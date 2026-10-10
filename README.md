@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.2.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.3.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
 
-0.2.0 修复 Windows 中文通信、长日志结构丢失、历史任务无法整理、同名知识覆盖、注入恢复和管理员记账问题。数据库首次打开时在事务内升级到版本 2，保留既有记录和知识 ID；旧任务快照优先从明确的任务更新事件恢复，缺失信息不会补猜。常见凭证脱敏用于减少后续记录与外发，不能保证抹除已经存在的副本。
+0.3.0 收口插件接入模块：Hook 提供会话句柄，MCP 校验身份与初始化协议，换号通知使旧连接失效；安装采用原子导出和统一发布副本。数据库首次打开时在事务内升级到版本 3，保留既有记录、任务快照与知识 ID。常见凭证脱敏用于减少后续记录与外发，不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -45,14 +45,16 @@ python scripts/learning.py status
 python scripts/learning.py install "D:\Plugins\agent-learning"
 ```
 
-`install` 创建独立安装副本，将实际 Python 与 MCP 脚本绝对路径写入配置。Hook 使用宿主提供的 `PLUGIN_ROOT` 执行当前安装缓存中的脚本。它不更改既有 Codex 配置。副本含本地插件目录，随后运行：
+`install` 先验证资源，在临时目录完成复制后原子发布。MCP 和 Hook 均指向同一份固定运行副本，不依赖导出目录或宿主缓存中的另一份代码。发布清单记录版本、协议和逐文件摘要，入口核对内容一致性；这不是数字签名或操作系统权限隔离。它不更改既有 Codex 配置。导出副本含本地插件目录，随后运行：
 
 ```powershell
 codex plugin marketplace add "D:\Plugins\agent-learning"
 codex plugin add agent-learning@agent-learning-local
 ```
 
-在 Codex 中开启新对话，审阅并信任 Hooks（CLI 可用 `/hooks`）。安装器不会代替用户设置 Hook 信任。保留安装副本与对应解释器；移动目录后重新导出并安装。Hook 的路径与信任规则见 [官方插件说明](https://developers.openai.com/plugins/build/plugins)。
+在 Codex 中开启新对话，审阅并信任 Hooks（CLI 可用 `/hooks`）。安装器不会代替用户设置 Hook 信任。固定运行副本默认位于 Windows 的 `%LOCALAPPDATA%\AgentLearning\runtime-releases` 或 POSIX 的 `~/.local/share/agent-learning/runtime-releases`。保留这个目录和对应解释器；移动导出源不影响已生成的运行入口。运行目录可通过 `install --runtime-store PATH` 或 `ALP_RUNTIME_STORE` 指定，不随临时 `ALP_HOME` 改变。Hook 的信任规则见 [官方插件说明](https://developers.openai.com/plugins/build/plugins)。
+
+需要在配置损坏时也拒绝覆盖工具调用，导出时显式使用 `install PATH --hook-mode enforce`，将保护模式写入可信入口。`--hook-mode observe` 固定观察模式；省略时依据当前有效配置。更换入口命令后需由宿主重新审阅 Hook 信任。
 
 源码中的 `.mcp.json` 是模板，安装副本会将路径渲染为实际绝对路径。本机已用隔离配置验证 Codex 原生加载与安装命令，未改当前用户的插件配置。
 
@@ -67,12 +69,34 @@ python scripts/learning.py --workspace "D:\Projects\my-project" serve --role adm
 
 | 身份 | MCP 工具 |
 |---|---|
-| 普通 Agent | `knowledge_search`、`knowledge_read`、`task_update`、`case_feedback`、`learning_status` |
+| 普通 Agent | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`learning_status` |
 | 管理员 | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate` |
 
 MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数不能提升角色。技能位于 [learning-worker](skills/learning-worker/SKILL.md) 和 [learning-admin](skills/learning-admin/SKILL.md)。
 
 这些权限限制覆盖本服务的入口。同一操作系统账户下的任意 Shell 和本地数据库访问，不属于 MCP 角色隔离保证；需要宿主权限与账户隔离配合。
+
+### 会话身份与压缩恢复
+
+`SessionStart` 和 `UserPromptSubmit` 注入 `context_handle=...`。普通 Agent 首次调用 `session_context(context_handle=...)`，或直接在 `task_update`／`case_feedback` 传这个句柄；之后当前 MCP 连接固定绑定该句柄，`conversation_id` 可省略。传入其他会话或句柄会被拒绝。写入身份和业务更新在同一事务内复核，失败不会留下错误项目绑定。
+
+压缩后用 `session_context` 恢复当前任务、revision 和状态，无需重新总结历史。没有可信句柄时只能查询项目知识和项目状态，不能猜最近会话或登记任意会话。受信本地操作者可使用 `session-bind --conversation ID` 登记明确身份，再用 `serve --context-handle HANDLE` 启动绑定服务。手动 CLI 的 `task`／`feedback` 仍是显式本地操作入口。
+
+`SubagentStart` 有可靠 `agent_id` 时，子 Agent 获得独立句柄和独立知识展示状态；共享父会话中的任务边界，不能用自己的句柄覆盖父任务。无可靠 ID 时不发写入句柄，也不根据最近启动的子 Agent 猜工具归属。若宿主让父子 Agent 共用一个已绑定的 MCP 连接，子 Agent 需要单独的绑定连接；当前不声称已验收宿主的父子 MCP 连接生命周期。
+
+### Codex／ChatGPT 登录账户切换
+
+同一项目、同一数据目录继续共享正式知识和历史证据，不按登录账户分库。换号通知推进本地 `host_epoch`，旧连接、旧句柄和旧管理员回写失效；新连接通过下一次 Hook 或明确的 `session-bind` 重新绑定。任务历史和每日调用计数不会清零，未确定结果的旧调用不会自动重试，已运行的项目命令也不会被当作重新执行的理由。
+
+受信宿主适配器或操作者在确认切换后调用：
+
+```powershell
+python scripts/learning.py account-changed --notification-id "unique-login-event-id"
+```
+
+可用唯一通知 ID 去重，省略时每次调用均视为一次新边界。所有通知方必须指向相同 `ALP_HOME`／`--home`。这个入口不读取、保存或修改登录 token，不执行登录、退出或额度重置。
+
+**当前没有自动订阅桌面端换号。** 官方 app-server 提供 `account/updated` 和登录完成通知，但普通插件不能据此假定已经接入桌面应用的内部通知通道。适配器应依据自己拥有的登录生命周期发出边界通知；仅比较 `authMode`／套餐不能识别同模式下的 A→B 换号，也不依赖 `auth.json` 修改时间。[官方 app-server 账户接口](https://learn.chatgpt.com/docs/app-server)
 
 ## 手动处理一个问题
 
@@ -96,7 +120,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" problems
 | `validation_level` | `reported` 或 `tool_success` |
 | `metadata`（可选） | `tool`、`tool_version`、`error_code`、`environment`、`verification` 字符串；未知时省略或留空 |
 
-`reported` 表示有记录的陈述，不代表已经验证。`tool_success` 要求引用明确完成且成功的 `PostToolUse` 事件，只能支持具体工具的成功结果。退出码为零不能单独证明专业根因、玩法结果或用户验收。
+`reported` 表示有记录的陈述，不代表已经验证。`tool_success` 要求引用明确完成且成功的 `PostToolUse` 事件，只能支持具体工具的成功结果。标准 MCP 的 `isError:false` 记为 `call_completed`，仅表示调用协议完成，不能单独支持 `tool_success`。退出码为零不能单独证明专业根因、玩法结果或用户验收。
 
 受信操作者使用 `publish CANDIDATE_ID` 发布，使用 `revoke KNOWLEDGE_ID` 撤销。Runtime 检查证据引用、来源版本和允许的验证范围；它不能证明任意自然语言结论正确。知识审核状态与产品验收状态分别表达。
 
@@ -158,7 +182,9 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 
 - 注入量由 `injection_max_chars` 限制，事件投影由 `event_max_chars` 限制；这些是字符限制。
 - 宿主 Hook 的 `additionalContextLimit` 使用近似 token 阈值，当前设为 2500；它与上述字符预算单位不同。显著提高注入字符预算时应核对宿主预览行为，具体机制见 [官方 Hook 说明](https://learn.chatgpt.com/docs/hooks)。
-- `enforce_task_policy` 默认关闭。启用保护时，应明确允许工具和当前任务边界；任务未知、已取消、已交付或中断时，覆盖的项目工具入口会拒绝调用，任务更新与查询入口仍可用。保护只覆盖实际接入并支持阻止动作的路径。
+- `enforce_task_policy` 默认关闭。启用保护时，应明确允许工具和当前任务边界；任务未知、已取消、已交付或中断时，覆盖的项目工具入口会拒绝调用，任务更新与查询入口仍可用。已确认保护模式的 `PreToolUse` 遇输入、配置、发布或数据库故障会拒绝；坏配置且未固定模式时只能报告保护未知。
+- Hook 未被信任、进程无法启动、宿主超时、Hosted WebSearch 或未再触发 `PreToolUse` 的 `write_stdin`，不在上述拒绝保证内。当前不停止外部已运行的工具进程。[官方 Hook 覆盖说明](https://learn.chatgpt.com/docs/hooks)
+- 子 Agent 知识展示按可靠 `agent_id` 分开；无该字段的工具事件不能保证及时通知仅对子 Agent 展示的知识撤销，读取正文仍核对当前有效版本。
 - 任务目标或授权未知时，不推断为全权执行。用户修正后，以最新任务版本为准。
 - 知识内容中的命令不能获得执行权限。项目主流程、UE、PIE、训练和用户验收遵守项目自身约定。
 - 技能和检索提示属于软约束。证据引用、版本与服务角色可由程序校验；任意专业结论和全部模型遗漏不能由本工具保证。
@@ -171,6 +197,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | 子命令 | 用途 |
 |---|---|
 | `status` | 读取运行状态 |
+| `session-bind` | 受信本地入口登记明确会话／子 Agent，返回可验证句柄 |
+| `account-changed` | 通知登录边界变化，使旧连接失效；支持通知 ID 去重 |
 | `task` | 保存明确任务，支持 `--expected-revision` 检查版本和 `--new-task` 开始新任务 |
 | `feedback` | 反馈问题及结果，支持重复 `--event-ref` |
 | `problems`、`packet` | 列出问题、读取审核包 |
@@ -181,3 +209,9 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `sync` | 同步已发布知识到可选 Hindsight |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
+
+## 0.3.0 检查状态（2026-10-11）
+
+125 项离线回归覆盖协议、身份、账户通知、管理员、Hindsight 适配、包装和 Windows 入口。首次全套发现管理员启动占用事务的回归；修复后对受影响的管理员和身份链重检 26 项，全部通过。两份技能通过格式校验。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+
+真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

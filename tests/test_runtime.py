@@ -106,7 +106,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_no_success_promotion_from_reported_or_running(self):
         with self.assertRaises(ContractError): self.candidate(level="tool_success")
-        self.assertEqual(Runtime.outcome({"isError": False}), "unknown")
+        self.assertEqual(Runtime.outcome({"isError": False}), "call_completed")
         self.assertEqual(Runtime.outcome("Process exited with code 0"), "unknown")
         self.assertEqual(Runtime.outcome({"exitCode": 0}), "succeeded")
 
@@ -183,7 +183,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_stdio_protocol_native_process(self):
         messages = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "native-test", "version": "1"}}},
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "learning_status", "arguments": {}}},

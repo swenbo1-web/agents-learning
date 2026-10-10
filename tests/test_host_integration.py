@@ -103,11 +103,18 @@ class HostIntegrationTests(unittest.TestCase):
         for entry, command in entries.items():
             with self.subTest(entry=entry):
                 goal = "检查中文编译问题：读取正确知识"
+                session = self.dispatch("SessionStart", session_id="unicode-" + entry,
+                                        source="startup", permission_mode="default")
+                context = session["hookSpecificOutput"]["additionalContext"]
+                import re
+                handle = re.search(r"context_handle=([a-f0-9]{32})", context).group(1)
                 messages = [
-                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "host-contract-check", "version": "1"}}},
                     {"jsonrpc": "2.0", "method": "notifications/initialized"},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                        "name": "task_update", "arguments": {"conversation_id": "unicode-" + entry, "goal": goal}}},
+                        "name": "task_update", "arguments": {"context_handle": handle, "goal": goal}}},
                 ]
                 body = ("\n".join(json.dumps(item, ensure_ascii=False) for item in messages) + "\n").encode("utf-8")
                 result = subprocess.run(
@@ -226,7 +233,7 @@ class HostIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows Hook command contract")
     def test_exported_windows_command_accepts_json_stdin(self):
         destination = self.workspace.parent / "installed plugin copy"
-        install(destination)
+        install(destination, runtime_store=self.workspace.parent / "runtime releases")
         handlers = json.loads((destination / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         handler = handlers["hooks"]["UserPromptSubmit"][0]["hooks"][0]
         self.assertIn("commandWindows", handler)
@@ -235,7 +242,7 @@ class HostIntegrationTests(unittest.TestCase):
         self.assertIn("EncodedCommand", command)
         cached = self.workspace.parent / "cached plugin copy"
         shutil.copytree(destination, cached)
-        # 宿主实际执行缓存副本；导出源脚本变更不应改变已安装Hook。
+        # 宿主资源可来自缓存；实际入口固定到已校验release，导出源变更不影响运行。
         (destination / "hooks/dispatch.py").write_text("raise RuntimeError('export source must not execute')\n", encoding="utf-8")
         event = {
             "session_id": "installed-conversation", "turn_id": "installed-turn",

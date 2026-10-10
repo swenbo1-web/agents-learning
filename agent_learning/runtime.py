@@ -15,6 +15,8 @@ import time
 import uuid
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
+TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted"}
+VALIDATION_LEVELS = {"reported", "tool_success"}
 METADATA_KEYS = {"tool", "tool_version", "error_code", "environment", "verification"}
 DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
@@ -114,6 +116,12 @@ CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, generation INTEGER NOT 
  revocation_epoch INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS project_paths(path TEXT PRIMARY KEY,project TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS session_projects(conversation TEXT PRIMARY KEY,project TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS host_state(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
+INSERT OR IGNORE INTO host_state VALUES(1,0);
+CREATE TABLE IF NOT EXISTS host_notifications(id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS context_access(handle TEXT PRIMARY KEY,project TEXT NOT NULL,
+ conversation TEXT NOT NULL,agent TEXT NOT NULL,host_epoch INTEGER NOT NULL,created REAL NOT NULL,
+ UNIQUE(project,conversation,agent,host_epoch));
 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project TEXT NOT NULL, conversation TEXT NOT NULL,
  revision INTEGER NOT NULL, goal TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL,
  updated REAL NOT NULL, UNIQUE(project,conversation));
@@ -123,6 +131,9 @@ CREATE TABLE IF NOT EXISTS task_snapshots(project TEXT NOT NULL,id TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS contexts(project TEXT NOT NULL, conversation TEXT NOT NULL,
  epoch INTEGER NOT NULL DEFAULT 0, injected TEXT NOT NULL DEFAULT '[]', last_query TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(project,conversation));
+CREATE TABLE IF NOT EXISTS subagent_contexts(project TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,
+ epoch INTEGER NOT NULL DEFAULT 0,injected TEXT NOT NULL DEFAULT '[]',last_query TEXT NOT NULL DEFAULT '',
+ shown TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(project,conversation,agent));
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, project TEXT NOT NULL, conversation TEXT NOT NULL,
  task_id TEXT, task_revision INTEGER, agent TEXT, operation TEXT, type TEXT NOT NULL,
  outcome TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL);
@@ -195,12 +206,19 @@ class Runtime:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2}:
+        if version not in {0, 1, 2, 3}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
             self._migrate()
+        if version < 3:
+            with self.transaction():
+                for table in ("operations", "admin_calls"):
+                    existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                    if "host_epoch" not in existing:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN host_epoch INTEGER NOT NULL DEFAULT 0")
+                self.db.execute("PRAGMA user_version=3")
 
     def _migrate(self):
         """原地升级并保留原记录；并发启动时在锁内重新检查列。"""
@@ -278,6 +296,80 @@ class Runtime:
             raise ContractError("conversation is already bound to a different workspace")
         return project
 
+    def host_epoch(self):
+        return self.db.execute("SELECT epoch FROM host_state WHERE id=1").fetchone()[0]
+
+    def assert_host_epoch(self, expected_epoch):
+        epoch = self.host_epoch()
+        if expected_epoch is not None and expected_epoch != epoch:
+            raise ContractError("reconnect_required: account context changed")
+        return epoch
+
+    def _register_context(self, project, conversation_id, agent_id=None):
+        self.bind_session(project, conversation_id)
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id.strip()):
+            raise ContractError("agent_id must be a nonempty string")
+        agent, epoch = agent_id or "", self.host_epoch()
+        row = self.db.execute("SELECT handle FROM context_access WHERE project=? AND conversation=? "
+                              "AND agent=? AND host_epoch=?", (project, conversation_id, agent, epoch)).fetchone()
+        handle = row[0] if row else uuid.uuid4().hex
+        if not row:
+            self.db.execute("INSERT INTO context_access VALUES(?,?,?,?,?,?)",
+                            (handle, project, conversation_id, agent, epoch, time.time()))
+        return {"context_handle": handle, "project_id": project, "conversation_id": conversation_id,
+                "agent_id": agent_id, "host_epoch": epoch}
+
+    def register_context(self, project, conversation_id, agent_id=None):
+        """仅 Hook/受信本地入口登记；MCP 不提供任意会话凭据查询或登记。"""
+        with self.transaction():
+            return self._register_context(project, conversation_id, agent_id)
+
+    def access_context(self, project, context_handle, conversation_id=None, expected_epoch=None):
+        epoch = self.assert_host_epoch(expected_epoch)
+        if not isinstance(context_handle, str) or not context_handle:
+            raise ContractError("session_context_required: use the handle supplied by the current hook")
+        row = self.db.execute("SELECT * FROM context_access WHERE handle=?", (context_handle,)).fetchone()
+        if not row:
+            raise ContractError("context_mismatch: unknown context handle")
+        if row["host_epoch"] != epoch:
+            raise ContractError("reconnect_required: context handle expired")
+        if row["project"] != project or (conversation_id is not None and conversation_id != row["conversation"]):
+            raise ContractError("context_mismatch: project or conversation does not match")
+        return {"context_handle": context_handle, "project_id": project, "conversation_id": row["conversation"],
+                "agent_id": row["agent"] or None, "host_epoch": epoch}
+
+    def session_context(self, project, context_handle=None, expected_epoch=None):
+        # 压缩恢复只读已验证的身份；不能从“最新会话”猜本次归属。
+        with self.transaction():
+            epoch = self.assert_host_epoch(expected_epoch)
+            if context_handle is None:
+                return {"project_id": project, "host_epoch": epoch, "context_bound": False, "rebind_required": True}
+            result = self.access_context(project, context_handle, expected_epoch=epoch)
+            return dict(result, context_bound=True, rebind_required=False,
+                        task=self.task(project, result["conversation_id"]),
+                        task_access="parent_read_only" if result["agent_id"] else "read_write")
+
+    def account_changed(self, notification_id=None):
+        """宿主/操作者通知换号；不读取凭证，不按登录账户拆分项目知识。"""
+        if notification_id is not None and (not isinstance(notification_id, str)
+                or not notification_id.strip() or len(notification_id) > 200):
+            raise ContractError("notification_id must be a nonempty string of at most 200 characters")
+        with self.transaction():
+            if notification_id and self.db.execute("SELECT 1 FROM host_notifications WHERE id=?", (notification_id,)).fetchone():
+                return {"host_epoch": self.host_epoch(), "changed": False, "knowledge_scope": "shared_project"}
+            self.db.execute("UPDATE host_state SET epoch=epoch+1 WHERE id=1")
+            epoch = self.host_epoch()
+            if notification_id:
+                self.db.execute("INSERT INTO host_notifications VALUES(?,?,?)", (notification_id, epoch, time.time()))
+            self.db.execute("UPDATE operations SET state='unknown' WHERE state IN ('started','running')")
+            # 未知调用仍占原额度；禁止旧执行器回写或自动重试。
+            self.db.execute("UPDATE admin_calls SET state='account_changed_unknown',finished=? "
+                            "WHERE state IN ('reserved','started')", (time.time(),))
+            for table in ("contexts", "subagent_contexts"):
+                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query=''")
+            return {"host_epoch": epoch, "changed": True, "knowledge_scope": "shared_project",
+                    "reconnect_required": True}
+
     def task(self, project, conversation):
         row = self.db.execute("SELECT * FROM tasks WHERE project=? AND conversation=?",
                               (project, conversation)).fetchone()
@@ -287,14 +379,20 @@ class Runtime:
         item["scope"] = json.loads(item["scope"])
         return item
 
-    def task_update(self, project, conversation_id, goal, scope=None, expected_revision=None, status="active", new_task=False):
+    def task_update(self, project, conversation_id, goal, scope=None, expected_revision=None, status="active", new_task=False,
+                    context_handle=None, expected_epoch=None):
         if not conversation_id or not isinstance(goal, str) or not goal.strip():
             raise ContractError("conversation_id and goal are required")
-        if status not in {"active", "delivered", "cancelled", "interrupted"}:
+        if status not in TASK_STATUSES:
             raise ContractError("invalid task status")
         if scope is not None and not isinstance(scope, dict):
             raise ContractError("scope must be an object")
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            if context_handle is not None:
+                access = self.access_context(project, context_handle, conversation_id, expected_epoch)
+                if access["agent_id"]:
+                    raise ContractError("parent_task_read_only: subagents cannot overwrite the parent task")
             self.bind_session(project, conversation_id)
             previous = self.task(project, conversation_id)
             revision = previous["revision"] if previous else 0
@@ -317,6 +415,7 @@ class Runtime:
                         task_id=task_id, task_revision=next_revision)
             if changed_scope or new_task:
                 self.db.execute("UPDATE contexts SET injected='[]',last_query='' WHERE project=? AND conversation=?", (project, conversation_id))
+                self.db.execute("UPDATE subagent_contexts SET injected='[]',last_query='' WHERE project=? AND conversation=?", (project, conversation_id))
         return self.task(project, conversation_id)
 
     def task_snapshot(self, project, task_id, revision):
@@ -380,11 +479,13 @@ class Runtime:
         return dict(self.db.execute("SELECT * FROM problems WHERE id=?", (ident,)).fetchone())
 
     def feedback(self, project, conversation_id, summary, category="unknown", event_refs=None,
-                 resolution="", knowledge_id=None):
+                 resolution="", knowledge_id=None, context_handle=None, expected_epoch=None):
         if category not in CATEGORIES or not summary.strip():
             raise ContractError("valid category and summary are required")
         refs = list(event_refs or [])
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            access = self.access_context(project, context_handle, conversation_id, expected_epoch) if context_handle is not None else None
             self.bind_session(project, conversation_id)
             task = self.task(project, conversation_id)
             for ref in refs:
@@ -393,10 +494,14 @@ class Runtime:
                                        (ref, project, conversation_id, task["id"] if task else None,
                                         task["revision"] if task else None)).fetchone():
                     raise ContractError("evidence must belong to the current project, conversation and task revision")
+                if access and access["agent_id"] and not self.db.execute(
+                        "SELECT 1 FROM events WHERE id=? AND agent=?", (ref, access["agent_id"])).fetchone():
+                    raise ContractError("evidence must belong to the current subagent")
             event, _ = self._event(project, conversation_id, "Feedback",
                                    {"summary": summary, "resolution": resolution, "knowledge_id": knowledge_id},
                                    task_id=task["id"] if task else None,
-                                   task_revision=task["revision"] if task else None, outcome="reported")
+                                   task_revision=task["revision"] if task else None,
+                                   agent_id=access["agent_id"] if access else None, outcome="reported")
             return self._problem(project, conversation_id, summary, category, refs + [event["id"]], knowledge_id)
 
     def problems(self, project, limit=20):
@@ -449,12 +554,12 @@ class Runtime:
             (packet["related_candidates"] or packet["related_knowledge"]).pop()
         return packet
 
-    def submit_candidate(self, project, **body):
+    def submit_candidate(self, project, expected_epoch=None, **body):
         required = {"problem_id", "problem_revision", "title", "content", "category", "applicability",
                     "limitations", "evidence_refs", "validation_level"}
         if not required <= set(body) or set(body) - required - {"metadata"}:
             raise ContractError("candidate fields do not match schema")
-        if body["category"] not in CATEGORIES or body["validation_level"] not in {"reported", "tool_success"}:
+        if body["category"] not in CATEGORIES or body["validation_level"] not in VALIDATION_LEVELS:
             raise ContractError("invalid candidate category or evidence level")
         if not isinstance(body["problem_revision"], int) or isinstance(body["problem_revision"], bool):
             raise ContractError("problem_revision must be an integer")
@@ -470,6 +575,7 @@ class Runtime:
             raise ContractError("candidate is too large")
         ident = digest([project, body])[:32]
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
             self._validate_sources(project, body)
             self.db.execute("INSERT OR IGNORE INTO candidates VALUES(?,?,?,?,?,?,?)",
                             (ident, project, body["problem_id"], body["problem_revision"], encode(body), "candidate", time.time()))
@@ -517,8 +623,10 @@ class Runtime:
             count = sum(self._queue_sync(project, row["id"], row["revision"], json.loads(row["body"])) for row in rows)
         return {"status": "enqueued", "enqueued": count}
 
-    def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None):
+    def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
+                expected_epoch=None):
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
             candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
             if not candidate:
                 raise ContractError("unknown candidate")
@@ -640,7 +748,8 @@ class Runtime:
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
-        return {"project_id": project, "home": str(self.home), "counts": counts,
+        return {"project_id": project, "home": str(self.home), "host_epoch": self.host_epoch(),
+                "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
@@ -661,16 +770,30 @@ class Runtime:
             return "failed"
         if response.get("success") is True:
             return "succeeded"
+        if response.get("isError") is False or response.get("is_error") is False:
+            # MCP 协议完成不代表业务验证通过，不能用于 tool_success 晋升。
+            return "call_completed"
         return "unknown"
 
-    def _context(self, project, conversation, query="", compact=False):
+    def _context_state(self, project, conversation, agent_id=None):
+        if agent_id:
+            return "subagent_contexts", "project=? AND conversation=? AND agent=?", (project, conversation, agent_id)
+        return "contexts", "project=? AND conversation=?", (project, conversation)
+
+    def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None, expected_epoch=None):
+        table, where, key = self._context_state(project, conversation, agent_id)
         with self.transaction():
-            self.db.execute("INSERT OR IGNORE INTO contexts(project,conversation) VALUES(?,?)", (project, conversation))
-            invalid = self._invalidated(project, conversation)
-            row = self.db.execute("SELECT * FROM contexts WHERE project=? AND conversation=?", (project, conversation)).fetchone()
+            self.assert_host_epoch(expected_epoch)
+            if context_handle is not None:
+                self.access_context(project, context_handle, conversation, expected_epoch)
+            columns = "project,conversation,agent" if agent_id else "project,conversation"
+            marks = ",".join("?" for _ in key)
+            self.db.execute(f"INSERT OR IGNORE INTO {table}({columns}) VALUES({marks})", key)
+            invalid = self._invalidated(project, conversation, agent_id)
+            row = self.db.execute(f"SELECT * FROM {table} WHERE {where}", key).fetchone()
             remembered = json.loads(row["injected"])
             if compact:
-                self.db.execute("UPDATE contexts SET epoch=epoch+1,injected='[]' WHERE project=? AND conversation=?", (project, conversation))
+                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]' WHERE {where}", key)
             task = self.task(project, conversation)
             query = clean(query).strip()
             continuation = not query or query.lower().strip("。.!！ ") in {
@@ -691,6 +814,11 @@ class Runtime:
                 items = list(unique.values())
             prior = set() if compact else set(remembered)
             lines, injected = [], list(prior)
+            if context_handle:
+                # 先放最短可靠句柄，极小注入预算下也不截断身份。
+                lines.append(f"[Agent Learning] context_handle={context_handle}; host_epoch={self.host_epoch()}")
+            if agent_id:
+                lines.append("子 Agent 继承父任务边界；session_context 可读取任务，不能覆盖父任务；只反馈自身可靠证据。")
             shown = set(json.loads(row["shown"]))
             if invalid:
                 lines.append("此前注入知识已撤销或被替换，不能继续依据旧版本执行：" + ",".join(invalid))
@@ -729,12 +857,13 @@ class Runtime:
                     break
             if fresh_count:
                 self._metric(project, "knowledge_injected", fresh_count)
-            self.db.execute("UPDATE contexts SET injected=?,shown=?,last_query=? WHERE project=? AND conversation=?",
-                            (encode(injected), encode(sorted(shown)), effective_query[-2000:], project, conversation))
+            self.db.execute(f"UPDATE {table} SET injected=?,shown=?,last_query=? WHERE {where}",
+                            (encode(injected), encode(sorted(shown)), effective_query[-2000:], *key))
             return "\n".join(lines)[:budget]
 
-    def _invalidated(self, project, conversation):
-        row = self.db.execute("SELECT injected,shown FROM contexts WHERE project=? AND conversation=?", (project, conversation)).fetchone()
+    def _invalidated(self, project, conversation, agent_id=None):
+        table, where, key = self._context_state(project, conversation, agent_id)
+        row = self.db.execute(f"SELECT injected,shown FROM {table} WHERE {where}", key).fetchone()
         if not row:
             return []
         valid, invalid = [], []
@@ -747,9 +876,9 @@ class Runtime:
             (invalid if not exists and len(invalid) < max_invalid else valid).append(identity)
         if invalid:
             invalid_set = set(invalid)
-            self.db.execute("UPDATE contexts SET injected=?,shown=? WHERE project=? AND conversation=?",
+            self.db.execute(f"UPDATE {table} SET injected=?,shown=? WHERE {where}",
                             (encode([i for i in json.loads(row[0]) if i not in invalid_set]),
-                             encode([i for i in json.loads(row[1]) if i not in invalid_set]), project, conversation))
+                             encode([i for i in json.loads(row[1]) if i not in invalid_set]), *key))
         return invalid
 
     def handle_hook(self, raw):
@@ -760,17 +889,26 @@ class Runtime:
         if not raw.get("session_id") or not raw.get("cwd"):
             raise ContractError("hook requires session_id and cwd")
         project, conversation = self.project(raw["cwd"]), str(raw["session_id"])
-        self.bind_session(project, conversation)
         tool_id, turn = raw.get("tool_use_id"), raw.get("turn_id")
-        operation = digest([conversation, tool_id]) if tool_id else None
+        agent_id = raw.get("agent_id")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id.strip()):
+            raise ContractError("invalid hook agent_id")
+        operation = digest([conversation, agent_id, tool_id] if agent_id else [conversation, tool_id]) if tool_id else None
         outcome = self.outcome(raw.get("tool_response")) if kind == "PostToolUse" else "unknown"
         # 没有宿主标识时不按内容哈希去重，两个真实的相同动作仍是两个事件。
-        event_key = ([conversation, kind, tool_id, digest(raw.get("tool_response"))] if tool_id else
-                     [conversation, kind, turn] if turn and kind in {"UserPromptSubmit", "Stop"} else None)
+        event_key = ([conversation, agent_id, kind, tool_id, digest(raw.get("tool_response"))] if tool_id else
+                     [conversation, agent_id, kind, turn, digest(raw.get("last_assistant_message") if kind == "Stop" else raw.get("prompt"))]
+                     if turn and kind in {"UserPromptSubmit", "Stop"} else None)
         payload = {k: raw[k] for k in ("tool_name", "tool_input", "tool_response", "prompt", "source",
                                      "last_assistant_message", "agent_type", "turn_id") if k in raw}
         payload["agent_identity_known"] = bool(raw.get("agent_id"))
+        access = None
         with self.transaction():
+            self.bind_session(project, conversation)
+            epoch = self.host_epoch()
+            if kind in {"SessionStart", "UserPromptSubmit"} or kind == "SubagentStart" and agent_id:
+                access = self._register_context(project, conversation, agent_id)
+            payload["host_epoch"] = epoch
             # 状态判断与记录共享快照，避免并发晚到事件降级终止状态。
             task = self.task(project, conversation)
             denied = False
@@ -784,20 +922,27 @@ class Runtime:
                 if denied:
                     outcome = "denied"
             binding = self.db.execute("SELECT * FROM operations WHERE project=? AND id=?", (project, operation)).fetchone() if operation else None
+            obsolete_operation = binding and binding["host_epoch"] != epoch
+            if obsolete_operation:
+                outcome = "unknown"
+                payload["account_context_changed"] = True
             task_id = binding["task_id"] if binding else task["id"] if task else None
             task_revision = binding["task_revision"] if binding else task["revision"] if task else None
-            event, fresh = self._event(project, conversation, kind, payload, event_id=event_key,
+            event, fresh = self._event(project, conversation, kind, payload, event_id=[epoch, event_key] if event_key else None,
                                        task_id=task_id, task_revision=task_revision,
                                        agent_id=raw.get("agent_id"), operation_id=operation, outcome=outcome)
             if operation and kind in {"PreToolUse", "PostToolUse"}:
                 state = "denied" if denied else "started" if kind == "PreToolUse" else outcome
                 old_state = binding["state"] if binding else None
-                if old_state in {"succeeded", "failed"} and state in {"started", "running", "unknown"}:
+                if obsolete_operation:
+                    state = "unknown"
+                elif old_state in {"succeeded", "failed", "call_completed"} and state in {"started", "running", "unknown"}:
                     state = old_state
-                self.db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project,id) "
+                self.db.execute("INSERT INTO operations(project,id,conversation,task_id,task_revision,agent,state,last_event,host_epoch) "
+                                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(project,id) "
                                 "DO UPDATE SET state=excluded.state,last_event=excluded.last_event",
                                 (project, operation, conversation, task_id, task_revision,
-                                 raw.get("agent_id"), state, event["id"]))
+                                 agent_id, state, event["id"], epoch))
             if fresh and outcome == "failed" and not raw.get("tool_name", "").startswith("mcp__agent_learning__"):
                 summary = f"{raw.get('tool_name', 'unknown tool')} failed: " + encode(clean(raw.get("tool_response")))[:300]
                 self._problem(project, conversation, summary, "operation", [event["id"]],
@@ -837,20 +982,35 @@ class Runtime:
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或已配置工具范围不允许此调用。"}}
         if kind == "PreToolUse":
             with self.transaction():
-                invalid = self._invalidated(project, conversation)
+                invalid = self._invalidated(project, conversation, agent_id)
             if invalid:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
                         ("此前注入知识已撤销或被替换，请核对当前依据：" + ",".join(invalid))[:self.config["injection_max_chars"]]}}
-        if kind in {"UserPromptSubmit", "SessionStart"}:
+        if kind in {"UserPromptSubmit", "SessionStart", "SubagentStart"}:
+            if kind == "SubagentStart" and not agent_id:
+                return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
+                        "Agent Learning: 子 Agent 身份未知，未分配写入句柄；继承当前任务边界，可按项目检索知识，不猜测会话归属。"}}
             query = raw.get("prompt", "")
-            text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"})
-            if kind == "SessionStart" and not text:
-                text = f"Agent Learning 本地记录已启用；conversation_id={conversation}。任务范围明确后用 task_update 保存，知识按需检索，来源资料不提供额外授权。"
+            text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
+                                 agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"])
             if text:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
         if kind == "Stop" and fresh and self.config["admin"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
-            self._launch_admin(raw["cwd"])
+            try:
+                # 无待处理素材、预算已用尽或有在途审核时，不额外启动进程。
+                pending = self.db.execute("SELECT 1 FROM problems WHERE project=? AND status='pending' LIMIT 1", (project,)).fetchone()
+                running = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN ('reserved','started') LIMIT 1", (project,)).fetchone()
+                calls = self.db.execute("SELECT COUNT(*) FROM admin_calls WHERE day=? AND state NOT IN ('not_started','deduplicated')",
+                                        (time.strftime("%Y-%m-%d", time.gmtime()),)).fetchone()[0]
+                if pending and not running and calls < self.config["admin"]["max_calls_per_day"]:
+                    self._launch_admin(raw["cwd"])
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                try:
+                    self._metric(project, "admin_schedule_failed")
+                except sqlite3.Error:
+                    pass
+                return {"systemMessage": "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"}
         return {}
 
     def _launch_admin(self, workspace):

@@ -1,6 +1,6 @@
 [project]
 name = "agent-learning-plugin"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Local-first governed memory for coding agents"
 requires-python = ">=3.10"
 dependencies = []
@@ -15,11 +15,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["agent_learning*"]
 
-[tool.setuptools.data-files]
-"share/agent-learning" = ["README.md", "config.example.json"]
-"share/agent-learning/scripts" = ["scripts/learning.py"]
-"share/agent-learning/hooks" = ["hooks/dispatch.py", "hooks/hooks.json"]
-"share/agent-learning/skills/learning-worker" = ["skills/learning-worker/SKILL.md"]
-"share/agent-learning/skills/learning-admin" = ["skills/learning-admin/SKILL.md"]
-"share/agent-learning/.codex-plugin" = [".codex-plugin/plugin.json"]
-"share/agent-learning/.agents/plugins" = [".agents/plugins/marketplace.json"]
+[tool.setuptools.dynamic]
+version = {attr = "agent_learning.__version__"}
+
+[tool.setuptools.cmdclass]
+build_py = "build_support.PluginBuildPy"

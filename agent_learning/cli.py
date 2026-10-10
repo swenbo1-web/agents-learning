@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -19,6 +20,13 @@ def parser():
     sub.add_parser("status")
     serve = sub.add_parser("serve")
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
+    serve.add_argument("--context-handle", default=os.environ.get("ALP_CONTEXT_HANDLE"),
+                       help="宿主已登记的会话句柄；也可由ALP_CONTEXT_HANDLE提供")
+    bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
+    bind.add_argument("--conversation", required=True)
+    bind.add_argument("--agent-id")
+    changed = sub.add_parser("account-changed", help="处理真实换号通知，失效旧连接但保留共享知识")
+    changed.add_argument("--notification-id", help="可选通知ID，用于重复通知去重")
     task = sub.add_parser("task")
     task.add_argument("--conversation", required=True)
     task.add_argument("--goal", required=True)
@@ -51,7 +59,10 @@ def parser():
     sync = sub.add_parser("sync")
     sync.add_argument("--retry", help="先人工核对远端结果，再显式重试此知识操作ID")
     sync.add_argument("--backfill", action="store_true", help="先将现有正式知识加入同步队列，再同步一项")
-    sub.add_parser("install").add_argument("destination")
+    export = sub.add_parser("install")
+    export.add_argument("destination")
+    export.add_argument("--runtime-store", help="版本化稳定运行目录，不随插件缓存清理")
+    export.add_argument("--hook-mode", choices=["observe", "enforce"], help="可信Hook故障策略；省略按配置")
     return p
 
 
@@ -63,7 +74,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.command == "install":
         try:
-            print(encode(install(args.destination)))
+            print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode)))
             return 0
         except (ContractError, OSError) as exc:
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
@@ -71,11 +82,15 @@ def main(argv=None):
     runtime = None
     try:
         runtime = Runtime(args.home)
+        if args.command == "account-changed":
+            print(encode(runtime.account_changed(notification_id=args.notification_id)))
+            return 0
         project = runtime.project(args.workspace)
         if args.command == "serve":
-            Server(runtime, project, args.role).serve()
+            Server(runtime, project, args.role, context_handle=args.context_handle).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
+        elif args.command == "session-bind": result = runtime.register_context(project, args.conversation, agent_id=args.agent_id)
         elif args.command == "task": result = runtime.task_update(project, args.conversation, args.goal,
                                                 json.loads(args.scope) if args.scope is not None else None,
                                                 args.expected_revision, args.status, args.new_task)

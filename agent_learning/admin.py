@@ -119,7 +119,8 @@ def _usage(log_path, elapsed):
 
 def _finish(runtime, call_id, state, log_path, started_at):
     usage = _usage(log_path, time.monotonic() - started_at)
-    runtime.db.execute("UPDATE admin_calls SET state=?,finished=?,usage=? WHERE id=?",
+    runtime.db.execute("UPDATE admin_calls SET state=CASE WHEN host_epoch!=(SELECT epoch FROM host_state WHERE id=1) THEN 'account_changed_unknown' "
+                       "ELSE ? END,finished=?,usage=? WHERE id=?",
                        (state, time.time(), encode(usage), call_id))
     return usage
 
@@ -144,6 +145,7 @@ def admin_once(runtime, project, problem_id=None):
     if not cfg["enabled"]:
         return {"status": "disabled"}
     with runtime.transaction():
+        host_epoch = runtime.host_epoch()
         command, timeout = _settings(cfg)
         if cfg["max_calls_per_day"] == 0:
             return {"status": "budget_exhausted"}
@@ -236,9 +238,9 @@ def admin_once(runtime, project, problem_id=None):
         if calls >= cfg["max_calls_per_day"]:
             return {"status": "budget_exhausted", **review_context}
         runtime.db.execute(
-            "INSERT INTO admin_calls(id,project,problem,revision,day,state,created,fingerprint) "
-            "VALUES(?,?,?,?,?,'reserved',?,?)",
-            (call_id, project, selected["id"], packet["problem"]["revision"], day, time.time(), fingerprint))
+            "INSERT INTO admin_calls(id,project,problem,revision,day,state,created,fingerprint,host_epoch) "
+            "VALUES(?,?,?,?,?,'reserved',?,?,?)",
+            (call_id, project, selected["id"], packet["problem"]["revision"], day, time.time(), fingerprint, host_epoch))
 
     process, started_at = None, time.monotonic()
     try:
@@ -258,20 +260,30 @@ def admin_once(runtime, project, problem_id=None):
                               str(schema_path), "--output-last-message", str(output), "-"]
             env = dict(os.environ, ALP_DISABLED="1", ALP_HOME=str(runtime.home))
             with log_path.open("wb") as log:
+                # 外部进程启动/模型调用不占数据库事务，启动边界换号按未知处理。
+                runtime.assert_host_epoch(host_epoch)
                 process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log, stderr=log,
                                            env=env, cwd=directory,
                                            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
-                runtime.db.execute("UPDATE admin_calls SET state='started',started=? WHERE id=?",
+                runtime.db.execute("UPDATE admin_calls SET state=CASE WHEN host_epoch!=(SELECT epoch FROM host_state WHERE id=1) "
+                                   "THEN 'account_changed_unknown' ELSE 'started' END,started=? WHERE id=?",
                                    (time.time(), call_id))
+                if runtime.host_epoch() != host_epoch:
+                    process.kill()
+                    process.wait(timeout=5)
+                    usage = _finish(runtime, call_id, "account_changed_unknown", log_path, started_at)
+                    return {"status": "account_changed_unknown", "call_id": call_id, "usage": usage, **review_context}
                 try:
                     process.communicate(instruction.encode("utf-8"), timeout=timeout)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
                     usage = _finish(runtime, call_id, "timeout_unknown", log_path, started_at)
-                    return {"status": "timeout_unknown", "call_id": call_id, "usage": usage, **review_context}
+                    return {"status": "account_changed_unknown" if runtime.host_epoch() != host_epoch else "timeout_unknown",
+                            "call_id": call_id, "usage": usage, **review_context}
             if process.returncode != 0 or not output.is_file() or output.stat().st_size > 50000:
                 raise ContractError("administrator produced no usable response")
+            runtime.assert_host_epoch(host_epoch)
             response = json.loads(output.read_text(encoding="utf-8-sig"))
             if (not isinstance(response, dict) or set(response) != {"decision", "reason", "candidate"}
                     or response["decision"] not in {"candidate", "needs_evidence", "skip"}
@@ -287,22 +299,26 @@ def admin_once(runtime, project, problem_id=None):
                     raise ContractError("administrator changed review identity or revision")
                 if packet.get("evidence_truncated"):
                     body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
-                result.update(runtime.submit_candidate(project, **body))
+                result.update(runtime.submit_candidate(project, expected_epoch=host_epoch, **body))
                 if cfg["auto_publish"]:
                     if packet.get("evidence_truncated"):
                         result["publication"] = {"status": "not_published", "reason": "evidence truncated"}
                     elif body["validation_level"] != "tool_success":
                         result["publication"] = {"status": "not_published", "reason": "requires observed tool success"}
                     else:
-                        result["publication"] = runtime.publish(project, result["candidate_id"])
+                        result["publication"] = runtime.publish(project, result["candidate_id"], expected_epoch=host_epoch)
             elif response["candidate"] is not None:
                 raise ContractError("non-candidate decision must not include a candidate")
             else:
                 result["problem_id"] = selected["id"]
             result["usage"] = _finish(runtime, call_id, response["decision"], log_path, started_at)
+            if runtime.host_epoch() != host_epoch:
+                return {"status": "account_changed_unknown", "call_id": call_id, "usage": result["usage"], **review_context}
             return result
         except (OSError, ValueError, TypeError, ContractError) as exc:
             state = "not_started" if process is None else "failed"
+            if runtime.host_epoch() != host_epoch:
+                state = "account_changed_unknown"
             usage = _finish(runtime, call_id, state, log_path, started_at)
             return {"status": state, "error_type": type(exc).__name__, "call_id": call_id, "usage": usage,
                     **review_context}
