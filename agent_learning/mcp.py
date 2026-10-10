@@ -13,12 +13,14 @@ def schema(properties, required=()):
 S = {"type": "string"}
 I = {"type": "integer"}
 STRINGS = {"type": "array", "items": S}
+METADATA = schema({key: S for key in ("tool", "tool_version", "error_code", "environment", "verification")})
 CANDIDATE = schema({
     "problem_id": S, "problem_revision": I, "title": S, "content": S, "category": S,
     "applicability": S, "limitations": S, "evidence_refs": STRINGS, "validation_level": S,
+    "metadata": METADATA,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
 WORKER_TOOLS = [
-    ("knowledge_search", "检索本项目当前正式知识；空结果只代表本地索引未命中。", schema({"query": S, "limit": I}, ["query"])),
+    ("knowledge_search", "检索本项目当前正式知识；可按工具、版本或环境精确筛选。", schema({"query": S, "limit": I, "filters": METADATA}, ["query"])),
     ("knowledge_read", "读取当前有效正文和审核允许的证据元数据。", schema({"knowledge_id": S}, ["knowledge_id"])),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
         "conversation_id": S, "goal": S, "scope": {"type": "object"}, "expected_revision": I,
@@ -76,8 +78,10 @@ class Server:
         p, r = self.project, self.runtime
         if name == "knowledge_search": return r.search(p, **args)
         if name == "knowledge_read": return r.read(p, **args)
-        if name == "task_update": return r.task_update(p, **args)
-        if name == "case_feedback": return r.feedback(p, **args)
+        if name in {"task_update", "case_feedback"}:
+            r.bind_session(p, args["conversation_id"])
+            if name == "task_update": return r.task_update(p, **args)
+            return r.feedback(p, **args)
         if name == "learning_status": return r.status(p)
         if name == "problem_list": return r.problems(p, **args)
         if name == "review_packet": return r.review_packet(p, **args)
@@ -98,7 +102,7 @@ class Server:
                 version = params.get("protocolVersion", "2024-11-05")
                 supported = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
                 response["result"] = {"protocolVersion": version if version in supported else "2025-11-25",
-                                      "capabilities": {"tools": {}}, "serverInfo": {"name": "agent-learning", "version": "0.1.0"}}
+                                      "capabilities": {"tools": {}}, "serverInfo": {"name": "agent-learning", "version": "0.2.0"}}
             elif method == "tools/list":
                 response["result"] = {"tools": [{"name": k, "description": v[0], "inputSchema": v[1]}
                                                for k, v in self.tools.items()]}
@@ -120,13 +124,17 @@ class Server:
 
     def serve(self):
         # MCP stdio每行一条JSON；诊断不得混进stdout协议流。
-        for line in sys.stdin:
+        # 从字节流按协议解码，Windows默认GBK不能用于MCP；console入口同样生效。
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
+        for line in getattr(sys.stdin, "buffer", sys.stdin):
             if len(line) > 2 * 1024 * 1024:
                 response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "message too large"}}
             else:
                 try:
-                    response = self.request(json.loads(line))
-                except json.JSONDecodeError:
+                    response = self.request(json.loads(line.decode("utf-8") if isinstance(line, bytes) else line))
+                except (UnicodeError, json.JSONDecodeError):
                     response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "invalid JSON"}}
             if response is not None:
                 print(encode(response), flush=True)

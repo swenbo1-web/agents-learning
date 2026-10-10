@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,86 @@ class HostIntegrationTests(unittest.TestCase):
             return [dict(row) for row in connection.execute(query, params)]
         finally:
             connection.close()
+
+    def run_cli(self, *arguments):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/learning.py"), "--workspace", str(self.workspace), *arguments],
+            cwd=self.workspace, env=self.environment, capture_output=True, timeout=5, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        return json.loads(result.stdout.decode("utf-8"))
+
+    def test_cli_scope_omission_preserves_existing_task_scope(self):
+        first = self.run_cli("task", "--conversation", "cli-scope", "--goal", "compile",
+                             "--scope", '{"mode":"analysis"}')
+        after = self.run_cli("task", "--conversation", "cli-scope", "--goal", "compile", "--status", "delivered")
+        self.assertEqual(after["scope"], {"mode": "analysis"})
+        self.assertEqual(after["revision"], first["revision"])
+        self.assertEqual(after["status"], "delivered")
+
+    def test_mcp_utf8_in_source_and_console_entry_with_legacy_encoding(self):
+        environment = dict(self.environment, PYTHONUTF8="0", PYTHONIOENCODING="gbk", PYTHONPATH=str(ROOT))
+        entries = {
+            "source": [sys.executable, str(ROOT / "scripts/learning.py")],
+            # console script调用cli.main，不经过scripts/learning.py的编码初始化。
+            "console": [sys.executable, "-c", "from agent_learning.cli import main; raise SystemExit(main())"],
+        }
+        for entry, command in entries.items():
+            with self.subTest(entry=entry):
+                goal = "检查中文编译问题：读取正确知识"
+                messages = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                        "name": "task_update", "arguments": {"conversation_id": "unicode-" + entry, "goal": goal}}},
+                ]
+                body = ("\n".join(json.dumps(item, ensure_ascii=False) for item in messages) + "\n").encode("utf-8")
+                result = subprocess.run(
+                    [*command, "--workspace", str(self.workspace), "serve"],
+                    input=body, cwd=self.workspace, env=environment, capture_output=True, timeout=5, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+                responses = [json.loads(line) for line in result.stdout.decode("utf-8").splitlines()]
+                self.assertEqual(len(responses), 2)
+                self.assertFalse(responses[-1]["result"]["isError"])
+                self.assertEqual(json.loads(responses[-1]["result"]["content"][0]["text"])["goal"], goal)
+                saved = self.rows("SELECT goal FROM tasks WHERE conversation=?", ("unicode-" + entry,))
+                self.assertEqual(saved[0]["goal"], goal)
+
+    def test_cli_metadata_filters_and_explicit_knowledge_update(self):
+        runtime = Runtime(self.home)
+        try:
+            project = runtime.project(self.workspace)
+            runtime.task_update(project, "cli-publish", "compiler recovery")
+            problem = runtime.feedback(project, "cli-publish", "compiler recovery", category="operation")
+            packet = runtime.review_packet(project, problem["id"])
+        finally:
+            runtime.close()
+        body = {
+            "problem_id": problem["id"], "problem_revision": packet["problem"]["revision"],
+            "title": "compiler recovery", "content": "Check the configured compiler path.",
+            "category": "operation", "applicability": "Windows compiler.",
+            "limitations": "Reported guidance only.", "evidence_refs": [packet["events"][0]["id"]],
+            "validation_level": "reported", "metadata": {"tool": "compiler", "environment": "windows"},
+        }
+        candidate_file = self.workspace / "candidate.json"
+        candidate_file.write_text(json.dumps(body), encoding="utf-8")
+        first_candidate = self.run_cli("propose", str(candidate_file))
+        first = self.run_cli("publish", first_candidate["candidate_id"])
+        body.update(title="compiler recovery revised", content="Check the compiler executable and version.")
+        candidate_file.write_text(json.dumps(body), encoding="utf-8")
+        update_candidate = self.run_cli("propose", str(candidate_file))
+        updated = self.run_cli("publish", update_candidate["candidate_id"],
+                               "--knowledge-id", first["knowledge_id"], "--expected-revision", str(first["revision"]))
+        self.assertEqual(updated["knowledge_id"], first["knowledge_id"])
+        self.assertEqual(updated["revision"], first["revision"] + 1)
+        selected = self.run_cli("search", "compiler", "--filters", '{"tool":"compiler","environment":"windows"}')
+        self.assertEqual([item["knowledge_id"] for item in selected["items"]], [first["knowledge_id"]])
+        self.assertEqual(selected["items"][0]["title"], body["title"])
+        self.assertEqual(self.run_cli("search", "compiler", "--filters", '{"environment":"linux"}')["items"], [])
+        backfill = self.run_cli("sync", "--backfill")
+        self.assertEqual(backfill["sync"]["status"], "disabled")
+        self.assertIn("backfill", backfill)
 
     def test_official_identity_fields_and_nullable_stop(self):
         self.dispatch("SessionStart", source="startup", permission_mode="default")
@@ -152,6 +233,10 @@ class HostIntegrationTests(unittest.TestCase):
         self.assertNotIn("command_windows", handler)
         command = handler["commandWindows"]
         self.assertIn("EncodedCommand", command)
+        cached = self.workspace.parent / "cached plugin copy"
+        shutil.copytree(destination, cached)
+        # 宿主实际执行缓存副本；导出源脚本变更不应改变已安装Hook。
+        (destination / "hooks/dispatch.py").write_text("raise RuntimeError('export source must not execute')\n", encoding="utf-8")
         event = {
             "session_id": "installed-conversation", "turn_id": "installed-turn",
             "cwd": str(self.workspace), "transcript_path": None,
@@ -160,7 +245,7 @@ class HostIntegrationTests(unittest.TestCase):
         # Windows shell=True 使用真实 COMSPEC，不绕过已导出的命令字符串。
         result = subprocess.run(
             command, shell=True, input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-            cwd=self.workspace, env=self.environment, capture_output=True, timeout=10, check=False,
+            cwd=self.workspace, env=dict(self.environment, PLUGIN_ROOT=str(cached)), capture_output=True, timeout=10, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         self.assertEqual(result.stderr, b"")

@@ -95,14 +95,14 @@ class RuntimeTests(unittest.TestCase):
         self.hook("PostToolUse", tool_use_id="new-evidence", tool_name="Bash", tool_response={"exit_code": 0})
         with self.assertRaises(ContractError): self.r.publish(self.p, candidate)
 
-    def test_delivery_does_not_stale_but_new_task_does(self):
+    def test_historical_delivery_remains_reviewable_after_new_task(self):
         candidate = self.candidate()
         self.r.task_update(self.p, "chat-a", "修复工具错误", status="delivered")
         self.assertEqual(self.r.task(self.p, "chat-a")["revision"], 1)
         self.assertEqual(self.r.task(self.p, "chat-a")["scope"], {"mode": "analysis"})
-        self.r.publish(self.p, candidate)
+        published = self.r.publish(self.p, candidate)
         self.r.task_update(self.p, "chat-a", "另一项任务", new_task=True)
-        with self.assertRaises(ContractError): self.r.publish(self.p, candidate)
+        self.assertEqual(self.r.publish(self.p, candidate)["knowledge_id"], published["knowledge_id"])
 
     def test_no_success_promotion_from_reported_or_running(self):
         with self.assertRaises(ContractError): self.candidate(level="tool_success")
@@ -150,7 +150,8 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(ContractError): server.call("publish", {"candidate_id": "anything"})
         with self.assertRaises(ContractError): worker.call("submit_candidate", {})
         with self.assertRaises(ContractError): worker.call("knowledge_search", {"query": "x", "role": "admin"})
-        p2 = self.r.project(self.workspace / "other")
+        self.assertEqual(self.r.project(self.workspace / "src"), self.p)
+        p2 = self.r.project(self.workspace.parent / "other")
         with self.assertRaises(ContractError): self.r.review_packet(p2, self.problem()["id"])
 
     def test_admin_budget_is_durable_and_new_problems_are_not_starved(self):

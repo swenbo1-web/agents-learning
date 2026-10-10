@@ -50,7 +50,11 @@ def main() -> int:
 
         # 持久目录由 Runtime 的 ALP_HOME/平台默认值统一决定。
         # PLUGIN_DATA 不参与选择，避免不同安装副本分裂记录。
-        output = Runtime().handle_hook(event)
+        runtime = Runtime()
+        try:
+            output = runtime.handle_hook(event)
+        finally:
+            runtime.close()
         if not isinstance(output, dict):
             _warning("runtime returned an invalid response; recording was not confirmed.")
             return 0

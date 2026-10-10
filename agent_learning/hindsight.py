@@ -17,6 +17,7 @@ import json
 import math
 import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -36,11 +37,29 @@ class HindsightError(RuntimeError):
         kind: str = "request_failed",
         status_code: int | None = None,
         retryable: bool = False,
+        write_outcome: str = "not_sent",
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status_code = status_code
         self.retryable = retryable
+        # 未尝试写请求可直接修配置；尝试后必须先核对远端结果。
+        self.write_outcome = write_outcome
+
+
+@contextmanager
+def _safe_errors(kind: str, write_outcome: str = "not_sent"):
+    """公共边界不透传可能包含凭证、输入或远端响应的底层异常。"""
+    try:
+        yield
+    except HindsightError:
+        raise
+    except Exception:
+        raise HindsightError(
+            "Hindsight 本地配置、请求或响应处理失败。",
+            kind=kind,
+            write_outcome=write_outcome,
+        ) from None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -53,6 +72,10 @@ class HindsightClient:
     """固定配置 bank 的适配器；不提供任意 bank、Reflect 或发布接口。"""
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        with _safe_errors("configuration"):
+            self._configure(config)
+
+    def _configure(self, config: Mapping[str, Any] | None) -> None:
         if config is not None and not isinstance(config, Mapping):
             raise HindsightError("Hindsight 配置必须是 Mapping。", kind="configuration")
         values = dict(config or {})
@@ -112,20 +135,31 @@ class HindsightClient:
         return bool(self._url and self._bank_id)
 
     def _request(self, method: str, route: str, payload: dict | None = None) -> dict:
-        if not self.configured:
-            raise HindsightError("Hindsight 未配置 URL 或 bank_id；保留本地功能。", kind="unconfigured")
-        headers = {"Accept": "application/json"}
-        if self._api_key_env:
-            api_key = os.environ.get(self._api_key_env, "").strip()
-            if not api_key:
-                raise HindsightError("Hindsight 凭证环境变量未设置。", kind="missing_credentials")
-            headers["Authorization"] = "Bearer " + api_key
-        data = None
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            headers["Content-Type"] = "application/json; charset=utf-8"
-        endpoint = self._url + "/v1/default/banks/" + quote(self._bank_id, safe="") + "/" + route
-        request = Request(endpoint, data=data, headers=headers, method=method)
+        # 只有 retain POST 写入知识；recall 虽为 POST，仍是只读调用。
+        writing = method == "POST" and route == "memories"
+        with _safe_errors("invalid_argument"):
+            if not self.configured:
+                raise HindsightError("Hindsight 未配置 URL 或 bank_id；保留本地功能。", kind="unconfigured")
+            headers = {"Accept": "application/json"}
+            if self._api_key_env:
+                api_key = os.environ.get(self._api_key_env, "").strip()
+                if not api_key:
+                    raise HindsightError("Hindsight 凭证环境变量未设置。", kind="missing_credentials")
+                # Bearer 凭证为 ASCII；提前拒绝控制字符，避免标准库错误回显密钥。
+                if not api_key.isascii() or any(ord(char) < 32 or ord(char) == 127 for char in api_key):
+                    raise HindsightError("Hindsight 凭证包含非法头字符。", kind="invalid_credentials")
+                headers["Authorization"] = "Bearer " + api_key
+            data = None
+            if payload is not None:
+                data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                headers["Content-Type"] = "application/json; charset=utf-8"
+            endpoint = self._url + "/v1/default/banks/" + quote(self._bank_id, safe="") + "/" + route
+            request = Request(endpoint, data=data, headers=headers, method=method)
+        write_outcome = "unknown" if writing else "not_sent"
+        with _safe_errors("request_failed", write_outcome):
+            return self._perform_request(request, write_outcome)
+
+    def _perform_request(self, request: Request, write_outcome: str) -> dict:
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
                 body = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -147,21 +181,35 @@ class HindsightClient:
                 kind="http_error",
                 status_code=status,
                 retryable=status in {408, 425, 429} or 500 <= status < 600,
+                write_outcome=write_outcome,
             ) from None
         except (URLError, TimeoutError, OSError, http.client.HTTPException):
             raise HindsightError(
-                "Hindsight 连接失败或请求超时；远端写入结果可能尚未确认。",
+                "Hindsight 连接失败或请求超时；" + (
+                    "远端写入结果尚未确认。" if write_outcome == "unknown" else "尚未发出知识写请求。"
+                ),
                 kind="transport_error",
                 retryable=True,
+                write_outcome=write_outcome,
             ) from None
-        if len(body) > _MAX_RESPONSE_BYTES:
-            raise HindsightError("Hindsight 响应超过本地大小限制。", kind="invalid_response")
-        try:
-            result = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise HindsightError("Hindsight 未返回有效 UTF-8 JSON。", kind="invalid_response") from None
-        if not isinstance(result, dict):
-            raise HindsightError("Hindsight 响应必须是 JSON 对象。", kind="invalid_response")
+        except Exception:
+            raise HindsightError(
+                "Hindsight 请求处理失败。",
+                kind="request_failed",
+                write_outcome=write_outcome,
+            ) from None
+        with _safe_errors("invalid_response", write_outcome):
+            if len(body) > _MAX_RESPONSE_BYTES:
+                raise HindsightError("Hindsight 响应超过本地大小限制。", kind="invalid_response",
+                                     write_outcome=write_outcome)
+            try:
+                result = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise HindsightError("Hindsight 未返回有效 UTF-8 JSON。", kind="invalid_response",
+                                     write_outcome=write_outcome) from None
+            if not isinstance(result, dict):
+                raise HindsightError("Hindsight 响应必须是 JSON 对象。", kind="invalid_response",
+                                     write_outcome=write_outcome)
         return result
 
     def _ensure_chunks_strategy(self) -> None:
@@ -208,43 +256,55 @@ class HindsightClient:
         operation_id: str,
     ) -> dict:
         """同步审核后的不可变修订；成功响应也不是本地发布状态。"""
-        self._required_text(document_id, "document_id")
-        self._required_text(content, "content")
-        self._required_text(project_id, "project_id")
-        self._required_text(operation_id, "operation_id")
-        if isinstance(revision, bool) or not isinstance(revision, (str, int)) or not str(revision).strip():
-            raise HindsightError("Hindsight revision 必须是非空字符串或整数。", kind="invalid_argument")
-        self._ensure_chunks_strategy()
-        payload = {
-            "items": [
-                {
-                    "document_id": document_id,
-                    "content": content,
-                    "strategy": self._strategy,
-                    "update_mode": "replace",
-                    "timestamp": "unset",
-                    "tags": ["project:" + project_id],
-                    "metadata": {
-                        "project_id": project_id,
-                        "revision": str(revision),
-                        "operation_id": operation_id,
-                    },
-                }
-            ],
-            "async": False,
-        }
+        with _safe_errors("invalid_argument"):
+            self._required_text(document_id, "document_id")
+            self._required_text(content, "content")
+            self._required_text(project_id, "project_id")
+            self._required_text(operation_id, "operation_id")
+            if isinstance(revision, bool) or not isinstance(revision, (str, int)) or not str(revision).strip():
+                raise HindsightError("Hindsight revision 必须是非空字符串或整数。", kind="invalid_argument")
+            self._ensure_chunks_strategy()
+            payload = {
+                "items": [
+                    {
+                        "document_id": document_id,
+                        "content": content,
+                        "strategy": self._strategy,
+                        "update_mode": "replace",
+                        "timestamp": "unset",
+                        "tags": ["project:" + project_id],
+                        "metadata": {
+                            "project_id": project_id,
+                            "revision": str(revision),
+                            "operation_id": operation_id,
+                        },
+                    }
+                ],
+                "async": False,
+            }
         response = self._request("POST", "memories", payload)
+        with _safe_errors("unconfirmed_write", "unknown"):
+            return self._confirm_retain(response)
+
+    def _confirm_retain(self, response: dict) -> dict:
         if response.get("success") is not True or response.get("async") is not False:
-            raise HindsightError("Hindsight 未确认同步 retain 已成功完成。", kind="unconfirmed_write")
+            raise HindsightError("Hindsight 未确认同步 retain 已成功完成。", kind="unconfirmed_write",
+                                 write_outcome="unknown")
         if response.get("bank_id") != self._canonical_bank_id:
-            raise HindsightError("Hindsight retain 确认的 bank 身份不一致。", kind="unconfirmed_write")
+            raise HindsightError("Hindsight retain 确认的 bank 身份不一致。", kind="unconfirmed_write",
+                                 write_outcome="unknown")
         count = response.get("items_count")
         if isinstance(count, bool) or not isinstance(count, int) or count != 1:
-            raise HindsightError("Hindsight retain 未确认唯一条目已处理。", kind="unconfirmed_write")
+            raise HindsightError("Hindsight retain 未确认唯一条目已处理。", kind="unconfirmed_write",
+                                 write_outcome="unknown")
         return response
 
     def recall(self, query: str, project_id: str, limit: int = 5) -> dict:
         """可选远端召回；调用方仍须核对本地 manifest、撤销和来源。"""
+        with _safe_errors("invalid_argument"):
+            return self._recall(query, project_id, limit)
+
+    def _recall(self, query: str, project_id: str, limit: int) -> dict:
         self._required_text(query, "query")
         self._required_text(project_id, "project_id")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:

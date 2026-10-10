@@ -9,7 +9,7 @@
             "command": "python3 \"${PLUGIN_ROOT}/hooks/dispatch.py\"",
             "commandWindows": "py -3 \"${PLUGIN_ROOT}/hooks/dispatch.py\"",
             "timeout": 10,
-            "additionalContextLimit": 1500
+            "additionalContextLimit": 2500
           }
         ]
       }
@@ -22,7 +22,7 @@
             "command": "python3 \"${PLUGIN_ROOT}/hooks/dispatch.py\"",
             "commandWindows": "py -3 \"${PLUGIN_ROOT}/hooks/dispatch.py\"",
             "timeout": 10,
-            "additionalContextLimit": 1500
+            "additionalContextLimit": 2500
           }
         ]
       }

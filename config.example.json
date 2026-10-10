@@ -2,6 +2,7 @@
   "injection_max_chars": 2400,
   "event_max_chars": 6000,
   "enforce_task_policy": false,
+  "capture_deliveries": true,
   "allowed_tools": [],
   "admin": {
     "enabled": false,
@@ -17,7 +18,6 @@
     "bank_id": "",
     "api_key_env": "HINDSIGHT_API_KEY",
     "strategy": "alp_chunks",
-    "chunks_strategy_verified": false,
     "timeout_seconds": 10
   },
   "project_aliases": {}

@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import threading
+import traceback
 import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.error import URLError
 
 from agent_learning.hindsight import HindsightClient, HindsightError
 
@@ -40,8 +42,9 @@ def fake_hindsight(*, bank_config=None, retain_response=None, recall_response=No
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            status = error_status or 200
-            if error_status:
+            failure = error_status.get(self.command) if isinstance(error_status, dict) else error_status
+            status = failure or 200
+            if failure:
                 # 检查远端错误回显凭证时，本地异常仍不会泄漏。
                 response = {"detail": "Bearer test-private-key"}
             elif self.command == "GET":
@@ -94,7 +97,83 @@ class HindsightContractTests(unittest.TestCase):
                 with self.assertRaises(HindsightError) as error:
                     HindsightClient(config).recall("错误", "fps")
             self.assertEqual(error.exception.kind, "missing_credentials")
+            self.assertEqual(error.exception.write_outcome, "not_sent")
             self.assertEqual(records, [])
+
+    def test_illegal_credentials_are_safe_and_never_reach_network(self):
+        client = HindsightClient({"url": "http://127.0.0.1:1", "bank_id": "published",
+                                  "api_key_env": "ALP_TEST_HINDSIGHT_KEY"})
+        for suffix in ["\npart", "\rpart", "\x00part", "\x7fpart", "\u2603"]:
+            key = "private-fixture" + suffix
+            with self.subTest(suffix=repr(suffix)), patch("agent_learning.hindsight.os.environ",
+                                                        {"ALP_TEST_HINDSIGHT_KEY": key}):
+                with patch.object(client._opener, "open") as network:
+                    with self.assertRaises(HindsightError) as error:
+                        client.retain("k1:r1", "方法", "fps", 1, "op")
+                self.assertEqual(error.exception.kind, "invalid_credentials")
+                self.assertEqual(error.exception.write_outcome, "not_sent")
+                self.assertNotIn("private-fixture", str(error.exception))
+                formatted = "".join(traceback.format_exception(error.exception))
+                self.assertNotIn("private-fixture", formatted)
+                network.assert_not_called()
+
+    def test_unexpected_constructor_error_is_safely_wrapped(self):
+        with patch("agent_learning.hindsight.build_opener", side_effect=ValueError("private-fixture")):
+            with self.assertRaises(HindsightError) as error:
+                HindsightClient({"url": "http://127.0.0.1:1", "bank_id": "published"})
+        self.assertEqual(error.exception.kind, "configuration")
+        self.assertEqual(error.exception.write_outcome, "not_sent")
+        self.assertNotIn("private-fixture", "".join(traceback.format_exception(error.exception)))
+
+    def test_content_encoding_failure_prevents_write(self):
+        with fake_hindsight() as (config, records):
+            with self.assertRaises(HindsightError) as error:
+                HindsightClient(config).retain("k1:r1", "private-fixture\ud800", "fps", 1, "op")
+            self.assertEqual(error.exception.kind, "invalid_argument")
+            self.assertEqual(error.exception.write_outcome, "not_sent")
+            self.assertEqual([record["method"] for record in records], ["GET"])
+            self.assertNotIn("private-fixture", "".join(traceback.format_exception(error.exception)))
+
+    def test_network_exceptions_after_write_attempt_have_unknown_outcome(self):
+        for exception, kind, retryable in [
+            (ValueError("private-fixture"), "request_failed", False),
+            (UnicodeEncodeError("ascii", "private-fixture\u2603", 15, 16, "fixture"), "request_failed", False),
+            (URLError("private-fixture"), "transport_error", True),
+        ]:
+            client = HindsightClient({"url": "http://127.0.0.1:1", "bank_id": "published"})
+            client._chunks_verified = True
+            client._canonical_bank_id = "published"
+            with self.subTest(kind=kind), patch.object(client._opener, "open", side_effect=exception) as network:
+                with self.assertRaises(HindsightError) as error:
+                    client.retain("k1:r1", "方法", "fps", 1, "op")
+            self.assertEqual(error.exception.kind, kind)
+            self.assertEqual(error.exception.write_outcome, "unknown")
+            self.assertEqual(error.exception.retryable, retryable)
+            self.assertNotIn("private-fixture", "".join(traceback.format_exception(error.exception)))
+            self.assertEqual(network.call_count, 1)
+
+    def test_http_errors_distinguish_preflight_and_write_attempt(self):
+        for method, outcome, expected_methods in [
+            ("GET", "not_sent", ["GET"]),
+            ("POST", "unknown", ["GET", "POST"]),
+        ]:
+            with self.subTest(method=method), fake_hindsight(error_status={method: 503}) as (config, records):
+                with self.assertRaises(HindsightError) as error:
+                    HindsightClient(config).retain("k1:r1", "方法", "fps", 1, "op")
+                self.assertEqual(error.exception.kind, "http_error")
+                self.assertEqual(error.exception.status_code, 503)
+                self.assertTrue(error.exception.retryable)
+                self.assertEqual(error.exception.write_outcome, outcome)
+                self.assertEqual([record["method"] for record in records], expected_methods)
+
+    def test_invalid_write_response_preserves_unknown_outcome(self):
+        with fake_hindsight(retain_response=["private-fixture"]) as (config, records):
+            with self.assertRaises(HindsightError) as error:
+                HindsightClient(config).retain("k1:r1", "方法", "fps", 1, "op")
+            self.assertEqual(error.exception.kind, "invalid_response")
+            self.assertEqual(error.exception.write_outcome, "unknown")
+            self.assertNotIn("private-fixture", str(error.exception))
+            self.assertEqual([record["method"] for record in records], ["GET", "POST"])
 
     def test_retain_contract_and_one_config_read_per_client(self):
         with fake_hindsight() as (config, records):
@@ -143,6 +222,7 @@ class HindsightContractTests(unittest.TestCase):
                 with self.assertRaises(HindsightError) as error:
                     HindsightClient(config).retain("k1:r1", "方法", "fps", 1, "op")
                 self.assertEqual(error.exception.kind, "unsafe_strategy")
+                self.assertEqual(error.exception.write_outcome, "not_sent")
                 self.assertEqual([record["method"] for record in records], ["GET"])
 
     def test_recall_uses_project_strict_filter_and_limits_only_client_results(self):
@@ -170,6 +250,7 @@ class HindsightContractTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(error.exception.status_code, 503)
             self.assertTrue(error.exception.retryable)
+            self.assertEqual(error.exception.write_outcome, "not_sent")
             self.assertNotIn("test-private-key", str(error.exception))
 
     def test_redirect_is_not_followed(self):
@@ -195,6 +276,7 @@ class HindsightContractTests(unittest.TestCase):
                 with self.assertRaises(HindsightError) as error:
                     HindsightClient(config).retain("k1:r1", "方法", "fps", 1, "op")
                 self.assertEqual(error.exception.kind, "unconfirmed_write")
+                self.assertEqual(error.exception.write_outcome, "unknown")
                 self.assertEqual(len(records), 2)
 
     def test_invalid_inputs_fail_without_request(self):
