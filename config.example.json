@@ -1,0 +1,24 @@
+{
+  "injection_max_chars": 2400,
+  "event_max_chars": 6000,
+  "enforce_task_policy": false,
+  "allowed_tools": [],
+  "admin": {
+    "enabled": false,
+    "command": ["codex"],
+    "max_calls_per_day": 5,
+    "max_input_chars": 16000,
+    "timeout_seconds": 120,
+    "auto_publish": false
+  },
+  "hindsight": {
+    "enabled": false,
+    "url": "http://127.0.0.1:8888",
+    "bank_id": "",
+    "api_key_env": "HINDSIGHT_API_KEY",
+    "strategy": "alp_chunks",
+    "chunks_strategy_verified": false,
+    "timeout_seconds": 10
+  },
+  "project_aliases": {}
+}

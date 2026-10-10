@@ -1,0 +1,175 @@
+"""通过真实 Python 子进程检查官方 Hook 事件和持久状态，不启动模型。"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from agent_learning.runtime import Runtime
+from agent_learning.install import install
+
+
+class HostIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="alp host checks ")
+        self.addCleanup(self.temporary.cleanup)
+        base = Path(self.temporary.name)
+        self.workspace = base / "project with spaces"
+        self.workspace.mkdir()
+        self.home = base / "runtime data"
+        self.home.mkdir()
+        (self.home / "config.json").write_text(
+            json.dumps({"admin": {"enabled": False}, "hindsight": {"enabled": False}}),
+            encoding="utf-8",
+        )
+        self.environment = os.environ.copy()
+        self.environment.pop("ALP_CONFIG", None)
+        self.environment.pop("ALP_DISABLED", None)
+        self.environment["ALP_HOME"] = str(self.home)
+        self.environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    def dispatch(self, kind, **fields):
+        event = {
+            "session_id": "conversation-a",
+            "cwd": str(self.workspace),
+            "transcript_path": None,
+            "hook_event_name": kind,
+            "model": "host-contract-check",
+            **fields,
+        }
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "dispatch.py")],
+            input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+            cwd=self.workspace,
+            env=self.environment,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(result.stderr, b"")
+        # json.loads 检查 stdout 只有一个 JSON 值，没有日志/调试前后缀。
+        output = json.loads(result.stdout.decode("utf-8"))
+        self.assertIsInstance(output, dict)
+        self.assertNotIn("systemMessage", output, output)
+        self.assertNotIn("decision", output)
+        self.assertNotEqual(output.get("continue"), False)
+        if "hookSpecificOutput" in output:
+            self.assertEqual(output["hookSpecificOutput"]["hookEventName"], kind)
+            self.assertIsInstance(output["hookSpecificOutput"]["additionalContext"], str)
+        return output
+
+    def rows(self, query, params=()):
+        connection = sqlite3.connect(self.home / "runtime.sqlite3")
+        try:
+            connection.row_factory = sqlite3.Row
+            return [dict(row) for row in connection.execute(query, params)]
+        finally:
+            connection.close()
+
+    def test_official_identity_fields_and_nullable_stop(self):
+        self.dispatch("SessionStart", source="startup", permission_mode="default")
+        self.dispatch("UserPromptSubmit", turn_id="turn-a", prompt="核对当前编译问题")
+        self.dispatch("SubagentStart", turn_id="turn-a", agent_id="child-a", agent_type="worker")
+        self.dispatch(
+            "PreToolUse", turn_id="turn-a", tool_use_id="call-a", tool_name="Bash",
+            tool_input={"command": "compiler --check"},
+        )
+        self.dispatch("Stop", turn_id="turn-a", stop_hook_active=False, last_assistant_message=None)
+        rows = self.rows("SELECT type,agent,payload FROM events ORDER BY created")
+        child = next(row for row in rows if row["type"] == "SubagentStart")
+        self.assertEqual(child["agent"], "child-a")
+        operation = next(row for row in rows if row["type"] == "PreToolUse")
+        self.assertIsNone(operation["agent"])
+        self.assertFalse(json.loads(operation["payload"])["agent_identity_known"])
+        stop = next(row for row in rows if row["type"] == "Stop")
+        self.assertIsNone(json.loads(stop["payload"])["last_assistant_message"])
+
+    def test_long_command_only_succeeds_on_terminal_result(self):
+        common = {
+            "turn_id": "turn-long", "tool_use_id": "original-command",
+            "tool_name": "Bash", "tool_input": {"command": "long-running-check"},
+        }
+        self.dispatch("PreToolUse", **common)
+        self.assertEqual(self.rows("SELECT state FROM operations")[0]["state"], "started")
+        self.dispatch("PostToolUse", **common, tool_response={"session_id": 451, "output": "running"})
+        self.assertEqual(self.rows("SELECT state FROM operations")[0]["state"], "running")
+        self.assertEqual(self.rows("SELECT COUNT(*) AS total FROM problems")[0]["total"], 0)
+        self.dispatch("Stop", turn_id="turn-long", last_assistant_message="命令仍在运行")
+        self.assertEqual(self.rows("SELECT state FROM operations")[0]["state"], "running")
+        completed = {"exit_code": 0, "output": "check complete"}
+        self.dispatch("PostToolUse", **common, tool_response=completed)
+        self.assertEqual(self.rows("SELECT state FROM operations")[0]["state"], "succeeded")
+        before = self.rows("SELECT COUNT(*) AS total FROM events")[0]["total"]
+        self.dispatch("PostToolUse", **common, tool_response=completed)
+        self.assertEqual(self.rows("SELECT COUNT(*) AS total FROM events")[0]["total"], before)
+        self.dispatch("PostToolUse", **common, tool_response={"session_id": 451, "output": "late observation"})
+        self.assertEqual(self.rows("SELECT state FROM operations")[0]["state"], "succeeded")
+
+    def test_compact_restores_knowledge_once_in_new_context(self):
+        runtime = Runtime(self.home)
+        try:
+            project = runtime.project(self.workspace)
+            runtime.task_update(project, "conversation-a", "compiler recovery")
+            problem = runtime.feedback(project, "conversation-a", "compiler recovery", category="operation")
+            packet = runtime.review_packet(project, problem["id"])
+            candidate = runtime.submit_candidate(
+                project, problem_id=problem["id"], problem_revision=packet["problem"]["revision"],
+                title="compiler recovery", content="Check the configured compiler path.",
+                category="operation", applicability="This test workspace only.",
+                limitations="Reported guidance; gameplay remains unverified.",
+                evidence_refs=[packet["events"][0]["id"]], validation_level="reported",
+            )
+            runtime.publish(project, candidate["candidate_id"])
+        finally:
+            runtime.close()
+        first = self.dispatch("UserPromptSubmit", turn_id="first", prompt="compiler recovery")
+        self.assertIn("compiler recovery", first["hookSpecificOutput"]["additionalContext"])
+        repeat = self.dispatch("UserPromptSubmit", turn_id="second", prompt="compiler recovery")
+        self.assertNotIn("compiler recovery", repeat.get("hookSpecificOutput", {}).get("additionalContext", ""))
+        restored = self.dispatch("SessionStart", source="compact")
+        self.assertIn("compiler recovery", restored["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.rows("SELECT epoch FROM contexts")[0]["epoch"], 1)
+        after = self.dispatch("UserPromptSubmit", turn_id="third", prompt="compiler recovery")
+        self.assertNotIn("compiler recovery", after.get("hookSpecificOutput", {}).get("additionalContext", ""))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Hook command contract")
+    def test_exported_windows_command_accepts_json_stdin(self):
+        destination = self.workspace.parent / "installed plugin copy"
+        install(destination)
+        handlers = json.loads((destination / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        handler = handlers["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertIn("commandWindows", handler)
+        self.assertNotIn("command_windows", handler)
+        command = handler["commandWindows"]
+        self.assertIn("EncodedCommand", command)
+        event = {
+            "session_id": "installed-conversation", "turn_id": "installed-turn",
+            "cwd": str(self.workspace), "transcript_path": None,
+            "hook_event_name": "UserPromptSubmit", "prompt": "检查安装副本的中文输入",
+        }
+        # Windows shell=True 使用真实 COMSPEC，不绕过已导出的命令字符串。
+        result = subprocess.run(
+            command, shell=True, input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+            cwd=self.workspace, env=self.environment, capture_output=True, timeout=10, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(result.stderr, b"")
+        output = json.loads(result.stdout.decode("utf-8"))
+        self.assertNotIn("systemMessage", output, output)
+        recorded = self.rows("SELECT payload FROM events WHERE conversation='installed-conversation'")
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(json.loads(recorded[0]["payload"])["prompt"], event["prompt"])
+
+
+if __name__ == "__main__":
+    unittest.main()

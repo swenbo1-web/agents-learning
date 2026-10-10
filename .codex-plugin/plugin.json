@@ -1,0 +1,13 @@
+{
+  "name": "agent-learning",
+  "version": "0.1.0",
+  "description": "Record supported Codex events, retrieve relevant knowledge, and queue evidence for administrator review.",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Learning",
+    "shortDescription": "自动记录问题、检索知识并维护经验候选",
+    "longDescription": "在受支持的 Codex 本地事件中保存执行证据，按任务检索知识，并将待整理记录交给管理员流程。正式知识发布与任务验收分别管理。"
+  }
+}

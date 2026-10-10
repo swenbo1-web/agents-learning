@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agent_learning": {
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/learning.py",
+        "serve",
+        "--role",
+        "worker"
+      ]
+    }
+  }
+}

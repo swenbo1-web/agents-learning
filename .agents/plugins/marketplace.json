@@ -1,0 +1,11 @@
+{
+  "name": "agent-learning-local",
+  "plugins": [
+    {
+      "name": "agent-learning",
+      "source": {"source": "local", "path": "./"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
+      "category": "Productivity"
+    }
+  ]
+}

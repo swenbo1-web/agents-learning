@@ -1,0 +1,16 @@
+[project]
+name = "agent-learning-plugin"
+version = "0.1.0"
+description = "Local-first governed memory for coding agents"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+agent-learning = "agent_learning.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_learning*"]
