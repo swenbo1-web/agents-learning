@@ -54,7 +54,8 @@ class CaseStoreMixin:
                                 "AND e.task_revision=d.revision AND e.type='Stop' AND e.agent IS NULL "
                                 "AND e.task_status='delivered' AND ts.status='delivered' ORDER BY e.created,e.id")
             self._install_case_feedback_triggers()
-            self.db.execute("PRAGMA user_version=7")
+            if previous_version < 7:
+                self.db.execute("PRAGMA user_version=7")
 
     def _install_case_feedback_triggers(self):
         from .context_storage import _dirty_sql
@@ -119,6 +120,10 @@ class CaseStoreMixin:
             if changed:
                 self.db.execute("UPDATE problems SET revision=revision+1,status='pending',resolution_status=? WHERE id=?",
                                 (next_resolution, problem_id))
+                # 新事实使原反例处置需要复核；重放没有新增证据时不清除回执。
+                self.db.execute("UPDATE knowledge_feedback SET disposition='unresolved',disposition_reason=NULL,"
+                                "disposition_receipt=NULL WHERE project=? AND problem_id=? AND disposition!='unresolved'",
+                                (problem["project"], problem_id))
             elif next_resolution != problem["resolution_status"]:
                 self.db.execute("UPDATE problems SET resolution_status=? WHERE id=?", (next_resolution, problem_id))
             return dict(self.db.execute("SELECT * FROM problems WHERE id=?", (problem_id,)).fetchone())
@@ -234,7 +239,7 @@ class CaseStoreMixin:
             result = self._problem(project, conversation_id, summary, category, refs + [event["id"]], knowledge_id,
                                    task_binding=task, evidence_roles={event["id"]: "feedback"}, knowledge_revision=actual_revision)
             if kind == "counterexample":
-                self.db.execute("INSERT OR IGNORE INTO knowledge_feedback VALUES(?,?,?,?,?,?)",
+                self.db.execute("INSERT OR IGNORE INTO knowledge_feedback(project,knowledge_id,revision,problem_id,kind,created) VALUES(?,?,?,?,?,?)",
                                 (project, knowledge_id, actual_revision, result["id"], kind, time.time()))
             if idempotency_key is not None:
                 self.db.execute("INSERT INTO feedback_receipts VALUES(?,?,?,?,?,?,?,?)",
@@ -248,6 +253,6 @@ class CaseStoreMixin:
     def _knowledge_feedback_state(self, project, knowledge_id, revision):
         count = self.db.execute("SELECT COUNT(*) FROM knowledge_feedback f JOIN problems p "
                                 "ON p.project=f.project AND p.id=f.problem_id WHERE f.project=? AND f.knowledge_id=? "
-                                "AND f.revision=? AND f.kind='counterexample' AND p.status='pending'",
+                                "AND f.revision=? AND f.kind='counterexample' AND f.disposition='unresolved'",
                                 (project, knowledge_id, revision)).fetchone()[0]
         return {"pending_counterexample_count": count, "feedback_status": "pending_counterexample" if count else "none"}

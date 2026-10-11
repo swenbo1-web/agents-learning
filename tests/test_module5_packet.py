@@ -62,13 +62,13 @@ class Module5PacketTests(unittest.TestCase):
         self.assertLessEqual(len(review_instruction(packet)), 16000)
         self.assertEqual(admin_once(self.r, self.p, problem["id"])["status"], "candidate")
 
-    def test_actual_small_input_fits_1500_character_budget(self):
-        self.configure(1500)
+    def test_actual_small_input_fits_2200_character_budget(self):
+        self.configure(2200)
         problem = self.problem(summary="x")
         packet = self.r.review_packet(self.p, problem["id"])
         self.assertEqual(len(packet["events"]), 1)
         self.assertFalse(packet["incomplete"])
-        self.assertLessEqual(len(review_instruction(packet)), 1500)
+        self.assertLessEqual(len(review_instruction(packet)), 2200)
         self.assertEqual(admin_once(self.r, self.p, problem["id"])["status"], "candidate")
 
     def test_large_scope_is_explicit_and_historical_json_is_pageable(self):

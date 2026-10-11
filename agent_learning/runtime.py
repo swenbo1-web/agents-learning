@@ -33,7 +33,8 @@ DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
     "enforce_task_policy": False, "capture_deliveries": True, "allowed_tools": [], "project_aliases": {},
     "admin": {"enabled": False, "command": ["codex"], "max_calls_per_day": 5,
-              "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False},
+              "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False,
+              "max_cases_per_batch": 20, "max_calls_per_batch": 2, "max_batch_seconds": 180},
     "hindsight": {"enabled": False, "url": "http://127.0.0.1:8888", "bank_id": "",
                   "api_key_env": "HINDSIGHT_API_KEY", "strategy": "alp_chunks",
                   "timeout_seconds": 10},
@@ -216,26 +217,43 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, 5, 6, 7}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7, 8}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
-        self.db.executescript(SCHEMA)
-        if version < 2:
-            self._migrate()
-        if version < 3:
-            with self.transaction():
-                if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
-                    for table in ("operations", "admin_calls"):
-                        existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
-                        if "host_epoch" not in existing:
-                            self.db.execute(f"ALTER TABLE {table} ADD COLUMN host_epoch INTEGER NOT NULL DEFAULT 0")
-                    self.db.execute("PRAGMA user_version=3")
-        if version < 4:
-            self._migrate_execution()
-        if version < 5:
-            self._migrate_knowledge_store()
-        self._migrate_context_storage()
-        self._migrate_case_store()
+        try:
+            self.db.executescript(SCHEMA)
+            if version < 2:
+                self._migrate()
+            if version < 3:
+                with self.transaction():
+                    if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
+                        for table in ("operations", "admin_calls"):
+                            existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                            if "host_epoch" not in existing:
+                                self.db.execute(f"ALTER TABLE {table} ADD COLUMN host_epoch INTEGER NOT NULL DEFAULT 0")
+                        self.db.execute("PRAGMA user_version=3")
+            if version < 4:
+                self._migrate_execution()
+            if version < 5:
+                self._migrate_knowledge_store()
+            self._migrate_context_storage()
+            self._migrate_case_store()
+            self._migrate_admin_storage()
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _migrate_admin_storage(self):
+        from .admin_lifecycle import install_lifecycle
+        from .admin_decisions import install_decisions
+        from .admin_governance import install_governance
+        from .admin_queue import install_queue
+        with self.transaction():
+            install_lifecycle(self)
+            install_decisions(self)
+            install_governance(self)
+            install_queue(self)
+            self.db.execute("PRAGMA user_version=8")
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -438,8 +456,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             for task in self.db.execute("SELECT project,conversation FROM tasks").fetchall():
                 self._execution_fence(task["project"], task["conversation"], "account_changed")
             # 未知调用仍占原额度；禁止旧执行器回写或自动重试。
-            self.db.execute("UPDATE admin_calls SET state='account_changed_unknown',finished=? "
-                            "WHERE state IN ('reserved','started')", (time.time(),))
+            self.db.execute("UPDATE admin_calls SET state='account_changed_unknown',finished=?,lease_until=NULL "
+                            "WHERE state IN ('reserved','launch_intent','started')", (time.time(),))
             for table in ("contexts", "subagent_contexts"):
                 self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]'")
             return {"host_epoch": epoch, "changed": True, "knowledge_scope": "shared_project",
@@ -518,7 +536,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             raise ContractError("candidate is too large")
         identity = digest([project, body])
         ident = identity[:32]
-        with self.transaction():
+        with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
             previous = self.db.execute("SELECT c.id,c.status,c.body FROM candidate_identity i JOIN candidates c "
                                        "ON i.project=c.project AND i.candidate_id=c.id WHERE i.project=? AND i.fingerprint=?",
@@ -593,7 +611,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
 
     def status(self, project):
         counts = {}
-        for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts"):
+        for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts",
+                      "review_receipts", "governance_proposals"):
             counts[table] = self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE project=?", (project,)).fetchone()[0]
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
@@ -607,6 +626,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
                 "metrics": {r[0]: r[1] for r in self.db.execute("SELECT name,value FROM metrics WHERE project=?", (project,))},
                 "admin_states": {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM admin_calls WHERE project=? GROUP BY state", (project,))},
+                "review_states": {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM review_states WHERE project=? GROUP BY state", (project,))},
+                "governance_states": {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM governance_proposals WHERE project=? GROUP BY state", (project,))},
                 "coverage": "configured local hooks only; unidentified agents remain unknown"}
 
     @staticmethod
@@ -770,15 +791,17 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
         if kind == "Stop" and fresh and self.config["admin"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
+            token = None
             try:
-                # 无待处理素材、预算已用尽或有在途审核时，不额外启动进程。
-                pending = self.db.execute("SELECT 1 FROM problems WHERE project=? AND status='pending' LIMIT 1", (project,)).fetchone()
-                running = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN ('reserved','started') LIMIT 1", (project,)).fetchone()
-                calls = self.db.execute("SELECT COUNT(*) FROM admin_calls WHERE day=? AND state NOT IN ('not_started','deduplicated')",
-                                        (time.strftime("%Y-%m-%d", time.gmtime()),)).fetchone()[0]
-                if pending and not running and calls < self.config["admin"]["max_calls_per_day"]:
-                    self._launch_admin(raw["cwd"])
+                from .admin import _settings
+                from .admin_queue import claim_dispatch, release_dispatch
+                _settings(self.config["admin"])
+                token = claim_dispatch(self, project)
+                if token:
+                    self._launch_admin(raw["cwd"], token)
             except (OSError, ValueError, TypeError, sqlite3.Error):
+                if token:
+                    release_dispatch(self, project, token)
                 try:
                     self._metric(project, "admin_schedule_failed")
                 except sqlite3.Error:
@@ -786,16 +809,19 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 return {"systemMessage": "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"}
         return {}
 
-    def _launch_admin(self, workspace):
+    def _launch_admin(self, workspace, dispatch_token=None):
         import subprocess
         import sys
         options = {"start_new_session": True} if os.name != "nt" else {
             "creationflags": subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS}
         env = dict(os.environ, ALP_HOME=str(self.home), ALP_DISABLED="1")
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
-        with (self.home / "background.log").open("ab") as log:
+        log_path = self.home / "background.log"
+        if log_path.exists() and log_path.stat().st_size > 1024 * 1024:
+            log_path.replace(self.home / "background.previous.log")
+        with log_path.open("ab") as log:
             subprocess.Popen([sys.executable, "-m", "agent_learning.cli", "--home", str(self.home), "--workspace",
-                              str(workspace), "admin-once"], stdin=subprocess.DEVNULL,
+                              str(workspace), "admin-batch", *(["--dispatch-token", dispatch_token] if dispatch_token else [])], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, env=env, **options)
 
     def sync_once(self, project, retry=None):

@@ -160,7 +160,7 @@ class Module5CaseTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             self.feedback(feedback_kind="resolved")
 
-    def test_counterexample_case_state_and_revision_dirty_source_until_reviewed(self):
+    def test_reviewed_case_keeps_unresolved_counterexample_and_dirty_source(self):
         k = self.publish()
         problem = self.feedback(knowledge_id=k["knowledge_id"])
         before = self.r.read(self.p, k["knowledge_id"])["source_version"]
@@ -168,7 +168,7 @@ class Module5CaseTests(unittest.TestCase):
             self.r.db.execute("UPDATE problems SET status='reviewed' WHERE id=?", (problem["id"],))
         reviewed = self.r.read(self.p, k["knowledge_id"])
         self.assertGreater(reviewed["source_version"], before)
-        self.assertEqual(self.r._knowledge_feedback_state(self.p, k["knowledge_id"], k["revision"])["pending_counterexample_count"], 0)
+        self.assertEqual(self.r._knowledge_feedback_state(self.p, k["knowledge_id"], k["revision"])["pending_counterexample_count"], 1)
         self.feedback(knowledge_id=k["knowledge_id"])
         self.assertEqual(self.r._knowledge_feedback_state(self.p, k["knowledge_id"], k["revision"])["pending_counterexample_count"], 1)
         self.assertGreater(self.r.read(self.p, k["knowledge_id"])["source_version"], reviewed["source_version"])
@@ -250,7 +250,7 @@ class Module5CaseTests(unittest.TestCase):
         self.assertIsNone(self.r.db.execute("SELECT tool_input_digest FROM events WHERE id=?", (event_refs[0],)).fetchone()[0])
         self.r.close()
         self.r = CaseRuntime(self.home)
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 7)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 8)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM problems WHERE id=?", (legacy["id"],)).fetchone()[0], 1)
 
     def test_migration_backfills_only_proven_legacy_delivery_round(self):

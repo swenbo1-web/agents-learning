@@ -103,6 +103,8 @@ class AdminOptimizationTests(unittest.TestCase):
         self.configure(max_input_chars=3500)
         old_problem = self.problem(summary="An oversized old issue " + "x" * 1900)
         new_problem = self.problem(summary="A small new issue")
+        self.runtime.db.executemany("UPDATE problems SET created=? WHERE id=?",
+                                   [(1, old_problem["id"]), (2, new_problem["id"])])
         self.assertTrue(self.runtime.review_packet(self.project, old_problem["id"])["incomplete"])
         self.assertEqual(admin_once(self.runtime, self.project, old_problem["id"])["status"], "needs_evidence")
         self.assertEqual(self.calls(), [])
@@ -149,7 +151,8 @@ class AdminOptimizationTests(unittest.TestCase):
             second = admin_once(self.runtime, self.project)
             self.assertEqual(second["status"], "candidate")
             self.assertEqual(second["skipped_problem_ids"], [old_problems[10]["id"]])
-            self.assertEqual(packets.call_count, 2)
+            # 一次旧超限项、一次新审核包，接受响应前还需核对比较资料未变化。
+            self.assertEqual(packets.call_count, 3)
         self.assertEqual([call["problem"] for call in self.calls()], [new_problem["id"]])
         with patch.object(self.runtime, "review_packet", side_effect=AssertionError("unchanged preflights must not repeat")):
             blocked = admin_once(self.runtime, self.project)

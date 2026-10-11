@@ -9,7 +9,7 @@ import re
 from . import __version__
 
 
-PROTOCOL_VERSION = "4"
+PROTOCOL_VERSION = "5"
 MANIFEST_NAME = "release.json"
 RELEASE_DIRECTORY = re.compile(r"^\d+\.\d+\.\d+-[0-9a-f]{64}$")
 

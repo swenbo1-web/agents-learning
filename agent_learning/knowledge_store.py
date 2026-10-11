@@ -101,6 +101,8 @@ class KnowledgeStoreMixin:
         linked = self._link_knowledge_source(project, knowledge_id, revision, candidate, body)
         self.db.execute("UPDATE candidates SET status='published' WHERE project=? AND id=?", (project, candidate["id"]))
         self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, body["problem_id"]))
+        self.db.execute("UPDATE review_states SET state='published',updated=? WHERE project=? AND problem=? AND revision=?",
+                        (time.time(), project, body["problem_id"], body["problem_revision"]))
         if changed or linked:
             self.db.execute("UPDATE projects SET generation=generation+1 WHERE id=?", (project,))
         self.db.execute("INSERT INTO publication_receipts VALUES(?,?,?,?,?,?)",
@@ -113,7 +115,7 @@ class KnowledgeStoreMixin:
     def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
                 expected_epoch=None):
         from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint, metadata
-        with self.transaction():
+        with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
             candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
             if not candidate:
@@ -188,7 +190,7 @@ class KnowledgeStoreMixin:
                                             expected_revision, response, True)
 
     def revoke(self, project, knowledge_id):
-        with self.transaction():
+        with self._case_transaction():
             changed = self.db.execute("DELETE FROM active WHERE project=? AND id=?", (project, knowledge_id)).rowcount
             if changed:
                 self._remove_knowledge_index(project, knowledge_id)

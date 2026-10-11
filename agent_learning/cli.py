@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 import sys
 
-from .admin import admin_once
+from .admin import admin_batch, admin_once
 from .install import install
 from .mcp import Server
 from .runtime import ContractError, Runtime, encode
@@ -61,7 +61,7 @@ def parser():
     packet.add_argument("--offset", type=int, default=0)
     packet.add_argument("--expected-revision", type=int)
     packet.add_argument("--max-chars", type=int)
-    packet.add_argument("--section", choices=["events", "task"], default="events")
+    packet.add_argument("--section", choices=["events", "task", "target"], default="events")
     sub.add_parser("propose").add_argument("file")
     publish = sub.add_parser("publish")
     publish.add_argument("candidate_id")
@@ -82,6 +82,18 @@ def parser():
     sub.add_parser("read").add_argument("knowledge_id")
     admin = sub.add_parser("admin-once")
     admin.add_argument("--problem")
+    batch = sub.add_parser("admin-batch", help="按案例数、调用数与时长运行有限审核批次")
+    batch.add_argument("--dispatch-token", help="由本地Hook预留的后台派发身份")
+    retry = sub.add_parser("admin-retry", help="核对失败或未知调用后明确允许一次再审，原额度记录保留")
+    retry.add_argument("call_id")
+    retry.add_argument("--reason", required=True)
+    reviews = sub.add_parser("reviews", help="查看持久审核原因、缺证需求与候选引用")
+    reviews.add_argument("--problem")
+    reviews.add_argument("--limit", type=int, default=20)
+    governance = sub.add_parser("governance-propose", help="从JSON文件提交治理提议，不执行")
+    governance.add_argument("file")
+    execute = sub.add_parser("governance-execute", help="受信入口校验并执行治理提议，保存幂等回执")
+    execute.add_argument("proposal_id")
     sync = sub.add_parser("sync")
     sync.add_argument("--retry", help="先人工核对远端结果，再显式重试此知识操作ID")
     sync.add_argument("--backfill", action="store_true", help="先将现有正式知识加入同步队列，再同步一项")
@@ -151,6 +163,19 @@ def main(argv=None):
                                                 filters=json.loads(args.filters) if args.filters is not None else None)
         elif args.command == "read": result = runtime.read(project, args.knowledge_id)
         elif args.command == "admin-once": result = admin_once(runtime, project, args.problem)
+        elif args.command == "admin-batch": result = admin_batch(runtime, project, dispatch_token=args.dispatch_token)
+        elif args.command == "admin-retry":
+            from .admin_lifecycle import retry_call
+            result = retry_call(runtime, project, args.call_id, args.reason)
+        elif args.command == "reviews":
+            from .admin_decisions import get_reviews
+            result = get_reviews(runtime, project, args.problem, args.limit)
+        elif args.command == "governance-propose":
+            from .admin_governance import propose_governance
+            result = propose_governance(runtime, project, **json.loads(Path(args.file).read_text(encoding="utf-8-sig")))
+        elif args.command == "governance-execute":
+            from .admin_governance import execute_governance
+            result = execute_governance(runtime, project, args.proposal_id)
         elif args.command == "sync":
             if args.backfill:
                 result = {"backfill": runtime.enqueue_sync(project), "sync": runtime.sync_once(project, args.retry)}

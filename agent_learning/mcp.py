@@ -72,9 +72,17 @@ ADMIN_TOOLS = [
         "problem_id": NONEMPTY, "offset": {"type": "integer", "minimum": 0},
         "expected_revision": {"type": "integer", "minimum": 1},
         "max_chars": {"type": "integer", "minimum": 1000, "maximum": 200000},
-        "section": {"type": "string", "enum": ["events", "task"]},
+        "section": {"type": "string", "enum": ["events", "task", "target"]},
     }, ["problem_id"])),
     ("submit_candidate", "提交带来源和适用条件的候选；此工具不能发布。", CANDIDATE),
+    ("review_list", "查看有限的持久审核回执，包括理由、缺证需求与候选引用。", schema({
+        "problem_id": NONEMPTY, "limit": {"type": "integer", "minimum": 1, "maximum": 100}})),
+    ("propose_governance", "提出发布、修订、撤销或反例处置建议；此工具不能执行治理。", schema({
+        "problem_id": NONEMPTY, "problem_revision": {"type": "integer", "minimum": 1},
+        "action": {"type": "string", "enum": ["publish", "update", "attach", "revoke", "dismiss_counterexample"]},
+        "candidate_id": NONEMPTY, "knowledge_id": NONEMPTY,
+        "expected_revision": {"type": "integer", "minimum": 1}, "reason": NONEMPTY,
+        "evidence_refs": STRINGS}, ["problem_id", "problem_revision", "action", "reason"])),
 ]
 
 
@@ -212,6 +220,12 @@ class Server:
         if name == "problem_list": return r.problems(p, **args)
         if name == "review_packet": return r.review_packet(p, **args)
         if name == "submit_candidate": return r.submit_candidate(p, expected_epoch=self.epoch, **args)
+        if name == "review_list":
+            from .admin_decisions import get_reviews
+            return get_reviews(r, p, **args)
+        if name == "propose_governance":
+            from .admin_governance import propose_governance
+            return propose_governance(r, p, expected_epoch=self.epoch, **args)
         raise ContractError("unknown tool")
 
     def request(self, message):

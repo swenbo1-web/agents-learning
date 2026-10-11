@@ -70,11 +70,11 @@ class Module5IntegrationTests(unittest.TestCase):
         for number in range(5):
             problem = self.r.feedback(self.p, "chat", "compiler error", resolution=f"attempt {number} " + "x" * 500)
         admin = Server(self.r, self.p, role="admin")
-        packet = admin.call("review_packet", {"problem_id": problem["id"], "max_chars": 2200})
+        packet = admin.call("review_packet", {"problem_id": problem["id"], "max_chars": 3000})
         self.assertTrue(packet["incomplete"])
         self.assertGreater(packet["next_offset"], 0)
         args = dict(problem_id=problem["id"], offset=packet["next_offset"],
-                    expected_revision=packet["problem"]["revision"], max_chars=2200)
+                    expected_revision=packet["problem"]["revision"], max_chars=3000)
         self.assertTrue(admin.call("review_packet", args)["events"])
         self.r.feedback(self.p, "chat", "compiler error", resolution="new fact")
         with self.assertRaises(ContractError):

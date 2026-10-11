@@ -21,6 +21,7 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 - 用 `case_feedback` 简短反馈实际问题结果和真实 `event_refs`；父 Agent 同时传 `expected_task_id` 和 `expected_task_revision`。子 Agent 按固定 assignment 反馈；assignment 过期后仍归属原任务，不继承新父任务的权限。没有证据时保留未知。
 - 同一次 `case_feedback` 提供 `idempotency_key`，失败重试沿用原键和原参数；真实再次发生使用新键。知识反例同时传 `knowledge_id`、`knowledge_revision` 和 `feedback_kind=counterexample`，不猜被反馈的修订，也不直接撤销知识。
 - `pending_counterexample_count` 表示知识存在待核实反例，先核对相关依据；它不等于结论已被证伪。`recovery_observed` 仅表示观察到潜在后续成功，不等于已解决或用户验收。
+- 案例被审核或生成新知识后，旧反例仍可能未处置；继续核对知识的准确修订及当前提醒，普通 Agent 不自行执行知识治理或等待后台整理。
 - 系统记录可观察的消息、工具事件和结果。只有缺少关键决策依据时才补一句说明，无需额外生成复盘文件。
 - 区分已执行、命令成功、编译通过和用户验收通过。退出码为零不证明专业结论或主流程验收成立。
 - 观察模式下知识服务不可达时继续已授权任务，并明确记录仍待同步；执行保护返回拒绝时保留该拒绝，不绕过入口。不自行安装服务、更改配置或扩大检查范围。

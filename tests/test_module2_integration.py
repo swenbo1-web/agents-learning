@@ -74,7 +74,7 @@ class Module2IntegrationTests(unittest.TestCase):
         self.hook('PostToolUse', agent_id='child', tool_name='Read', tool_response={'exit_code': 1})
         self.assertEqual(self.r.problems(self.p)[0]['task_id'], self.a['id'])
         self.hook('PostToolUse', agent_id='never-started', tool_name='Read', tool_response={'exit_code': 1})
-        self.assertIsNone(self.r.problems(self.p)[1]['task_id'])
+        self.assertCountEqual([problem['task_id'] for problem in self.r.problems(self.p)], [self.a['id'], None])
 
     def test_prompt_fence_is_idempotent_continuation_and_compaction_keep_permit(self):
         self.r.config['enforce_task_policy'] = True
@@ -164,6 +164,8 @@ class Module2IntegrationTests(unittest.TestCase):
         self.r.task_update(self.p, 'chat', self.a['goal'], status='delivered')
         for _ in range(41):
             self.r.feedback(self.p, 'chat', '同一个问题')
+        # 复现系统时钟精度下连续事件同一时点，历史状态必须仍取首个入库事件。
+        self.r.db.execute("UPDATE events SET created=1 WHERE project=?", (self.p,))
         self.assertEqual(self.r.review_packet(self.p, problem['id'])['task']['status'], 'active')
 
     def test_child_stop_cannot_take_parent_delivery_slot(self):
@@ -214,7 +216,7 @@ class Module2IntegrationTests(unittest.TestCase):
         db.close()
         upgraded = Runtime(legacy_home)
         try:
-            self.assertEqual(upgraded.db.execute('PRAGMA user_version').fetchone()[0], 7)
+            self.assertEqual(upgraded.db.execute('PRAGMA user_version').fetchone()[0], 8)
             self.assertEqual(upgraded.task('legacy','legacy-chat')['write_version'], 1)
             packet = upgraded.review_packet('legacy','old-problem')
             self.assertEqual(packet['events'][0]['id'], 'old-event')

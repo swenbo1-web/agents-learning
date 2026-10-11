@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.7.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.8.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
 
-0.7.0 优化第五模块的结果判断、前置命令证据、潜在恢复归属、反馈回执、知识反例、交付轮次与审核包预算，保留前四模块的发布、检索、来源追踪和受信执行策略。数据库首次打开时在事务内升级到版本 7，保留已有记录和知识 ID；旧案例角色保持 observation，缺少依据的输入摘要、知识修订与交付轮次不猜测。全文索引版本为 4，内部发布协议为 4，不能将新旧运行文件混用；旧运行端不能打开版本 7 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
+0.8.0 优化第六模块的持久审核回执、精确去重、调用恢复、有界批次、知识治理及反例处置，保留前五模块的采集、发布、检索和受信执行策略。数据库首次打开时在事务内升级到版本 8，保留记录和知识 ID；旧审核记录缺失的理由不猜测，旧 reviewed 反例仍视为未处置。全文索引版本为 4，内部发布协议为 5，不能将新旧运行文件混用；旧运行端不能打开版本 8 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -181,7 +181,7 @@ python scripts/learning.py --home "D:\AgentLearningData" rebuild-index
 
 `case_feedback` / CLI `feedback --idempotency-key KEY` 支持持久回执。同一次请求重试沿用原键和参数，返回首次结果，不增加事件或案例版本；同键不同参数拒绝。不同实际发生使用新键，省略键兼容旧入口且不保证重试去重。回执按项目、会话、Agent 和宿主版本隔离。
 
-知识反例传 `knowledge_id`、`knowledge_revision`、`feedback_kind=counterexample`，必须引用本项目真实修订；兼容旧请求未传修订时绑定当前有效版并返回明确修订，已撤销或历史版应显式引用。反例独立关联对应知识修订并推进来源变化版本；`pending_counterexample_count` / `feedback_status=pending_counterexample` 会出现在知识响应和后续 Hook 提醒中。待核实反例不改变原来源 health，也不直接撤销知识；管理员处理后更新待审状态。
+知识反例传 `knowledge_id`、`knowledge_revision`、`feedback_kind=counterexample`，必须引用本项目真实修订；兼容旧请求未传修订时绑定当前有效版并返回明确修订，已撤销或历史版应显式引用。反例独立关联对应知识修订并推进来源变化版本；`pending_counterexample_count` / `feedback_status=pending_counterexample` 会出现在知识响应和后续 Hook 提醒中。案例 reviewed、生成候选、发布新知识或挂接等价来源都不清除反例。准确修订被受信治理更新、撤销或依据额外真实证据明确驳回后才处置；新证据会重新打开反例。
 
 ## 任务范围与执行保护
 
@@ -222,23 +222,33 @@ python scripts/learning.py --workspace "D:\Projects\my-project" execution-approv
 
 默认 `admin.enabled` 和 `admin.auto_publish` 都为 `false`。未启用执行器时，可用管理员技能人工整理候选。
 
-需要自动提出候选时，配置可信的 Codex CLI 路径并启用 `admin.enabled`。此时 `Stop` Hook 启动一个独立后台 `admin-once` 短批次，不等待模型完成。它不是常驻守护进程，也不会持续轮询队列。也可以手动运行：
+需要自动提出候选时，配置可信的 Codex CLI 路径并启用 `admin.enabled`。此时 `Stop` Hook 先持久预留派发位置，再启动一个独立后台 `admin-batch` 短批次，不等待模型完成。没有可审增量、已有派发或审核在途、额度耗尽时不启动。它不是常驻守护进程，也不会持续轮询队列。也可以手动运行：
 
 ```powershell
 python scripts/learning.py --workspace "D:\Projects\my-project" admin-once
+python scripts/learning.py --workspace "D:\Projects\my-project" admin-batch
+python scripts/learning.py --workspace "D:\Projects\my-project" reviews --problem CASE_ID
 ```
 
 可用 `admin-once --problem ID` 限定问题。执行器在隔离临时目录使用只读沙箱、临时会话和结构化输出，并设置 `ALP_DISABLED=1` 避免学习递归。自动提出候选不等于自动发布；默认仍由受信操作者发布。
 
-审核快照与调用预留在同一短事务完成，模型调用在事务外执行。审核包包含原任务、实际事件及少量相关知识和候选摘要；相同项目、范围和精确素材可复用调用记录，语义相似仍需判断。预检失败不占模型额度，确定未启动的进程可以在修正配置后重试；已经启动但结果未知的调用不自动重试。截短证据会标明限制并阻止自动发布。
+审核快照与调用预留在同一事务完成，模型调用在事务外执行。同一项目的模型预留在事务内互斥。调用持久经历 reserved → launch_intent → started → 终态，启动意图在创建进程前提交；超时、换号或启动窗口崩溃按未知保留额度。新协议严格启动意图前的过期预留、明确未启动的进程可以恢复；遗留活动记录不能证明未启动，升级后按 orphaned_unknown 处理。不会按进程名称杀其他任务。
+
+审核决定与调用计量分开保存：`reviews` / 管理员 `review_list` 可查看理由、结构化缺证项、候选和提议引用。候选对应 candidate_ready，缺证对应 awaiting_evidence，生成提议对应 proposal_ready；与案例是否恢复、产品是否验收独立。精确复用同时检查业务证据及实际比较知识、候选、反例目标、来源健康和审核策略；失败或未知调用不复用为成功决定。自身证据产生的候选不形成再次审核循环，新相关资料才可能复审。发布或候选变化先唤醒有界比较，实际审核签名不变则不调用模型。
+
+审核结果写入前，在同一事务重核案例、宿主、租约及实际比较资料；变化则拒绝旧决定。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
 
 直接 MCP / CLI 取包同样使用一致快照。整包按实际管理员提示、任务、证据与比较材料计算预算，完整可容纳的 41 条事件可审核，不再固定丢弃第 41 条。单页最多读取 512 条，事件展示必要归属、角色及当前 health；比较资料只使用剩余空间。预算不足明确返回 incomplete、omitted_count、omission_reasons 和有限 missing_refs，不完整材料仍不自动调用模型。
 
-管理员可用 `review_packet(problem_id, offset, expected_revision, max_chars, section)` 或 `packet ID --offset N --expected-revision R --max-chars N` 分页；续页必须沿用同一问题 revision，素材变化则重读。大任务完整 JSON 使用 `section=task` / `--section task` 分页，投影不会默删范围规则后伪装完整。若单条证据本身放不下，按返回的预算提示增加 max_chars；不得反复读取无进展的页。分页材料及当前健康状态不等于新的独立验证。
+管理员可用 `review_packet(problem_id, offset, expected_revision, max_chars, section)` 或 `packet ID --offset N --expected-revision R --max-chars N` 分页；续页必须沿用同一问题 revision，素材变化则重读。大任务完整 JSON 使用 `section=task`；反例的准确历史知识必读，不依赖关键词重合，即使已撤销仍可查。目标放不下时明确 target_omitted 和 incomplete，可使用 `section=target` / `--section target` 分页。若单条证据本身放不下，按返回的预算提示增加 max_chars；不得反复读取无进展的页。分页材料及当前健康状态不等于新的独立验证。
 
-自动批次最多预检十个问题，保存超限预检结果，让后续批次继续处理后面的案例。问题证据版本、输入预算或审核提示变化后，旧预检失效；显式指定问题会重新检查。超限案例保持待处理并返回跳过的 ID，不占模型调用额度。
+`admin-once` 一次最多扫描十个问题；`admin-batch` 默认总共扫描 20 个案例、最多启动 2 次审核、运行预算 180 秒，同时受全局 UTC 每日调用额度限制。预检和精确去重不消耗模型调用数，超限预检持久缓存并绕过阻塞项。问题版本、必要目标、预算或提示改变后可重检；可选候选变化不重新展开未变超限素材。无工作退出，坏启动配置停止当前批次。执行时间包含模型等待，进程清理和数据库收尾可能略超运行预算。
 
-`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。
+管理员 MCP 的 `propose_governance` 只能提出 publish/update/attach/revoke/dismiss_counterexample，不能执行。受信操作者用 `governance-propose FILE` 提交 JSON、`governance-execute PROPOSAL_ID` 执行：校验案例及目标修订、证据和宿主边界，治理变更与幂等回执同事务提交。update 必须产生真实新修订，等价内容应 attach；发布不同知识不处置旧反例。模型输出中的 proposal 同样只作为提议。
+
+即使开启 `auto_publish`，也仅限无截短、具备真实工具成功证据的 operation/solution 新知识。已有知识治理、反例、professional、pattern 和未验证事实仍交受信入口处理；工具成功不证明专业结论正确。
+
+`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；单次审核日志受超时约束，不是磁盘写入硬上限。当前清理只保证直属审核进程，CLI自行启动的后代进程仍需宿主级约束。
 
 是否降低消耗，需要结合实际调用和任务结果衡量。
 
@@ -291,13 +301,17 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `publish`、`revoke`、`restore` | 本地受信发布、撤销与显式恢复入口 |
 | `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
 | `search`、`read` | 查询和读取正式知识 |
-| `admin-once` | 有预算地处理一个管理员批次 |
+| `admin-once`、`admin-batch` | 单次审核、受多项预算限制的后台短批次 |
+| `reviews`、`admin-retry` | 查询持久回执、明确允许一次失败或未知调用再审 |
+| `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
 | `sync` | 同步已发布知识到可选 Hindsight |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.7.0 检查状态（2026-10-11）
+## 0.8.0 检查状态（2026-10-11）
 
-307 项离线回归全套通过，耗时约 59 秒；第五模块新增 50 项隔离 SQLite/Hook/MCP/CLI 检查，覆盖结果信号、关键字段预算、完整输入摘要、前置命令证据、跨 Agent 和资源隔离、多 Agent 合并案例各自恢复、已审核案例增量证据、反馈幂等、知识反例与修订归属、修正交付及旧轮次迁移、实际整包预算、41 条可审证据、角色保全、分页进展与 CAS、历史任务缺失、当前来源健康和素材指纹。前四模块的发布、检索、存储、子任务及执行保护回归继续通过。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+392 项离线回归全套通过，耗时约 75 秒；第六模块新增 85 项隔离 SQLite、本地假审核器及并发入口检查，覆盖回执持久化、缺证、租约恢复、准确目标、反例处置、原子回滚、并发调度、去重、预算、旧库升级、审核期间比较资料变化、重复案例来源变化及受信 CLI/MCP 边界。前五模块回归继续通过。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+
+持久语义聚类、跨案例晋升为 Stable、Daily Release 知识发布清单仍是后续模块；当前 `release.py` 管理插件软件副本身份。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

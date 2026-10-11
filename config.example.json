@@ -10,7 +10,10 @@
     "max_calls_per_day": 5,
     "max_input_chars": 16000,
     "timeout_seconds": 120,
-    "auto_publish": false
+    "auto_publish": false,
+    "max_cases_per_batch": 20,
+    "max_calls_per_batch": 2,
+    "max_batch_seconds": 180
   },
   "hindsight": {
     "enabled": false,
