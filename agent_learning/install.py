@@ -17,7 +17,7 @@ from .runtime import ContractError
 
 
 RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents")
-RESOURCE_FILES = ("README.md", "config.example.json", ".mcp.json")
+RESOURCE_FILES = ("README.md", "LICENSE", "config.example.json", ".mcp.json")
 REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "hooks/hooks.json",
                   "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
                   ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json")

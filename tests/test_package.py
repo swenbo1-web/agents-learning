@@ -29,7 +29,7 @@ class PackageTests(unittest.TestCase):
             for name in ("agent_learning", "scripts", "hooks", "skills", ".codex-plugin", ".agents"):
                 shutil.copytree(source_root / name, source / name,
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-            for name in ("pyproject.toml", "README.md", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
+            for name in ("pyproject.toml", "README.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
                 shutil.copy2(source_root / name, source / name)
             wheel_directory = base / "wheels"
             wheel_directory.mkdir()
@@ -46,6 +46,10 @@ class PackageTests(unittest.TestCase):
             with zipfile.ZipFile(wheels[0]) as wheel:
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
+                self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
+                licenses = [name for name in wheel.namelist() if ".dist-info/" in name and name.endswith("/LICENSE")]
+                self.assertTrue(licenses, "wheel must retain its distribution license")
+                self.assertEqual(wheel.read(licenses[0]), (source_root / "LICENSE").read_bytes())
                 self.assertFalse(any("share/agent-learning" in item for item in wheel.namelist()))
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-deps", "--no-index", "--no-cache-dir",
@@ -72,8 +76,9 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout.decode("utf-8"))["status"], "exported")
             for relative in ("hooks/dispatch.py", "scripts/learning.py", "skills/learning-worker/SKILL.md",
                              "skills/learning-admin/SKILL.md", ".codex-plugin/plugin.json",
-                             ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json"):
+                             ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json", "LICENSE"):
                 self.assertTrue((exported / relative).is_file(), relative)
+            self.assertEqual((exported / "LICENSE").read_bytes(), (source_root / "LICENSE").read_bytes())
             manifest = json.loads((exported / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["version"], __version__)
             release = json.loads((exported / "runtime-release.json").read_text(encoding="utf-8"))

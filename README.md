@@ -402,10 +402,16 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 
 649 项离线回归全套通过，零失败、零错误、零跳过，耗时 128.382 秒；本轮在 0.11.0 的 640 项基础上增加 9 项工具名称保护回归。覆盖首次缺名、Post-only、后续缺名、旧 NULL 台账、完整历史双名的重放收敛、三种历史事件键/摘要兼容、极小预算、来源失效、幂等和账户迟到；独立审查复验历史矛盾不能支持新 tool_success 候选。原十项审查修复及八模块、CLI/MCP、安装导出和 Windows 编码检查继续通过，包含路径根冻结、调度和同步换号竞态、完整条件分页、长查询、恢复关联、业务摘要、保守计量及 schema10→11 回滚。检查使用临时 SQLite、内存审核器与受控进程，不代表真实模型或服务验收。
 
-本轮运行环境为 Windows、Python 3.12.14、Codex CLI 0.152.1；原生插件目录加载与安装只使用隔离 CODEX_HOME。71 个 Python 文件通过 Python 3.10 语法检查，但未运行实际 Python 3.10、Linux 或 macOS 回归。准备 GitHub 首次测试版时，公开授权许可证和持续集成仍需分别确定；现有仓库尚未配置 LICENSE 或 GitHub Actions。
+本轮本机运行环境为 Windows、Python 3.12.14、Codex CLI 0.152.1；原生插件目录加载与安装只使用隔离 CODEX_HOME。71 个 Python 文件通过 Python 3.10 语法检查。本机未运行实际 Python 3.10、Linux 或 macOS 回归；GitHub Actions 对 Windows/Linux 与 Python 3.10/3.12 的检查状态以实际运行记录为准，未安装 Codex CLI 的 CI 不代替本机原生接入验收。
 
 配置示例与运行默认值一致，技能原有头字段及必需内容静态核对通过；辅助 `quick_validate.py` 因当前解释器缺少 PyYAML 未运行成功，未为此修改用户环境。
 
 持久语义聚类、professional/pattern 专门验证、全天服务唤醒、普通任务用量与货币账单接入仍未实现；当前 Stable、发布、调度和效果观察使用上述明确规则。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。
+
+## 开源与发布
+
+项目采用 [MIT 许可证](LICENSE)。源码、wheel、导出插件和固定运行副本保留同一份授权文件。
+
+公开仓库：[swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning)。首次发布作为 0.11.1 测试版；GitHub 发行资产使用源码 ZIP 与通用 wheel。`install` 生成的本机插件目录包含解释器和固定运行副本的绝对路径，其他机器应根据自己的路径重新导出。CI 只做隔离离线检查，不启用真实 Hooks、模型、后台服务或 Hindsight。

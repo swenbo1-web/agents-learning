@@ -1,0 +1,89 @@
+name: Offline plugin checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.10', '3.12']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      ALP_DISABLED: '1'
+      ALP_HOME: ${{ runner.temp }}/agent-learning-state
+      ALP_CONFIG: ${{ runner.temp }}/agent-learning-config.json
+      ALP_RUNTIME_STORE: ${{ runner.temp }}/agent-learning-runtime-releases
+      CODEX_HOME: ${{ runner.temp }}/agent-learning-codex-home
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Prepare isolated data and configuration
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          for name in ('ALP_HOME', 'ALP_RUNTIME_STORE', 'CODEX_HOME'):
+              Path(os.environ[name]).mkdir(parents=True, exist_ok=True)
+          config = json.loads(Path('config.example.json').read_text(encoding='utf-8'))
+          assert config['admin']['enabled'] is False
+          assert config['admin']['auto_publish'] is False
+          assert config['scheduler']['enabled'] is False
+          assert config['scheduler']['auto_release'] is False
+          assert config['scheduler']['sync_enabled'] is False
+          assert config['hindsight']['enabled'] is False
+          configuration = json.dumps(config)
+          Path(os.environ['ALP_CONFIG']).write_text(configuration, encoding='utf-8')
+          (Path(os.environ['ALP_HOME']) / 'config.json').write_text(configuration, encoding='utf-8')
+
+      # Dependency bootstrap uses the network; the checks and build below use local tools.
+      - name: Install build tools
+        run: python -B -m pip install --upgrade pip setuptools wheel
+
+      # Reviewers and Hindsight are fakes. Hook entry tests use isolated subprocesses,
+      # without enabling a real host. Native Codex checks skip when its CLI is absent.
+      - name: Run offline regression suite
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+
+          environment = dict(os.environ)
+          # Fixtures select their own temporary home/config.json and exercise Hook
+          # entry behavior. Do not mask them with the job's fallback switches.
+          for name in ('ALP_CONFIG', 'ALP_DISABLED', 'ALP_HOOK_MODE', 'ALP_CONTEXT_HANDLE'):
+              environment.pop(name, None)
+          subprocess.run(
+              [sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+              env=environment,
+              check=True,
+          )
+
+      - name: Build wheel without resolving dependencies
+        run: python -B -m pip wheel --no-deps --no-build-isolation --no-index --wheel-dir dist .
