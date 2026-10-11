@@ -123,8 +123,10 @@ class Module5PacketTests(unittest.TestCase):
     def test_first_page_always_makes_progress_when_one_equal_event_fits(self):
         for i in range(3):
             problem = self.problem(resolution=str(i) + "x" * 400)
+        # 等长输入包含时间字段；真实时钟的浮点精度不能决定本用例的页面长度。
+        self.r.db.execute("UPDATE events SET created=1700000000.0 WHERE project=?", (self.p,))
         full = self.r.review_packet(self.p, problem["id"])
-        # 精确预算按真实一个事件的页面开销求取，不依赖固定预留或主机时间精度。
+        # 按真实一个事件的页面开销求取预算，不依赖固定预留。
         limit = 1000
         while limit <= 4000:
             first = self.r.review_packet(self.p, problem["id"], max_chars=limit)
@@ -143,6 +145,47 @@ class Module5PacketTests(unittest.TestCase):
             self.assertTrue(page["next_offset"] is None or page["next_offset"] > offset)
             offset = page["next_offset"]
         self.assertEqual(shown, {event["id"] for event in full["events"]})
+
+    def test_longer_next_event_reports_required_budget_and_resumes_without_loss(self):
+        for i in range(3):
+            problem = self.problem(resolution=str(i) + "x" * 400)
+        rows = self.r.db.execute("SELECT id FROM events WHERE project=? ORDER BY created,id",
+                                 (self.p,)).fetchall()
+        for row, created in zip(rows, (1700000000.0, 1700000001.1234567, 1700000002.1234567)):
+            self.r.db.execute("UPDATE events SET created=? WHERE id=?", (created, row["id"]))
+        self.r.db.execute("UPDATE problems SET created=? WHERE id=?", (1700000000.1234567, problem["id"]))
+        full = self.r.review_packet(self.p, problem["id"])
+        # 找首页首条完整证据的最小预算，避免把格式开销硬编码进保护回归。
+        low, high = 1000, 4000
+        self.assertTrue(self.r.review_packet(self.p, problem["id"], max_chars=high)["events"])
+        while low < high:
+            middle = (low + high) // 2
+            page = self.r.review_packet(self.p, problem["id"], max_chars=middle)
+            if page["events"]:
+                high = middle
+            else:
+                low = middle + 1
+        first = self.r.review_packet(self.p, problem["id"], max_chars=low)
+        self.assertEqual([event["id"] for event in first["events"]], [full["events"][0]["id"]])
+        self.assertEqual(first["next_offset"], 1)
+        blocked = self.r.review_packet(self.p, problem["id"], offset=1,
+                                       expected_revision=problem["revision"], max_chars=low)
+        self.assertEqual(blocked["events"], [])
+        self.assertEqual(blocked["next_offset"], 1)
+        self.assertTrue(blocked["incomplete"])
+        self.assertEqual(blocked["pagination_blocked"], "increase_max_chars")
+        self.assertGreater(blocked["required_chars"], low)
+        self.assertLessEqual(len(review_instruction(blocked)), low)
+        resumed = self.r.review_packet(self.p, problem["id"], offset=1,
+                                       expected_revision=problem["revision"], max_chars=blocked["required_chars"])
+        self.assertEqual(resumed["events"], [full["events"][1]])
+        self.assertEqual(resumed["next_offset"], 2)
+        self.assertLessEqual(len(review_instruction(resumed)), blocked["required_chars"])
+        last = self.r.review_packet(self.p, problem["id"], offset=2,
+                                    expected_revision=problem["revision"], max_chars=blocked["required_chars"])
+        self.assertEqual(last["events"], [full["events"][2]])
+        self.assertIsNone(last["next_offset"])
+        self.assertEqual(first["events"] + resumed["events"] + last["events"], full["events"])
 
     def test_role_priority_and_continuation_preserve_all_event_ids(self):
         self.configure(2500)
