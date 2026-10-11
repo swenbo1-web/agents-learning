@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | [English](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md)
 
+[![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
+
 **让 Agent 记住项目经验，在下一次任务中查到有依据的解决方法。**
 
-开发版本：**0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布测试版 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+当前版本：**0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [公开测试版与下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning 为长期项目建立可持续维护的知识记忆：在受支持的任务事件中检索相关经验，记录工具结果，由管理员整理候选，再把带有条件、来源和修订的知识交给后续 Agent。普通 Agent 专注当前任务，多次对话积累的经验可以继续使用。
 
@@ -21,6 +23,8 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 `当前任务 → 查阅经验 → 执行与观察 → 整理候选 → 校验发布 → 下一次任务复用`
 
 ## 快速体验（源码）
+
+下载 [0.13.0 源码 ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip)，解压后在项目目录运行。也可获取[通用 wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl)和 [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS)。
 
 ```sh
 python -B scripts/learning.py --help
@@ -195,9 +199,9 @@ flowchart LR
 
 ## 当前版本与兼容
 
-0.13.0 增加已有导出目录的显式覆盖升级和可选 GitHub Release 后台版本检查，默认不启用网络检查。数据库 schema 11、全文索引 4、语义索引 1 不变；内部发布协议升至 10，安装更新生成新的固定运行副本。可验证并升级使用同类清单的历史导出，不执行旧代码，不覆盖真实数据目录。后台任务统一从绑定的脚本入口启动，避免当前项目的同名包抢先导入。GitHub 已发布标签及附件仍为 0.11.1，当前开发版本尚未发布。
+0.13.0 增加已有导出目录的显式覆盖升级和可选 GitHub Release 后台版本检查，默认不启用网络检查。数据库 schema 11、全文索引 4、语义索引 1 不变；内部发布协议升至 10，安装更新生成新的固定运行副本。可验证并升级使用同类清单的历史导出，不执行旧代码，不覆盖真实数据目录。后台任务统一从绑定的脚本入口启动，避免当前项目的同名包抢先导入。0.13.0 公开测试版同时包含下面的 0.12.0 新增能力。
 
-0.12.0 增加可选本地语义混合检索、本机只读知识浏览器和任务对照评估工具。数据库 schema 仍为 11，全文索引仍为 4，可选语义索引为 1；内部发布协议升至 9，新版需要重新导出固定运行副本。向量索引按项目、知识修订及模型配置派生，默认关闭；查询不自动构建索引或下载模型。浏览器与文件评估入口不初始化 Runtime、不升级数据库。GitHub 已发布标签及附件仍对应 0.11.1。
+0.12.0 增加可选本地语义混合检索、本机只读知识浏览器和任务对照评估工具。数据库 schema 仍为 11，全文索引仍为 4，可选语义索引为 1；当时内部发布协议升至 9。向量索引按项目、知识修订及模型配置派生，默认关闭；查询不自动构建索引或下载模型。浏览器与文件评估入口不初始化 Runtime、不升级数据库。0.12.0 未单独发布，相关能力包含在 0.13.0 测试版中。
 
 0.11.0 修复整合审查发现的执行范围、工具证据、账户隔离、知识检索与管理员计量问题。数据库升级到 schema 11，在事务内增加全量脱敏业务证据摘要；旧截短资料无法恢复的摘要保持未知，保留事件、知识 ID 和历史回执。全文索引版本为 4，内部发布协议为 8，不能将新旧运行文件混用；旧运行端不能打开版本 11 数据库。旧 scope 执行许可缺少冻结路径台账时须通过受信入口重新审批。常见凭证脱敏不能保证抹除已经存在的副本。
 
@@ -667,7 +671,7 @@ Windows、Python 3.12.14 下全套发现 **814 项检查：813 项通过，1 项
 
 84 个 Python 文件通过 Python 3.10 语法检查；本轮未运行实际 Python 3.10 或其他操作系统。使用 Git 历史中的真实 0.11.1 文件纯数据重建旧导出，协议 8、`hook_mode=None` 覆盖升级成功，未执行旧代码。临时目录的真实 GitHub API 检查成功，正确返回本地 0.13.0 比公开 0.11.1 新的 `ahead` 状态，未创建知识数据库。
 
-本轮未覆盖用户实际安装、启用真实 Hook、修改用户配置、调用模型或开启常驻服务。自动检查默认关闭；本轮代码尚未推送或创建 GitHub Release，宿主实际重载需另外验收。
+上述本地验收未覆盖用户实际安装、启用真实 Hook、修改用户配置、调用模型或开启常驻服务。自动检查默认关闭，宿主实际重载需另外验收。发布检查的线上结果可通过首页 CI 徽章和 Release 说明查看。
 
 ## 0.12.0 历史检查状态（2026-10-11）
 
@@ -693,6 +697,14 @@ Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、�
 
 项目采用 [MIT 许可证](LICENSE)。源码、wheel、导出插件和固定运行副本保留同一份授权文件。
 
-公开仓库：[swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning)。首次发布作为 0.11.1 测试版；GitHub 发行资产使用源码 ZIP 与通用 wheel。`install` 生成的本机插件目录包含解释器和固定运行副本的绝对路径，其他机器应根据自己的路径重新导出。CI 只做隔离离线检查，不启用真实 Hooks、模型、后台服务或 Hindsight。
+公开仓库：[swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning)。[0.13.0 公开测试版](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)提供源码 ZIP、通用 wheel 与 SHA256SUMS；0.11.1 是首次公开测试版。`install` 生成的本机插件目录包含解释器和固定运行副本的绝对路径，其他机器应根据自己的路径重新导出。CI 只做隔离离线检查，不启用真实 Hooks、模型、后台服务或 Hindsight。
 
 后续文档更新在仓库 `main` 发布，中英文版本分别为本文件与 [README.en.md](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md)。测试版标签和附件对应其原发布提交，语言入口和最新架构说明以仓库文档为准。
+
+## 反馈与贡献
+
+通过 [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) 提交可复现的问题、使用建议或功能需求。问题报告请提供插件版本、操作系统、Python／Codex 版本、复现步骤和必要的脱敏输出，不上传真实知识数据库或凭据。
+
+欢迎改进中英文说明、补充安装与跨平台复现、贡献检索案例及真实任务对照评估。提交代码前阅读 [AGENTS.md](AGENTS.md)，使用临时数据目录运行与改动对应的离线检查，并在 Pull Request 说明改动、验证方式及兼容影响。真实任务评估需要包含任务验收和普通 Agent、管理员、检索的完整用量；当前尚无足够数据支持 token、耗时或质量提升比例。
+
+觉得项目有用，可以 Star 或分享[英文介绍](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md)和[公开测试版](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)。

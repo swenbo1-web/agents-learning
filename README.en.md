@@ -2,9 +2,11 @@
 
 [中文](README.md) | English
 
+[![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
+
 **Help Agents retain project experience and find evidence-backed guidance for the next task.**
 
-Development version: **0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published prerelease 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+Current version: **0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Public prerelease and downloads](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning builds maintainable knowledge memory for long-running projects. It retrieves relevant experience at supported task events, records tool outcomes, lets an administrator organize candidates, and makes knowledge with conditions, sources and revisions available to later Agents. Workers focus on their current task while experience remains reusable across conversations.
 
@@ -21,6 +23,8 @@ agents-learning builds maintainable knowledge memory for long-running projects. 
 `Current task → Retrieve experience → Execute and observe → Organize candidates → Validate and publish → Reuse in the next task`
 
 ## Quick try from source
+
+Download the [0.13.0 source ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip), extract it, and run these commands from the project directory. A [portable wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl) and [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS) are also available.
 
 ```sh
 python -B scripts/learning.py --help
@@ -195,9 +199,9 @@ These mechanisms make retrieval and event recording less dependent on the Agent 
 
 ## Current version and compatibility
 
-0.13.0 adds explicit upgrades of existing plugin exports and optional background GitHub Release checks, disabled by default. Database schema 11, full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 10. Upgrades validate historical exports using the same manifest format without executing old code or touching live data directories. Background commands use their bound script entry, preventing a same-named package in the project directory from taking precedence. Published GitHub tags and assets remain at 0.11.1; the current development version has not been published.
+0.13.0 adds explicit upgrades of existing plugin exports and optional background GitHub Release checks, disabled by default. Database schema 11, full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 10. Upgrades validate historical exports using the same manifest format without executing old code or touching live data directories. Background commands use their bound script entry, preventing a same-named package in the project directory from taking precedence. This public prerelease also includes the 0.12.0 additions below.
 
-0.12.0 adds optional local semantic hybrid retrieval, a local read-only knowledge browser and paired task evaluation tools. Database schema stays at 11 and the full-text index at 4; the optional semantic index is version 1. Internal publication protocol becomes 9, requiring a new export of the fixed runtime copy. Vectors are derived by project, knowledge revision and model configuration and are disabled by default. Queries never build an index or download a model. Browser and file evaluation entry points do not initialize Runtime or migrate a database. Published GitHub tags and assets still correspond to 0.11.1.
+0.12.0 added optional local semantic hybrid retrieval, a local read-only knowledge browser and paired task evaluation tools. Database schema stayed at 11 and the full-text index at 4; the optional semantic index is version 1, and the internal publication protocol advanced to 9 at that point. Vectors are derived by project, knowledge revision and model configuration and are disabled by default. Queries never build an index or download a model. Browser and file evaluation entry points do not initialize Runtime or migrate a database. There was no separate 0.12.0 release; these capabilities are included in 0.13.0.
 
 0.11.0 fixes execution scope, tool evidence, account isolation, retrieval and administrator accounting issues identified during integration review. The database advances to schema 11, adding complete redacted business evidence digests within transactions. Digests that cannot be reconstructed from old truncated material remain unknown; events, knowledge IDs and historical receipts are preserved. The full-text index is version 4 and internal publication protocol is version 8. Do not mix old and new runtime files; older runtimes cannot open a version 11 database. Old scope authorizations without frozen path ledgers require approval again through a trusted entry point. Common credential redaction cannot guarantee removal of copies that already exist.
 
@@ -667,7 +671,7 @@ On Windows with Python 3.12.14, the full suite discovered **814 checks: 813 pass
 
 Eighty-four Python files passed Python 3.10 syntax checks; actual Python 3.10 and other operating systems were not run this round. A pure-data reconstruction of the real historical 0.11.1 export upgraded successfully from protocol 8 with `hook_mode=None`, without executing old code. A real public GitHub API check in a temporary directory returned `ahead` for local 0.13.0 versus published 0.11.1 and created no knowledge database.
 
-No live user installation was overwritten, no live Hook or persistent service was enabled, no user configuration was changed and no model was called. Automatic checks remain disabled by default. This code has not been pushed or released on GitHub; actual host reloading remains a separate acceptance step.
+The local checks above overwrote no live user installation, enabled no live Hook or persistent service, changed no user configuration and called no model. Automatic checks remain disabled by default; actual host reloading remains a separate acceptance step. Online release checks are available through the CI badge and release notes.
 
 ## 0.12.0 historical validation status (2026-10-11)
 
@@ -693,6 +697,14 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 
 The project uses the [MIT license](LICENSE). Source, wheel, exported plugin and fixed runtime copies retain the same license file.
 
-Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The first release is the 0.11.1 prerelease, with source ZIP and a portable wheel as GitHub assets. A local plugin directory generated by `install` contains absolute interpreter and fixed runtime paths; other machines should export using their own paths. CI runs isolated offline checks only and enables no live Hooks, models, background services or Hindsight.
+Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The [0.13.0 public prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) provides a source ZIP, portable wheel and SHA256SUMS; 0.11.1 was the initial public prerelease. A local plugin directory generated by `install` contains absolute interpreter and fixed runtime paths; other machines should export using their own paths. CI runs isolated offline checks only and enables no live Hooks, models, background services or Hindsight.
 
 Subsequent documentation updates are published on repository `main`; the Chinese version is [README.md](README.md) and the English version is this file. The prerelease tag and assets correspond to their original release commit. Use the repository documentation for language navigation and the latest architecture description.
+
+## Feedback and contributions
+
+Use [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) for reproducible bugs, usability feedback and feature requests. Include the plugin, operating system, Python/Codex versions, reproduction steps and necessary redacted output. Do not upload live knowledge databases or credentials.
+
+Contributions can improve the Chinese/English documentation, reproduce installation or platform issues, add retrieval cases or provide real paired task evaluations. Read [AGENTS.md](AGENTS.md) before changing code, run relevant offline checks with temporary data directories, and describe the changes, verification and compatibility impact in your pull request. Real evaluations should report task acceptance and full usage across workers, administrator and retrieval. Token, latency and quality improvements have not yet been established by sufficient data.
+
+If the project is useful to you, Star it or share the [English introduction](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md) and [public prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0).
