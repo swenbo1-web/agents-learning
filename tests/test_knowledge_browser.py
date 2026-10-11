@@ -108,6 +108,21 @@ class KnowledgeBrowserTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_empty_query_works_with_legacy_strict_parser_without_relaxing_nonempty_queries(self):
+        from urllib.parse import parse_qs
+        def legacy_parser(query, **options):
+            if not query:
+                raise ValueError("bad query field: ''")
+            return parse_qs(query, **options)
+        with patch("agent_learning.knowledge_browser.parse_qs", side_effect=legacy_parser):
+            for path in ("/api/stats", "/api/stats?", "/api/admin", "/api/knowledge-list"):
+                with self.subTest(path=path):
+                    self.assertEqual(self.request(path)[0], 200)
+            self.assertEqual(self.get("/api/knowledge-list?q=")["total"], 0)
+            for query in ("&", "q=abc&", "&q=abc", "q", "q=a&q=b"):
+                with self.subTest(query=query):
+                    self.assertEqual(self.request("/api/knowledge-list?" + query)[0], 400)
+
     def test_cross_project_identifiers_and_query_parameters_rejected(self):
         own = self.publish(title="Own entry")
         foreign = self.publish(project=self.other, title="Foreign secret")

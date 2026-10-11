@@ -232,8 +232,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(401, {"error": "access key required"})
             return
         try:
-            parsed_params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True,
-                                     max_num_fields=12)
+            # Python 3.10 的严格解析把空查询视为坏字段；无参数的 API 路由合法。
+            # 非空查询仍严格检查空片段、重复字段和字段数量。
+            parsed_params = (parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True,
+                                      max_num_fields=12) if parsed.query else {})
             if any(len(values) != 1 for values in parsed_params.values()):
                 raise ContractError("duplicate query parameter")
             params = {key: values[0] for key, values in parsed_params.items()}
