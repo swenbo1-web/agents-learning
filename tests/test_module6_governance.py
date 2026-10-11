@@ -113,7 +113,7 @@ class Module6GovernanceTests(unittest.TestCase):
     def test_revoked_target_remains_available_in_packet(self):
         knowledge = self.knowledge()
         problem = self.counterexample(knowledge)
-        self.r.revoke(self.p, knowledge["knowledge_id"])
+        self.r.revoke(self.p, knowledge["knowledge_id"], expected_revision=self.r.read(self.p, knowledge["knowledge_id"])["revision"])
         target = self.r.review_packet(self.p, problem["id"])["target_knowledge"]
         self.assertIsNone(target["active_revision"])
         self.assertEqual(target["content"], "Adjust CXX include directory")

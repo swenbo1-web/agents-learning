@@ -67,7 +67,7 @@ class OptimizationTests(unittest.TestCase):
         item = self.r.publish(self.p, self.candidate())
         self.hook("UserPromptSubmit", prompt="模块加载")
         self.r.task_update(self.p, "chat", "另一项任务", new_task=True)
-        self.r.revoke(self.p, item["knowledge_id"])
+        self.r.revoke(self.p, item["knowledge_id"], expected_revision=self.r.read(self.p, item["knowledge_id"])["revision"])
         result = self.hook("PreToolUse", tool_use_id="next", tool_name="Bash")
         self.assertIn(item["knowledge_id"], result["hookSpecificOutput"]["additionalContext"])
 
@@ -174,7 +174,7 @@ class OptimizationTests(unittest.TestCase):
         migrated = Runtime(legacy)
         try:
             self.assertEqual(migrated.task_snapshot("p", "old-task", 1)["goal"], "旧任务")
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(migrated.db.execute("SELECT shown FROM contexts").fetchone()[0], '["knowledge@1"]')
             self.assertNotIn("SYNTHETIC_OLD_KEY", migrated.db.execute("SELECT payload FROM outbox").fetchone()[0])
         finally:

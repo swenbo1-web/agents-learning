@@ -25,6 +25,7 @@ def _text(value):
 def _state(item):
     # 展示的来源版本与展示状态必须一起传给登记入口，不能另读一次猜基线。
     return {"source_health": item.get("source_health", "missing"),
+            "maturity": item.get("maturity", "candidate"),
             "current_tool_success": bool(item.get("current_tool_success", False)),
             "validation_level": item.get("validation_level", "reported"),
             "source_version": item.get("source_version", -1),

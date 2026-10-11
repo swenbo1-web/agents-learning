@@ -98,7 +98,7 @@ class Module6IntegrationTests(unittest.TestCase):
         problem = self.problem()
         def revoke(packet, reviewer):
             self.assertTrue(packet["related_knowledge"])
-            self.r.revoke(self.p, knowledge["knowledge_id"])
+            self.r.revoke(self.p, knowledge["knowledge_id"], expected_revision=self.r.read(self.p, knowledge["knowledge_id"])["revision"])
         with patch("agent_learning.admin.subprocess.Popen", fake_reviewer("skip", revoke)):
             result = admin_once(self.r, self.p, problem["id"])
         self.assertEqual(result["status"], "failed")
@@ -184,7 +184,7 @@ class Module6IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Runtime(home)
         with contextlib.closing(Runtime(home)) as recovered:
-            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 9)
 
     def test_duplicate_origin_new_evidence_invalidates_without_losing_history(self):
         original = self.problem()

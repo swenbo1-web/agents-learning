@@ -23,6 +23,9 @@ from .context_storage import ContextStorageMixin
 from .case_store import CaseStoreMixin
 from .event_capture import CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict
 from .review_packet import ReviewPacketMixin
+from .knowledge_releases import KnowledgeReleaseMixin
+from .knowledge_sync import KnowledgeSyncMixin
+from .publication_state import PublicationStateMixin
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -184,7 +187,8 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 
 class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
-              KnowledgeStoreMixin, KnowledgeIndexMixin):
+              KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
+              KnowledgeSyncMixin, PublicationStateMixin):
     def __init__(self, home=None, config=None):
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
@@ -217,7 +221,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, 5, 6, 7, 8}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -239,6 +243,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             self._migrate_context_storage()
             self._migrate_case_store()
             self._migrate_admin_storage()
+            self._migrate_publication_storage()
         except BaseException:
             self.db.close()
             raise
@@ -253,7 +258,20 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             install_decisions(self)
             install_governance(self)
             install_queue(self)
-            self.db.execute("PRAGMA user_version=8")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 8:
+                self.db.execute("PRAGMA user_version=8")
+
+    def _migrate_publication_storage(self):
+        from .knowledge_lifecycle import install_lifecycle
+        from .knowledge_releases import install_releases
+        from .knowledge_sync import install_sync
+        from .publication_state import install_publication_triggers
+        with self.transaction():
+            install_lifecycle(self)
+            install_releases(self)
+            install_sync(self)
+            install_publication_triggers(self)
+            self.db.execute("PRAGMA user_version=9")
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -578,32 +596,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         if body["validation_level"] == "tool_success" and not successful:
             raise ContractError("no observed completed tool success")
 
-    def _queue_sync(self, project, knowledge_id, revision, body):
-        if not self.config["hindsight"]["enabled"]:
-            return 0
-        target = clean(self.config["hindsight"])
-        payload = {"knowledge_id": knowledge_id, "revision": revision, "body": clean(body), "target": target}
-        ident = digest([project, knowledge_id, revision, self._target_identity(target)])
-        created = self.db.execute("INSERT OR IGNORE INTO outbox(id,project,kind,payload) VALUES(?,?,?,?)",
-                                  (ident, project, "published_sync", encode(payload))).rowcount
-        # 撤销时尚未发送的派生操作可以重新排队；曾尝试/结果未知的写入仍需人工对账。
-        restored = self.db.execute("UPDATE outbox SET state='pending',payload=?,error=NULL,next_try=0,"
-                                   "lease=NULL,lease_until=0 WHERE project=? AND id=? AND state='superseded' AND attempts=0",
-                                   (encode(payload), project, ident)).rowcount
-        return created + restored
 
-    @staticmethod
-    def _target_identity(target):
-        return {k: target.get(k) for k in ("url", "bank_id", "api_key_env", "strategy")}
 
-    def enqueue_sync(self, project):
-        if not self.config["hindsight"]["enabled"]:
-            return {"status": "disabled", "enqueued": 0}
-        with self.transaction():
-            rows = self.db.execute("SELECT k.* FROM knowledge k JOIN active a ON k.project=a.project AND k.id=a.id "
-                                   "AND k.revision=a.revision WHERE k.project=?", (project,)).fetchall()
-            count = sum(self._queue_sync(project, row["id"], row["revision"], json.loads(row["body"])) for row in rows)
-        return {"status": "enqueued", "enqueued": count}
 
     def _metric(self, project, name, value=1):
         self.db.execute("INSERT INTO metrics VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET value=value+excluded.value",
@@ -612,7 +606,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def status(self, project):
         counts = {}
         for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts",
-                      "review_receipts", "governance_proposals"):
+                      "review_receipts", "governance_proposals", "knowledge_actions", "knowledge_releases"):
             counts[table] = self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE project=?", (project,)).fetchone()[0]
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
@@ -624,6 +618,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
+                "knowledge_release_head": self._release_head(project),
                 "metrics": {r[0]: r[1] for r in self.db.execute("SELECT name,value FROM metrics WHERE project=?", (project,))},
                 "admin_states": {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM admin_calls WHERE project=? GROUP BY state", (project,))},
                 "review_states": {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM review_states WHERE project=? GROUP BY state", (project,))},
@@ -823,54 +818,3 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             subprocess.Popen([sys.executable, "-m", "agent_learning.cli", "--home", str(self.home), "--workspace",
                               str(workspace), "admin-batch", *(["--dispatch-token", dispatch_token] if dispatch_token else [])], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, env=env, **options)
-
-    def sync_once(self, project, retry=None):
-        """仅重放知识同步；不重新执行任何用户工具命令。"""
-        from .hindsight import HindsightClient
-        if not self.config["hindsight"]["enabled"]:
-            return {"status": "disabled"}
-        lease = str(uuid.uuid4())
-        with self.transaction():
-            # 进程崩溃后远端可能已经写入，过期租约只进入待核对，不盲目重投。
-            self.db.execute("UPDATE outbox SET state='blocked',error='expired lease; remote outcome unknown' "
-                            "WHERE project=? AND state='running' AND lease_until<?", (project, time.time()))
-            if retry:
-                changed = self.db.execute("UPDATE outbox SET state='pending',error=NULL,next_try=0 WHERE project=? AND id=? "
-                                          "AND state='blocked' AND attempts<3", (project, retry)).rowcount
-                if not changed:
-                    raise ContractError("no retryable knowledge operation; verify remote state before requesting retry")
-            row = self.db.execute("SELECT * FROM outbox WHERE project=? AND attempts<3 AND next_try<=? "
-                                  "AND state='pending' AND (? IS NULL OR id=?) ORDER BY rowid LIMIT 1",
-                                  (project, time.time(), retry, retry)).fetchone()
-            if not row:
-                return {"status": "idle"}
-            payload = clean(json.loads(row["payload"]))
-            if self._target_identity(payload["target"]) != self._target_identity(clean(self.config["hindsight"])):
-                self.db.execute("UPDATE outbox SET state='blocked',error='target configuration changed' WHERE id=?", (row["id"],))
-                return {"status": "blocked", "reason": "target configuration changed"}
-            active = self.db.execute("SELECT revision FROM active WHERE project=? AND id=?", (project, payload["knowledge_id"])).fetchone()
-            if not active or active[0] != payload["revision"]:
-                self.db.execute("UPDATE outbox SET state='superseded' WHERE id=?", (row["id"],))
-                return {"status": "superseded"}
-            self.db.execute("UPDATE outbox SET state='running',attempts=attempts+1,lease=?,lease_until=? WHERE id=?",
-                            (lease, time.time() + max(30, int(self.config["hindsight"]["timeout_seconds"]) * 3), row["id"]))
-        try:
-            result = HindsightClient(clean(self.config["hindsight"])).retain(
-                f"{project}:{payload['knowledge_id']}@{payload['revision']}", encode(payload["body"]),
-                project, payload["revision"], row["id"])
-            state, error = "synced", None
-        except Exception as exc:
-            from .hindsight import HindsightError
-            diagnostic = {"error_type": type(exc).__name__, "write_outcome": "unknown"}
-            if isinstance(exc, HindsightError):
-                diagnostic.update(kind=exc.kind, status_code=exc.status_code, retryable=exc.retryable,
-                                  write_outcome=exc.write_outcome)
-            result = {"status": "failed", **diagnostic}
-            state, error = "blocked", encode(diagnostic)
-            # 不确定远端写入结果时不自动append；人工对账后再决定重试。
-        changed = self.db.execute("UPDATE outbox SET state=?,error=?,lease=NULL,lease_until=0 WHERE id=? AND lease=?",
-                                  (state, error, row["id"], lease)).rowcount
-        if not changed:
-            current = self.db.execute("SELECT state FROM outbox WHERE id=?", (row["id"],)).fetchone()
-            return {"status": "lease_lost", "operation_id": row["id"], "current_state": current[0] if current else "missing"}
-        return {"status": state, "operation_id": row["id"], "result": result}

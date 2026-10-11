@@ -46,7 +46,7 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertEqual(self.r.publish(self.p, candidate, expected_generation=0), first)
         self.assertEqual(self.r.read(self.p, first["knowledge_id"])["revision"], updated["revision"])
         self.assertEqual(self.generation(), before)
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         before = self.generation()
         self.assertEqual(self.r.publish(self.p, candidate), first)
         self.assertEqual(self.generation(), before)
@@ -107,7 +107,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
     def test_restore_requires_latest_revision_and_current_valid_source(self):
         first = self.r.publish(self.p, self.candidate())
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         before = self.generation()
         with self.assertRaises(ContractError):
             self.r.restore(self.p, first["knowledge_id"], 2)
@@ -128,7 +128,7 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.r.publish(self.p, second_candidate)
         problem = self.r.db.execute("SELECT problem FROM candidates WHERE id=?", (first_candidate,)).fetchone()[0]
         self.r.db.execute("UPDATE problems SET revision=revision+1 WHERE id=?", (problem,))
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         result = self.r.restore(self.p, first["knowledge_id"], 1)
         self.assertEqual(result["source_candidate_id"], second_candidate)
         item = self.r.read(self.p, first["knowledge_id"])
@@ -138,7 +138,7 @@ class KnowledgeStoreTests(unittest.TestCase):
         candidate = self.candidate()
         first = self.r.publish(self.p, candidate)
         self.r.db.execute("UPDATE problems SET revision=revision+1")
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         with self.assertRaises(ContractError):
             self.r.restore(self.p, first["knowledge_id"], 1)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM active").fetchone()[0], 0)
@@ -156,7 +156,7 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertFalse(item["current_tool_success"])
         self.assertEqual(item["validation_level"], "tool_success")
         self.assertEqual(self.r.publish(self.p, candidate), first)
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         with self.assertRaises(ContractError):
             self.r.restore(self.p, first["knowledge_id"], 1)
 
@@ -235,7 +235,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
     def test_legacy_migration_rebuilds_clean_index_and_recovers_unique_receipt(self):
         candidate, first = self.legacy_state()
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 8)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 9)
         self.assertEqual(self.r.publish(self.p, candidate), first)
         self.assertEqual(len(self.r.read(self.p, first["knowledge_id"])["sources"]), 1)
         self.assertEqual(self.r.search(self.p, "synthetic_legacy_secret")["items"], [])
@@ -265,7 +265,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
     def test_legacy_same_body_resubmission_preserves_candidate_and_revocation(self):
         candidate, first = self.legacy_state()
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         body = json.loads(self.r.db.execute("SELECT body FROM candidates WHERE id=?", (candidate,)).fetchone()[0])
         submitted = self.r.submit_candidate(self.p, **body)
         self.assertEqual(submitted, {"candidate_id": candidate, "status": "published"})
@@ -291,7 +291,7 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.r.db.execute("PRAGMA user_version=4")
         self.r._migrate_knowledge_store()
         body = json.loads(self.r.db.execute("SELECT body FROM candidates WHERE id=?", (candidate,)).fetchone()[0])
-        self.r.revoke(self.p, first["knowledge_id"])
+        self.r.revoke(self.p, first["knowledge_id"], expected_revision=self.r.read(self.p, first["knowledge_id"])["revision"])
         self.assertEqual(self.r.submit_candidate(self.p, **body)["candidate_id"], candidate)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM candidate_identity").fetchone()[0], 1)
 

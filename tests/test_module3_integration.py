@@ -81,16 +81,18 @@ class Module3IntegrationTests(unittest.TestCase):
         tracked = json.loads(self.r.db.execute("SELECT source_states FROM contexts WHERE project=? AND conversation='chat'", (self.p,)).fetchone()[0])
         self.assertEqual([identity for identity, state in tracked], injected[-8:])
 
-    def test_restore_requeues_superseded_sync_that_was_never_sent(self):
+    def test_restore_enqueues_new_state_and_preserves_unsent_old_receipt(self):
         self.r.config["hindsight"]["enabled"] = True
         knowledge = self.publish()
-        self.r.revoke(self.p, knowledge["knowledge_id"])
+        original_id = self.r.db.execute("SELECT id FROM outbox").fetchone()[0]
+        self.r.revoke(self.p, knowledge["knowledge_id"], expected_revision=self.r.read(self.p, knowledge["knowledge_id"])["revision"])
         with patch("agent_learning.hindsight.HindsightClient") as client:
-            self.assertEqual(self.r.sync_once(self.p)["status"], "superseded")
             client.assert_not_called()
             self.r.restore(self.p, knowledge["knowledge_id"], 1)
-            operation = self.r.db.execute("SELECT state,attempts FROM outbox").fetchone()
+            operation = self.r.db.execute("SELECT state,attempts FROM outbox WHERE state='pending'").fetchone()
             self.assertEqual(tuple(operation), ("pending", 0))
+            old = self.r.db.execute("SELECT state,attempts FROM outbox WHERE id=?", (original_id,)).fetchone()
+            self.assertEqual(tuple(old), ("superseded", 0))
             client.return_value.retain.return_value = {"success": True}
             self.assertEqual(self.r.sync_once(self.p)["status"], "synced")
             client.return_value.retain.assert_called_once()
@@ -100,8 +102,9 @@ class Module3IntegrationTests(unittest.TestCase):
         knowledge = self.publish()
         for state in ("blocked", "superseded", "synced"):
             with self.subTest(state=state):
-                self.r.db.execute("UPDATE outbox SET state=?,attempts=1,error='unknown prior write'", (state,))
-                self.r.revoke(self.p, knowledge["knowledge_id"])
+                self.r.db.execute("UPDATE outbox SET state=?,attempts=1,write_outcome=?,error='unknown prior write'",
+                                  (state, "confirmed" if state == "synced" else "unknown"))
+                self.r.revoke(self.p, knowledge["knowledge_id"], expected_revision=self.r.read(self.p, knowledge["knowledge_id"])["revision"])
                 self.r.restore(self.p, knowledge["knowledge_id"], 1)
                 self.assertEqual(tuple(self.r.db.execute("SELECT state,attempts FROM outbox").fetchone()), (state, 1))
 

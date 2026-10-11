@@ -166,7 +166,7 @@ class HostIntegrationTests(unittest.TestCase):
         # 真实子进程重放、撤销、恢复和在线备份，检查持久数据没有被旧候选覆盖。
         self.assertEqual(self.run_cli("publish", first_candidate["candidate_id"]), first)
         self.assertEqual(self.run_cli("read", first["knowledge_id"])["revision"], updated["revision"])
-        self.assertTrue(self.run_cli("revoke", first["knowledge_id"])["revoked"])
+        self.assertTrue(self.run_cli("revoke", first["knowledge_id"], "--expected-revision", str(updated["revision"]))["revoked"])
         self.assertEqual(self.run_cli("publish", first_candidate["candidate_id"]), first)
         self.assertEqual(self.run_cli("search", "compiler")["items"], [])
         restored = self.run_cli("restore", first["knowledge_id"], "--expected-revision", str(updated["revision"]))

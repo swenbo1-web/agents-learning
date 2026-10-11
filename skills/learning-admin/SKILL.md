@@ -18,6 +18,7 @@ description: "在 Agent Learning Runtime 的管理员身份下，依据新增案
 - 缺少必要证据时标明缺项或保持待补证，不反复调用模型猜测根因。保留失败、未解决及适用性未知的情况。
 - 先查询已有回执；自动审核用 `missing_evidence` 保存所缺事实或验证需求。相同证据和实际比较资料的决定可以复用，failed/unknown 不能视为成功审核。核对未知结果后只能通过受信入口明确允许一次再审，保留原额度。
 - 按证据 `role` 区分尝试、失败、冲突、潜在恢复、交付和反馈，同时核对事件当前 `health`。后续成功不自动证明修复因果；`reviewed` 与 `resolution_status` 分别表达审核和解决观察。
+- Stable 由受信运行端检查独立任务、来源与反例，管理员不把单次工具成功视为成熟经验。恢复同版后原撤销反例仍待核实；专业知识及 Pattern 需要对应专门验证依据，不绕过晋升规则。
 - 审核包有遗漏时使用 `next_offset`、同一 `problem.revision` 的 `expected_revision` 继续读取；大任务原文用 `section=task` 分页。分页材料仍属于同一案例，不能把不完整或已截短证据晋升为完整验证。
 - 候选内容描述现象、适用条件、方法、证据和限制，绑定 `problem_id`、`problem_revision` 和 `evidence_refs`。来源改变后，应复核受影响内容。
 - `knowledge_kind` 区分 `fact`（事实）、`solution`（具体解法）、`pattern`（可复用方法）；省略时使用 `solution`。比较现有知识时同时核对当前 `source_health` 和 `current_tool_success`。

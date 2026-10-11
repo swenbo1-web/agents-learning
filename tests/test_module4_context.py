@@ -43,7 +43,7 @@ class Module4ContextTests(unittest.TestCase):
     def test_revocation_waits_for_complete_notification_under_small_budget(self):
         knowledge = self.publish("compiler")
         self.hook("UserPromptSubmit", prompt="compiler", turn_id="inject")
-        self.r.revoke(self.p, knowledge["knowledge_id"])
+        self.r.revoke(self.p, knowledge["knowledge_id"], expected_revision=self.r.read(self.p, knowledge["knowledge_id"])["revision"])
         self.r.config["injection_max_chars"] = 128
         small = self.text(self.hook("UserPromptSubmit", prompt="继续", turn_id="small"))
         self.assertLessEqual(len(small), 128)
@@ -119,7 +119,7 @@ class Module4ContextTests(unittest.TestCase):
         revoked = [self.publish("old" + str(index)) for index in range(2)]
         for index in range(2):
             self.hook("UserPromptSubmit", prompt="old" + str(index), turn_id="old" + str(index))
-            self.r.revoke(self.p, revoked[index]["knowledge_id"])
+            self.r.revoke(self.p, revoked[index]["knowledge_id"], expected_revision=self.r.read(self.p, revoked[index]["knowledge_id"])["revision"])
         self.hook("PreToolUse", tool_use_id="failed", tool_name="Bash")
         self.hook("PostToolUse", tool_use_id="failed", tool_name="Bash", tool_response={"exit_code": 1, "stderr": "E_IMPORT"})
         self.r.config["injection_max_chars"] = 128

@@ -96,8 +96,9 @@ class KnowledgeStoreMixin:
                                 body["problem_revision"], encode(body["evidence_refs"]), time.time())).rowcount
 
     def _finish_publication(self, project, candidate, body, knowledge_id, revision, requested_id,
-                            expected_revision, response, changed):
+                            expected_revision, response, changed, before_state):
         from .runtime import encode
+        from .knowledge_lifecycle import record_action
         linked = self._link_knowledge_source(project, knowledge_id, revision, candidate, body)
         self.db.execute("UPDATE candidates SET status='published' WHERE project=? AND id=?", (project, candidate["id"]))
         self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, body["problem_id"]))
@@ -107,6 +108,11 @@ class KnowledgeStoreMixin:
             self.db.execute("UPDATE projects SET generation=generation+1 WHERE id=?", (project,))
         self.db.execute("INSERT INTO publication_receipts VALUES(?,?,?,?,?,?)",
                         (project, candidate["id"], requested_id, expected_revision, encode(response), time.time()))
+        record_action(self, project, "publication:" + candidate["id"],
+                      {"candidate_id": candidate["id"], "requested_id": requested_id, "expected_revision": expected_revision},
+                      "attach" if not changed else "update" if before_state["latest_revision"] else "publish",
+                      knowledge_id, revision, response, actor="publisher", reason="validated candidate publication",
+                      evidence_refs=body["evidence_refs"], before_state=before_state)
         published_body = self.db.execute("SELECT body FROM knowledge WHERE project=? AND id=? AND revision=?",
                                          (project, knowledge_id, revision)).fetchone()[0]
         self._queue_sync(project, knowledge_id, revision, json.loads(published_body))
@@ -115,6 +121,7 @@ class KnowledgeStoreMixin:
     def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
                 expected_epoch=None):
         from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint, metadata
+        from .knowledge_lifecycle import lifecycle_state
         with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
             candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
@@ -166,18 +173,19 @@ class KnowledgeStoreMixin:
                     revision = current["revision"]
                     response = {"knowledge_id": knowledge_id, "revision": revision, "status": "published", "deduplicated": True}
                     return self._finish_publication(project, candidate, body, knowledge_id, revision, requested_id,
-                                                    expected_revision, response, False)
+                                                    expected_revision, response, False, lifecycle_state(self, project, knowledge_id))
             elif expected_revision is not None:
                 raise ContractError("expected_revision requires a knowledge_id")
             elif duplicates:
                 duplicate = duplicates[0]
                 response = {"knowledge_id": duplicate["id"], "revision": duplicate["revision"], "status": "published", "deduplicated": True}
                 return self._finish_publication(project, candidate, body, duplicate["id"], duplicate["revision"], None,
-                                                None, response, False)
+                                                None, response, False, lifecycle_state(self, project, duplicate["id"]))
             else:
                 knowledge_id = digest([project, "candidate", candidate_id])[:32]
                 if self.db.execute("SELECT 1 FROM knowledge WHERE project=? AND id=?", (project, knowledge_id)).fetchone():
                     raise ContractError("knowledge ID already has history; restore or explicitly update it")
+            before_state = lifecycle_state(self, project, knowledge_id)
             revision = self.db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM knowledge WHERE project=? AND id=?",
                                        (project, knowledge_id)).fetchone()[0]
             self.db.execute("INSERT INTO knowledge VALUES(?,?,?,?,?)", (project, knowledge_id, revision, encode(body), time.time()))
@@ -187,21 +195,58 @@ class KnowledgeStoreMixin:
             self._index_knowledge(project, knowledge_id, revision, body)
             response = {"knowledge_id": knowledge_id, "revision": revision, "status": "published"}
             return self._finish_publication(project, candidate, body, knowledge_id, revision, requested_id,
-                                            expected_revision, response, True)
+                                            expected_revision, response, True, before_state)
 
-    def revoke(self, project, knowledge_id):
+    def revoke(self, project, knowledge_id, expected_revision=None, *, request_id=None, reason="explicit revoke",
+               actor="operator", expected_generation=None, expected_epoch=None):
+        from .runtime import ContractError
+        from .knowledge_lifecycle import action_request, lifecycle_state, record_action, request_identity
+
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 1:
+            raise ContractError("revoke requires a positive expected active revision")
+        request_id, reason, actor, refs = request_identity(request_id, reason, actor)
+        request = {"action": "revoke", "knowledge_id": knowledge_id, "expected_revision": expected_revision,
+                   "expected_generation": expected_generation, "reason": reason, "actor": actor, "evidence_refs": refs}
         with self._case_transaction():
+            self.assert_host_epoch(expected_epoch)
+            replay = action_request(self, project, request_id, request)
+            if replay is not None:
+                return replay
+            before = lifecycle_state(self, project, knowledge_id)
+            if before["active_revision"] != expected_revision:
+                raise ContractError("knowledge active revision changed or is revoked")
+            manifest = self.db.execute("SELECT generation FROM projects WHERE id=?", (project,)).fetchone()
+            if not manifest or (expected_generation is not None and manifest[0] != expected_generation):
+                raise ContractError("publication manifest changed")
             changed = self.db.execute("DELETE FROM active WHERE project=? AND id=?", (project, knowledge_id)).rowcount
             if changed:
                 self._remove_knowledge_index(project, knowledge_id)
                 self.db.execute("UPDATE projects SET generation=generation+1,revocation_epoch=revocation_epoch+1 WHERE id=?", (project,))
-        return {"knowledge_id": knowledge_id, "revoked": bool(changed)}
+            response = {"knowledge_id": knowledge_id, "revision": expected_revision, "revoked": bool(changed),
+                        "request_id": request_id, "changed": bool(changed)}
+            record_action(self, project, request_id, request, "revoke", knowledge_id, expected_revision, response,
+                          actor=actor, reason=reason, evidence_refs=refs, before_state=before)
+            row = self.db.execute("SELECT body FROM knowledge WHERE project=? AND id=? AND revision=?",
+                                  (project, knowledge_id, expected_revision)).fetchone()
+            self._queue_sync(project, knowledge_id, expected_revision, json.loads(row[0]))
+            return response
 
-    def restore(self, project, knowledge_id, expected_revision, expected_generation=None):
+    def restore(self, project, knowledge_id, expected_revision, expected_generation=None, *, request_id=None,
+                reason="explicit restore", actor="operator", expected_epoch=None, evidence_refs=None):
         from .runtime import ContractError, knowledge_fingerprint
-        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
+        from .knowledge_lifecycle import action_request, lifecycle_state, record_action, request_identity, validate_restore_support
+
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 1:
             raise ContractError("restore requires the expected latest revision")
-        with self.transaction():
+        request_id, reason, actor, refs = request_identity(request_id, reason, actor, evidence_refs)
+        request = {"action": "restore", "knowledge_id": knowledge_id, "expected_revision": expected_revision,
+                   "expected_generation": expected_generation, "reason": reason, "actor": actor, "evidence_refs": refs}
+        with self._case_transaction():
+            self.assert_host_epoch(expected_epoch)
+            replay = action_request(self, project, request_id, request)
+            if replay is not None:
+                return replay
+            before = lifecycle_state(self, project, knowledge_id)
             if self.db.execute("SELECT 1 FROM active WHERE project=? AND id=?", (project, knowledge_id)).fetchone():
                 raise ContractError("knowledge is already active")
             row = self.db.execute("SELECT * FROM knowledge WHERE project=? AND id=? ORDER BY revision DESC LIMIT 1",
@@ -236,11 +281,22 @@ class KnowledgeStoreMixin:
                 break
             if not valid_source:
                 raise ContractError("no current valid source can restore this knowledge")
+            validate_restore_support(self, project, knowledge_id, expected_revision, reason, refs, body["validation_level"])
             self.db.execute("INSERT INTO active VALUES(?,?,?)", (project, knowledge_id, expected_revision))
             self._index_knowledge(project, knowledge_id, expected_revision, body)
+            # 撤销曾关闭的反例重新进入待治理状态；已修订和已驳回处置保持历史依据。
+            reopened = self.db.execute("UPDATE knowledge_feedback SET disposition='unresolved',disposition_reason=NULL,"
+                                      "disposition_receipt=NULL WHERE project=? AND knowledge_id=? AND revision=? "
+                                      "AND kind='counterexample' AND disposition='revoked'",
+                                      (project, knowledge_id, expected_revision)).rowcount
             self.db.execute("UPDATE projects SET generation=generation+1 WHERE id=?", (project,))
+            response = {"knowledge_id": knowledge_id, "revision": expected_revision, "status": "restored",
+                        "source_candidate_id": valid_source, "request_id": request_id, "changed": True,
+                        "reopened_counterexamples": reopened}
+            record_action(self, project, request_id, request, "restore", knowledge_id, expected_revision, response,
+                          actor=actor, reason=reason, evidence_refs=refs, before_state=before)
             self._queue_sync(project, knowledge_id, expected_revision, body)
-        return {"knowledge_id": knowledge_id, "revision": expected_revision, "status": "restored", "source_candidate_id": valid_source}
+            return response
 
     def _source_evidence(self, project, refs, problem_id=None):
         evidence = []
@@ -265,7 +321,7 @@ class KnowledgeStoreMixin:
         states = {item["health"] for item in evidence}
         return next((value for value in ("conflicted", "denied", "missing") if value in states), "valid" if states else "missing")
 
-    def _public(self, project, row):
+    def _public(self, project, row, include_maturity=True):
         from .runtime import clean, metadata
         body = clean(json.loads(row["body"]))
         sources = []
@@ -286,7 +342,7 @@ class KnowledgeStoreMixin:
         evidence = list(combined.values())
         source_version = self.db.execute("SELECT version FROM knowledge_source_versions WHERE project=? AND knowledge_id=? AND revision=?",
                                          (project, row["id"], row["revision"])).fetchone()
-        return {"knowledge_id": row["id"], "revision": row["revision"],
+        result = {"knowledge_id": row["id"], "revision": row["revision"],
                 **{k: body[k] for k in ("title", "content", "category", "applicability", "limitations", "validation_level")},
                 "knowledge_kind": body.get("knowledge_kind", "solution"), "metadata": metadata(body.get("metadata")),
                 "sources": sources, "source_health": self._source_health(evidence),
@@ -294,6 +350,10 @@ class KnowledgeStoreMixin:
                 "source_version": source_version[0] if source_version else 0,
                 "problem_changed": any(source["problem_changed"] for source in sources),
                 **self._knowledge_feedback_state(project, row["id"], row["revision"])}
+        if include_maturity:
+            state = self.knowledge_state_snapshot(project, row["id"], row["revision"], _public_data=result)
+            result.update(maturity=state["maturity"], lifecycle_version=state["lifecycle_version"])
+        return result
 
     def read(self, project, knowledge_id):
         from .runtime import ContractError

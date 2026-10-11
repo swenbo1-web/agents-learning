@@ -170,7 +170,9 @@ def execute_governance(runtime, project, proposal_id, expected_epoch=None):
             if action == "update" and result["publication"]["revision"] <= proposal["expected_revision"]:
                 raise ContractError("update did not create a new revision; counterexample remains unresolved")
         elif action == "revoke":
-            result["revocation"] = runtime.revoke(project, proposal["knowledge_id"])
+            result["revocation"] = runtime.revoke(project, proposal["knowledge_id"], proposal["expected_revision"],
+                request_id="governance:" + proposal_id, reason=proposal["reason"], actor="governance_operator",
+                expected_epoch=expected_epoch)
             runtime.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, problem["id"]))
         else:
             runtime.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, problem["id"]))
@@ -180,6 +182,12 @@ def execute_governance(runtime, project, proposal_id, expected_epoch=None):
                 "WHERE project=? AND problem_id=? AND knowledge_id=? AND revision=? AND kind='counterexample'",
                 (disposition, proposal["reason"], proposal_id, project, problem["id"], proposal["knowledge_id"], proposal["expected_revision"])).rowcount
             result["disposition"] = {"state": disposition, "changed_count": changed}
+            # 发布/撤销已排队；最终反例处置也必须进入同一同步状态快照。
+            if target is not None:
+                current = runtime.db.execute("SELECT * FROM knowledge WHERE project=? AND id=? ORDER BY revision DESC LIMIT 1",
+                                             (project, proposal["knowledge_id"])).fetchone()
+                if current:
+                    runtime._queue_sync(project, current["id"], current["revision"], json.loads(current["body"]))
         runtime.db.execute("UPDATE governance_proposals SET state='executed',result=?,completed=? WHERE project=? AND id=?",
                            (encode(result), time.time(), project, proposal_id))
         runtime.db.execute("UPDATE review_states SET state=?,updated=? WHERE project=? AND problem=? AND revision=?",

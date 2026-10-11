@@ -21,6 +21,7 @@ class KnowledgeContextMixin:
     @staticmethod
     def _source_state(item):
         return {"health": item.get("source_health", "missing"),
+                "maturity": item.get("maturity", "candidate"),
                 "current_tool_success": item.get("current_tool_success", False),
                 "problem_changed": item.get("problem_changed", any(s.get("problem_changed", False) for s in item.get("sources", []))),
                 "pending_counterexample_count": item.get("pending_counterexample_count", 0)}
@@ -102,9 +103,16 @@ class KnowledgeContextMixin:
                 note = (f"知识 {identity} 来源已变：health={state['health']}，"
                         f"tool_success={state['current_tool_success']}，新证据={state['problem_changed']}，"
                         f"待核实反例={state['pending_counterexample_count']}；请用 knowledge_read 核对。")
+                if state["maturity"] != json.loads(row["state"]).get("maturity", "candidate"):
+                    note = note.replace("；请用", f"，成熟度={state['maturity']}；请用")
                 cost = len(note) + int(bool(notes))
                 if cost > remaining:
-                    continue
+                    # 极小预算也交付完整的ID和复查要求，不裁断后确认送达。
+                    note = (f"知识 {identity} 状态已变（{state['health']}/{state['maturity']}，"
+                            f"反例{state['pending_counterexample_count']}）；执行前用 knowledge_read 核对。")
+                    cost = len(note) + int(bool(notes))
+                    if cost > remaining:
+                        continue
                 notes.append(note)
                 remaining -= cost
             self.db.execute("UPDATE context_exposures SET state=?,source_version=?,updated=? WHERE "
@@ -290,6 +298,7 @@ class KnowledgeContextMixin:
                         "applicability": clip(item["applicability"], 180), "limitations": clip(item["limitations"], 180),
                         "category": item["category"], "knowledge_kind": item["knowledge_kind"],
                         "validation_level": item["validation_level"], "source_health": item["source_health"],
+                        "maturity": item.get("maturity", "candidate"),
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
                 if item.get("pending_counterexample_count", 0):
@@ -306,7 +315,8 @@ class KnowledgeContextMixin:
                     # 不裁掉适用/限制后继续展示可执行摘要；退回仅标识卡。
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                             "title": clip(item["title"], 60), "summary_only": True,
-                            "read_required": True, "source_health": item["source_health"]}
+                            "read_required": True, "source_health": item["source_health"],
+                            "maturity": item.get("maturity", "candidate")}
                     if item.get("pending_counterexample_count", 0):
                         card["pending_counterexample_count"] = item["pending_counterexample_count"]
                 if len(encode(card)) > available:

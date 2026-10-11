@@ -51,7 +51,7 @@ class RuntimeTests(unittest.TestCase):
         self.r.close()
         self.r = Runtime(self.home)
         self.assertEqual(self.r.read(self.p, published["knowledge_id"])["revision"], 1)
-        self.r.revoke(self.p, published["knowledge_id"])
+        self.r.revoke(self.p, published["knowledge_id"], expected_revision=self.r.read(self.p, published["knowledge_id"])["revision"])
         self.assertEqual(self.r.search(self.p, "模块路径")["items"], [])
         with self.assertRaises(ContractError): self.r.read(self.p, published["knowledge_id"])
 
@@ -124,7 +124,7 @@ class RuntimeTests(unittest.TestCase):
     def test_revoked_injected_knowledge_reports_invalidation_before_tool(self):
         published = self.r.publish(self.p, self.candidate())
         self.hook("UserPromptSubmit", turn_id="memory", prompt="模块路径")
-        self.r.revoke(self.p, published["knowledge_id"])
+        self.r.revoke(self.p, published["knowledge_id"], expected_revision=self.r.read(self.p, published["knowledge_id"])["revision"])
         result = self.hook("PreToolUse", tool_use_id="check-revocation", tool_name="Bash")
         self.assertIn(published["knowledge_id"], result["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.r.search(self.p, "模块路径")["items"], [])

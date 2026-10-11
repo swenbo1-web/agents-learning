@@ -208,7 +208,7 @@ class KnowledgeIndexTests(unittest.TestCase):
                                  (self.p, published["knowledge_id"])).fetchall()
         self.assertEqual([int(row[0]) for row in rows], [2])
         self.assertEqual(self.r.search(self.p, "compiler")["items"], [])
-        self.r.revoke(self.p, published["knowledge_id"])
+        self.r.revoke(self.p, published["knowledge_id"], expected_revision=self.r.read(self.p, published["knowledge_id"])["revision"])
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM knowledge_fts WHERE project=?", (self.p,)).fetchone()[0], 0)
         self.assertEqual(self.r.search(self.p, "graphics")["items"], [])
 

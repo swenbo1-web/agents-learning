@@ -110,7 +110,7 @@ class Module4MCPTests(unittest.TestCase):
         server.call("knowledge_read", {"knowledge_id": published["knowledge_id"], "context_handle": handle})
         self.assertEqual(server.context_handle, handle)
         self.assertIn(f"{published['knowledge_id']}@{published['revision']}", self.shown())
-        self.runtime.revoke(self.project, published["knowledge_id"])
+        self.runtime.revoke(self.project, published["knowledge_id"], expected_revision=self.runtime.read(self.project, published["knowledge_id"])["revision"])
         output = self.runtime.handle_hook({"hook_event_name": "PreToolUse", "session_id": "reader",
             "cwd": str(self.workspace), "tool_use_id": "after-revoke", "tool_name": "Bash"})
         self.assertIn(published["knowledge_id"], output["hookSpecificOutput"]["additionalContext"])

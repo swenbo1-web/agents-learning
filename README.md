@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.8.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.9.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
 
-0.8.0 优化第六模块的持久审核回执、精确去重、调用恢复、有界批次、知识治理及反例处置，保留前五模块的采集、发布、检索和受信执行策略。数据库首次打开时在事务内升级到版本 8，保留记录和知识 ID；旧审核记录缺失的理由不猜测，旧 reviewed 反例仍视为未处置。全文索引版本为 4，内部发布协议为 5，不能将新旧运行文件混用；旧运行端不能打开版本 8 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
+0.9.0 完善第七模块的准确撤销、反例恢复、生命周期回执、Stable 认证、知识发布批次和可选分发恢复，保留前六模块契约。数据库首次打开时在事务内升级到版本 9，保留记录和知识 ID；不补造旧撤销／恢复理由或认证，旧知识成熟度默认 candidate。全文索引版本为 4，内部发布协议为 6，不能将新旧运行文件混用；旧运行端不能打开版本 9 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -123,13 +123,15 @@ python scripts/learning.py --workspace "D:\Projects\my-project" problems
 
 `reported` 表示有记录的陈述，不代表已经验证。`tool_success` 要求引用明确完成且成功的 `PostToolUse` 事件，只能支持具体工具的成功结果。标准 MCP 的 `isError:false` 记为 `call_completed`，仅表示调用协议完成，不能单独支持 `tool_success`。退出码为零不能单独证明专业根因、玩法结果或用户验收。
 
-受信操作者使用 `publish CANDIDATE_ID` 发布，使用 `revoke KNOWLEDGE_ID` 撤销。Runtime 检查证据引用、来源版本和允许的验证范围；它不能证明任意自然语言结论正确。知识审核状态与产品验收状态分别表达。
+受信操作者使用 `publish CANDIDATE_ID` 发布，使用 `revoke KNOWLEDGE_ID --expected-revision N` 撤销。Runtime 检查证据引用、来源版本和允许的验证范围；它不能证明任意自然语言结论正确。知识审核状态与产品验收状态分别表达。
 
 默认发布创建新条目，同名但适用范围不同的知识可以并存。相同正文、适用条件、限制、分类、用途和证据等级复用当前条目，并持久化每个来源候选、问题修订和证据引用；新增来源不制造正文修订。更新已有知识必须指定 `publish CANDIDATE_ID --knowledge-id KNOWLEDGE_ID --expected-revision N`；版本不符或条目已撤销时拒绝首次更新，不能仅凭标题覆盖。更新后若与另一个有效 ID 完全重复，会拒绝并提示已有条目。
 
 每个候选只有一个发布回执。默认重试或使用原目标/CAS 参数重试显式更新时，直接返回第一次发布结果，不再次校验证据或推进版本；回执中的 `published` 表示历史发布已经完成，当前可用性用 `read` 核对。旧候选不能回滚较新知识，也不能复活已撤销知识。变更目标需提交新的候选。迁移仅恢复有明确对应依据的历史回执；对应目标无法确定时保留 `legacy_unresolved`，阻止自动重发并等待复核新候选。
 
-显式恢复使用 `restore KNOWLEDGE_ID --expected-revision N`，只允许恢复末版、核对当前至少一份完整有效来源，并检查有效知识重复；可附 `--expected-generation N`。恢复保留原正文修订，回执给出依据的来源候选 ID，不借候选重试恢复。
+显式恢复使用 `restore KNOWLEDGE_ID --expected-revision N`，只允许恢复末版、核对当前至少一份完整有效来源，并检查有效知识重复；可附 `--expected-generation N`。涉及未决或因撤销关闭的反例时，另需具体 `--reason` 与新的 `--event-ref` 支持：历史来源、反例自身、已绑定其他知识的观察不能作为恢复依据。恢复同版后重新打开原 revoked 反例，保留 dismissed/revised，不宣称反例已经解决。恢复保留原正文修订并降为 candidate。
+
+发布、修订、附加来源、撤销、恢复和晋升保存统一生命周期动作及状态版本。撤销／恢复可传 `--request-id`，同一参数重试回放历史结果，不再次变更状态；原请求 ID 改参数会被拒绝。无请求 ID 会生成新 ID，响应给出该 ID。`knowledge-actions` 列有限摘要，`knowledge-action REQUEST_ID` 读取理由、状态和回执。历史发布回执继续保留；记录中的执行者类别不提供操作系统身份认证。
 
 使用 `search QUERY` 查询当前已发布内容，使用 `read KNOWLEDGE_ID` 读取条目。撤销后不再返回该知识；当前对话在下一次提示或已覆盖的工具前置事件收到版本失效提示。这不能保证从模型内部删除已经读过的内容。
 
@@ -256,6 +258,18 @@ python scripts/learning.py --workspace "D:\Projects\my-project" reviews --proble
 
 真实付费模型调用与宿主端 Hook 启用须单独验收；本地离线检查不代表这两项已通过。
 
+## 第七模块：成熟度与知识发布批次
+
+`maturity` 与 active、正文 revision、validation_level 分别表达。`knowledge-maturity ID --expected-revision N` 给出当前 candidate/stable、资格及缺项；`knowledge-promote ID --expected-revision N --request-id REQUEST` 由受信入口晋升，不暴露到普通或管理员 MCP。当前默认规则仅允许 operation/solution：至少两个独立任务（同任务的重复案例不增加次数；无任务时按独立对话）、每份来源仍有真实工具成功且合同有效、来源无变化或冲突、无未决或原撤销反例。professional/pattern 需要专门验证规则，当前不会仅凭工具成功晋升。
+
+Stable 认证绑定正文、来源与反例状态，变化后 effective maturity 返回 candidate；新修订、附加来源、撤销／恢复需重新晋升。读取、MCP 有限预览与 Hook 摘要显示成熟度，已展示知识的成熟度变化通过现有通知链提示。历史认证不证明产品已由用户验收。
+
+`knowledge-release-prepare` 保存紧凑清单，引用 ID、正文修订、来源／生命周期版本、成熟度、健康和摘要哈希，不复制正文或日志。`knowledge-release-commit RELEASE_ID` 在同一事务内重核有效知识全集、来源快照和父批次，变化则拒绝并要求重新准备。完成批次不可改写，重复提交回放结果；`knowledge-releases` 和 `knowledge-release ID --offset N --limit N` 分页读取摘要及 added/updated/removed 差异。
+
+`knowledge-daily-release` 将准备／提交组合成显式的一步入口，有变化才发布，无变化跳过，也不新增管理员模型调用。此入口没有创建定时任务；第八模块或操作者决定调用时机。
+
+`knowledge-release-rollback ID --expected-head CURRENT --request-id REQUEST` 只回退分发清单：历史目标必须仍为当前有效修订、来源有效且无反例，保存新的回退批次；不会复活撤销知识、倒退正文或撤销后来新增知识。当前 Runtime 检索仍使用本地 active，批次指针尚未作为检索可见性过滤器。知识批次与 `release.py` 管理的软件运行副本分别维护。
+
 ## 可选 Hindsight
 
 默认使用本地 SQLite 全文检索。Hindsight 是可选的已发布知识同步目标，不是本地记录成功的前提，也不会自动成为 Codex 内置资料库。
@@ -268,9 +282,11 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 
 同步不将候选案例自动晋升为正式知识。适配器会只读核对目标 Bank 的 chunks 命名策略，并要求关闭自动综合，避免同步意外触发额外分析；它不修改 Bank 配置。
 
-同步失败与本地保存状态分开记录；本地仍可使用。崩溃后过期的同步租约标为待核对，不自动重投。核实远端状态后，可用 `sync --retry OPERATION_ID` 显式重试，最多三次；原目标配置变化会阻止重投，不能自动迁到新 Bank。
+同步失败与本地保存状态分开记录；本地仍可使用。崩溃后过期租约清除并标为远端未知，迟到结果单独留回执，不能覆盖待核对状态。`sync --retry OPERATION_ID` 显式重试：确定尚未发送的预检失败不消耗实际发送次数；未知写入先对账，最多三次实际尝试。后续 not_sent 失败不能清除此前 unknown，原目标配置变化也不能自动迁到新 Bank。
 
-`sync --backfill` 将启用前的当前正式知识补入队列并同步一项，重复补入不会创建相同目标和修订的重复任务。调整连接超时不改变目标身份；修改 URL、Bank、策略或密钥环境变量名仍须重新核对。失败保留安全的错误分类和写入阶段，区分尚未发送与远端结果未知；失去租约的旧进程返回 `lease_lost`，不宣称完成。本地撤销不删除已同步的远端副本；当前检索使用本地 active 清单，尚未接入远端召回。
+同步载荷含正文修订、来源状态版本、成熟度、健康／反例摘要和 active 状态；完整来源参与摘要哈希，输出只携带有限引用。来源／处置变化由程序登记增量，同一知识、修订和目标的确定未发送旧状态可被新状态替代，未知操作仍保留对账。旧版失效记录与新版有效记录分别发送。远端文档按不可变状态摘要区分，不使用本地回执声称远端恰好一次。
+
+`sync --backfill` 补入各知识末版（含撤销状态）并同步一项，相同目标和状态不重复排队。`sync-list` / `sync-read OPERATION_ID` 提供有界操作 ID、目标摘要、次数、诊断和回执；`sync-batch --max-items N --max-seconds S` 只处理 pending，blocked 不自动重试。预算限制新操作并收紧 HTTP 超时，不保证强制取消已在运行的请求。调整连接超时不改变目标身份；目标变化须显式回填或实际新状态变更。成功响应只保留核实字段。当前没有常驻分发进程，本地撤销不删除远端旧副本，Runtime 尚未接入远端 recall。
 
 ## 自动化的实际边界
 
@@ -299,19 +315,23 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `problems`、`packet` | 列出问题、读取审核包 |
 | `propose` | 提交结构化候选 JSON |
 | `publish`、`revoke`、`restore` | 本地受信发布、撤销与显式恢复入口 |
+| `knowledge-actions`、`knowledge-action` | 查询生命周期动作与幂等回执 |
+| `knowledge-maturity`、`knowledge-promote` | 检查成熟度及按确定性门槛晋升 |
+| `knowledge-release-prepare`、`knowledge-release-commit`、`knowledge-daily-release` | 准备、复查及提交知识批次，无变更跳过 |
+| `knowledge-releases`、`knowledge-release`、`knowledge-release-rollback` | 查询知识清单、差异与安全回退 |
 | `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
 | `search`、`read` | 查询和读取正式知识 |
 | `admin-once`、`admin-batch` | 单次审核、受多项预算限制的后台短批次 |
 | `reviews`、`admin-retry` | 查询持久回执、明确允许一次失败或未知调用再审 |
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
-| `sync` | 同步已发布知识到可选 Hindsight |
+| `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.8.0 检查状态（2026-10-11）
+## 0.9.0 检查状态（2026-10-11）
 
-392 项离线回归全套通过，耗时约 75 秒；第六模块新增 85 项隔离 SQLite、本地假审核器及并发入口检查，覆盖回执持久化、缺证、租约恢复、准确目标、反例处置、原子回滚、并发调度、去重、预算、旧库升级、审核期间比较资料变化、重复案例来源变化及受信 CLI/MCP 边界。前五模块回归继续通过。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+489 项离线回归全套通过，耗时约 95 秒；第七模块新增 97 项隔离 SQLite 与模拟分发检查，覆盖撤销CAS、反例恢复、生命周期回执、Stable认证、批次prepare/commit/diff/回退、无变化跳过、旧库迁移、来源与上下文成熟度变化、预检次数、未知写入保留、失租及迟到回执、旧版墓碑与新版同步共存、跨知识证据归属及真实CLI/MCP接口。前六模块回归继续通过。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
 
-持久语义聚类、跨案例晋升为 Stable、Daily Release 知识发布清单仍是后续模块；当前 `release.py` 管理插件软件副本身份。
+持久语义聚类、professional/pattern 专门验证、持续调度和总成本评估仍待后续模块；当前 Stable 与知识批次仅使用上述明确规则。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

@@ -297,7 +297,7 @@ class HindsightClient:
         if isinstance(count, bool) or not isinstance(count, int) or count != 1:
             raise HindsightError("Hindsight retain 未确认唯一条目已处理。", kind="unconfirmed_write",
                                  write_outcome="unknown")
-        return response
+        return {"success": True, "async": False, "bank_id": self._canonical_bank_id, "items_count": 1}
 
     def recall(self, query: str, project_id: str, limit: int = 5) -> dict:
         """可选远端召回；调用方仍须核对本地 manifest、撤销和来源。"""

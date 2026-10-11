@@ -145,7 +145,7 @@ class Module5CaseTests(unittest.TestCase):
 
     def test_revoked_knowledge_requires_explicit_historical_revision(self):
         k = self.publish()
-        self.r.revoke(self.p, k["knowledge_id"])
+        self.r.revoke(self.p, k["knowledge_id"], expected_revision=self.r.read(self.p, k["knowledge_id"])["revision"])
         with self.assertRaises(ContractError):
             self.feedback(knowledge_id=k["knowledge_id"])
         accepted = self.feedback(knowledge_id=k["knowledge_id"], knowledge_revision=k["revision"])
@@ -250,7 +250,7 @@ class Module5CaseTests(unittest.TestCase):
         self.assertIsNone(self.r.db.execute("SELECT tool_input_digest FROM events WHERE id=?", (event_refs[0],)).fetchone()[0])
         self.r.close()
         self.r = CaseRuntime(self.home)
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 8)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 9)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM problems WHERE id=?", (legacy["id"],)).fetchone()[0], 1)
 
     def test_migration_backfills_only_proven_legacy_delivery_round(self):
@@ -263,7 +263,11 @@ class Module5CaseTests(unittest.TestCase):
             self.r.db.execute("PRAGMA user_version=6")
         self.r._migrate_case_store()
         restored = dict(self.r.db.execute("SELECT * FROM delivery_rounds WHERE project=?", (self.p,)).fetchone())
-        self.assertEqual(restored, original)
+        # 旧库没有轮次插入时点；恢复身份必须精确，时间使用真实Stop来源时点。
+        self.assertEqual({k: v for k, v in restored.items() if k != "created"},
+                         {k: v for k, v in original.items() if k != "created"})
+        self.assertEqual(restored["created"], self.r.db.execute("SELECT created FROM events WHERE id=?",
+                                                               (restored["event_id"],)).fetchone()[0])
         self.assertEqual(restored["write_version"], delivered["write_version"])
         self.r.handle_hook(dict(hook_event_name="Stop", cwd=str(self.workspace), session_id="chat", turn_id="second",
                                 last_assistant_message="同一交付轮次的补充说明"))
