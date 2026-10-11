@@ -22,6 +22,14 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 
 `当前任务 → 查阅经验 → 执行与观察 → 整理候选 → 校验发布 → 下一次任务复用`
 
+## 84 秒演示
+
+[![隔离演示：导出、记录工具问题、发布知识、新会话检索](assets/demo-preview-zh.gif)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4)
+
+[中文视频（MP4）](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4) · [English video](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4) · [中文字幕（SRT）](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.srt)
+
+演示使用实际本机导出、SQLite 工具失败与恢复、全新会话检索结果和只读浏览器截图。Hook 事件通过隔离运行副本模拟，管理员使用确定性候选样例并由受信入口显式发布；Codex 接入步骤按安装指南展示。画面回放真实输出的精选字段，适用条件、来源和修订随知识保留。
+
 ## 快速体验（源码）
 
 下载 [0.13.0 源码 ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip)，解压后在项目目录运行。也可获取[通用 wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl)和 [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS)。

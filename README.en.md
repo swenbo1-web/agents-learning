@@ -22,6 +22,14 @@ agents-learning builds maintainable knowledge memory for long-running projects. 
 
 `Current task → Retrieve experience → Execute and observe → Organize candidates → Validate and publish → Reuse in the next task`
 
+## 84-second demo
+
+[![Isolated demo: export, capture tool results, publish knowledge and retrieve in a fresh session](assets/demo-preview-en.gif)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4)
+
+[English video (MP4)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4) · [中文视频](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4) · [English captions (SRT)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.srt)
+
+The demo replays selected fields from an actual local export, SQLite tool failure and recovery, fresh-session retrieval, and read-only browser captures. Hook events run through an isolated dispatcher; administrator review uses a deterministic candidate fixture followed by explicit trusted publication. Codex setup is shown as installation-guide steps. Knowledge retains its conditions, sources and revision.
+
 ## Quick try from source
 
 Download the [0.13.0 source ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip), extract it, and run these commands from the project directory. A [portable wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl) and [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS) are also available.
