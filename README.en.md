@@ -1,0 +1,548 @@
+# agents-learning
+
+[中文](README.md) | English
+
+**A continuous learning plugin for Agents working on long-running projects, turning task experience into project knowledge that later work can retrieve, check and update.**
+
+Current prerelease: **0.11.1** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Download](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+
+## How the project took shape
+
+This project grew from practical questions about AI collaboration on long-running projects. How can experience survive a new conversation or context compaction? How can different Agents reuse it? How can repeated tool errors require less repeated investigation? And how can outdated or incorrect knowledge be corrected in time?
+
+We initially planned a structured knowledge base: an Agent would look up previous experience before analyzing a problem against the current requirements and environment. As the design developed, we found that retrieval, collection, organization and maintenance also needed clear processes. Otherwise, steps would still be missed and recording experience would add work to the current task.
+
+Drawing on engineering retrospectives, knowledge management and event-driven automation, we developed an architecture with explicit responsibilities: **the worker Agent focuses on its task, the plugin assists with retrieval and recording, the administrator organizes evidence, and checked knowledge becomes available for later work.**
+
+Continuous learning here works through accumulated and reused project knowledge. The plugin records observable messages, tool events and outcomes, supplemented by short domain feedback. These records do not contain a model's internal thinking.
+
+## The problems we address
+
+| Project problem | Approach |
+|---|---|
+| Experience stays in a single conversation | Store project facts, operational experience and solutions in a separate local knowledge base for retrieval across conversations |
+| Similar errors require repeated investigation | Retrieve relevant knowledge at task start, context restoration and supported events after tool failures, providing bounded summaries for the current task |
+| Recording experience interrupts current work | Hooks collect tool events and results; short feedback supplements domain issues without requiring a retrospective document for each operation |
+| Historical solutions are applied incorrectly | Keep applicable conditions, limitations, sources and revisions, with source change notices, revocation and counterexample review |
+| Organization and context consumption keep growing | Review increments, bound retrieval, paginate on demand, and manage call count, concurrency and reported usage separately |
+| Automation exceeds the current task scope | With execution protection enabled, check task identity, state and explicit execution authorization for integrated calls; knowledge remains reference material |
+
+The goal is to reduce repeated work and irrelevant context so Agents can use existing experience more effectively. Knowledge exposure, declared adoption and tool observations are recorded separately; user acceptance requires independent confirmation. Ordinary task total usage and monetary bills are not fully integrated, so the project does not claim a net savings ratio or percentage improvement in quality.
+
+## Where it fits
+
+The plugin suits projects that require long-term maintenance, frequent tool use and work handed between conversations or Agents, including software development, troubleshooting, testing, data processing and experimental workflows. Project context, domain experience and tool operation knowledge can be maintained together; each domain still needs its own evidence and acceptance methods.
+
+**Codex** is currently the primary integration environment, with plugin rules, skills, MCP, Hooks and runtime working together. The framework can be configured around project tools; other Agent environments require an appropriate host adapter.
+
+Storage is local by default, and knowledge is managed by project. Administrator execution, background scheduling, automatic publication and remote services are off by default and may be enabled separately as needed.
+
+## Complete architecture
+
+### Overall workflow
+
+```mermaid
+flowchart TD
+    User["Current user task"] --> Entry["Plugin entry: check project, session and host epoch"]
+    Entry --> Task["Current task contract and subagent assignment"]
+    Task --> Retrieve["Local retrieval, summary injection and compaction restoration"]
+    Knowledge[("Published knowledge: content, conditions, revisions and sources")] --> Retrieve
+    Retrieve --> Worker["Worker Agent analyzes and executes the task"]
+    Worker --> Guard["Integrated PreToolUse: execution rules and state checks"]
+    Guard -->|"Allowed or observation mode"| Result["Tool events and actual outcomes"]
+    Guard -->|"Denied"| Capture
+    Result --> Capture["Collection, redaction, idempotency and conflict detection"]
+    Capture --> Cases[("Cases, problem increments and evidence")]
+    Worker --> Feedback["Short domain feedback or user corrections"]
+    Feedback --> Cases
+    Capture --> Fault["Pending failure follow-up retrieval"]
+    Fault --> Retrieve
+    Cases --> Packet["Bounded review packet and existing knowledge comparison"]
+    Packet --> Admin["Administrator review when enabled"]
+    Admin --> Candidate["Knowledge candidates or governance proposals"]
+    Candidate --> Publish["Trusted entry: evidence, identity and revision checks"]
+    Publish --> Knowledge
+    Knowledge --> Governance["Counterexamples, maturity, revocation and batch governance"]
+    Governance --> Knowledge
+    Schedule["Optional: bounded scheduling, budgets and receipts"] -.-> Packet
+    Schedule -.-> Publish
+    Retrieve --> Exposure["Exposure and declared adoption records"]
+    Worker --> Exposure
+```
+
+The main task, knowledge retrieval and experience organization proceed independently. Task delivery does not wait for background organization. Tool failures first register follow-up retrieval, which runs at the next supported prompt, restoration or tool pre-event. Administrator model calls, automatic publication and knowledge batches are configured separately; nodes in the diagram do not imply that everything is enabled by default.
+
+### Roles and responsibilities
+
+| Participant | Responsibilities | Permissions and handoff |
+|---|---|---|
+| User / trusted local operator | Define tasks, set execution rules, enable optional capabilities, publish and govern knowledge | Use explicit entry points for each operation; the user reviews host Hook trust |
+| Worker Agent | Analyze and deliver the task, query knowledge, provide necessary feedback and adoption declarations | 7 MCP tools; bound to the current session/assignment; knowledge cannot add execution permission |
+| Plugin runtime | Check identity and versions, retrieve, collect, persist and check integrated execution boundaries | Uses deterministic program rules and accesses observable events and results only |
+| Administrator Agent / executor | Propose candidates and governance based on evidence and existing knowledge | 12 administrator MCP tools, with no publication/revocation tools; automatic calls are off by default |
+| Optional scheduler | Advance persistent review, knowledge batch and state distribution work | Bounded batches, time and call budgets; participates only when enabled |
+
+Rules and skills provide collaboration conventions. Runtime and Hooks with execution protection enabled check task state, authorized actions and resource scope for integrated calls. Protection covers plugin entry points; arbitrary local Shell and database access still depend on host and operating system permissions.
+
+### Deployment and storage
+
+```mermaid
+flowchart LR
+    Source["Development source / Python wheel"] --> Export["install: export a local plugin directory"]
+    Export --> Host["Host loads skills, MCP and Hooks"]
+    Export --> Fixed["Fixed runtime copy with a content manifest"]
+    Host --> Fixed
+    Fixed --> Runtime["Shared Runtime"]
+    CLI["Explicit CLI operations"] --> Runtime
+    Runtime --> DB[("Separate ALP_HOME: authoritative SQLite records")]
+    DB --> FTS["Full-text index of active knowledge"]
+    DB -.-> Remote["Optional derived distribution target"]
+```
+
+Development source, exported plugins, fixed runtime copies and live databases are maintained separately. Exported Hooks and MCP point to the same fixed copy; its release manifest records the version, internal protocol and file digests. SQLite stores events, tasks, knowledge and receipts. Full-text indexes and remote copies are derived capabilities; current Runtime retrieval uses active local knowledge.
+
+The same project and data directory can retain knowledge across login accounts. After an account change is confirmed, a host adapter or operator sends a boundary notification to invalidate old connections, handles and administrator writebacks. Desktop account change notifications still require explicit wiring.
+
+### Eight modules and source mapping
+
+| Module | Responsibilities and boundaries | Key source / resources |
+|---|---|---|
+| 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export fixed runtime copies; check release contents and role permissions | [install.py](agent_learning/install.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
+| 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
+| 3. Knowledge storage and indexing | Store published knowledge, revisions and evidence sources in SQLite; maintain a full-text projection of active content and consistent reads | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py) |
+| 4. Retrieval and context management | Bounded recall and match filtering, summary/page budgets, exposure ledgers, invalidation notices, compaction restoration and failure follow-up retrieval | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py) |
+| 5. Event, evidence and case collection | Record observable events and tool results; handle idempotency, conflicts, late callbacks and user feedback; form traceable problem increments | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [runtime.py](agent_learning/runtime.py) |
+| 6. Administrator knowledge governance | Organize bounded review packets, incremental queues, calls and receipts; propose candidates and governance; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
+| 7. Knowledge publication and version governance | Publish, update, revoke, restore and promote through trusted entry points; save batch manifests, safe rollback and optional distribution state | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py), [publication_state.py](agent_learning/publication_state.py), [knowledge_releases.py](agent_learning/knowledge_releases.py), [knowledge_sync.py](agent_learning/knowledge_sync.py), [hindsight.py](agent_learning/hindsight.py) |
+| 8. Background scheduling, budgets and effect evaluation | Persistent work and bounded continuation, global call/reported usage admission, knowledge exposure and declared adoption; no inferred reading or causation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py) |
+
+[runtime.py](agent_learning/runtime.py) combines the eight modules, unifying project, session, account boundaries and database transactions. The modules share versions and data contracts within the same runtime.
+
+### How each module works
+
+**1. Plugin integration and protocol.** CLI provides explicit local operations, MCP exposes tools by role, Hooks receive host events and skills describe the workflow. `install` validates resources and exports atomically; fixed runtime entry points check content identity. MCP connections bind to a session through a trusted handle, and arguments cannot elevate a role.
+
+**2. Task and execution control.** The current task stores goal, scope and status. Contract revision, state write version and execution epoch distinguish changes. A child Agent's assignment freezes the parent task snapshot at dispatch. Execution protection checks explicit authorization, actions, paths, budget and validity; after a task change or pause, old permission cannot authorize a new operation.
+
+**3. Knowledge storage and indexing.** SQLite stores published content, revisions, evidence sources and action receipts. Categories cover project, domain, operation and mixed problems; kinds distinguish facts, specific solutions and reusable methods. The full-text index projects active knowledge only. Content and sources are read from the same database snapshot.
+
+**4. Retrieval and context management.** Queries use the current question and explicit task filters; bounded recall is followed by match and source-state checks. Automatic injection defaults to at most three cards totaling 2400 characters. Complete conditions that do not fit produce `read_required`. Manual search returns bounded previews; content and conditions are paginated against a revision. Exposure ledgers track changes, and compaction restoration prioritizes new matches for the current question before adding valid historical summaries.
+
+**5. Event, evidence and case collection.** Tool pre/post events, delivery declarations and short feedback create problem increments. Identical callbacks are deduplicated; contradictory inputs or tool names retain conflicts; late callbacks follow their original task and host boundaries. Tool success, protocol completion and statements remain separate, and none automatically establishes user acceptance. Failures register bounded follow-up retrieval without directly calling an administrator model.
+
+**6. Administrator knowledge governance.** New or changed problems enter the review queue. The administrator receives a bounded review packet, compares existing knowledge and candidates, and proposes suggestions with applicable conditions, limitations and evidence references. Receipts record calls, results and retry states. When enabled, narrowly scoped automatic publication accepts only new operational solutions with complete tool success evidence. Domain knowledge, methodologies and governance changes continue through their corresponding trusted entry points.
+
+**7. Knowledge publication and version governance.** Publication checks the candidate's basis, identity, sources and target revision; identical requests return receipts idempotently. Published knowledge supports updates, revocation, explicit restoration, counterexample handling and maturity promotion. Knowledge batches save deterministic entry manifests and differences. Batch rollback cannot overwrite newer content or revive revoked knowledge.
+
+**8. Background scheduling, budgets and effect evaluation.** Bounded `tick`/`run` advances persistent work; when enabled, supported events wake short-lived runners. Call count, concurrency, batch time and reported usage are controlled separately, and unknown usage retains its reservation. Effect records distinguish exposure from declared adoption and link tool outcomes and source state. Current scheduling requires a process or event; unattended all-day wakeups still require host or external runtime support.
+
+### Data contracts throughout the workflow
+
+| Data | Core contents | Why it is retained |
+|---|---|---|
+| Project and session identity | Project scope, `context_handle`, Agent identity, `host_epoch` | Establish query/write ownership and invalidate old connections after account changes |
+| Task and assignment | `task_id`, `revision`, `write_version`, `execution_epoch`, goal and scope | Distinguish contract, state and execution changes so old task writebacks cannot enter a new task |
+| Events and operations | Event references, tool call identifiers, input digests, results, task snapshots and conflict state | Support traceable evidence, idempotent callbacks and source health checks |
+| Problems and cases | Problem ID/revision, event references, domain feedback and potential recovery links | Organize scattered observations into reviewable problem increments |
+| Candidates and knowledge | Title, content, category, kind, applicability, limitations, evidence level and metadata | Make retrieval and adoption conditional, with sources available for rechecking |
+| Revisions and governance state | Knowledge ID/revision, active state, maturity, source version, action and batch receipts | Distinguish content changes, source changes, publication state and historical operations |
+| Budgets and effect records | Call reservations, known/unknown usage, exposure method and adoption declarations | Control incremental organization usage and retain the evidence boundaries of effect observations |
+
+Candidate metadata may include `tool`, `tool_version`, `error_code`, `environment` and `verification`; unknown values remain unknown. Published knowledge active state, content revision, evidence level and maturity are maintained separately; none may be inferred from another.
+
+### How automation reduces missed steps
+
+| Trigger | Plugin action | Boundary |
+|---|---|---|
+| `SessionStart` / `UserPromptSubmit` | Bind identity, retrieve relevant knowledge, restore tasks and notices | Insufficient matches are not injected; short continuations may reuse an unchanged query plan |
+| `SubagentStart` | Create an independent identity and assignment, then query knowledge for that task | Requires a reliable Agent ID; independent MCP connection lifecycle depends on host wiring |
+| `PreToolUse` | Check covered execution rules and send bounded invalidation notices and follow-up retrieval results | Observation mode is the default; rule-based rejection requires explicit protection enablement |
+| `PostToolUse` | Save results, update operation/source state and register failure follow-up retrieval | Protocol completion and unrelated commands do not establish a resolved problem |
+| MCP queries and feedback | Record knowledge actually returned to a bound session; supplement problems and adoption declarations | Unbound queries do not guess a session; exposure does not mean the model read it |
+| Background wakeups at `Stop` / `SessionStart` | Advance incremental review, batches and distribution when configuration permits | Bounded execution; unchanged work is skipped; wakeup with no running host is not guaranteed |
+| Knowledge revision, revocation or source changes | Save version changes and notify exposed sessions through later supported events | Complete notices that do not fit wait for later delivery; internal model content cannot be deleted |
+
+These mechanisms make retrieval and event recording less dependent on the Agent remembering every step. Domain judgment still requires the Agent to consider current requirements, environment and evidence, and publication checks cannot prove arbitrary natural language conclusions correct.
+
+## Current version and compatibility
+
+0.11.0 fixes execution scope, tool evidence, account isolation, retrieval and administrator accounting issues identified during integration review. The database advances to schema 11, adding complete redacted business evidence digests within transactions. Digests that cannot be reconstructed from old truncated material remain unknown; events, knowledge IDs and historical receipts are preserved. The full-text index is version 4 and internal publication protocol is version 8. Do not mix old and new runtime files; older runtimes cannot open a version 11 database. Old scope authorizations without frozen path ledgers require approval again through a trusted entry point. Common credential redaction cannot guarantee removal of copies that already exist.
+
+0.11.1 strengthens evidence boundaries when tool names are missing. An operation retains its first explicit name; later missing names remain unknown, while explicitly different names invalidate the operation and its old success sources. Legacy empty name ledgers use only complete historical events as evidence and do not guess truncated names. When an otherwise identical historical callback replay confirms an existing name conflict, one derived observation marked legacy_name_conflict is appended, preserving the original events and advancing source version. Later replays remain idempotent. Database schema, full-text index and internal publication protocol remain at the versions above.
+
+## Project location and entry points
+
+This repository maintains the source and Git history of the integrated eight modules. The display name is `agents-learning`, the Python package is `agent_learning`, and the plugin and CLI are named `agent-learning`.
+
+The development repository contains source code, example configuration, skills and checks. The exported directory and fixed runtime copy generated by `install` are used for installation. The actual knowledge database resides in a separate data directory (see the defaults and overrides below); it is neither copied with the development project nor stored in this repository. Changing the development directory does not automatically switch an existing installation. Export a new runtime copy and have the host review its entry points when updating.
+
+## Local operation
+
+Run these commands from the repository. In the examples, `python` must refer to an actual Python 3.10+ interpreter.
+
+```bash
+git clone https://github.com/swenbo1-web/agents-learning.git
+cd agents-learning
+python scripts/learning.py status
+```
+
+To select a project workspace:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" status
+```
+
+The default data directory is `%LOCALAPPDATA%\AgentLearning` on Windows or `~/.local/share/agent-learning` on POSIX. Use `--home PATH` for a separate data directory and `--workspace PATH` to select the project scope.
+
+For custom configuration, copy [config.example.json](config.example.json) and point `ALP_CONFIG` to the JSON file. For example, in PowerShell:
+
+```powershell
+Copy-Item -LiteralPath .\config.example.json -Destination .\config.local.json
+$env:ALP_CONFIG = (Resolve-Path .\config.local.json).Path
+python scripts/learning.py status
+```
+
+Configuration and the state database are separate. Do not put API keys in the configuration file; the optional Hindsight adapter reads its key from the configured environment variable.
+
+## Plugin and MCP integration
+
+```powershell
+python scripts/learning.py install "D:\Plugins\agent-learning"
+```
+
+`install` validates resources, copies them into a temporary directory and publishes the export atomically. Both MCP and Hooks point to the same fixed runtime copy, rather than another copy in the export directory or host cache. The release manifest records the version, protocol and digest of each file; entry points check that their contents agree. This is neither a digital signature nor operating system permission isolation. The installer does not change existing Codex configuration. The export contains a local plugin catalog. Then run:
+
+```powershell
+codex plugin marketplace add "D:\Plugins\agent-learning"
+codex plugin add agent-learning@agent-learning-local
+```
+
+Start a new conversation in Codex, then review and trust the Hooks (the CLI provides `/hooks`). The installer cannot grant Hook trust on the user's behalf. By default, fixed runtime copies reside in `%LOCALAPPDATA%\AgentLearning\runtime-releases` on Windows or `~/.local/share/agent-learning/runtime-releases` on POSIX. Retain that directory and its interpreter. Moving the export source does not affect generated runtime entry points. Set the runtime directory with `install --runtime-store PATH` or `ALP_RUNTIME_STORE`; a temporary `ALP_HOME` does not change it. See the [official plugin documentation](https://developers.openai.com/plugins/build/plugins) for Hook trust requirements.
+
+To make covered tool calls fail closed even when configuration is damaged, explicitly export with `install PATH --hook-mode enforce`. This writes the protection mode into the trusted entry point. `--hook-mode observe` fixes observation mode; when omitted, the current effective configuration is used. Changing an entry command requires the host to review Hook trust again.
+
+The source `.mcp.json` is a template; installation renders actual absolute paths into the exported copy. Native Codex catalog loading and installation commands have been checked locally with isolated configuration, without changing the current user's plugin configuration.
+
+The standard wheel includes export resources and supports `python -m agent_learning.cli`. The runtime, CLI and MCP use UTF-8; Chinese requests do not need ASCII escaping to work around system encoding.
+
+You can also start a standalone stdio MCP service:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role worker
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role admin
+```
+
+| Role | MCP tools |
+|---|---|
+| Worker Agent (7 tools) | `knowledge_search`, `knowledge_read`, `session_context`, `task_update`, `case_feedback`, `knowledge_use`, `learning_status` |
+| Administrator (12 tools) | The tools above, plus `problem_list`, `review_packet`, `submit_candidate`, `review_list`, `propose_governance` |
+
+MCP exposes no publication or revocation tools. The startup entry point determines the role; tool arguments cannot elevate it. Skills are available in [learning-worker](skills/learning-worker/SKILL.md) and [learning-admin](skills/learning-admin/SKILL.md).
+
+These restrictions apply to this service's entry points. Arbitrary Shell access or direct database access under the same operating system account is outside the MCP role isolation guarantee and requires host permissions and account isolation.
+
+### Session identity and context restoration
+
+`SessionStart` and `UserPromptSubmit` inject `context_handle=...`. The worker Agent initially calls `session_context(context_handle=...)` or passes the handle to `task_update` or `case_feedback`. The current MCP connection then remains bound to that handle, and `conversation_id` may be omitted. Other conversations or handles are rejected. Identity and business updates are rechecked in the same transaction; a failed update cannot leave an incorrect project binding.
+
+After context compaction, use `session_context` to restore the task, revision, write_version, status and execution readiness without summarizing the history again. Without a trusted handle, only project knowledge and project status may be queried; the service does not guess the most recent conversation or register an arbitrary one. A trusted local operator may register an explicit identity with `session-bind --conversation ID`, then start a bound service with `serve --context-handle HANDLE`. Manual CLI `task` and `feedback` remain explicit local operation entry points.
+
+When `SubagentStart` provides a reliable `agent_id`, the subagent receives an independent handle, knowledge exposure state and fixed assignment. The assignment binds the parent task ID, revision, state version and execution turn at dispatch. If the parent task changes, old feedback still belongs to the original task, and the old assignment cannot use a new authorization. `session_context` returns both the dispatched task and the current parent task; it cannot overwrite the parent task. A subagent without a reliable ID or an assignment from before an upgrade is not assigned by inference and must be dispatched again with a new identity. If the host makes parent and child Agents share an already bound MCP connection, the child needs its own bound connection. The host's parent/child MCP connection lifecycle has not yet been accepted through live validation.
+
+### Switching Codex / ChatGPT login accounts
+
+The same project and data directory continue to share published knowledge and historical evidence; separate databases are not created per login account. An account change notification advances the local `host_epoch`, invalidating old connections, handles and administrator writebacks. New connections bind through the next Hook or explicit `session-bind`. Task history and daily call counts are not reset. Old calls with unknown results are not automatically retried, and commands that have already run are not treated as a reason to execute them again.
+
+A trusted host adapter or operator calls this after confirming the change:
+
+```powershell
+python scripts/learning.py account-changed --notification-id "unique-login-event-id"
+```
+
+A unique notification ID provides deduplication; without one, each call represents a new boundary. All notification sources must use the same `ALP_HOME` or `--home`. This entry point does not read, save or change login tokens, and does not log in, log out or reset usage limits.
+
+**Desktop account changes are not currently subscribed to automatically.** The official app-server exposes `account/updated` and login completion notifications, but a plugin cannot assume it is connected to the desktop application's internal notification channel. An adapter should emit boundary notifications from the login lifecycle it actually controls. Comparing only `authMode` or a subscription plan cannot identify an A → B switch using the same authentication mode; the implementation does not rely on the modification time of `auth.json`. See the [official app-server account API](https://learn.chatgpt.com/docs/app-server).
+
+## Handling a problem manually
+
+These examples record an explicit task and problem without running the project's main workflow:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" task --conversation demo --goal "Analyze a tool error without modifying the project"
+python scripts/learning.py --workspace "D:\Projects\my-project" feedback --conversation demo --summary "The tool error has occurred again and remains unresolved" --category operation
+python scripts/learning.py --workspace "D:\Projects\my-project" problems
+```
+
+Use the actual returned problem ID in `packet PROBLEM_ID`. The administrator prepares candidate JSON from that packet, then calls `propose FILE`. Candidate fields are:
+
+| Field | Meaning |
+|---|---|
+| `problem_id`, `problem_revision` | Problem identifier string and integer revision used for review |
+| `title`, `content` | Title and body strings |
+| `category` | `operation`, `professional`, `project`, `mixed` or `unknown` |
+| `applicability`, `limitations` | Strings describing applicable conditions and limitations |
+| `evidence_refs` | List of actual event ID strings |
+| `validation_level` | `reported` or `tool_success` |
+| `metadata` (optional) | Strings for `tool`, `tool_version`, `error_code`, `environment`, `verification`; omit or leave empty when unknown |
+| `knowledge_kind` (optional) | `fact`, `solution` or `pattern`; defaults to `solution` |
+
+`reported` means a statement has been recorded, not verified. `tool_success` requires an explicitly completed and successful `PostToolUse` event and can only support that specific tool result. Standard MCP `isError:false` is recorded as `call_completed`, which only means the protocol call completed and cannot by itself support `tool_success`. A zero exit code does not by itself establish a domain root cause, gameplay outcome or user acceptance.
+
+A trusted operator publishes with `publish CANDIDATE_ID` and revokes with `revoke KNOWLEDGE_ID --expected-revision N`. Runtime checks evidence references, source versions and the allowed validation scope; it cannot prove that arbitrary natural language conclusions are correct. Knowledge review and product acceptance are represented separately.
+
+By default, publication creates a new entry. Entries with the same title but different applicable conditions may coexist. Identical content, applicability, limitations, category, kind and evidence level reuse the current entry, while each source candidate, problem revision and evidence reference is persisted. Adding a source does not create a body revision. To update existing knowledge, specify `publish CANDIDATE_ID --knowledge-id KNOWLEDGE_ID --expected-revision N`. A revision mismatch or revoked entry rejects the initial update; the title alone cannot authorize an overwrite. An update identical to another active ID is rejected with a reference to the existing entry.
+
+Each candidate has one publication receipt. A default retry, or an explicit update retried with its original target and compare-and-swap (CAS) arguments, returns the first publication result without rechecking evidence or advancing the revision. `published` in a receipt means a historical publication completed; use `read` to check current availability. An old candidate cannot roll back newer knowledge or revive revoked knowledge. Submit a new candidate to change the target. Migration only reconstructs historical receipts with an explicit matching basis. An indeterminate target remains `legacy_unresolved`, blocking automatic republication until a new candidate is reviewed.
+
+Explicit restoration uses `restore KNOWLEDGE_ID --expected-revision N`. It only restores the latest body revision, checks that at least one complete and valid source exists now, and checks for duplicate active knowledge. `--expected-generation N` is optional. Pending counterexamples or counterexamples closed by revocation additionally require a specific `--reason` and new `--event-ref`: historical sources, the counterexample itself and observations already bound to other knowledge cannot justify restoration. Restoring the same revision reopens its original revoked counterexamples and preserves dismissed/revised ones; it does not claim the counterexamples are resolved. Restoration retains the body revision and returns maturity to candidate.
+
+Publication, revision, source attachment, revocation, restoration and promotion save a unified lifecycle action and state version. Revocation and restoration accept `--request-id`; retries with the same arguments replay the historical result without another state change, while changing arguments under the same request ID is rejected. If omitted, a new ID is generated and returned. `knowledge-actions` lists bounded summaries; `knowledge-action REQUEST_ID` reads reasons, state and receipts. Historical publication receipts remain intact. The recorded actor category does not provide operating system identity authentication.
+
+Use `search QUERY` to query currently published content and `read KNOWLEDGE_ID` to read an entry. Revoked knowledge is no longer returned. The current conversation receives an invalidation notice at the next prompt or covered tool pre-event. This cannot guarantee removal of previously read content from the model's internal context.
+
+MCP `knowledge_search` accepts `filters`, and CLI `search QUERY --filters JSON` supports exact filtering by `category`, `knowledge_kind` and known metadata fields; omit unknown filters. Automatic retrieval can use explicitly specified `knowledge_filters` metadata fields in task scope; allowed tools and execution rules are not treated as retrieval filters. Automatic injection provides at most three summaries, preserving category, entry ID, applicability, evidence level and current source health. If the conditions do not fit, it falls back to an identifier card with `read_required`. Insufficient matches and conflicted, denied or missing sources are not injected automatically.
+
+MCP `knowledge_search` returns previews with a default budget of 6000 JSON body characters. `max_chars` may be 512–20000. It does not expand full content or all evidence, and returns `match`, `summary_only`, `truncated` and `omitted_count`. Cropped applicability or limitations produce `read_required=true`. `knowledge_read` defaults to 12000 characters and accepts 1024–50000. `section=content|applicability|limitations` selects the body, applicable conditions or limitations; the default is content. The selected field is paginated using character `offset`. Subsequent pages must retain the section and pass `next_offset` and the previous page's `revision` as `expected_revision`, preventing concatenation across revisions; the response includes section_length. When the budget permits, applicability and limitations are returned in full; fields listed in fields_truncated can be read separately by section. Source summaries are bounded and omitted sources are marked. These budgets exclude the MCP protocol envelope and its `structuredContent` duplicate, and are not exact token limits. CLI and internal Runtime `search/read` retain full content and evidence interfaces.
+
+Hooks check the output budget against complete applicability and limitations first. If they do not fit, only an identifier card with read_required is provided. Automatic retrieval checks at most 64 candidates, filters relevance and source health first, then selects up to five for context selection. Invalid items among the first five therefore do not directly hide later valid entries. Manual retrieval still accepts limit 1–10. The recall cap does not guarantee discovery of every valid entry ranked further down.
+
+Search and read accept the current `context_handle`. Once the connection is bound, the actual returned cards or body pages are recorded. Unbound queries only read project knowledge and do not guess conversation ownership. Parent and child Agents have separate exposure ledgers. `source_version` and the actual exposure state are returned from the same snapshot, so changes after the read cannot be recorded as already notified.
+
+Short replies such as “continue” reuse the query. If task, knowledge, source versions and budget are unchanged, the query plan is reused without another search. Cache signatures and retrieval use the same token and phrase plan built from the last 8000 characters; continuation stores the same length to avoid treating a changed earlier portion of a long question as the old query. Automatic retrieval cache entries are invalidated by source health versions, and negative results by newly published knowledge. Cards that do not fit can be delivered later. Compaction restoration prioritizes new matches for the current question, then adds ordered, valid historical summaries. The current restoration set retains the most recent 32 items, while a separate ledger tracks historical exposure. Task or account changes reset the current set and query plan while retaining historical invalidation tracking and shared project knowledge.
+
+Content, `sources` and `evidence` are read from the same SQLite snapshot. `source_health` may be `valid`, `conflicted`, `denied` or `missing`. `current_tool_success` means the current references still contain a trusted tool success observation; `problem_changed` separately indicates new evidence in a source problem. Historical `validation_level` is not rewritten when callbacks change. Conflicts require administrator review; storage does not automatically revoke domain conclusions.
+
+The full-text projection contains only active knowledge. It supports C++, C#, C, R, Chinese characters and bigrams, and searches limitations. Technical identifiers retain both whole tokens and components. Queries use their last 8000 characters and at most 128 useful tokens, preferring Chinese bigrams and suppressing common request modifiers. After FTS recall, ranking prioritizes query coverage and uses only each token's highest field weight, preventing repeated fields from inflating a score; ID breaks ties. `match` reports score, coverage, up to 12 matching terms and automatic injection eligibility. Scores are not probabilities. Single-character queries remain available for manual recall but do not trigger automatic injection. Ranking does not use term frequencies from other projects or historical knowledge.
+
+The cache stores only ID/revision pairs. Each read checks active state, filters and token intersection; the returned generation, content and sources belong to the same snapshot. Each project's own generation invalidates its old cache without clearing other projects; the global cache holds at most 256 entries. Cache and counter writes happen after the read snapshot. If a derived write is locked, it may be skipped without blocking a completed query. Hook retrieval holds no write lock. Final state submission rechecks host identity, task/assignment, context version, active revision and source version.
+
+Source states for all exposed knowledge are tracked in a versioned ledger. Problem revisions, evidence relationships, operation conflicts/denials and added sources advance affected knowledge source versions in the same transaction. Each Hook processes at most 16 revocations and 16 source changes. State advances only after a complete notification fits in the output; insufficient budget or excess items defer delivery to later events. The eight recent states are a compatibility summary only. Program output does not prove the model read it or remove old content from the model's internal context.
+
+Actual tool failures register follow-up retrieval bound to the task contract and host version. Each task contract, Agent and host version processes at most three different error signatures. Duplicate callbacks, the plugin's own tools and failures without a verifiable task do not trigger it. Local retrieval occurs at the next continuation, restoration or tool pre-event. A normal new prompt prioritizes the current question and leaves old failures for later events. When the budget is insufficient, bounded references are cached for later delivery without another search. Late failures from an old task do not enter a new task, and child Agents use their fixed assignment. Follow-up retrieval does not call an administrator model or add execution permission.
+
+## Storage maintenance on demand
+
+Use these commands only for migration, diagnosis or manual maintenance, rather than in every task:
+
+```powershell
+python scripts/learning.py --home "D:\AgentLearningData" doctor
+python scripts/learning.py --home "D:\AgentLearningData" backup "D:\Backups\agent-learning-2026-10-11.sqlite3"
+python scripts/learning.py --home "D:\AgentLearningData" rebuild-index
+```
+
+`doctor` checks the database and publication/source/index relationships and reports anomaly counts. `backup` uses SQLite online backup and requires a new destination file. `rebuild-index` reconstructs the projection from active content and clears the cache within a write transaction. The index can be rebuilt; content, history, receipts and sources are authoritative data, and index rebuilding cannot repair missing original evidence. Before opening an old database, use its original runtime for an online backup if needed. The plugin does not automatically overwrite databases or restore backups.
+
+If published knowledge produces a counterexample, link `knowledge_id` in `case_feedback` to create a review problem. Feedback alone does not revoke knowledge.
+
+For a genuinely new task in the same conversation, use `task --new-task` or `task_update(new_task=true)`. MCP updates to an existing task must pass `expected_task_id` and `expected_write_version`. Comparing only `expected_revision` cannot protect state updates or a reused revision in a new task, so the older single-field update is no longer accepted. Explicit local CLI operations may omit concurrency conditions, but conditions, when supplied, must be paired. Only goal or scope changes advance `revision`; each actual status, goal or execution boundary change advances `write_version`. Receipts are read in the same transaction.
+
+Omitting `status` preserves it. Resuming paused, cancelled or delivered tasks requires explicit `resume=true` or `--resume` and does not restore expired execution permission. Parent Agent `case_feedback` passes both `expected_task_id` and `expected_task_revision` to prevent feedback from before compaction entering a new task. Child feedback uses its fixed assignment. Contract snapshots and event-time state are stored separately; later delivery does not rewrite earlier cases or make the administrator repeat prechecks on unchanged material.
+
+Historical cases are reviewed against their own task snapshots; a later task does not authorize past execution. MCP and Hooks share project identity: repository subdirectories use the repository root, and ordinary subdirectories of registered workspaces use that workspace. Crossing into another project produces an identity conflict. Configure `project_aliases` explicitly to share knowledge across directories; different repositories are not merged automatically.
+
+After the worker Agent marks an explicit task as `delivered`, the next `Stop` records its delivery result against that delivered `write_version`, with bounded tool results and their corresponding pre-events. Duplicate Stop events in the same delivery round do not recapture it. Resuming explicitly and delivering again appends to the existing case for that contract while preserving the first result. Old delivery rounds are migrated only when both Stop and historical state provide explicit evidence. This records reported delivery, not proof of domain conclusions or user acceptance. Set `capture_deliveries=false` to disable collection. Domain problems can still be supplemented through short `case_feedback`, without retrospective documents.
+
+## Case collection and evidence
+
+Tool results are checked for explicit failure before success, protocol completion or running state. A zero exit code or session ID cannot override a failure marker. If pre/post callbacks or multiple callbacks for an operation explicitly provide different inputs or tool names, the operation is marked conflicted. New evidence is retained and old success sources invalidated even if responses match. An initially missing name cannot permanently bypass name comparison; later missing names do not create a name conflict. The name ledger retains the first explicit value. Identical callbacks remain idempotent. Old records are confirmed as replay only when complete content can be compared. Full redacted input signatures and business evidence digests are stored separately; truncated historical inputs or names are not guessed. Event budgets prioritize exit codes, failure markers, error codes and conflict data, retaining the beginning and end of other logs and marking truncation.
+
+Potential recovery requires the same identity, task and host version, plus the same explicit resource or same nonempty command. Merely sharing a working directory or running an unrelated pwd does not constitute recovery. Historical recovery records that are conflicted, denied or lack current success evidence remain recorded, but cannot hide later relevant success. Potential recovery does not mean a confirmed fix or user acceptance.
+
+Failure cases link the operation's pre-event and result and preserve its actual command. Potential later success is restricted by task, Agent, assignment and host epoch, and compares known action targets. A repair command may differ, but explicitly different files or resources are not automatically linked. Real new evidence may be added after a case has been reviewed. `problem_events.role` distinguishes observation, attempt, failure, conflict, potential_recovery, delivery and feedback. `status` represents governance state; `resolution_status` is open or recovery_observed, and the latter does not mean repair validation passed. Problems with a deterministic summary identity are grouped; semantic clustering remains an administrator judgment.
+
+`case_feedback` and CLI `feedback --idempotency-key KEY` support persistent receipts. Retry the same request with its original key and arguments to receive the first result without increasing event count or case version. Different arguments with the same key are rejected. Use a new key for a different actual occurrence. Omitting a key preserves older entry point compatibility but does not guarantee retry deduplication. Receipts are isolated by project, conversation, Agent and host version.
+
+Knowledge counterexamples pass `knowledge_id`, `knowledge_revision` and `feedback_kind=counterexample`, referencing an actual revision in this project. Older requests without a revision bind to the current active revision and return it explicitly; revoked or historical revisions should be referenced explicitly. Counterexamples are linked independently to the knowledge revision and advance its source change version. `pending_counterexample_count` and `feedback_status=pending_counterexample` appear in knowledge responses and subsequent Hook notices. A reviewed case, a generated candidate, publication of other knowledge or attachment of an equivalent source does not clear a counterexample. Resolution requires trusted governance to update or revoke the exact revision, or explicitly dismiss the counterexample using additional real evidence. New evidence reopens it.
+
+## Task scope and execution protection
+
+Known `scope` fields are type-checked. Additional project fields may be stored but do not grant permission:
+
+| Field | Type and meaning |
+|---|---|
+| `mode` | `analysis`, `read_only`, `implementation`, `execute` |
+| `allowed_tools`, `allowed_paths`, `allowed_actions` | String arrays; actions are `read/write/execute/network`; an explicit empty array permits none |
+| `budget` | `{remaining: nonnegative number or null, unit: optional string}`; 0 blocks execution, null means unknown |
+| `stop_conditions`, `verification` | String arrays storing stop conditions and acceptance requirements; arbitrary natural language conditions are not automatically interpreted |
+
+Protection mode requires a trusted operator or host to issue rules first; a worker Agent cannot authorize itself by updating its task. The operator saves rules as JSON and uses the actual ID and write_version from the current task receipt:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" execution-approve --conversation demo --expected-task-id "ACTUAL_TASK_ID" --expected-write-version 1 --rules "D:\Policies\read-only.json"
+```
+
+Example rules (tool names and argument fields must match the actual host contract):
+
+```json
+{
+  "mode": "read_only",
+  "allowed_tools": ["Read"],
+  "tool_rules": {"Read": {"action": "read", "path_fields": ["file_path"]}},
+  "allowed_paths": ["Docs"],
+  "budget": {"remaining": null}
+}
+```
+
+Approval freezes the workspace and authorized resource roots. Tool resources resolve relative to the actual cwd, then are intersected with the frozen roots, task scope and assignment scope. Missing fields, out-of-scope resources, `..` or symbolic link escapes are rejected. Bounded structural checks cannot prove all side effects of arbitrary tools. Arbitrary Shell is rejected in read-only mode; permission is not guessed by parsing commands. Actions such as UE/PIE/training in FPS projects require a project adapter and are not hardcoded in this general plugin.
+
+A new user message invalidates the old execution turn. Exact matches of “继续 / 继续吧 / 接着 / continue / go on” retain the existing scope without expanding permission and require no extra model classifier. Duplicate messages with the same turn_id do not invalidate twice. `Interrupt` pauses rather than cancels the parent task. Clearing context also pauses it, while compaction restoration retains the current version. Task corrections, rule replacement and account changes invalidate old permissions; a worker Agent cannot bypass this by restoring state. For other new messages, protection mode conservatively requires renewed confirmation through the trusted entry point. Automatic wiring needs a host adapter; CLI is the currently available manual entry point.
+
+`PreToolUse` records authorization decisions and `PostToolUse` records observed results separately. Completion after a denial or contradictory terminal states for one operation are marked conflict and cannot become `tool_success`. This handles anomalous callbacks and does not claim the live host has emitted them. Explicit Pre bindings retain late results; results without Pre or assignment remain unassigned to a task. The plugin cannot recall an external command that has already started and does not provide a complete execution lease. The balance only consumes snapshots supplied by module eight or the host; atomic charging and dynamic monetary budgets are not implemented.
+
+Trusted approval also freezes actual path roots in rules, the task and existing assignment scopes. Checks intersect these roots so later directory link redirection cannot expand permission. A child task with the same approved scope inherits its parent's frozen roots. Other child scopes lacking a frozen basis, and old policies, require approval again. User rules and task fields cannot issue the internal frozen ledger.
+
+## Optional administrator executor
+
+`admin.enabled` and `admin.auto_publish` both default to `false`. When the executor is disabled, the administrator skill can be used to prepare candidates manually.
+
+To propose candidates automatically, configure a trusted Codex CLI path and enable `admin.enabled`. With scheduling disabled, the `Stop` Hook first reserves a dispatch slot persistently, then starts a separate background `admin-batch` short batch without waiting for the model. It does not start if there is no reviewable increment, dispatch or review is already in flight, or the quota is exhausted. With `scheduler.enabled`, the persistent scheduler described below arranges bounded continuation. Manual commands are also available:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" admin-once
+python scripts/learning.py --workspace "D:\Projects\my-project" admin-batch
+python scripts/learning.py --workspace "D:\Projects\my-project" reviews --problem CASE_ID
+```
+
+Use `admin-once --problem ID` to select a problem. The executor uses an isolated temporary directory, read-only sandbox, temporary session and structured output, setting `ALP_DISABLED=1` to avoid recursive learning. Automatic proposal does not mean automatic publication; publication still defaults to the trusted operator.
+
+The review snapshot and call reservation are committed in the same transaction; the model call runs outside it. Model reservations for the same project are mutually exclusive in the transaction, and global concurrency defaults to 1. Calls persist through reserved → launch_intent → started → terminal state. Launch intent is committed before process creation; timeouts, account changes or crashes during the launch window retain the quota as unknown. Before checking global budgets, expired reservations from all projects are safely reclaimed. Records strictly before launch intent, or processes confirmed not to have started, may release their reservation. Legacy active records cannot establish that a process never started and become orphaned_unknown after upgrade. Other tasks are not killed by process name.
+
+Review decisions are stored separately from call accounting. `reviews` and administrator `review_list` show reasons, structured missing evidence, and candidate/proposal references. Candidates correspond to candidate_ready, missing evidence to awaiting_evidence, and proposals to proposal_ready, independent of case recovery or product acceptance. Exact reuse checks business evidence and the actual compared knowledge, candidates, counterexample target, source health and review policy. Failed or unknown calls are not reused as successful decisions. A candidate produced from a case's own evidence does not cause a review loop; new relevant material can trigger review again. Publication or candidate changes first trigger bounded comparison, and no model call occurs if the actual review signature is unchanged.
+
+Before writing review results and at final commit, the same transaction rechecks the case, host, lease and actual comparison material. Changes roll back candidates, governance proposals and decision receipts while retaining the actual call terminal state and usage. After reconciling an unknown call, a trusted entry point can use `admin-retry CALL_ID --reason "Reason confirmed during reconciliation"` to explicitly permit one more review; the original record and quota remain. Repeated approval does not create unlimited retries. Truncated evidence is marked and blocks automatic publication.
+
+The scheduler, batch, single review and call claim share the same expected_epoch, rechecked in the claim transaction. An executor started before an account change cannot reclaim work under the new account version. Changes to concurrency, daily reported usage thresholds and per-call reservations affect admission only, not the review's semantic signature for the same material. Long log deduplication compares the complete redacted business digest before projection, preserving nested business IDs and excluding only top-level transport identities. Fully visible events do not resend their digest; old truncated events without digests cannot be inferred identical across events.
+
+Direct MCP and CLI packet reads also use a consistent snapshot. The whole packet budget covers the actual administrator prompt, task, evidence and comparison material. A complete set of 41 events that fits can be reviewed; the 41st is no longer dropped by a fixed count. A page reads at most 512 events and shows necessary ownership, role and current health. Comparison material uses only the remaining space. Insufficient budgets return incomplete, omitted_count, omission_reasons and bounded missing_refs explicitly; incomplete material still does not trigger automatic model calls.
+
+Administrators can paginate with `review_packet(problem_id, offset, expected_revision, max_chars, section)` or `packet ID --offset N --expected-revision R --max-chars N`. Subsequent pages must retain the same problem revision; changed material requires a fresh read. Use `section=task` for the full JSON of a large task. Exact historical knowledge for a counterexample is required regardless of keyword overlap, even if revoked. If the target does not fit, target_omitted and incomplete are explicit; paginate with `section=target` or `--section target`. If one evidence item cannot fit, increase max_chars according to the returned guidance rather than repeatedly reading a page that makes no progress. Paginated material and current health do not constitute new independent validation.
+
+`admin-once` scans at most ten problems. `admin-batch` defaults to scanning 20 cases in total, starting at most 2 reviews and a 180-second runtime budget, also subject to the global UTC daily call quota. Prechecks and exact deduplication consume no model call count. Oversized prechecks are persistently cached and blocking items bypassed. Changes to problem revision, required target, budget or prompt permit another precheck; optional candidate changes do not re-expand unchanged oversized material. No work causes exit, while invalid launch configuration stops the current batch. Runtime includes waiting for the model; process cleanup and database finalization may slightly exceed the runtime budget.
+
+Administrator MCP `propose_governance` can only propose publish/update/attach/revoke/dismiss_counterexample, not execute them. Trusted operators submit JSON with `governance-propose FILE` and execute with `governance-execute PROPOSAL_ID`. This checks case and target revisions, evidence and host boundaries, committing the governance change and idempotent receipt in one transaction. update must produce a real new revision; equivalent content should use attach. Publishing different knowledge does not resolve an old counterexample. A proposal in model output also remains a proposal.
+
+Even when `auto_publish` is enabled, it is limited to new operation/solution knowledge with no truncation and actual tool success evidence. Governance of existing knowledge, counterexamples, professional, pattern and unverified facts still require the trusted entry point. Tool success does not prove a domain conclusion correct.
+
+`max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits a single call's duration. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches. Characters and call counts are not tokens or costs, and the tool does not guarantee a strict token or dollar budget. Pending records remain when disabled or after failure. When background summary logs exceed 1 MiB, the next dispatch rotates them and keeps one old log. If an active Windows handle prevents rotation, the delay is recorded and dispatch continues. Single-review logs are constrained by timeout, not a hard disk-write limit. Cleanup currently guarantees only the direct review process; descendants started by the CLI require host-level constraints.
+
+Whether usage is reduced must be assessed from actual calls and task outcomes.
+
+`status` reports search counts, hits, injected entry counts, administrator state, global budget, scheduler waiting reasons and `knowledge_sync_dirty` count. Retrieval statistics include automatic injection and administrator queries. Cumulative search counts are operational observations, not a billing ledger. Module eight describes knowledge adoption and usage completeness.
+
+Live paid model calls and host Hook enablement require separate acceptance; local offline checks do not establish either.
+
+## Module seven: maturity and knowledge release batches
+
+`maturity` is separate from active state, body revision and validation_level. `knowledge-maturity ID --expected-revision N` reports current candidate/stable maturity, eligibility and missing requirements. Promotion uses the trusted entry point `knowledge-promote ID --expected-revision N --request-id REQUEST` and is not exposed through worker or administrator MCP. Current default rules permit only operation/solution knowledge: at least two independent tasks (repeated cases from one task do not increase the count; independent conversations are used when no task exists), actual current tool success and a valid contract for each source, no source changes or conflicts, and no pending or previously revoked counterexamples. professional/pattern need dedicated validation rules and cannot currently be promoted on tool success alone.
+
+Stable certification binds content, sources and counterexample state. Changes return effective maturity to candidate; new revisions, added sources, revocation and restoration require promotion again. Reads, bounded MCP previews and Hook summaries show maturity. Changes to exposed knowledge maturity use the existing notification chain. Historical certification does not establish user acceptance of the product.
+
+`knowledge-release-prepare` saves a compact manifest referencing IDs, body revisions, source/lifecycle versions, maturity, health and digest hashes without copying content or logs. `knowledge-release-commit RELEASE_ID` rechecks all active knowledge, source snapshots and the parent batch in one transaction; changes reject the commit and require preparation again. Completed batches cannot be rewritten, and repeated commits replay the result. `knowledge-releases` and `knowledge-release ID --offset N --limit N` paginate summaries and added/updated/removed differences.
+
+`knowledge-daily-release` combines preparation and commit into one explicit entry point. It publishes only when there are changes, skips otherwise and adds no administrator model call. Operators can invoke it explicitly or enable module eight's `scheduler.auto_release` to schedule published knowledge batches. It does not automatically turn candidates into published knowledge.
+
+`knowledge-release-rollback ID --expected-head CURRENT --request-id REQUEST` only rolls back the distribution manifest. Historical targets must still be the current active revisions with valid sources and no counterexamples; a new rollback batch is saved. It does not revive revoked knowledge, roll back content or revoke knowledge added later. Runtime retrieval still uses local active state, and the batch pointer is not yet a retrieval visibility filter. Knowledge batches are separate from software runtime copies managed by `release.py`.
+
+## Optional Hindsight integration
+
+Local SQLite full-text retrieval is the default. Hindsight is an optional synchronization target for published knowledge, not a prerequisite for successful local recording, and does not automatically become Codex's built-in library.
+
+Before enabling it, configure the URL, Bank and key environment variable and set the corresponding chunks naming strategy on the Hindsight side. The default `strategy` is `alp_chunks`; the target strategy is actually checked before each new client write. The legacy `chunks_strategy_verified` configuration flag is not taken as verification.
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" sync
+```
+
+Synchronization does not automatically promote candidate cases into published knowledge. The adapter checks the target Bank's chunks naming strategy read-only and requires automatic synthesis to be disabled, preventing synchronization from unexpectedly triggering extra analysis. It does not change Bank configuration.
+
+Synchronization failures are recorded separately from local save state; local knowledge remains usable. After a crash, expired leases are cleared and marked remote unknown. Late results receive separate receipts and cannot overwrite a state awaiting reconciliation. `sync --retry OPERATION_ID` retries explicitly: precheck failures known not to have sent anything consume no actual send attempts. Unknown writes must be reconciled first, with at most three actual attempts. Later not_sent failures cannot clear an earlier unknown, and changes to the original target configuration cannot automatically migrate it to a new Bank.
+
+Single, batch and scheduled dispatch retain the same host epoch and recheck it in the claim transaction and before network dispatch. If the account changes after a request starts, confirmation is recorded only as a late receipt; the queue remains blocked/unknown for reconciliation. The plugin cannot claim to have cancelled a write already received remotely.
+
+Synchronization payloads include the body revision, source state version, maturity, health/counterexample summary and active state. Complete sources participate in the digest hash, while output includes bounded references only. Source and disposition changes register increments programmatically. A new state may replace an older state known not to have been sent for the same knowledge, revision and target, while unknown operations remain for reconciliation. Old invalid revisions and new active revisions are sent separately. Remote documents are distinguished by immutable state digests; local receipts do not establish exactly-once remote delivery.
+
+`sync --backfill` enqueues each entry's latest revision, including revoked state, then synchronizes one item. The same target and state are not queued twice. `sync-list` and `sync-read OPERATION_ID` provide bounded operation IDs, target digests, attempts, diagnostics and receipts. `sync-batch --max-items N --max-seconds S` processes pending only; blocked items are not retried automatically. Budgets limit new operations and tighten HTTP timeouts without guaranteeing forced cancellation of running requests. Changing connection timeout does not change target identity; target changes require explicit backfill or an actual new state change. Successful responses retain verified fields only. There is no persistent distribution daemon, local revocation does not delete old remote copies, and Runtime does not yet use remote recall.
+
+## Practical automation boundaries
+
+- `injection_max_chars` limits injection and `event_max_chars` limits event projection; both are character limits.
+- The host Hook's `additionalContextLimit` uses an approximate token threshold, currently 2500, distinct from the character budgets above. Check host preview behavior when significantly increasing the injection character budget. See the [official Hook documentation](https://learn.chatgpt.com/docs/hooks).
+- `enforce_task_policy` defaults to off. With protection enabled, project tools need a current trusted execution policy and must satisfy state, action, resource and balance constraints. Standard learning MCP tools can restore state but cannot issue authorization. `PreToolUse` with a confirmed protection mode rejects input, configuration, release or database failures; damaged configuration without a fixed mode can only report unknown protection.
+- Untrusted Hooks, processes that cannot start, host timeouts, Hosted WebSearch and `write_stdin` that triggers no new `PreToolUse` are outside this rejection guarantee. Already running external tool processes are not stopped. See [official Hook coverage](https://learn.chatgpt.com/docs/hooks).
+- Child Agent knowledge exposure is separated by reliable `agent_id`. Tool events without that field cannot guarantee timely revocation notices for knowledge shown only to a child Agent; body reads still check the current active revision.
+- Unknown task goals or authorization are not interpreted as unrestricted execution. User corrections make the latest task version authoritative.
+- Commands in knowledge content do not obtain execution permission. Project workflows, UE, PIE, training and user acceptance follow the project's own conventions.
+- Skills and retrieval prompts provide soft constraints. Programs can check evidence references, versions and service roles; this tool cannot guarantee arbitrary domain conclusions or prevent every model omission.
+- Experience recording does not automatically generate project retrospective files or rewrite existing project documentation.
+
+## Module eight: scheduling, admission budgets and effect receipts
+
+`scheduler.enabled` defaults to off. When enabled, `Stop` and `SessionStart` check persistent work. A separate bounded runner is dispatched only when work is executable soon; one scheduler executor owns a given data directory. Work is merged by project and admin/release/sync, storing `next_due`, waiting reasons, leases, last execution and bounded summaries without copying cases or logs. Project rotation and a global call concurrency limit reduce one project's monopolization.
+
+`scheduler-tick` runs one round. `scheduler-run` continues subsequent batches within `max_run_seconds`. A batch that reaches its call cap stores the next execution time. An exhausted daily quota waits for the next UTC cycle; unchanged missing evidence waits for material changes, while unknown calls and blocked synchronization require explicit reconciliation. Startup failures use bounded backoff. Work persists after the runner exits and can resume through a later Hook or explicit command. The plugin installs no operating system scheduled service and cannot guarantee unattended wakeups throughout the day after exit.
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-status
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-tick --max-jobs 3 --max-seconds 60
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --all --max-seconds 300
+```
+
+`--all` only processes projects already registered in the same data directory. `scheduler.auto_release` defaults to off; when enabled, it packages published knowledge according to `release_interval_seconds`, skips unchanged state and records diagnostics when capacity is insufficient. `scheduler.sync_enabled` also defaults to off, and distribution additionally requires Hindsight to be enabled. Scheduling does not replace governance authorization or execute administrator proposals to revoke, modify or resolve counterexamples.
+
+Administrator budgets are separate from ordinary task balance snapshots and batch duration. `admin.max_concurrent_calls` defaults to 1. `admin.max_reported_tokens_per_day` defaults to null; when set, it reserves `token_reservation_per_call` first, then settles using complete reported input+output. Cached input is part of input usage and is not added twice. Unknown or partial reporting retains reservations. Known excess remains visible and does not reset after failure, retry or account switching. This is an admission threshold for reported usage; without a strict executor output cap, one call may still exceed its reservation. The local ledger does not represent subscription balance or an actual monetary bill.
+
+Call usage distinguishes complete/partial/unknown. Stream accumulation is separate from the most recent 16 diagnostic previews; cropping previews does not discard totals. Statistics track started/completed/failed/cancelled. Unreported, failed or contradictory turns do not become complete merely because another turn completed. Unknown terminal states retain reservations even when some completion logs exist. Read sizes and line lengths are bounded; exceeding a read boundary is partial, and missing data is not treated as zero. Usage observations append idempotent records. Empty supplemental usage does not overwrite existing numbers, and contradictory reports retain conflicts and conservative consumption. Different cumulative snapshots are not added repeatedly. Raw temporary call logs are not saved as long-term knowledge content.
+
+When a worker Agent actually uses exposed knowledge, it may call `knowledge_use` with the exact knowledge revision, task ID/revision/write_version, idempotency key and optional `operation_id`. Runtime checks the handle, current task or assignment, host version and actual exposure. A linked operation must have a Pre record from the same boundary, and exposure must precede the operation. Adoption remains reported; operation outcome and source health are recalculated at query time. Later conflict or revocation is reflected in observations. Adoption neither adds execution permission nor requires a retrospective document.
+
+`learning-effects --days 30` or `status.learning_effects` reports declared adoption and first unique exposures within the window, separating Hook and MCP. Dynamic operation/source state covers only the latest 200 declarations and includes sample size and truncation. Repeated exposure is deduplicated by exact task version, Agent, host, knowledge revision and delivery method; the window uses first exposure time. Exposure is not proof of reading, declared adoption does not prove causation, and tool success does not prove a domain conclusion or user acceptance. Until total ordinary task usage is integrated, no net savings percentage can be claimed.
+
+## CLI entry points
+
+Use `python scripts/learning.py --help` for actual arguments. Global `--home` and `--workspace` options precede the subcommand.
+
+| Subcommand | Purpose |
+|---|---|
+| `status` | Read runtime status |
+| `learning-effects`, `knowledge-use` | Windowed effect observations and short adoption declarations for the exact task |
+| `scheduler-status`, `scheduler-tick`, `scheduler-run` | Persistent work status, bounded single round and bounded continuation |
+| `session-bind` | Trusted local registration of an explicit conversation/subagent, returning a verifiable handle |
+| `account-changed` | Notify a login boundary change and invalidate old connections; supports notification ID deduplication |
+| `task` | Save an explicit task, with task ID/write_version concurrency checks, `--new-task` and `--resume` |
+| `execution-approve` | Trusted local issue of structured execution rules for the current task; not exposed through MCP |
+| `feedback` | Record problems and results; supports repeated `--event-ref` |
+| `problems`, `packet` | List problems and read review packets |
+| `propose` | Submit structured candidate JSON |
+| `publish`, `revoke`, `restore` | Trusted local publication, revocation and explicit restoration |
+| `knowledge-actions`, `knowledge-action` | Query lifecycle actions and idempotent receipts |
+| `knowledge-maturity`, `knowledge-promote` | Check maturity and promote against deterministic requirements |
+| `knowledge-release-prepare`, `knowledge-release-commit`, `knowledge-daily-release` | Prepare, recheck and commit knowledge batches; skip unchanged state |
+| `knowledge-releases`, `knowledge-release`, `knowledge-release-rollback` | Query knowledge manifests, differences and safe rollback |
+| `doctor`, `backup`, `rebuild-index` | On-demand storage checks, online backup and derived index rebuilding |
+| `search`, `read` | Search and read published knowledge |
+| `admin-once`, `admin-batch` | Single review and short background batches subject to several budgets |
+| `reviews`, `admin-retry` | Query persistent receipts and explicitly permit one review after a failed or unknown call |
+| `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |
+| `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
+| `serve` | Start an MCP service with a specified role |
+| `install` | Create a separate installation copy for later enablement |
+
+## 0.11.1 validation status (2026-10-11)
+
+The full offline suite passed 649 tests with no failures, errors or skips in 128.382 seconds, adding 9 tool-name protection regressions to the 640 tests in 0.11.0. Coverage includes an initially missing name, Post-only observations, later missing names, legacy NULL ledgers, convergence of replay with two complete historical names, three legacy event key/digest formats, small budgets, source invalidation, idempotency and late callbacks across account boundaries. Independent review reconfirmed that historical conflicts cannot support a new tool_success candidate. The original ten review fixes, eight modules, CLI/MCP, installation export and Windows encoding checks continue to pass, covering frozen path roots, scheduler/synchronization account races, complete conditions pagination, long queries, recovery linking, business digests, conservative accounting and schema10 → 11 rollback. Checks use temporary SQLite databases, in-memory reviewers and controlled processes, not live models or services.
+
+The local environment was Windows, Python 3.12.14 and Codex CLI 0.152.1. Native plugin catalog loading and installation used isolated CODEX_HOME only. Seventy-one Python files passed Python 3.10 syntax checks. Actual Python 3.10, Linux and macOS regressions were not run on this local machine. The published 0.11.1 [four-job GitHub Actions matrix](https://github.com/swenbo1-web/agents-learning/actions/runs/38135716974) passed regressions and wheel builds on Windows/Linux × Python 3.10/3.12. Each job discovered 649 tests. Each Windows job skipped one native loading check requiring Codex CLI; each Linux job skipped that check and the Windows-specific Hook check (two skips). CI does not replace local native integration or live desktop host acceptance.
+
+Example configuration matches runtime defaults. Static checks of original skill header fields and required content passed. The auxiliary `quick_validate.py` did not run successfully because the current interpreter lacks PyYAML; the user's environment was not changed to address it.
+
+Persistent semantic clustering, dedicated professional/pattern validation, all-day service wakeups, ordinary task usage and monetary billing integration are not yet implemented. Stable maturity, publication, scheduling and effect observations follow the explicit rules above.
+
+Live desktop Hook trust, automatic account event wiring, parent/child MCP connection lifecycle and project workflows still require host acceptance. Current tests do not modify the FPS project, perform login switches, enable live models or change the current user's plugin configuration.
+
+## Open source and releases
+
+The project uses the [MIT license](LICENSE). Source, wheel, exported plugin and fixed runtime copies retain the same license file.
+
+Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The first release is the 0.11.1 prerelease, with source ZIP and a portable wheel as GitHub assets. A local plugin directory generated by `install` contains absolute interpreter and fixed runtime paths; other machines should export using their own paths. CI runs isolated offline checks only and enables no live Hooks, models, background services or Hindsight.
+
+Subsequent documentation updates are published on repository `main`; the Chinese version is [README.md](README.md) and the English version is this file. The prerelease tag and assets correspond to their original release commit. Use the repository documentation for language navigation and the latest architecture description.
