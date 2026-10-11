@@ -24,6 +24,8 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 
 ## 84 秒演示
 
+中文版采用“晓晓”神经网络女声，配合自然口播与同步字幕。
+
 [![隔离演示：导出、记录工具问题、发布知识、新会话检索](assets/demo-preview-zh.gif)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4)
 
 [中文视频（MP4）](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4) · [English video](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4) · [中文字幕（SRT）](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.srt)
