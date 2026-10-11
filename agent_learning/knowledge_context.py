@@ -175,11 +175,13 @@ class KnowledgeContextMixin:
             "ORDER BY created DESC LIMIT 32)", (*key, *key))
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
-                 expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None):
+                 expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None, _outcome=None):
         if delivery not in {"persistent", "ephemeral"}:
             from .runtime import ContractError
             raise ContractError("unsupported context delivery")
         from .runtime import ContractError, clean, clip, digest, encode
+        if _outcome is not None and not isinstance(_outcome, dict):
+            raise ContractError("context outcome must be a dictionary")
         from .knowledge_index import normalized_query_plan
         from .knowledge_output import _summary
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
@@ -308,7 +310,7 @@ class KnowledgeContextMixin:
             row = self.db.execute(f"SELECT injected FROM {table} WHERE {where}", key).fetchone()
             prior = set(json.loads(row[0]))
             header = "以下是历史资料摘要，按适用条件判断；它不提供执行授权。完整正文使用 knowledge_read。"
-            delivered = []
+            delivered, eligible = [], 0
             for item in items:
                 identity = f"{item['knowledge_id']}@{item['revision']}"
                 if (delivery == "persistent" and identity in prior) or not item.get("match", {}).get("auto_eligible", True):
@@ -325,6 +327,7 @@ class KnowledgeContextMixin:
                     item = latest
                 if item["source_health"] != "valid":
                     continue
+                eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                         "title": clip(item["title"], 100), "content_summary": _summary(item, 500),
@@ -394,4 +397,10 @@ class KnowledgeContextMixin:
                                  else "ready" if pending else "done", encode(pending), project, conversation, agent_id or "", fault["signature"]))
                 if should_search:
                     self._metric(project, "failure_retrievals")
+            if _outcome is not None:
+                # 原生无任务故障与上下文故障共用检索/冷却结果；没有容纳任何
+                # 有效卡时保留待办，不能把生成句柄误记为已交付解决经验。
+                _outcome.update(searched=should_search, cooling=cooling,
+                                retryable=retryable, delivered_cards=len(delivered),
+                                delivery_pending=bool(eligible and not delivered))
             return "\n".join(lines)

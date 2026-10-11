@@ -26,6 +26,7 @@ MAX_PAGE = 50
 MAX_OFFSET = 10000
 MAX_FIELD_PAGE = 8000
 MAX_RESPONSE_BYTES = 256000
+MAX_DISCARD_BYTES = 8192
 
 
 def _connection(database):
@@ -258,6 +259,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(503, {"error": "stored data does not match the browser contract"})
 
     def _write_denied(self):
+        # Small rejected bodies must be consumed before closing the socket;
+        # unread bytes can reset TCP and hide the 405 response on Windows.
+        lengths = self.headers.get_all("Content-Length") or []
+        if len(lengths) == 1 and not self.headers.get_all("Transfer-Encoding"):
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                length = -1
+            if 0 < length <= MAX_DISCARD_BYTES:
+                timeout = self.request.gettimeout()
+                try:
+                    self.request.settimeout(0.25)
+                    self.rfile.read(length)
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    self.request.settimeout(timeout)
         if self._boundary():
             self._send(405, {"error": "browser is read-only"})
         self.close_connection = True

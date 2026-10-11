@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Retain project experience with bounded retrieval, evidence-based knowledge governance, a local browser and paired task evaluation.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",

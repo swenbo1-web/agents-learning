@@ -1,7 +1,9 @@
 """Real local HTTP and temporary SQLite browser checks; no user database access."""
 import contextlib
 import http.client
+import io
 import json
+from email.message import Message
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -9,7 +11,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from agent_learning.knowledge_browser import (HTML, JAVASCRIPT, _ReadModel,
+from agent_learning.knowledge_browser import (HTML, JAVASCRIPT, _ReadModel, _Handler, MAX_DISCARD_BYTES,
     browser_projects, make_browser_server, resolve_browser_project)
 from agent_learning.runtime import ContractError, Runtime
 
@@ -339,6 +341,31 @@ class KnowledgeBrowserTests(unittest.TestCase):
         self.assertNotIn(str(self.database).encode(), data)
         self.assertNotIn(b"Traceback", data)
         self.assertEqual(self.request("/api/stats")[0], 200)
+
+
+class DeniedRequestBodyTests(unittest.TestCase):
+    def test_small_rejected_body_is_discarded_before_response_with_fixed_bounds(self):
+        for length, transfer, expected in ((2, None, 2), (MAX_DISCARD_BYTES + 1, None, 0), (2, "chunked", 0)):
+            with self.subTest(length=length, transfer=transfer):
+                handler = _Handler.__new__(_Handler)
+                handler.headers = Message()
+                handler.headers["Content-Length"] = str(length)
+                if transfer:
+                    handler.headers["Transfer-Encoding"] = transfer
+                handler.rfile = io.BytesIO(b"{}")
+                from unittest.mock import Mock
+                handler.request = Mock()
+                handler.request.gettimeout.return_value = 5
+                handler._boundary = lambda: True
+                responses = []
+                handler._send = lambda status, body: responses.append((status, handler.rfile.tell()))
+                handler._write_denied()
+                self.assertEqual(responses, [(405, expected)])
+                self.assertTrue(handler.close_connection)
+                if expected:
+                    self.assertEqual([call.args[0] for call in handler.request.settimeout.call_args_list], [0.25, 5])
+                else:
+                    handler.request.settimeout.assert_not_called()
 
 
 if __name__ == "__main__":

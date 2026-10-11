@@ -196,6 +196,48 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertFalse(self.home.exists())
         self.assertFalse(self.store.exists())
 
+    def test_file_home_or_parent_rejected_before_initial_export(self):
+        blocker = self.root / "existing data file"
+        blocker.write_bytes(b"preserve user file")
+        for home in (blocker, blocker / "new knowledge", blocker / "nested/new knowledge"):
+            with self.subTest(home=home), self.assertRaisesRegex(ContractError, "must be directories"):
+                install(self.target, runtime_store=self.store, host="antigravity",
+                        workspace=self.workspace, home=home)
+            self.assertEqual(blocker.read_bytes(), b"preserve user file")
+            self.assertFalse(self.target.exists())
+            self.assertFalse(self.store.exists())
+            self.assertFalse(self.home.exists())
+
+    def test_file_home_or_parent_rebind_preserves_existing_installation(self):
+        first = self.initial()
+        before_target, before_store = snapshot(self.target), snapshot(self.store)
+        blocker = self.root / "existing data file"
+        blocker.write_bytes(b"preserve user file")
+        for home in (blocker, blocker / "new knowledge", blocker / "nested/new knowledge"):
+            with self.subTest(home=home), self.assertRaisesRegex(ContractError, "must be directories"):
+                install(self.target, upgrade=True, host="antigravity", home=home)
+            self.assertEqual(snapshot(self.target), before_target)
+            self.assertEqual(snapshot(self.store), before_store)
+            self.assertEqual(blocker.read_bytes(), b"preserve user file")
+            self.assertEqual(read_json(self.target / "runtime-release.json")["release_id"], first["release_id"])
+            self.assertFalse(list(self.root.glob(".alp-backup-*")))
+            self.assertFalse(self.home.exists())
+
+    def test_rebind_to_project_inside_export_preserves_installation_and_project(self):
+        self.initial()
+        nested = self.target / "personal project"
+        nested.mkdir()
+        source = nested / "source.txt"
+        source.write_bytes(b"preserve project file")
+        before_target, before_store = snapshot(self.target), snapshot(self.store)
+        with self.assertRaisesRegex(ContractError, "outside export and runtime"):
+            install(self.target, upgrade=True, host="antigravity", workspace=nested)
+        self.assertEqual(snapshot(self.target), before_target)
+        self.assertEqual(snapshot(self.store), before_store)
+        self.assertEqual(source.read_bytes(), b"preserve project file")
+        self.assertFalse(list(self.root.glob(".alp-backup-*")))
+        self.assertFalse(self.home.exists())
+
     def test_exported_native_hook_and_mcp_share_verified_utf8_session_and_fail_closed(self):
         """执行实际导出入口，覆盖Windows命令包装、中文stdio和默认审批边界。"""
         self.initial()

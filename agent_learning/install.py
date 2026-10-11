@@ -247,6 +247,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning" if os.environ.get("LOCALAPPDATA")
                         else Path.home() / ".local/share/agent-learning")
         home = safe_path(home if home is not None else os.environ.get("ALP_HOME") or default_home)
+        if any(path.exists() and not path.is_dir() for path in (home, *home.parents)):
+            raise ContractError("Antigravity knowledge home and its existing parents must be directories")
         hook_mode = hook_mode or "observe"
     store = safe_path(runtime_store if runtime_store is not None else _default_store())
     protected = [package]
@@ -260,7 +262,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
     if host == "antigravity":
-        if (workspace == target or workspace == store or store in workspace.parents
+        if (workspace == target or target in workspace.parents or workspace == store or store in workspace.parents
                 or any(_overlaps(home, path) for path in (*protected, target, store))):
             raise ContractError("Antigravity bindings must keep project and knowledge data outside export and runtime directories")
     try:

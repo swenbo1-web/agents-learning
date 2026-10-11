@@ -479,6 +479,66 @@ class AntigravityAdapterTests(unittest.TestCase):
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM antigravity_receipts").fetchone()[0], 0)
 
 
+    def test_model_diagnostics_do_not_repeat_stop_or_invalidation(self):
+        self.stop(modelName="model-A")
+        self.r.task_update(self.p, self.c, "new explicit task", new_task=True)
+        before = self.r.task(self.p, self.c)["execution_epoch"]
+        self.assertEqual(self.stop(modelName="model-B"), {"decision": "stop"})
+        self.assertEqual(self.r.task(self.p, self.c)["execution_epoch"], before)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events WHERE type='AntigravityStop'").fetchone()[0], 1)
+
+    def test_model_diagnostics_do_not_duplicate_invocation_or_post(self):
+        first = self.invocation(modelName="model-A")
+        self.assertEqual(self.invocation(modelName="model-B"), first)
+        self.tool("PostToolUse", error="compiler error", modelName="model-A")
+        self.tool("PostToolUse", error="compiler error", modelName="model-B")
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM antigravity_receipts").fetchone()[0], 2)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events WHERE type='PostToolUse'").fetchone()[0], 1)
+
+    def test_actual_secret_input_change_denies_reused_pre_step(self):
+        self.enforce()
+        self.approve()
+        def args(secret):
+            return {"Cwd": str(self.workspace), "CommandLine": "check --password=" + secret}
+        self.assertEqual(self.tool("PreToolUse", arguments=args("first-fixture-secret"))["decision"], "ask")
+        self.assertEqual(self.tool("PreToolUse", arguments=args("second-fixture-secret"))["decision"], "deny")
+        self.assertEqual(self.r.db.execute("SELECT conflict FROM antigravity_steps").fetchone()[0], 1)
+        events = self.r.db.execute("SELECT outcome,payload FROM events WHERE type='PreToolUse' ORDER BY created").fetchall()
+        self.assertEqual([row[0] for row in events], ["unknown", "denied"])
+        self.assertNotIn("fixture-secret", str([row[1] for row in events]))
+
+    def test_actual_secret_input_change_records_conflicting_post(self):
+        for secret in ("first-fixture-secret", "second-fixture-secret"):
+            self.tool("PostToolUse", arguments={"Cwd": str(self.workspace), "CommandLine": "check --password=" + secret})
+        events = self.r.db.execute("SELECT outcome,payload FROM events WHERE type='PostToolUse' ORDER BY created").fetchall()
+        self.assertEqual([row[0] for row in events], ["call_completed", "conflict"])
+        self.assertEqual(self.r.db.execute("SELECT state FROM operations").fetchone()[0], "conflict")
+        self.assertNotIn("fixture-secret", str([row[1] for row in events]))
+
+    def test_legacy_native_identity_requires_reset_without_replaying_stop(self):
+        item = self.publish()
+        self.invocation()
+        self.r.db.execute("UPDATE antigravity_receipts SET raw_digest=substr(raw_digest,4)")
+        before = self.r.task(self.p, self.c)["execution_epoch"]
+        self.enforce()
+        self.assertEqual(self.tool("PreToolUse")["decision"], "deny")
+        self.assertEqual(self.stop(), {"decision": "stop"})
+        self.assertEqual(self.r.task(self.p, self.c)["execution_epoch"], before)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events WHERE type='AntigravityStop'").fetchone()[0], 0)
+        self.assertIn("trusted antigravity-session-reset", json.dumps(self.invocation(1)))
+        reset_session(self.r, self.workspace, "native-chat")
+        self.assertIn("context_handle=", json.dumps(self.invocation()))
+        self.assertEqual(self.r.read(self.p, item["knowledge_id"])["revision"], item["revision"])
+
+    def test_native_reset_rejects_codex_runtime_before_any_write(self):
+        other = Runtime(Path(self.temp.name) / "codex-home", config={})
+        self.addCleanup(other.close)
+        before = other.db.total_changes
+        with self.assertRaisesRegex(ContractError, "antigravity_host_required"):
+            reset_session(other, self.workspace, "codex-chat")
+        self.assertEqual(other.db.total_changes, before)
+
+
 class AntigravityDispatcherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -549,6 +609,82 @@ class AntigravityDispatcherTests(unittest.TestCase):
         output, _ = self.dispatch(b'{"conversationId":"secret-password"}')
         self.assertEqual(output["decision"], "deny")
         self.assertNotIn("secret-password", json.dumps(output))
+
+
+class NativeFaultRetryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="alp-native-fault-retry-")
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = Path(self.temp.name) / "project"
+        self.workspace.mkdir()
+        self.r = Runtime(Path(self.temp.name) / "home", config={}, host="antigravity")
+        self.addCleanup(self.r.close)
+        self.p = self.r.project(self.workspace)
+        self.c = self.r.host_conversation("taskless-chat")
+        self.adapter = AntigravityAdapter(self.r, self.workspace)
+
+    def raw(self, **fields):
+        return {"conversationId": "taskless-chat", "workspacePaths": [str(self.workspace)], **fields}
+
+    def fault(self, step, error):
+        return self.adapter.handle("PostToolUse", self.raw(stepIdx=step, error=error,
+            toolCall={"name": "run_command", "args": {"Cwd": str(self.workspace)}}))
+
+    def invocation(self, number, steps=2):
+        return self.adapter.handle("PreInvocation", self.raw(invocationNum=number, initialNumSteps=steps))
+
+    def fault_states(self):
+        return [row[0] for row in self.r.db.execute("SELECT state FROM antigravity_faults ORDER BY created")]
+
+    def test_retryable_taskless_fault_retains_priority_and_cooling(self):
+        self.fault(0, "fault-A")
+        self.fault(1, "fault-B")
+        queries = []
+        def search(project, query, **kwargs):
+            queries.append(query)
+            return {"items": [], "retrieval": {"retryable": len(queries) == 1, "retry_after_seconds": 5}}
+        with patch.object(self.r, "search", side_effect=search):
+            self.invocation(0)
+            self.assertEqual(self.fault_states(), ["pending", "pending"])
+            self.invocation(1)
+            self.assertEqual(len(queries), 1)
+            self.assertEqual(self.fault_states(), ["pending", "pending"])
+            signature = self.r.db.execute("SELECT retrieval_signature FROM contexts WHERE conversation=?", (self.c,)).fetchone()[0]
+            deadline = float(signature.split(":", 2)[1])
+            with patch("agent_learning.knowledge_context.time.time", return_value=deadline + 1):
+                self.invocation(2)
+                self.assertEqual(self.fault_states(), ["queried", "pending"])
+                self.invocation(3)
+        self.assertEqual(queries[0], queries[1])
+        self.assertIn("fault-A", queries[1])
+        self.assertIn("fault-B", queries[2])
+        self.assertEqual(self.fault_states(), ["queried", "queried"])
+        self.assertIsNone(self.r.task(self.p, self.c))
+
+    def test_taskless_result_waits_for_budget_without_repeating_search(self):
+        problem = self.r.feedback(self.p, self.c, "compiler error", "operation")
+        packet = self.r.review_packet(self.p, problem["id"])
+        candidate = self.r.submit_candidate(self.p, problem_id=problem["id"], problem_revision=problem["revision"],
+            title="compiler error", content="Check compiler paths", category="operation",
+            applicability="Recorded compiler environment", limitations="Reported only", validation_level="reported",
+            evidence_refs=[item["id"] for item in packet["events"]])
+        published = self.r.publish(self.p, candidate["candidate_id"])
+        item = self.r.read(self.p, published["knowledge_id"])
+        item["match"] = {"auto_eligible": True, "matched_terms": ["compiler"]}
+        self.r.config["injection_max_chars"] = 128
+        self.fault(0, "compiler error")
+        with patch.object(self.r, "search", return_value={"items": [item], "retrieval": {"retryable": False}}) as search:
+            first = self.invocation(0, 1)
+            self.assertNotIn(published["knowledge_id"], json.dumps(first))
+            self.assertEqual(self.fault_states(), ["pending"])
+            self.invocation(1, 1)
+            self.assertEqual(search.call_count, 1)
+            self.assertEqual(self.fault_states(), ["pending"])
+            self.r.config["injection_max_chars"] = 2400
+            delivered = self.invocation(2, 1)
+        self.assertIn(published["knowledge_id"], delivered["injectSteps"][0]["ephemeralMessage"])
+        self.assertEqual(self.fault_states(), ["queried"])
+        self.assertIsNone(self.r.task(self.p, self.c))
 
 
 if __name__ == "__main__":

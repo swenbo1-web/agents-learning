@@ -82,10 +82,11 @@ def _within(path, root):
 
 def reset_session(runtime, workspace, native_conversation):
     """受信 CLI 专用；编号重置须使旧句柄、执行许可和查询缓存失效。"""
+    if runtime.host != "antigravity":
+        raise ContractError("antigravity_host_required")
     project = runtime.project(_absolute(str(workspace)))
     conversation = runtime.host_conversation(native_conversation)
     with runtime.transaction():
-        install_storage(runtime)
         runtime.bind_session(project, conversation)
         runtime.db.execute("INSERT OR IGNORE INTO antigravity_trajectories(project,conversation) VALUES(?,?)", (project, conversation))
         runtime.db.execute("UPDATE antigravity_trajectories SET generation=generation+1,reset_generation=generation+1,"
@@ -113,8 +114,6 @@ class AntigravityAdapter:
             raise ContractError("antigravity_host_required")
         # 由固定入口选择正常守卫与故障策略，不让原生 JSON 覆盖。
         runtime.config["enforce_task_policy"] = self.mode == "enforce"
-        with runtime.transaction():
-            install_storage(runtime)
 
     def _epoch(self):
         return self.runtime.session_epoch()
@@ -230,7 +229,8 @@ class AntigravityAdapter:
 
     def _step(self, project, conversation, observed, trajectory, epoch):
         index = observed["stepIdx"]
-        fingerprint = digest(clean(observed["toolCall"]))
+        # 脱敏只应用于记录正文；实际输入变化必须仍能触发同序号冲突。
+        fingerprint = digest(observed["toolCall"])
         generation = trajectory["generation"]
         row = self.runtime.db.execute("SELECT * FROM antigravity_steps WHERE project=? AND conversation=? "
                                       "AND generation=? AND step_index=?", (project, conversation, generation, index)).fetchone()
@@ -326,12 +326,24 @@ class AntigravityAdapter:
             return {}
         project, conversation, mounted = self._common(raw)
         observed = self._observable(event, raw)
-        raw_digest = digest(clean(observed))
+        # 诊断元数据不是事件身份；仅持久化不可逆摘要，正文仍经 clean。
+        raw_digest = "v2:" + digest({key: value for key, value in observed.items() if key != "modelName"})
         r = self.runtime
         with r.transaction():
             epoch = self._epoch()
             # 在缓存查找前处理计数回退，旧 PreInvocation 不能绕过轨迹失效。
             trajectory = self._trajectory(project, conversation, observed)
+            # 0.14.0 的摘要先脱敏，无法可靠恢复原输入或忽略旧 modelName。
+            # 同一代旧回执需要显式重置，不能把升级当作新事件而重放副作用。
+            legacy = r.db.execute("SELECT 1 FROM antigravity_receipts WHERE project=? AND conversation=? "
+                                  "AND generation>=? AND raw_digest NOT LIKE 'v2:%' LIMIT 1",
+                                  (project, conversation, trajectory["reset_generation"])).fetchone()
+            if legacy:
+                if event == "PreInvocation":
+                    return {"injectSteps": [{"ephemeralMessage": "Agent Learning: native event identity was upgraded. "
+                        "A trusted antigravity-session-reset is required for this conversation before resuming plugin context."}]}
+                return self._deny("native_identity_upgrade_requires_trusted_reset") if event == "PreToolUse" else (
+                    {"decision": "stop"} if event == "Stop" else {})
             event_key = digest([epoch, trajectory["generation"], raw_digest])
             old = r.db.execute("SELECT * FROM antigravity_receipts WHERE project=? AND conversation=? AND event_key=?",
                                (project, conversation, event_key)).fetchone()
@@ -389,13 +401,15 @@ class AntigravityAdapter:
             access = r.register_context(project, conversation, expected_epoch=epoch, _phase_guard=phase_guard)
             fault = r.db.execute("SELECT signature,query FROM antigravity_faults WHERE project=? AND conversation=? AND host_epoch=? AND state='pending' "
                                  "ORDER BY created LIMIT 1", (project, conversation, epoch)).fetchone()
+            outcome = {}
             text = r._context(project, conversation, query=fault["query"] if fault else "", context_handle=access["context_handle"],
-                              expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard)
+                              expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard, _outcome=outcome)
             if fault:
                 with r.transaction():
                     phase_guard()
-                    r.db.execute("UPDATE antigravity_faults SET state='queried' WHERE project=? AND conversation=? AND signature=?",
-                                 (project, conversation, fault["signature"]))
+                    pending = outcome.get("retryable") or outcome.get("cooling") or outcome.get("delivery_pending")
+                    r.db.execute("UPDATE antigravity_faults SET state=? WHERE project=? AND conversation=? AND signature=?",
+                                 ("pending" if pending else "queried", project, conversation, fault["signature"]))
             output = {"injectSteps": [{"ephemeralMessage": text}]} if text else {}
         elif event == "Stop":
             output, phase_task_signature = self._stop(project, conversation, observed, event_key, phase_guard)
@@ -431,7 +445,8 @@ class AntigravityAdapter:
                 if event == "PostToolUse":
                     # error 空只证明原生回调完成；没有退出码或后台结果，绝不宣称成功。
                     normalized["tool_response"] = {"isError": bool(observed["error"]), "error": observed["error"]}
-                result = r.handle_hook(normalized, context_delivery=False, expected_epoch=epoch, _phase_guard=phase_guard)
+                result = r.handle_hook(normalized, context_delivery=False, expected_epoch=epoch, _phase_guard=phase_guard,
+                                       _adapter_event_key=event_key, _adapter_conflict=conflict)
                 if event == "PreToolUse":
                     denial = result.get("hookSpecificOutput", {})
                     if conflict or denial.get("permissionDecision") == "deny":

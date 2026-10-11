@@ -6,9 +6,262 @@
 
 **Help Agents retain project experience and find evidence-backed guidance for the next task.**
 
-Current source: **0.14.0** (dual host adapter, unreleased) · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published 0.13.0 and downloads](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
+Current source: **0.14.1** (Codex / Antigravity) · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published 0.13.0 and downloads](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning builds maintainable knowledge memory for long-running projects. It retrieves relevant experience at supported task events, records tool outcomes, lets an administrator organize candidates, and makes knowledge with conditions, sources and revisions available to later Agents. Workers focus on their current task while experience remains reusable across conversations.
+
+**Install: [Antigravity](#install-in-antigravity-native-plugin) · [Codex desktop / CLI](#install-in-codex-desktop-and-cli) · [Complete architecture](#complete-architecture)**
+
+These installation steps use the current **0.14.1** source on `main`. Published downloads remain at **0.13.0** and do not include Antigravity. If both hosts share a knowledge database, update both installations from the current source.
+
+## Install in Antigravity (native plugin)
+
+### 1. Get the source and export
+
+Installation path: **get the source → export for your project → load in Antigravity → verify in a new chat**. You need Git, Python **3.10+**, and Antigravity with native plugin and Hook support. CLI installation also requires `agy plugin`. Obtain the current source first; if you already have this checkout, enter its directory and skip `git clone`:
+
+```powershell
+git clone https://github.com/swenbo1-web/agents-learning.git
+cd agents-learning
+python --version
+agy plugin --help
+```
+
+These are Windows PowerShell examples. `python` must resolve to your actual Python 3.10+ interpreter. If it is not on PATH, replace the leading `python` with `& "C:\your-python-directory\python.exe"`; `&` is the PowerShell call operator. The installer records the actual interpreter's absolute path, so retain that interpreter after export.
+
+Replace `D:\Projects\my-project` with an **existing project's absolute path**, `D:\AgentLearningData` with a **knowledge data directory outside the source and plugin directories**, and `D:\Plugins\agent-learning-antigravity` with a new export destination. Then run:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
+```
+
+For Codex, export to a separate directory using [the Codex steps below](#install-in-codex-desktop-and-cli). Both profiles share the same repository and fixed runtime implementation.
+
+An initial Antigravity export requires an explicit existing workspace. Omitting `--home` uses the same default as the local Runtime. Both MCP and Hooks bind these absolute paths. Export creates no knowledge database and changes no host configuration. For the package entry, replace `scripts/learning.py` with `-m agent_learning.cli`; on macOS/Linux use your own Python and absolute paths.
+
+The native export contains root `plugin.json`, `mcp_config.json`, `hooks.json`, rules and worker/admin skills. Codex keeps its own manifest and entry contracts. Installation receipts record `target_host`; upgrades reject overwriting one host's export with the other profile.
+
+### 2. Load and verify
+
+The Antigravity CLI can install the generated local directory:
+
+```powershell
+agy plugin install "D:\Plugins\agent-learning-antigravity"
+agy plugin list
+```
+
+Antigravity IDE/2.0 support workspace `.agents/plugins/` directories and global `~/.gemini/config/plugins/`. For a project installation, change the export destination above to `D:\Projects\my-project\.agents\plugins\agent-learning`, reload the project, and check that MCP, rules, skills and Hooks are enabled. This export binds one workspace; loading it globally into another workspace is rejected, so prefer project installation. The CLI copies plugins into `~/.gemini/antigravity-cli/plugins/` when you run `agy plugin install`. After upgrading the export, rerun that installation command and restart/reload the host; updating the directory it copied from is insufficient. See the [official plugin guide](https://antigravity.google/docs/plugins/). The repository root contains both sets of resource templates and must be exported locally before installation.
+
+In a fresh conversation, ask the agent to check the project and `host_scope=antigravity:default` through `learning_status`, pass the current PreInvocation `context_handle` to `session_context`, verify `context_bound=true`, then register the current task goal.
+
+An Antigravity MCP process may serve several chats. Every stateful call must explicitly supply the current handle; omitted handles never inherit another chat. Supply it to knowledge queries to record exposure too. Without a verified handle, only project queries are available. Observe mode omits PreToolUse, so native chat origin on every MCP write still relies on correct handle use and rules. Enforce mode adds a native origin check in the pre-tool callback.
+
+### 3. Host differences and evidence
+
+| Workflow | Codex | Initial Antigravity adapter |
+|---|---|---|
+| Automatic context | Supported user prompt, session and restoration events | PreInvocation using registered goals, recent queries and actual errors |
+| Current user prompt | Supported Hook prompt | Public callback does not promise prompt text; register it through task_update |
+| Context delivery | Track previous injections and avoid repeated text | Render bounded ephemeralMessage from cached references each invocation |
+| Tool observations | Classify actual responses | Nonempty PostToolUse.error is failure; empty means call_completed only |
+| Execution checks | Connected rules and trusted approvals | Observe omits PreToolUse; enforce returns ask on passing checks and deny on rejection |
+| Stop | Registered delivery and public output | Records loop stopping; fullyIdle does not prove user acceptance |
+| Compaction, children, login | Supported events and explicit entry points | No invented equivalent events; ambiguous numbering needs trusted reset |
+| Administrator | Optional Codex CLI executor and separate admin tools | Shared governance queue; no automatic Antigravity model executor yet |
+
+The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). It does not scan transcripts, artifacts or private model reasoning. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
+
+Multi-workspace callbacks must mount the bound project. Tool resources verify attribution; uncertain callbacks stay unassociated, and enforce rejects them. Native tool argument mappings are distinct from Codex. For example, run_command is command execution and cannot bypass read-only protection through a rule labeling it as a read.
+
+Without a reliable new-user-prompt boundary, Hooks cannot automatically establish that a new requirement replaces the previous task. Workers must update the goal/scope when requirements change. Enforcement checks the registered contract and trusted approval; it does not establish authorization for every native user prompt. Native installations ignore an inherited ALP_CONTEXT_HANDLE and require the current Hook handle on each stateful request.
+
+### 4. Explicit enforcement, reset and account change
+
+From a trusted terminal, update the export to enable enforcement:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
+```
+
+The adapter never returns automatic allow or permissionOverrides. The existing trusted execution-approve entry must still authorize the current task with native tool names and argument fields. ask follows the host's approval settings. Host Deny composition, timeout, killed processes and malformed responses have not been accepted in a live host; universal hard rejection on failure is not established.
+
+When counters regress, repeat or conflict without a reliable trajectory ID, the adapter does not invent a new execution identity. Reset a specific native conversation from a trusted terminal:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "native-conversation-id"
+# After a confirmed real login account change
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "stable-id-for-this-notification"
+```
+
+Reset pauses the task and invalidates old handles and execution approvals. A later Hook binds again; explicitly resume and reapprove the task. Reset is CLI-only, not a worker MCP tool. Unknown late events cannot strengthen evidence. Account notifications require a trusted source; the plugin reads no login credentials and does not automatically detect Antigravity account changes.
+
+### 5. Shared knowledge, upgrades and administrators
+
+0.14.1 corrects native event identity: model names are diagnostic only, actual input changes trigger conflict detection, and recorded event bodies remain redacted. If a conversation already has 0.14.0 receipts, use the `antigravity-session-reset` entry above after upgrading, then resume the task and renew execution approval. Old hashes cannot reliably recover actual inputs, so old events are not automatically replayed. Knowledge and source records remain available.
+
+The same ALP_HOME/--home and project mapping share knowledge, candidates, sources and governance queues. Conversation identities are namespaced by host. Changing one host's account preserves the other host's worker sessions, while shared governance calls are fenced and unknown usage stays reserved for reconciliation.
+
+If Codex uses its default data directory, omit --home on the Antigravity export to use that default too. If choosing a custom path as in the example, configure the Codex host process with the same ALP_HOME. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
+
+An explicitly configured admin interface can review Antigravity cases, and the existing compatible executor can process the shared queue. An admin skill is guidance; the default native MCP role remains worker. Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
+
+Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
+
+Before sharing a database with existing 0.13 installations, stop the relevant runtimes, back up the database as needed, update all installations accessing it to 0.14, and reload the hosts. Updating only Antigravity leaves old Codex runtimes unable to open the migrated schema.
+
+## Install in Codex (desktop and CLI)
+
+### 1. Get the source and check prerequisites
+
+Installation path: **get the source → export locally → register and install → trust Hooks → verify in a new chat**. Use Git, Python 3.10+ and a Codex CLI with plugin commands. Run under the same operating system user and `CODEX_HOME` as the desktop app; a custom `CODEX_HOME` changes plugin configuration and cache locations. Reuse an existing checkout and skip `git clone` if you already have one.
+
+```powershell
+git clone https://github.com/swenbo1-web/agents-learning.git
+cd agents-learning
+python --version
+codex --version
+codex plugin --help
+```
+
+If `codex` is unavailable, install it and configure PATH using the [official Codex CLI guide](https://learn.chatgpt.com/docs/cli). The desktop plugin directory manages local plugins; the CLI provides source registration, installation and diagnostics below.
+
+### 2. Export for this machine
+
+If you already obtained the source for Antigravity, reuse that checkout. Run these commands from the repository. `python` must be your actual Python 3.10+ interpreter; if it is not on PATH, replace it with `& "C:\your-python-directory\python.exe"`. Replace `D:\Plugins\agent-learning-codex` with a new export directory outside the source and knowledge data directories:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
+```
+
+Alternatively, install the current source as a Python package and export through its package entry point. Choose one of these two methods:
+
+```powershell
+python -B -m pip install .
+python -B -m agent_learning.cli install "D:\Plugins\agent-learning-codex" --host codex
+```
+
+On macOS/Linux, use your interpreter and an absolute path, for example `python3 -B scripts/learning.py install /absolute/path/agent-learning`. If the target exists, use [installation upgrades](#update-an-existing-installation) below. Do not install another machine's export: it binds that machine's interpreter and fixed runtime paths.
+
+### 3. Register the source and install
+
+```powershell
+codex plugin marketplace add "D:\Plugins\agent-learning-codex"
+codex plugin add agent-learning@agent-learning-local
+codex plugin list --json
+```
+
+The plugin ID is `agent-learning@agent-learning-local`; its display name is **Agent Learning**. Check its installed and enabled state in the list. Restart Codex desktop, select the `agent-learning-local` source in the plugin directory, and confirm the plugin is installed and enabled. CLI users can also inspect it with `/plugins` in an interactive session. [Official plugin installation and sources](https://developers.openai.com/plugins/build/plugins)
+
+### 4. Trust Hooks and verify integration
+
+Start a new conversation in your target project and review/trust the plugin Hooks when prompted. In the CLI, launch `codex` from that project and enter `/hooks` interactively; it is not a PowerShell command. Installation, enablement and Hook trust are separate steps. Untrusted plugin Hooks are skipped. [Official Hook trust guidance](https://learn.chatgpt.com/docs/hooks)
+
+In a new conversation, ask the Agent:
+
+> Use Agent Learning's learning_status to confirm the project, then pass the context_handle supplied by this turn's Hook to session_context and check that context_bound is true. If no handle was supplied, report the missing integration rather than guessing.
+
+Verify the expected `project_id` in `learning_status` and `context_bound=true` when using a real handle. Search tools alone do not prove Hooks are running. An initially empty knowledge base is normal; installation invents no experience and administrator model calls remain disabled by default.
+
+| Symptom | Check |
+|---|---|
+| No `codex` command or `plugin` subcommand | Check PATH and CLI version; update using the official guide |
+| Plugin absent in desktop | Check the OS user, `CODEX_HOME`, registered sources and selected source; restart |
+| Knowledge tools present but no current handle | Check plugin enablement and Hook trust; verify in a new project conversation |
+| MCP/Hook entry cannot start | Check the receipt's interpreter and `runtime_directory` still exist |
+| Old runtime still appears after an update | Restart, review changed Hooks and inspect the cache using the update guidance below |
+
+### Installation contract and MCP entry
+
+`install` validates resources, copies them into a temporary directory and publishes the export atomically. Both MCP and Hooks point to the same fixed runtime copy, rather than another copy in the export directory or host cache. The release manifest records the version, protocol and digest of each file; entry points check that their contents agree. This is neither a digital signature nor operating system permission isolation. Export does not change Codex configuration; the `codex plugin` commands above register and install it.
+
+By default, fixed runtime copies reside in `%LOCALAPPDATA%\AgentLearning\runtime-releases` on Windows or `~/.local/share/agent-learning/runtime-releases` on POSIX. Retain that directory and its interpreter. Moving the export source does not affect generated runtime entry points. Set the runtime directory with `install --runtime-store PATH` or `ALP_RUNTIME_STORE`; a temporary `ALP_HOME` does not change it.
+
+To make covered tool calls fail closed even when configuration is damaged, explicitly export with `install PATH --hook-mode enforce`. This writes the protection mode into the trusted entry point. `--hook-mode observe` fixes observation mode; when omitted, the current effective configuration is used. Changing an entry command requires the host to review Hook trust again.
+
+The source `.mcp.json` is a template; installation renders actual absolute paths into the exported copy. Native Codex catalog loading and installation commands have been checked locally with isolated configuration, without changing the current user's plugin configuration.
+
+The standard wheel includes export resources and supports `python -m agent_learning.cli`. The runtime, CLI and MCP use UTF-8; Chinese requests do not need ASCII escaping to work around system encoding.
+
+### Update an existing installation
+
+After obtaining the new source or extracting a new release package, run its entry:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex --upgrade
+# Optional: use release_id from the old directory's runtime-release.json
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex --upgrade --expected-release-id OLD_RELEASE_ID
+```
+
+The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and managed file digests before preparing the new export. Omitted `--runtime-store` and `--hook-mode` inherit their old values. Modified managed files, conflicting extra files, source/fixed runtime targets, links or a knowledge database such as `runtime.sqlite3` inside the export cause rejection. External `ALP_HOME` and `ALP_CONFIG` are neither read nor modified. Keep the database outside the export. Extra personal files and empty directories are retained without becoming managed plugin files.
+
+The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
+
+Restart Codex after updating the local source directory and review the changed Hook definitions again. Existing MCP processes may still use the old runtime; a file update receipt does not confirm that they have switched. Reload the local plugin through the host installation entry if its cache remains old. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
+
+### Automatic GitHub version checks
+
+Release checks read public metadata and keep their cache separate from the knowledge database. These commands do not initialize Runtime:
+
+```powershell
+python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
+python -B scripts/learning.py --home "D:\AgentLearningData" update-status
+```
+
+`update-status` only reads the cache: no network request or database creation. Manual `update-check` works with automatic checks disabled. `--force` skips the normal interval while respecting server rate limits. Failures return `state=error` or `rate_limited`, which does not establish that the installation is current. A successfully printed state JSON exits 0; invalid configuration or local I/O errors exit 1.
+
+To opt in, add this section to your configuration:
+
+```json
+"software_updates": {
+  "enabled": true,
+  "repository": "swenbo1-web/agents-learning",
+  "channel": "prerelease",
+  "interval_seconds": 86400,
+  "timeout_seconds": 3
+}
+```
+
+Root `SessionStart(startup/resume)` events reserve a check outside the event transaction and dispatch a separate short process. Compaction, clear and subagent events do not dispatch it. Checks default to a daily interval; conversations share a cache, short lease and process lock per data directory/repository/channel. An available update is announced on a later startup/resume; inspect all check states through `update-status` or `status`. Knowledge injection does not wait for the network. Failures back off, responses are bounded, and ETag/304 is supported. The timeout controls sockets and response reads, not a strict process deadline for operating system DNS.
+
+The `prerelease` channel includes previews; `stable` excludes them. Only eligible semantic versions in the latest 20 Releases are compared. Commits, ordinary tags and unpublished development versions are not updates; `ahead` means the local version exceeds the published version found. Checks use the official GitHub API without reading login tokens, downloading/executing code or replacing an installation. Apply new code with the explicit upgrade command above. [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
+
+You can also start a standalone stdio MCP service:
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role worker
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role admin
+```
+
+| Role | MCP tools |
+|---|---|
+| Worker Agent (7 tools) | `knowledge_search`, `knowledge_read`, `session_context`, `task_update`, `case_feedback`, `knowledge_use`, `learning_status` |
+| Administrator (12 tools) | The tools above, plus `problem_list`, `review_packet`, `submit_candidate`, `review_list`, `propose_governance` |
+
+MCP exposes no publication or revocation tools. The startup entry point determines the role; tool arguments cannot elevate it. Skills are available in [learning-worker](skills/learning-worker/SKILL.md) and [learning-admin](skills/learning-admin/SKILL.md).
+
+These restrictions apply to this service's entry points. Arbitrary Shell access or direct database access under the same operating system account is outside the MCP role isolation guarantee and requires host permissions and account isolation.
+
+### Session identity and context restoration
+
+`SessionStart` and `UserPromptSubmit` inject `context_handle=...`. The worker Agent initially calls `session_context(context_handle=...)` or passes the handle to `task_update` or `case_feedback`. The current MCP connection then remains bound to that handle, and `conversation_id` may be omitted. Other conversations or handles are rejected. Identity and business updates are rechecked in the same transaction; a failed update cannot leave an incorrect project binding.
+
+After context compaction, use `session_context` to restore the task, revision, write_version, status and execution readiness without summarizing the history again. Without a trusted handle, only project knowledge and project status may be queried; the service does not guess the most recent conversation or register an arbitrary one. A trusted local operator may register an explicit identity with `session-bind --conversation ID`, then start a bound service with `serve --context-handle HANDLE`. Manual CLI `task` and `feedback` remain explicit local operation entry points.
+
+When `SubagentStart` provides a reliable `agent_id`, the subagent receives an independent handle, knowledge exposure state and fixed assignment. The assignment binds the parent task ID, revision, state version and execution turn at dispatch. If the parent task changes, old feedback still belongs to the original task, and the old assignment cannot use a new authorization. `session_context` returns both the dispatched task and the current parent task; it cannot overwrite the parent task. A subagent without a reliable ID or an assignment from before an upgrade is not assigned by inference and must be dispatched again with a new identity. If the host makes parent and child Agents share an already bound MCP connection, the child needs its own bound connection. The host's parent/child MCP connection lifecycle has not yet been accepted through live validation.
+
+### Switching Codex / ChatGPT login accounts
+
+The same project and data directory continue to share published knowledge and historical evidence; separate databases are not created per login account. An account change notification advances the local `host_epoch`, invalidating old connections, handles and administrator writebacks. New connections bind through the next Hook or explicit `session-bind`. Task history and daily call counts are not reset. Old calls with unknown results are not automatically retried, and commands that have already run are not treated as a reason to execute them again.
+
+A trusted host adapter or operator calls this after confirming the change:
+
+```powershell
+python scripts/learning.py account-changed --notification-id "unique-login-event-id"
+```
+
+A unique notification ID provides deduplication; without one, each call represents a new boundary. All notification sources must use the same `ALP_HOME` or `--home`. This entry point does not read, save or change login tokens, and does not log in, log out or reset usage limits.
+
+**Desktop account changes are not currently subscribed to automatically.** The official app-server exposes `account/updated` and login completion notifications, but a plugin cannot assume it is connected to the desktop application's internal notification channel. An adapter should emit boundary notifications from the login lifecycle it actually controls. Comparing only `authMode` or a subscription plan cannot identify an A → B switch using the same authentication mode; the implementation does not rely on the modification time of `auth.json`. See the [official app-server account API](https://learn.chatgpt.com/docs/app-server).
 
 ## Core capabilities
 
@@ -35,7 +288,7 @@ The demo replays selected fields from an actual local export, SQLite tool failur
 
 ## Quick try from source
 
-Download the [0.13.0 source ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip), extract it, and run these commands from the project directory. A [portable wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl) and [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS) are also available.
+Use the current source obtained in the installation steps above and run these commands from the repository to inspect local status and the browser. `--workspace .` is only a source-repository demonstration; use your own project path for actual integration.
 
 ```sh
 python -B scripts/learning.py --help
@@ -43,7 +296,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex installation steps](#install-in-codex-desktop-and-cli) or [native Antigravity steps](#install-in-antigravity-native-plugin). Antigravity needs the 0.14.0 source checkout or a locally built package; published 0.13.0 downloads do not include it. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex installation steps](#install-in-codex-desktop-and-cli) or [native Antigravity steps](#install-in-antigravity-native-plugin). Antigravity needs the current source or a locally built package of the same version; published 0.13.0 downloads do not include it. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## How the project took shape
 
@@ -214,7 +467,9 @@ These mechanisms make retrieval and event recording less dependent on the Agent 
 
 ## Current version and compatibility
 
-0.14.0 adds native Antigravity installation and event adaptation while sharing SQLite and knowledge governance. Schema 12 adds host instances, native trajectories, receipts and taskless fault followups. Full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 11. Migration preserves legacy Codex sessions and knowledge. Older runtimes cannot open schema 12 databases. Use the existing `backup` entry before upgrading when a database backup is needed; installation backups do not back up external knowledge. Version 0.14.0 has not been published yet.
+0.14.1 fixes native event deduplication, input conflicts, session resets, fault retries and installation path validation, and stabilizes Windows browser responses to rejected requests. Database schema 12, full-text index 4 and semantic index 1 are unchanged; the internal publication protocol advances to 12. Legacy native conversation receipts require a trusted reset to rebind. This update publishes source on GitHub; downloadable releases remain at 0.13.0.
+
+0.14.0 adds native Antigravity installation and event adaptation while sharing SQLite and knowledge governance. Schema 12 adds host instances, native trajectories, receipts and taskless fault followups. Full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 11. Migration preserves legacy Codex sessions and knowledge. Older runtimes cannot open schema 12 databases. Use the existing `backup` entry before upgrading when a database backup is needed; installation backups do not back up external knowledge. There are no downloadable 0.14-series release assets yet.
 
 0.13.0 adds explicit upgrades of existing plugin exports and optional background GitHub Release checks, disabled by default. Database schema 11, full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 10. Upgrades validate historical exports using the same manifest format without executing old code or touching live data directories. Background commands use their bound script entry, preventing a same-named package in the project directory from taking precedence. This public prerelease also includes the 0.12.0 additions below.
 
@@ -311,241 +566,6 @@ python scripts/learning.py status
 ```
 
 Configuration and the state database are separate. Do not put API keys in the configuration file; the optional Hindsight adapter reads its key from the configured environment variable.
-
-## Install in Codex (desktop and CLI)
-
-### 1. Check prerequisites
-
-Use Python 3.10+ and a Codex CLI with plugin commands. Run under the same operating system user and `CODEX_HOME` as the desktop app; a custom `CODEX_HOME` changes plugin configuration and cache locations.
-
-```powershell
-python --version
-codex --version
-codex plugin --help
-```
-
-If `codex` is unavailable, install it and configure PATH using the [official Codex CLI guide](https://learn.chatgpt.com/docs/cli). The desktop plugin directory manages local plugins; the CLI provides source registration, installation and diagnostics below.
-
-### 2. Export for this machine
-
-Download and extract the source ZIP, then run from the extracted repository. Choose a new export directory outside the source and knowledge data directories:
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning"
-```
-
-Alternatively, install the downloaded wheel and export through its package entry point. Choose one of these two methods:
-
-```powershell
-python -B -m pip install "D:\Downloads\agent_learning_plugin-0.13.0-py3-none-any.whl"
-python -B -m agent_learning.cli install "D:\Plugins\agent-learning"
-```
-
-On macOS/Linux, use your interpreter and an absolute path, for example `python3 -B scripts/learning.py install /absolute/path/agent-learning`. If the target exists, use [installation upgrades](#update-an-existing-installation) below. Do not install another machine's export: it binds that machine's interpreter and fixed runtime paths.
-
-### 3. Register the source and install
-
-```powershell
-codex plugin marketplace add "D:\Plugins\agent-learning"
-codex plugin add agent-learning@agent-learning-local
-codex plugin list --json
-```
-
-The plugin ID is `agent-learning@agent-learning-local`; its display name is **Agent Learning**. Check its installed and enabled state in the list. Restart Codex desktop, select the `agent-learning-local` source in the plugin directory, and confirm the plugin is installed and enabled. CLI users can also inspect it with `/plugins` in an interactive session. [Official plugin installation and sources](https://developers.openai.com/plugins/build/plugins)
-
-### 4. Trust Hooks and verify integration
-
-Start a new conversation in your target project and review/trust the plugin Hooks when prompted. In the CLI, launch `codex` from that project and enter `/hooks` interactively; it is not a PowerShell command. Installation, enablement and Hook trust are separate steps. Untrusted plugin Hooks are skipped. [Official Hook trust guidance](https://learn.chatgpt.com/docs/hooks)
-
-In a new conversation, ask the Agent:
-
-> Use Agent Learning's learning_status to confirm the project, then pass the context_handle supplied by this turn's Hook to session_context and check that context_bound is true. If no handle was supplied, report the missing integration rather than guessing.
-
-Verify the expected `project_id` in `learning_status` and `context_bound=true` when using a real handle. Search tools alone do not prove Hooks are running. An initially empty knowledge base is normal; installation invents no experience and administrator model calls remain disabled by default.
-
-| Symptom | Check |
-|---|---|
-| No `codex` command or `plugin` subcommand | Check PATH and CLI version; update using the official guide |
-| Plugin absent in desktop | Check the OS user, `CODEX_HOME`, registered sources and selected source; restart |
-| Knowledge tools present but no current handle | Check plugin enablement and Hook trust; verify in a new project conversation |
-| MCP/Hook entry cannot start | Check the receipt's interpreter and `runtime_directory` still exist |
-| Old runtime still appears after an update | Restart, review changed Hooks and inspect the cache using the update guidance below |
-
-### Installation contract and MCP entry
-
-`install` validates resources, copies them into a temporary directory and publishes the export atomically. Both MCP and Hooks point to the same fixed runtime copy, rather than another copy in the export directory or host cache. The release manifest records the version, protocol and digest of each file; entry points check that their contents agree. This is neither a digital signature nor operating system permission isolation. Export does not change Codex configuration; the `codex plugin` commands above register and install it.
-
-By default, fixed runtime copies reside in `%LOCALAPPDATA%\AgentLearning\runtime-releases` on Windows or `~/.local/share/agent-learning/runtime-releases` on POSIX. Retain that directory and its interpreter. Moving the export source does not affect generated runtime entry points. Set the runtime directory with `install --runtime-store PATH` or `ALP_RUNTIME_STORE`; a temporary `ALP_HOME` does not change it.
-
-To make covered tool calls fail closed even when configuration is damaged, explicitly export with `install PATH --hook-mode enforce`. This writes the protection mode into the trusted entry point. `--hook-mode observe` fixes observation mode; when omitted, the current effective configuration is used. Changing an entry command requires the host to review Hook trust again.
-
-The source `.mcp.json` is a template; installation renders actual absolute paths into the exported copy. Native Codex catalog loading and installation commands have been checked locally with isolated configuration, without changing the current user's plugin configuration.
-
-The standard wheel includes export resources and supports `python -m agent_learning.cli`. The runtime, CLI and MCP use UTF-8; Chinese requests do not need ASCII escaping to work around system encoding.
-
-### Update an existing installation
-
-After obtaining the new source or extracting a new release package, run its entry:
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade
-# Optional: use release_id from the old directory's runtime-release.json
-python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade --expected-release-id OLD_RELEASE_ID
-```
-
-The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and managed file digests before preparing the new export. Omitted `--runtime-store` and `--hook-mode` inherit their old values. Modified managed files, conflicting extra files, source/fixed runtime targets, links or a knowledge database such as `runtime.sqlite3` inside the export cause rejection. External `ALP_HOME` and `ALP_CONFIG` are neither read nor modified. Keep the database outside the export. Extra personal files and empty directories are retained without becoming managed plugin files.
-
-The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
-
-Restart Codex after updating the local source directory and review the changed Hook definitions again. Existing MCP processes may still use the old runtime; a file update receipt does not confirm that they have switched. Reload the local plugin through the host installation entry if its cache remains old. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
-
-### Automatic GitHub version checks
-
-Release checks read public metadata and keep their cache separate from the knowledge database. These commands do not initialize Runtime:
-
-```powershell
-python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
-python -B scripts/learning.py --home "D:\AgentLearningData" update-status
-```
-
-`update-status` only reads the cache: no network request or database creation. Manual `update-check` works with automatic checks disabled. `--force` skips the normal interval while respecting server rate limits. Failures return `state=error` or `rate_limited`, which does not establish that the installation is current. A successfully printed state JSON exits 0; invalid configuration or local I/O errors exit 1.
-
-To opt in, add this section to your configuration:
-
-```json
-"software_updates": {
-  "enabled": true,
-  "repository": "swenbo1-web/agents-learning",
-  "channel": "prerelease",
-  "interval_seconds": 86400,
-  "timeout_seconds": 3
-}
-```
-
-Root `SessionStart(startup/resume)` events reserve a check outside the event transaction and dispatch a separate short process. Compaction, clear and subagent events do not dispatch it. Checks default to a daily interval; conversations share a cache, short lease and process lock per data directory/repository/channel. An available update is announced on a later startup/resume; inspect all check states through `update-status` or `status`. Knowledge injection does not wait for the network. Failures back off, responses are bounded, and ETag/304 is supported. The timeout controls sockets and response reads, not a strict process deadline for operating system DNS.
-
-The `prerelease` channel includes previews; `stable` excludes them. Only eligible semantic versions in the latest 20 Releases are compared. Commits, ordinary tags and unpublished development versions are not updates; `ahead` means the local version exceeds the published version found. Checks use the official GitHub API without reading login tokens, downloading/executing code or replacing an installation. Apply new code with the explicit upgrade command above. [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
-
-You can also start a standalone stdio MCP service:
-
-```powershell
-python scripts/learning.py --workspace "D:\Projects\my-project" serve --role worker
-python scripts/learning.py --workspace "D:\Projects\my-project" serve --role admin
-```
-
-| Role | MCP tools |
-|---|---|
-| Worker Agent (7 tools) | `knowledge_search`, `knowledge_read`, `session_context`, `task_update`, `case_feedback`, `knowledge_use`, `learning_status` |
-| Administrator (12 tools) | The tools above, plus `problem_list`, `review_packet`, `submit_candidate`, `review_list`, `propose_governance` |
-
-MCP exposes no publication or revocation tools. The startup entry point determines the role; tool arguments cannot elevate it. Skills are available in [learning-worker](skills/learning-worker/SKILL.md) and [learning-admin](skills/learning-admin/SKILL.md).
-
-These restrictions apply to this service's entry points. Arbitrary Shell access or direct database access under the same operating system account is outside the MCP role isolation guarantee and requires host permissions and account isolation.
-
-### Session identity and context restoration
-
-`SessionStart` and `UserPromptSubmit` inject `context_handle=...`. The worker Agent initially calls `session_context(context_handle=...)` or passes the handle to `task_update` or `case_feedback`. The current MCP connection then remains bound to that handle, and `conversation_id` may be omitted. Other conversations or handles are rejected. Identity and business updates are rechecked in the same transaction; a failed update cannot leave an incorrect project binding.
-
-After context compaction, use `session_context` to restore the task, revision, write_version, status and execution readiness without summarizing the history again. Without a trusted handle, only project knowledge and project status may be queried; the service does not guess the most recent conversation or register an arbitrary one. A trusted local operator may register an explicit identity with `session-bind --conversation ID`, then start a bound service with `serve --context-handle HANDLE`. Manual CLI `task` and `feedback` remain explicit local operation entry points.
-
-When `SubagentStart` provides a reliable `agent_id`, the subagent receives an independent handle, knowledge exposure state and fixed assignment. The assignment binds the parent task ID, revision, state version and execution turn at dispatch. If the parent task changes, old feedback still belongs to the original task, and the old assignment cannot use a new authorization. `session_context` returns both the dispatched task and the current parent task; it cannot overwrite the parent task. A subagent without a reliable ID or an assignment from before an upgrade is not assigned by inference and must be dispatched again with a new identity. If the host makes parent and child Agents share an already bound MCP connection, the child needs its own bound connection. The host's parent/child MCP connection lifecycle has not yet been accepted through live validation.
-
-### Switching Codex / ChatGPT login accounts
-
-The same project and data directory continue to share published knowledge and historical evidence; separate databases are not created per login account. An account change notification advances the local `host_epoch`, invalidating old connections, handles and administrator writebacks. New connections bind through the next Hook or explicit `session-bind`. Task history and daily call counts are not reset. Old calls with unknown results are not automatically retried, and commands that have already run are not treated as a reason to execute them again.
-
-A trusted host adapter or operator calls this after confirming the change:
-
-```powershell
-python scripts/learning.py account-changed --notification-id "unique-login-event-id"
-```
-
-A unique notification ID provides deduplication; without one, each call represents a new boundary. All notification sources must use the same `ALP_HOME` or `--home`. This entry point does not read, save or change login tokens, and does not log in, log out or reset usage limits.
-
-**Desktop account changes are not currently subscribed to automatically.** The official app-server exposes `account/updated` and login completion notifications, but a plugin cannot assume it is connected to the desktop application's internal notification channel. An adapter should emit boundary notifications from the login lifecycle it actually controls. Comparing only `authMode` or a subscription plan cannot identify an A → B switch using the same authentication mode; the implementation does not rely on the modification time of `auth.json`. See the [official app-server account API](https://learn.chatgpt.com/docs/app-server).
-
-## Install in Antigravity (native plugin)
-
-### 1. Export each host separately
-
-Use the 0.14.0 source checkout, Python 3.10+, and an Antigravity version supporting native plugins and Hooks. The published 0.13.0 downloads do not include this adapter. Export separate directories from the same repository:
-
-```powershell
-# Codex: default profile; follow the Codex installation section above
-python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
-
-# Antigravity: export, then install through the host
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
-```
-
-An initial Antigravity export requires an explicit existing workspace. Omitting `--home` uses the same default as the local Runtime. Both MCP and Hooks bind these absolute paths. Export creates no knowledge database and changes no host configuration. For the package entry, replace `scripts/learning.py` with `-m agent_learning.cli`; on macOS/Linux use your own Python and absolute paths.
-
-The native export contains root `plugin.json`, `mcp_config.json`, `hooks.json`, rules and worker/admin skills. Codex keeps its own manifest and entry contracts. Installation receipts record `target_host`; upgrades reject overwriting one host's export with the other profile.
-
-### 2. Load and verify
-
-The Antigravity CLI can install the generated local directory:
-
-```powershell
-agy plugin install "D:\Plugins\agent-learning-antigravity"
-```
-
-IDE/2.0 also support workspace `.agents/plugins/` directories. You can export directly to `D:\Projects\my-project\.agents\plugins\agent-learning`, reload the project, and check that MCP, rules, skills and Hooks are enabled. Prefer project installation because this export binds one workspace; loading it globally into another workspace is rejected. See the [official plugin guide](https://antigravity.google/docs/plugins/). The repository root contains both sets of resource templates and must be exported locally before installation.
-
-In a fresh conversation, ask the agent to check the project and `host_scope=antigravity:default` through `learning_status`, pass the current PreInvocation `context_handle` to `session_context`, verify `context_bound=true`, then register the current task goal.
-
-An Antigravity MCP process may serve several chats. Every stateful call must explicitly supply the current handle; omitted handles never inherit another chat. Supply it to knowledge queries to record exposure too. Without a verified handle, only project queries are available. Observe mode omits PreToolUse, so native chat origin on every MCP write still relies on correct handle use and rules. Enforce mode adds a native origin check in the pre-tool callback.
-
-### 3. Host differences and evidence
-
-| Workflow | Codex | Initial Antigravity adapter |
-|---|---|---|
-| Automatic context | Supported user prompt, session and restoration events | PreInvocation using registered goals, recent queries and actual errors |
-| Current user prompt | Supported Hook prompt | Public callback does not promise prompt text; register it through task_update |
-| Context delivery | Track previous injections and avoid repeated text | Render bounded ephemeralMessage from cached references each invocation |
-| Tool observations | Classify actual responses | Nonempty PostToolUse.error is failure; empty means call_completed only |
-| Execution checks | Connected rules and trusted approvals | Observe omits PreToolUse; enforce returns ask on passing checks and deny on rejection |
-| Stop | Registered delivery and public output | Records loop stopping; fullyIdle does not prove user acceptance |
-| Compaction, children, login | Supported events and explicit entry points | No invented equivalent events; ambiguous numbering needs trusted reset |
-| Administrator | Optional Codex CLI executor and separate admin tools | Shared governance queue; no automatic Antigravity model executor yet |
-
-The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). It does not scan transcripts, artifacts or private model reasoning. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
-
-Multi-workspace callbacks must mount the bound project. Tool resources verify attribution; uncertain callbacks stay unassociated, and enforce rejects them. Native tool argument mappings are distinct from Codex. For example, run_command is command execution and cannot bypass read-only protection through a rule labeling it as a read.
-
-Without a reliable new-user-prompt boundary, Hooks cannot automatically establish that a new requirement replaces the previous task. Workers must update the goal/scope when requirements change. Enforcement checks the registered contract and trusted approval; it does not establish authorization for every native user prompt. Native installations ignore an inherited ALP_CONTEXT_HANDLE and require the current Hook handle on each stateful request.
-
-### 4. Explicit enforcement, reset and account change
-
-From a trusted terminal, update the export to enable enforcement:
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
-```
-
-The adapter never returns automatic allow or permissionOverrides. The existing trusted execution-approve entry must still authorize the current task with native tool names and argument fields. ask follows the host's approval settings. Host Deny composition, timeout, killed processes and malformed responses have not been accepted in a live host; universal hard rejection on failure is not established.
-
-When counters regress, repeat or conflict without a reliable trajectory ID, the adapter does not invent a new execution identity. Reset a specific native conversation from a trusted terminal:
-
-```powershell
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "native-conversation-id"
-# After a confirmed real login account change
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "stable-id-for-this-notification"
-```
-
-Reset pauses the task and invalidates old handles and execution approvals. A later Hook binds again; explicitly resume and reapprove the task. Reset is CLI-only, not a worker MCP tool. Unknown late events cannot strengthen evidence. Account notifications require a trusted source; the plugin reads no login credentials and does not automatically detect Antigravity account changes.
-
-### 5. Shared knowledge, upgrades and administrators
-
-The same ALP_HOME/--home and project mapping share knowledge, candidates, sources and governance queues. Conversation identities are namespaced by host. Changing one host's account preserves the other host's worker sessions, while shared governance calls are fenced and unknown usage stays reserved for reconciliation.
-
-If Codex uses its default data directory, omit --home on the Antigravity export to use that default too. If choosing a custom path as in the example, configure the Codex host process with the same ALP_HOME. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
-
-An explicitly configured admin interface can review Antigravity cases, and the existing compatible executor can process the shared queue. An admin skill is guidance; the default native MCP role remains worker. Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
-
-Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
-
-Before sharing a database with existing 0.13 installations, stop the relevant runtimes, back up the database as needed, update all installations accessing it to 0.14, and reload the hosts. Updating only Antigravity leaves old Codex runtimes unable to open the migrated schema.
 
 ## Handling a problem manually
 
@@ -816,6 +836,14 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
 
+## 0.14.1 review and validation (2026-10-12)
+
+The complete offline suite on Windows/Python 3.12.14 discovered **910 checks: 909 passed, one skipped, zero failures and zero errors**, in 234.445 seconds. The skip requires Windows privileges to create a real symbolic link; simulated link-boundary checks passed. Twelve protection checks were added since 0.14.0, covering diagnostic metadata deduplication, actual input conflicts without exposing recorded secrets, legacy native receipt resets, wrong-host reset rejection, taskless fault retry/cooling and delivery budgets, installation paths, and rejected request bodies.
+
+Targeted runs passed all 62 native adapter, 14 native installation and 21 browser checks. The Windows browser connection interruption was reproduced with 700 rejected requests: ten interruptions before the fix, none afterward, with the rejection policy preserved. Ninety-one Python files passed Python 3.10 syntax checks, and both installation sections and code fences were checked. The full suite includes wheel exports for both profiles, actual fixed-script Hook→Chinese handle→MCP integration, CLI checks and migration protection.
+
+Checks used temporary data directories, fake services and isolated entries, without enabling live host Hooks, calling paid models or changing user plugin configuration. Actual Python 3.10 and Linux results are reported by GitHub CI. Live Antigravity permission composition, timeouts and asynchronous terminal states still need host acceptance. Downloadable release assets remain at 0.13.0; install the dual-host capabilities from current source.
+
 ## 0.14.0 dual host validation (2026-10-12)
 
 The full offline suite on Windows/Python 3.12.14 discovered **897 checks**, with one platform symlink-permission skip. After updating historical schema and installation assertions, 177 related checks passed. The final full run encountered one Windows loopback connection interruption (10053) in a browser write-rejection check. All 20 browser checks passed on recheck; the rejection policy was not relaxed and the failure was not hidden.
@@ -866,7 +894,7 @@ Subsequent documentation updates are published on repository `main`; the Chinese
 
 ## Feedback and contributions
 
-Use [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) for reproducible bugs, usability feedback and feature requests. Include the plugin, operating system, Python/Codex versions, reproduction steps and necessary redacted output. Do not upload live knowledge databases or credentials.
+Use [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) for reproducible bugs, usability feedback and feature requests. Include the plugin, operating system, Python and relevant Codex/Antigravity versions, reproduction steps and necessary redacted output. Do not upload live knowledge databases or credentials.
 
 Contributions can improve the Chinese/English documentation, reproduce installation or platform issues, add retrieval cases or provide real paired task evaluations. Read [AGENTS.md](AGENTS.md) before changing code, run relevant offline checks with temporary data directories, and describe the changes, verification and compatibility impact in your pull request. Real evaluations should report task acceptance and full usage across workers, administrator and retrieval. Token, latency and quality improvements have not yet been established by sufficient data.
 

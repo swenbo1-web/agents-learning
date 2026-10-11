@@ -723,7 +723,14 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     break
         return names
 
-    def handle_hook(self, raw, *, context_delivery=True, expected_epoch=None, _phase_guard=None):
+    def handle_hook(self, raw, *, context_delivery=True, expected_epoch=None, _phase_guard=None,
+                    _adapter_event_key=None, _adapter_conflict=False):
+        # 原生身份摘要由适配器核对，不能从 Hook JSON 中注入冲突或更换去重身份。
+        if _adapter_event_key is not None or _adapter_conflict:
+            if (self.host != "antigravity" or not isinstance(_adapter_event_key, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", _adapter_event_key)
+                    or not isinstance(_adapter_conflict, bool)):
+                raise ContractError("invalid native adapter event identity")
         kind = raw.get("hook_event_name")
         supported = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Interrupt", "SubagentStart", "SubagentStop"}
         if kind not in supported:
@@ -749,6 +756,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         if kind == "PostToolUse" and tool_id:
             # 工具响应相同而输入/工具名不同仍是独立证据，由 operation 统一判冲突。
             event_key = [conversation, agent_id, kind, tool_id, capture_digest]
+        if _adapter_event_key is not None:
+            event_key = ["antigravity-v2", conversation, kind, _adapter_event_key]
         access = None
         with self.transaction():
             epoch = self.assert_session_epoch(expected_epoch)
@@ -762,8 +771,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     if replay[0] != capture_digest:
                         raise ContractError("event id reused with different content")
                     identical_replay = True
-                legacy_replay = self.db.execute("SELECT capture_digest,payload FROM events WHERE id=?",
-                    (digest([project, [epoch, legacy_event_key]]),)).fetchone()
+                legacy_replay = (self.db.execute("SELECT capture_digest,payload FROM events WHERE id=?",
+                    (digest([project, [epoch, legacy_event_key]]),)).fetchone() if _adapter_event_key is None else None)
                 if legacy_replay and legacy_replay[0] == capture_digest:
                     identical_replay = True
                 if legacy_replay and legacy_replay[0] is None:
@@ -820,6 +829,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     denied, deny_reason = True, "operation_previously_denied"
                 if obsolete_operation:
                     denied, deny_reason = True, "account_context_changed"
+                if _adapter_conflict:
+                    denied, deny_reason = True, "native_step_conflict"
                 if binding and self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
                     prior_pre = self.db.execute("SELECT capture_digest FROM events WHERE project=? AND operation=? AND type='PreToolUse' "
                                                 "ORDER BY created,id LIMIT 1", (project, operation)).fetchone()
@@ -836,7 +847,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if denied:
                     outcome = "denied"
             observed_outcome = outcome
-            conflict = bool(binding and binding["conflict"])
+            conflict = bool(binding and binding["conflict"]) or _adapter_conflict
             if binding and kind == "PostToolUse" and not obsolete_operation:
                 terminals = {"succeeded", "failed", "call_completed"}
                 conflict |= binding["decision"] == "denied" and outcome != "unknown"

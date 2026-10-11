@@ -6,9 +6,264 @@
 
 **让 Agent 记住项目经验，在下一次任务中查到有依据的解决方法。**
 
-当前源码：**0.14.0**（双宿主适配，待发布）· Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布 0.13.0 与下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
+当前源码：**0.14.1**（Codex／Antigravity 双宿主）· Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布 0.13.0 与下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning 为长期项目建立可持续维护的知识记忆：在受支持的任务事件中检索相关经验，记录工具结果，由管理员整理候选，再把带有条件、来源和修订的知识交给后续 Agent。普通 Agent 专注当前任务，多次对话积累的经验可以继续使用。
+
+**安装入口：[Antigravity](#在-antigravity-中安装原生插件) · [Codex 桌面端／CLI](#在-codex-中安装桌面端与-cli) · [完整架构](#完整架构)**
+
+以下安装说明使用当前 `main` 源码 **0.14.1**。公开下载仍是 **0.13.0**，不包含 Antigravity 适配；使用两个宿主共用知识库时，请按当前源码更新两个安装目录。
+
+## 在 Antigravity 中安装（原生插件）
+
+### 1. 获取源码并导出
+
+安装路径：**获取源码 → 为当前项目导出 → Antigravity 加载 → 新会话验证**。需要 Git、Python **3.10+**，以及支持原生插件与 Hooks 的 Antigravity；CLI 安装方式还需 `agy plugin` 命令。先在终端获取当前源码；已有该仓库时进入已有目录，跳过 `git clone`：
+
+```powershell
+git clone https://github.com/swenbo1-web/agents-learning.git
+cd agents-learning
+python --version
+agy plugin --help
+```
+
+以下是 Windows PowerShell 示例。`python` 必须指向实际的 Python 3.10+；若没有配置 PATH，用 `& "C:\你的Python目录\python.exe"` 替换命令开头的 `python`（`&` 是 PowerShell 的调用符）。安装器会把实际解释器的绝对路径写入入口，因此后续不能移动或删除它。
+
+把 `D:\Projects\my-project` 替换为**已有的项目绝对路径**，`D:\AgentLearningData` 替换为源码及插件目录之外的**知识数据目录**，`D:\Plugins\agent-learning-antigravity` 替换为新的导出目录。然后执行：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
+```
+
+使用 Codex 时，另行按[下方 Codex 步骤](#在-codex-中安装桌面端与-cli)导出到不同目录；两个宿主的代码和固定运行副本由同一仓库维护。
+
+Antigravity 首次导出必须显式指定已有工作区；`--home` 可省略，默认与本地 Runtime 相同。MCP 与 Hook 都绑定这两个绝对路径，不从聊天猜当前项目。使用包入口时，将 `scripts/learning.py` 替换成 `-m agent_learning.cli`；macOS／Linux 使用自己的 `python3` 和绝对路径。导出不会创建知识数据库或修改宿主配置。
+
+Antigravity 包包含根 `plugin.json`、`mcp_config.json`、`hooks.json`、rules 和 worker／admin skills；Codex 包保留其专用清单与入口。安装回执记录 `target_host`，覆盖升级不允许将一个宿主的安装替换成另一个。
+
+### 2. 在宿主加载并验证
+
+Antigravity CLI 可安装上面生成的本机目录：
+
+```powershell
+agy plugin install "D:\Plugins\agent-learning-antigravity"
+agy plugin list
+```
+
+Antigravity IDE／2.0 支持项目 `.agents/plugins/` 下的原生目录，也支持全局 `~/.gemini/config/plugins/`。项目级安装可把上一步导出目标改为 `D:\Projects\my-project\.agents\plugins\agent-learning`，然后重新加载项目并核对 MCP、Rules、Skills 和 Hooks 已启用。本插件绑定一个项目，全局加载同一包到其他工作区会被拒绝，因此优先使用项目级安装。CLI 的 `agy plugin install` 会把插件复制到 `~/.gemini/antigravity-cli/plugins/`；更新导出目录后，需要重新执行安装命令并重启／重新加载宿主，不能只更新复制前的目录。安装位置与 CLI 管理方式见[官方插件说明](https://antigravity.google/docs/plugins/)。仓库根含两套资源模板，需先本机导出，不能直接把 GitHub 根目录当成已绑定的 Antigravity 安装包。
+
+在新对话验证：
+
+> 使用 learning_status 核对项目与 host_scope=antigravity:default。把本轮 PreInvocation 给出的 context_handle 传给 session_context，确认 context_bound=true，再登记当前任务目标。
+
+共享 MCP 进程可能服务多个聊天。Antigravity 每次有状态请求必须显式携带本轮句柄，省略时不会继承前一个聊天；查询也应携带句柄登记展示。未获得句柄时只能做项目查询，不能猜“最近会话”。默认观察模式不安装 `PreToolUse`，因此原生聊天与每次 MCP 写入的对应仍依赖正确传递句柄及规则；显式保护模式才额外检查前置事件中的会话一致性。
+
+### 3. 宿主差异与证据边界
+
+| 流程 | Codex | Antigravity 首版 |
+|---|---|---|
+| 自动注入 | 用户提示、会话开始与恢复事件 | `PreInvocation`，使用已登记目标、近期查询和真实错误 |
+| 当前用户提示 | 使用受支持 Hook 的 prompt | 公开回调未承诺 prompt；通过 `task_update` 登记目标，不扫描 transcript |
+| 上下文投递 | 保留展示状态并避免重复正文 | 每次调用从缓存重新渲染有限 `ephemeralMessage`；不重复计为新命中 |
+| 工具观察 | 按实际响应区分结果 | `PostToolUse.error` 非空为失败，空值只表示 `call_completed` |
+| 工具保护 | 已接入的执行规则与受信许可 | 默认 observe 无前置 Hook；enforce 检查通过返回 `ask`，拒绝返回 `deny` |
+| 停止 | 按已上报任务与公开交付消息处理 | `Stop` 记录停止；`fullyIdle=false` 不结束后台任务，true 也不代表用户验收 |
+| 压缩、子 Agent、登录变化 | 使用受支持事件及显式入口 | 不伪造等价事件；编号歧义需受信重置，换号使用显式 CLI 通知 |
+| 管理员 | 可选 Codex CLI 执行器与单独 admin 接口 | 复用治理队列；未实现 Antigravity 自动模型执行器，默认仍无模型调用 |
+
+原生事件按[官方 Hooks 契约](https://antigravity.google/docs/hooks)处理。没有最终退出码、输出和后台终态时，不生成 `tool_success`，不能据此满足要求该等级的自动发布；简短反馈维持 `reported` 等级。默认观察模式的孤儿 Post 事件没有可信前置任务归属，案例保持未关联，仅将错误用于补查。PreInvocation 的重复摘要仍占模型上下文，缓存减少的是重复检索，不代表已测得 token 净节省。
+
+公开事件没有可靠的新用户提示边界时，不能自动确认当前用户要求是否替换了旧任务。worker 需在新的目标或范围变化时及时 `task_update`；执行保护核对已登记合同及受信许可，不表示已经核验每次原生用户提示的授权。Antigravity 安装忽略继承环境中的 `ALP_CONTEXT_HANDLE`，每次有状态请求使用当前 Hook 的显式句柄。
+
+多工作区事件必须挂载已绑定项目；工具路径用于验证其归属，无法归属的记录保持未关联，保护模式拒绝。原生工具不套用 Codex 参数；例如 `run_command` 仍属于命令执行，不能通过把规则标为读取来绕过只读保护。
+
+### 4. 显式保护、重置与换号
+
+需要启用执行规则时，从受信终端更新安装：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
+```
+
+enforce 不返回自动 `allow`，不设置 `permissionOverrides`；仍需要已有 `execution-approve` 入口签发当前任务的精确许可，规则中的工具名和参数字段必须与原生调用一致。`ask` 会遵循宿主已有审批设置；宿主 Deny 合成、超时、进程被终止和坏 JSON 的实际行为尚未完成真实宿主验收，因此当前不能承诺所有故障都被宿主硬阻断。
+
+编号回退、复用或矛盾输入没有可靠轨迹 ID 时，不猜新执行身份。通过受信终端重置指定原生会话：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "原生conversationId"
+# 确认实际换号后通知对应宿主
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "本次通知的稳定ID"
+```
+
+重置暂停当前任务、失效旧句柄和许可；后续 Hook 重新绑定，再显式恢复任务并重新审批。这是 CLI 专用入口，不开放给普通 MCP 工具。无法鉴别的迟到回调不增强证据，默认保护拒绝歧义轨迹。换号通知需由实际使用者或可信宿主来源提供，插件不读取登录凭证，也不自动侦测 Antigravity 换号。
+
+### 5. 共用知识、升级与管理员
+
+0.14.1 修正原生事件身份：模型名称仅作诊断；真实输入变化参与冲突判定，事件正文继续脱敏。如果同一会话已有 0.14.0 回执，升级后先用上方 `antigravity-session-reset` 入口重置该会话，再恢复任务并重新批准执行。旧摘要无法可靠反推真实输入，因此不自动重放旧事件；知识和来源记录继续保留。
+
+两个宿主使用同一 `ALP_HOME`／`--home`，且工作区映射到同一项目时，共用知识、候选、来源和治理队列；不复制一套知识算法或默认启动第二个管理员。会话 ID 加宿主命名空间；一个宿主换号不使另一个宿主的 worker 失效，但会让共享治理执行器的旧调用失效，保留未知用量等待核对。
+
+Codex 使用默认数据目录时，Antigravity 导出省略 `--home` 即可选用相同默认位置；使用示例中的自定义目录时，Codex 宿主进程也需要配置同一路径的 `ALP_HOME`。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
+
+可用单独的管理员接口人工整理 Antigravity 案例，也可显式配置现有兼容执行器。native admin skill 只是操作说明，默认 MCP 仍是 worker。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
+
+升级时保持 `--host antigravity --upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。两个宿主可复用同一固定运行 release，但只能分别更新各自的安装目录。
+
+与已有 0.13 安装共用数据时，先停止相关运行端、按需备份数据库，并把所有访问同一知识库的安装都更新到 0.14，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 不兼容而被拒绝。
+
+## 在 Codex 中安装（桌面端与 CLI）
+
+### 1. 获取源码并检查环境
+
+安装路径：**获取源码 → 导出本机插件 → 登记插件源并安装 → 信任 Hooks → 新会话验证**。需要 Git、Python 3.10+ 和支持插件命令的 Codex CLI。在与桌面端相同的系统用户及 `CODEX_HOME` 下运行；自定义 `CODEX_HOME` 会改变插件配置和缓存位置。已有该仓库时使用现有目录，跳过 `git clone`。
+
+```powershell
+git clone https://github.com/swenbo1-web/agents-learning.git
+cd agents-learning
+python --version
+codex --version
+codex plugin --help
+```
+
+如果没有 `codex` 命令，先按[官方 Codex CLI 说明](https://learn.chatgpt.com/docs/cli)安装并配置 PATH。桌面端最终通过插件目录管理本地插件；CLI 用于下面的源登记、安装和诊断。
+
+### 2. 导出本机插件
+
+若已为 Antigravity 获取源码，直接使用同一个仓库。以下命令在仓库目录执行；`python` 应指向实际的 Python 3.10+，未配置 PATH 时用 `& "C:\你的Python目录\python.exe"` 替换它。把 `D:\Plugins\agent-learning-codex` 替换为源码和知识数据目录之外的新导出目录：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
+```
+
+也可将当前源码安装成 Python 包，再从包入口导出；两种方式选一种：
+
+```powershell
+python -B -m pip install .
+python -B -m agent_learning.cli install "D:\Plugins\agent-learning-codex" --host codex
+```
+
+macOS／Linux 用自己的 Python 和绝对路径，例如 `python3 -B scripts/learning.py install /absolute/path/agent-learning`。目标已存在时使用下方的[覆盖更新](#覆盖更新已有安装)。不要把其他设备导出的目录直接拿来安装：其中已绑定那台设备的解释器和固定运行路径。
+
+### 3. 登记插件源并安装
+
+```powershell
+codex plugin marketplace add "D:\Plugins\agent-learning-codex"
+codex plugin add agent-learning@agent-learning-local
+codex plugin list --json
+```
+
+插件 ID 为 `agent-learning@agent-learning-local`，界面名称为 **Agent Learning**。检查列表中的安装与启用状态。重启 Codex 桌面端，在插件目录中选择 `agent-learning-local` 来源，确认该插件已安装并启用；CLI 用户也可在交互会话用 `/plugins` 查看。[官方插件安装与来源说明](https://developers.openai.com/plugins/build/plugins)
+
+### 4. 信任 Hooks 并验证接入
+
+在要使用插件的项目中开启新对话，按宿主提示审阅并信任插件 Hooks。CLI 可进入该项目后运行 `codex`，在交互界面输入 `/hooks`；它不是 PowerShell 命令。安装、启用插件和信任 Hooks 是不同步骤，未信任的插件 Hooks 会被跳过。[官方 Hook 信任说明](https://learn.chatgpt.com/docs/hooks)
+
+在新对话中可以要求 Agent：
+
+> 使用 Agent Learning 的 learning_status 确认当前项目，再把本轮 Hook 提供的 context_handle 传给 session_context，检查 context_bound 是否为 true。没有句柄时请报告缺少接入，不要猜测。
+
+`learning_status` 返回预期的 `project_id`，且使用真实句柄的 `session_context` 返回 `context_bound=true`，才说明本轮会话身份已接入。仅能搜索知识不能证明 Hooks 正常运行。初始知识为空是正常状态，安装不会凭空生成经验，管理员默认也不自动调用模型。
+
+| 现象 | 检查方法 |
+|---|---|
+| 没有 `codex` 或 `plugin` 子命令 | 检查 PATH 与 CLI 版本，按官方说明更新 CLI |
+| 桌面端看不到插件 | 核对系统用户、`CODEX_HOME`、插件源列表和当前来源，重启后检查 |
+| 有知识工具，没有本轮句柄 | 检查插件启用状态与 Hook 信任；使用新的项目对话验证 |
+| MCP／Hook 无法启动 | 核对导出回执中的解释器及 `runtime_directory` 是否仍存在 |
+| 更新后仍显示旧运行版本 | 重启宿主并重新审阅 Hooks；按下方更新说明检查缓存 |
+
+### 安装契约与 MCP 入口
+
+`install` 先验证资源，在临时目录完成复制后原子发布。MCP 和 Hook 均指向同一份固定运行副本，不依赖导出目录或宿主缓存中的另一份代码。发布清单记录版本、协议和逐文件摘要，入口核对内容一致性；这不是数字签名或操作系统权限隔离。导出不会更改既有 Codex 配置；上面的 `codex plugin` 命令才向宿主登记并安装。
+
+固定运行副本默认位于 Windows 的 `%LOCALAPPDATA%\AgentLearning\runtime-releases` 或 POSIX 的 `~/.local/share/agent-learning/runtime-releases`。保留这个目录和对应解释器；移动导出源不影响已生成的运行入口。运行目录可通过 `install --runtime-store PATH` 或 `ALP_RUNTIME_STORE` 指定，不随临时 `ALP_HOME` 改变。
+
+需要在配置损坏时也拒绝覆盖工具调用，导出时显式使用 `install PATH --hook-mode enforce`，将保护模式写入可信入口。`--hook-mode observe` 固定观察模式；省略时依据当前有效配置。更换入口命令后需由宿主重新审阅 Hook 信任。
+
+源码中的 `.mcp.json` 是模板，安装副本会将路径渲染为实际绝对路径。本机已用隔离配置验证 Codex 原生加载与安装命令，未改当前用户的插件配置。
+
+标准 wheel 包含导出资源，也支持 `python -m agent_learning.cli` 入口。运行时、CLI 和 MCP 均使用 UTF-8；无需把中文请求转义成 ASCII 来绕过系统编码。
+
+### 覆盖更新已有安装
+
+取得新版源码或解压新版发布包后，从新版入口执行：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex --upgrade
+# 可选：从原目录 runtime-release.json 取得 release_id，校验预期的旧安装
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex --upgrade --expected-release-id OLD_RELEASE_ID
+```
+
+升级先核对原目录的插件身份、固定副本、MCP／Hook 路径和管理文件摘要，再准备完整新版。省略 `--runtime-store` 和 `--hook-mode` 时沿用旧值。管理文件已改动、额外文件与新版路径冲突、目标是源码／固定副本、出现链接或目录内含 `runtime.sqlite3` 等知识数据库时拒绝覆盖。外部 `ALP_HOME` 与 `ALP_CONFIG` 不被读取或修改；知识数据库应保持在导出目录之外。额外个人文件和空目录会保留，不纳入插件管理文件。
+
+回执给出 `backup_directory` 和新旧 `release_id`；旧导出目录完整保留为同级备份，旧固定运行副本也保留。目标锁和快照检测并发改动，切换失败尝试恢复原目录。切换有短暂目录间隙；进程硬退出可能留锁或备份，需要人工核对回执、目标及 `.alp-install-*.lock` 后恢复，安装器不自动抢锁或删除备份。不支持通过此入口降级。
+
+更新源目录后重启 Codex，使插件缓存重新加载，并重新审阅变化后的 Hook 信任。已运行的 MCP 仍可能使用旧副本，文件更新回执不代表当前进程已切换。若宿主仍沿用旧缓存，按宿主的插件安装入口重新加载该本地目录。[官方本地插件更新说明](https://developers.openai.com/plugins/build/plugins)
+
+### 从 GitHub 自动检查版本
+
+版本检查读取公开 Release 元数据，检查结果与知识数据库分开保存。显式命令不初始化 Runtime：
+
+```powershell
+python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
+python -B scripts/learning.py --home "D:\AgentLearningData" update-status
+```
+
+`update-status` 只读缓存，不访问网络，也不创建数据库。`update-check` 可在自动检查关闭时手动运行；`--force` 跳过常规间隔，仍遵守服务端限流。请求失败会返回 `state=error` 或 `rate_limited`，不能据此判断已经是最新版；命令成功输出状态 JSON 时退出码为 0，配置或本地读写异常才退出 1。
+
+要启用自动检查，在自己的配置中加入：
+
+```json
+"software_updates": {
+  "enabled": true,
+  "repository": "swenbo1-web/agents-learning",
+  "channel": "prerelease",
+  "interval_seconds": 86400,
+  "timeout_seconds": 3
+}
+```
+
+主会话 `SessionStart(startup/resume)` 在事件事务外预留检查，由独立短进程访问 GitHub；压缩、清空和子 Agent 不派发检查。默认每天按间隔检查，同一数据目录按仓库和通道共用缓存、短租约与进程锁，避免多个对话重复请求。检测到新版本后，在后续 `startup/resume` 提醒；完整检查状态通过 `update-status`／`status` 查看，不阻塞当前知识注入。失败会退避，响应大小受限，支持 ETag/304；超时约束 socket 与响应读取，操作系统 DNS 不属于严格进程总时长限制。
+
+`prerelease` 通道包含测试版，`stable` 排除测试版。仅比较最近 20 条 Release 中的合格语义版本；不把提交、普通标签或尚未发布的开发版本当成更新。`ahead` 表示本地版本比检查到的发布版本新。检查只连接官方 GitHub API，不读登录令牌、不下载或执行代码、不自动替换安装；新版通过上面的显式覆盖命令安装。[GitHub Release API](https://docs.github.com/en/rest/releases/releases)
+
+也可以单独启动 stdio MCP 服务：
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role worker
+python scripts/learning.py --workspace "D:\Projects\my-project" serve --role admin
+```
+
+| 身份 | MCP 工具 |
+|---|---|
+| 普通 Agent（7 个） | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`knowledge_use`、`learning_status` |
+| 管理员（12 个） | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate`、`review_list`、`propose_governance` |
+
+MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数不能提升角色。技能位于 [learning-worker](skills/learning-worker/SKILL.md) 和 [learning-admin](skills/learning-admin/SKILL.md)。
+
+这些权限限制覆盖本服务的入口。同一操作系统账户下的任意 Shell 和本地数据库访问，不属于 MCP 角色隔离保证；需要宿主权限与账户隔离配合。
+
+### 会话身份与压缩恢复
+
+`SessionStart` 和 `UserPromptSubmit` 注入 `context_handle=...`。普通 Agent 首次调用 `session_context(context_handle=...)`，或直接在 `task_update`／`case_feedback` 传这个句柄；之后当前 MCP 连接固定绑定该句柄，`conversation_id` 可省略。传入其他会话或句柄会被拒绝。写入身份和业务更新在同一事务内复核，失败不会留下错误项目绑定。
+
+压缩后用 `session_context` 恢复任务、revision、write_version、状态和执行准备情况，无需重新总结历史。没有可信句柄时只能查询项目知识和项目状态，不能猜最近会话或登记任意会话。受信本地操作者可使用 `session-bind --conversation ID` 登记明确身份，再用 `serve --context-handle HANDLE` 启动绑定服务。手动 CLI 的 `task`／`feedback` 仍是显式本地操作入口。
+
+`SubagentStart` 有可靠 `agent_id` 时，子 Agent 获得独立句柄、知识展示状态和固定 assignment，绑定派发时的父任务 ID、revision、状态版本与执行轮次。父任务改变后，旧反馈仍记入原任务，旧 assignment 不能使用新许可；`session_context` 同时返回派发任务和当前父任务，不能覆盖父任务。无可靠 ID 或升级前无 assignment 的子身份不猜归属，需要新的子 Agent 身份重新派发。若宿主让父子 Agent 共用一个已绑定的 MCP 连接，子 Agent 需要单独的绑定连接；当前不声称已验收宿主的父子 MCP 连接生命周期。
+
+### Codex／ChatGPT 登录账户切换
+
+同一项目、同一数据目录继续共享正式知识和历史证据，不按登录账户分库。换号通知推进本地 `host_epoch`，旧连接、旧句柄和旧管理员回写失效；新连接通过下一次 Hook 或明确的 `session-bind` 重新绑定。任务历史和每日调用计数不会清零，未确定结果的旧调用不会自动重试，已运行的项目命令也不会被当作重新执行的理由。
+
+受信宿主适配器或操作者在确认切换后调用：
+
+```powershell
+python scripts/learning.py account-changed --notification-id "unique-login-event-id"
+```
+
+可用唯一通知 ID 去重，省略时每次调用均视为一次新边界。所有通知方必须指向相同 `ALP_HOME`／`--home`。这个入口不读取、保存或修改登录 token，不执行登录、退出或额度重置。
+
+**当前没有自动订阅桌面端换号。** 官方 app-server 提供 `account/updated` 和登录完成通知，但普通插件不能据此假定已经接入桌面应用的内部通知通道。适配器应依据自己拥有的登录生命周期发出边界通知；仅比较 `authMode`／套餐不能识别同模式下的 A→B 换号，也不依赖 `auth.json` 修改时间。[官方 app-server 账户接口](https://learn.chatgpt.com/docs/app-server)
 
 ## 核心能力
 
@@ -35,7 +290,7 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 
 ## 快速体验（源码）
 
-下载 [0.13.0 源码 ZIP](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-0.13.0-source.zip)，解压后在项目目录运行。也可获取[通用 wheel](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agent_learning_plugin-0.13.0-py3-none-any.whl)和 [SHA256SUMS](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/SHA256SUMS)。
+使用上述安装步骤获取的当前源码，在仓库目录运行以下命令，可先查看本地状态与知识浏览器。这里的 `--workspace .` 仅用于体验源码仓库；正式接入请指定自己的项目路径。
 
 ```sh
 python -B scripts/learning.py --help
@@ -43,7 +298,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按[Codex 安装步骤](#在-codex-中安装桌面端与-cli)或[Antigravity 安装步骤](#在-antigravity-中安装原生插件)接入对应宿主。Antigravity 新入口需使用 0.14.0 源码或自行构建的包，已发布的 0.13.0 下载不包含该入口。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
+第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按[Codex 安装步骤](#在-codex-中安装桌面端与-cli)或[Antigravity 安装步骤](#在-antigravity-中安装原生插件)接入对应宿主。Antigravity 使用当前源码或相同版本自行构建的包，已发布的 0.13.0 下载不包含该入口。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
 
 ## 项目是怎样形成的
 
@@ -214,7 +469,9 @@ flowchart LR
 
 ## 当前版本与兼容
 
-0.14.0 新增 Antigravity 原生安装与事件适配，共用 SQLite 和知识治理。数据库升至 schema 12，增加宿主实例、原生轨迹、回执及无任务故障待办；全文索引 4、语义索引 1 不变，内部发布协议升至 11。旧 Codex 会话和知识迁移后保留，旧运行端不能打开 schema 12 数据库。升级前可用现有 `backup` 入口保留数据库副本；安装目录备份不会备份外部知识库。当前尚未发布 0.14.0。
+0.14.1 修复原生事件去重、输入冲突、会话重置、故障重试及安装路径检查，并稳定 Windows 浏览器对拒绝请求的响应。数据库 schema 12、全文索引 4、语义索引 1 不变；内部发布协议升至 12，旧原生会话回执需通过受信重置重新绑定。本次在 GitHub 更新源码，公开下载仍为 0.13.0。
+
+0.14.0 新增 Antigravity 原生安装与事件适配，共用 SQLite 和知识治理。数据库升至 schema 12，增加宿主实例、原生轨迹、回执及无任务故障待办；全文索引 4、语义索引 1 不变，内部发布协议升至 11。旧 Codex 会话和知识迁移后保留，旧运行端不能打开 schema 12 数据库。升级前可用现有 `backup` 入口保留数据库副本；安装目录备份不会备份外部知识库。0.14 系列暂未发布下载附件。
 
 0.13.0 增加已有导出目录的显式覆盖升级和可选 GitHub Release 后台版本检查，默认不启用网络检查。数据库 schema 11、全文索引 4、语义索引 1 不变；内部发布协议升至 10，安装更新生成新的固定运行副本。可验证并升级使用同类清单的历史导出，不执行旧代码，不覆盖真实数据目录。后台任务统一从绑定的脚本入口启动，避免当前项目的同名包抢先导入。0.13.0 公开测试版同时包含下面的 0.12.0 新增能力。
 
@@ -311,243 +568,6 @@ python scripts/learning.py status
 ```
 
 配置文件与状态库分离。不要在配置文件写入 API 密钥；可选 Hindsight 从配置指定的环境变量读取密钥。
-
-## 在 Codex 中安装（桌面端与 CLI）
-
-### 1. 检查环境
-
-需要 Python 3.10+ 和支持插件命令的 Codex CLI。在与桌面端相同的系统用户及 `CODEX_HOME` 下运行；自定义 `CODEX_HOME` 会改变插件配置和缓存位置。
-
-```powershell
-python --version
-codex --version
-codex plugin --help
-```
-
-如果没有 `codex` 命令，先按[官方 Codex CLI 说明](https://learn.chatgpt.com/docs/cli)安装并配置 PATH。桌面端最终通过插件目录管理本地插件；CLI 用于下面的源登记、安装和诊断。
-
-### 2. 导出本机插件
-
-下载并解压上方源码 ZIP，在解压后的仓库目录执行。导出目标应是源码和知识数据目录之外的新目录：
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning"
-```
-
-也可安装下载的 wheel 后从包入口导出，两种方式选一种：
-
-```powershell
-python -B -m pip install "D:\Downloads\agent_learning_plugin-0.13.0-py3-none-any.whl"
-python -B -m agent_learning.cli install "D:\Plugins\agent-learning"
-```
-
-macOS／Linux 用自己的 Python 和绝对路径，例如 `python3 -B scripts/learning.py install /absolute/path/agent-learning`。目标已存在时使用下方的[覆盖更新](#覆盖更新已有安装)。不要把其他设备导出的目录直接拿来安装：其中已绑定那台设备的解释器和固定运行路径。
-
-### 3. 登记插件源并安装
-
-```powershell
-codex plugin marketplace add "D:\Plugins\agent-learning"
-codex plugin add agent-learning@agent-learning-local
-codex plugin list --json
-```
-
-插件 ID 为 `agent-learning@agent-learning-local`，界面名称为 **Agent Learning**。检查列表中的安装与启用状态。重启 Codex 桌面端，在插件目录中选择 `agent-learning-local` 来源，确认该插件已安装并启用；CLI 用户也可在交互会话用 `/plugins` 查看。[官方插件安装与来源说明](https://developers.openai.com/plugins/build/plugins)
-
-### 4. 信任 Hooks 并验证接入
-
-在要使用插件的项目中开启新对话，按宿主提示审阅并信任插件 Hooks。CLI 可进入该项目后运行 `codex`，在交互界面输入 `/hooks`；它不是 PowerShell 命令。安装、启用插件和信任 Hooks 是不同步骤，未信任的插件 Hooks 会被跳过。[官方 Hook 信任说明](https://learn.chatgpt.com/docs/hooks)
-
-在新对话中可以要求 Agent：
-
-> 使用 Agent Learning 的 learning_status 确认当前项目，再把本轮 Hook 提供的 context_handle 传给 session_context，检查 context_bound 是否为 true。没有句柄时请报告缺少接入，不要猜测。
-
-`learning_status` 返回预期的 `project_id`，且使用真实句柄的 `session_context` 返回 `context_bound=true`，才说明本轮会话身份已接入。仅能搜索知识不能证明 Hooks 正常运行。初始知识为空是正常状态，安装不会凭空生成经验，管理员默认也不自动调用模型。
-
-| 现象 | 检查方法 |
-|---|---|
-| 没有 `codex` 或 `plugin` 子命令 | 检查 PATH 与 CLI 版本，按官方说明更新 CLI |
-| 桌面端看不到插件 | 核对系统用户、`CODEX_HOME`、插件源列表和当前来源，重启后检查 |
-| 有知识工具，没有本轮句柄 | 检查插件启用状态与 Hook 信任；使用新的项目对话验证 |
-| MCP／Hook 无法启动 | 核对导出回执中的解释器及 `runtime_directory` 是否仍存在 |
-| 更新后仍显示旧运行版本 | 重启宿主并重新审阅 Hooks；按下方更新说明检查缓存 |
-
-### 安装契约与 MCP 入口
-
-`install` 先验证资源，在临时目录完成复制后原子发布。MCP 和 Hook 均指向同一份固定运行副本，不依赖导出目录或宿主缓存中的另一份代码。发布清单记录版本、协议和逐文件摘要，入口核对内容一致性；这不是数字签名或操作系统权限隔离。导出不会更改既有 Codex 配置；上面的 `codex plugin` 命令才向宿主登记并安装。
-
-固定运行副本默认位于 Windows 的 `%LOCALAPPDATA%\AgentLearning\runtime-releases` 或 POSIX 的 `~/.local/share/agent-learning/runtime-releases`。保留这个目录和对应解释器；移动导出源不影响已生成的运行入口。运行目录可通过 `install --runtime-store PATH` 或 `ALP_RUNTIME_STORE` 指定，不随临时 `ALP_HOME` 改变。
-
-需要在配置损坏时也拒绝覆盖工具调用，导出时显式使用 `install PATH --hook-mode enforce`，将保护模式写入可信入口。`--hook-mode observe` 固定观察模式；省略时依据当前有效配置。更换入口命令后需由宿主重新审阅 Hook 信任。
-
-源码中的 `.mcp.json` 是模板，安装副本会将路径渲染为实际绝对路径。本机已用隔离配置验证 Codex 原生加载与安装命令，未改当前用户的插件配置。
-
-标准 wheel 包含导出资源，也支持 `python -m agent_learning.cli` 入口。运行时、CLI 和 MCP 均使用 UTF-8；无需把中文请求转义成 ASCII 来绕过系统编码。
-
-### 覆盖更新已有安装
-
-取得新版源码或解压新版发布包后，从新版入口执行：
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade
-# 可选：从原目录 runtime-release.json 取得 release_id，校验预期的旧安装
-python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade --expected-release-id OLD_RELEASE_ID
-```
-
-升级先核对原目录的插件身份、固定副本、MCP／Hook 路径和管理文件摘要，再准备完整新版。省略 `--runtime-store` 和 `--hook-mode` 时沿用旧值。管理文件已改动、额外文件与新版路径冲突、目标是源码／固定副本、出现链接或目录内含 `runtime.sqlite3` 等知识数据库时拒绝覆盖。外部 `ALP_HOME` 与 `ALP_CONFIG` 不被读取或修改；知识数据库应保持在导出目录之外。额外个人文件和空目录会保留，不纳入插件管理文件。
-
-回执给出 `backup_directory` 和新旧 `release_id`；旧导出目录完整保留为同级备份，旧固定运行副本也保留。目标锁和快照检测并发改动，切换失败尝试恢复原目录。切换有短暂目录间隙；进程硬退出可能留锁或备份，需要人工核对回执、目标及 `.alp-install-*.lock` 后恢复，安装器不自动抢锁或删除备份。不支持通过此入口降级。
-
-更新源目录后重启 Codex，使插件缓存重新加载，并重新审阅变化后的 Hook 信任。已运行的 MCP 仍可能使用旧副本，文件更新回执不代表当前进程已切换。若宿主仍沿用旧缓存，按宿主的插件安装入口重新加载该本地目录。[官方本地插件更新说明](https://developers.openai.com/plugins/build/plugins)
-
-### 从 GitHub 自动检查版本
-
-版本检查读取公开 Release 元数据，检查结果与知识数据库分开保存。显式命令不初始化 Runtime：
-
-```powershell
-python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
-python -B scripts/learning.py --home "D:\AgentLearningData" update-status
-```
-
-`update-status` 只读缓存，不访问网络，也不创建数据库。`update-check` 可在自动检查关闭时手动运行；`--force` 跳过常规间隔，仍遵守服务端限流。请求失败会返回 `state=error` 或 `rate_limited`，不能据此判断已经是最新版；命令成功输出状态 JSON 时退出码为 0，配置或本地读写异常才退出 1。
-
-要启用自动检查，在自己的配置中加入：
-
-```json
-"software_updates": {
-  "enabled": true,
-  "repository": "swenbo1-web/agents-learning",
-  "channel": "prerelease",
-  "interval_seconds": 86400,
-  "timeout_seconds": 3
-}
-```
-
-主会话 `SessionStart(startup/resume)` 在事件事务外预留检查，由独立短进程访问 GitHub；压缩、清空和子 Agent 不派发检查。默认每天按间隔检查，同一数据目录按仓库和通道共用缓存、短租约与进程锁，避免多个对话重复请求。检测到新版本后，在后续 `startup/resume` 提醒；完整检查状态通过 `update-status`／`status` 查看，不阻塞当前知识注入。失败会退避，响应大小受限，支持 ETag/304；超时约束 socket 与响应读取，操作系统 DNS 不属于严格进程总时长限制。
-
-`prerelease` 通道包含测试版，`stable` 排除测试版。仅比较最近 20 条 Release 中的合格语义版本；不把提交、普通标签或尚未发布的开发版本当成更新。`ahead` 表示本地版本比检查到的发布版本新。检查只连接官方 GitHub API，不读登录令牌、不下载或执行代码、不自动替换安装；新版通过上面的显式覆盖命令安装。[GitHub Release API](https://docs.github.com/en/rest/releases/releases)
-
-也可以单独启动 stdio MCP 服务：
-
-```powershell
-python scripts/learning.py --workspace "D:\Projects\my-project" serve --role worker
-python scripts/learning.py --workspace "D:\Projects\my-project" serve --role admin
-```
-
-| 身份 | MCP 工具 |
-|---|---|
-| 普通 Agent（7 个） | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`knowledge_use`、`learning_status` |
-| 管理员（12 个） | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate`、`review_list`、`propose_governance` |
-
-MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数不能提升角色。技能位于 [learning-worker](skills/learning-worker/SKILL.md) 和 [learning-admin](skills/learning-admin/SKILL.md)。
-
-这些权限限制覆盖本服务的入口。同一操作系统账户下的任意 Shell 和本地数据库访问，不属于 MCP 角色隔离保证；需要宿主权限与账户隔离配合。
-
-### 会话身份与压缩恢复
-
-`SessionStart` 和 `UserPromptSubmit` 注入 `context_handle=...`。普通 Agent 首次调用 `session_context(context_handle=...)`，或直接在 `task_update`／`case_feedback` 传这个句柄；之后当前 MCP 连接固定绑定该句柄，`conversation_id` 可省略。传入其他会话或句柄会被拒绝。写入身份和业务更新在同一事务内复核，失败不会留下错误项目绑定。
-
-压缩后用 `session_context` 恢复任务、revision、write_version、状态和执行准备情况，无需重新总结历史。没有可信句柄时只能查询项目知识和项目状态，不能猜最近会话或登记任意会话。受信本地操作者可使用 `session-bind --conversation ID` 登记明确身份，再用 `serve --context-handle HANDLE` 启动绑定服务。手动 CLI 的 `task`／`feedback` 仍是显式本地操作入口。
-
-`SubagentStart` 有可靠 `agent_id` 时，子 Agent 获得独立句柄、知识展示状态和固定 assignment，绑定派发时的父任务 ID、revision、状态版本与执行轮次。父任务改变后，旧反馈仍记入原任务，旧 assignment 不能使用新许可；`session_context` 同时返回派发任务和当前父任务，不能覆盖父任务。无可靠 ID 或升级前无 assignment 的子身份不猜归属，需要新的子 Agent 身份重新派发。若宿主让父子 Agent 共用一个已绑定的 MCP 连接，子 Agent 需要单独的绑定连接；当前不声称已验收宿主的父子 MCP 连接生命周期。
-
-### Codex／ChatGPT 登录账户切换
-
-同一项目、同一数据目录继续共享正式知识和历史证据，不按登录账户分库。换号通知推进本地 `host_epoch`，旧连接、旧句柄和旧管理员回写失效；新连接通过下一次 Hook 或明确的 `session-bind` 重新绑定。任务历史和每日调用计数不会清零，未确定结果的旧调用不会自动重试，已运行的项目命令也不会被当作重新执行的理由。
-
-受信宿主适配器或操作者在确认切换后调用：
-
-```powershell
-python scripts/learning.py account-changed --notification-id "unique-login-event-id"
-```
-
-可用唯一通知 ID 去重，省略时每次调用均视为一次新边界。所有通知方必须指向相同 `ALP_HOME`／`--home`。这个入口不读取、保存或修改登录 token，不执行登录、退出或额度重置。
-
-**当前没有自动订阅桌面端换号。** 官方 app-server 提供 `account/updated` 和登录完成通知，但普通插件不能据此假定已经接入桌面应用的内部通知通道。适配器应依据自己拥有的登录生命周期发出边界通知；仅比较 `authMode`／套餐不能识别同模式下的 A→B 换号，也不依赖 `auth.json` 修改时间。[官方 app-server 账户接口](https://learn.chatgpt.com/docs/app-server)
-
-## 在 Antigravity 中安装（原生插件）
-
-### 1. 分别导出两个宿主
-
-使用本仓库 0.14.0 源码、Python 3.10+ 和支持原生插件／Hooks 的 Antigravity。两个宿主使用不同导出目录，代码和固定运行副本仍由同一仓库维护：
-
-```powershell
-# Codex：默认 profile，沿用上方安装步骤
-python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
-
-# Antigravity：先导出到单独目录，再由宿主安装
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
-```
-
-Antigravity 首次导出必须显式指定已有工作区；`--home` 可省略，默认与本地 Runtime 相同。MCP 与 Hook 都绑定这两个绝对路径，不从聊天猜当前项目。使用包入口时，将 `scripts/learning.py` 替换成 `-m agent_learning.cli`；macOS／Linux 使用自己的 `python3` 和绝对路径。导出不会创建知识数据库或修改宿主配置。
-
-Antigravity 包包含根 `plugin.json`、`mcp_config.json`、`hooks.json`、rules 和 worker／admin skills；Codex 包保留其专用清单与入口。安装回执记录 `target_host`，覆盖升级不允许将一个宿主的安装替换成另一个。
-
-### 2. 在宿主加载并验证
-
-Antigravity CLI 可安装上面生成的本机目录：
-
-```powershell
-agy plugin install "D:\Plugins\agent-learning-antigravity"
-```
-
-IDE／2.0 也支持项目 `.agents/plugins/` 下的原生目录，可直接把导出目标设为 `D:\Projects\my-project\.agents\plugins\agent-learning`，然后重新加载项目并核对 MCP、Rules、Skills 和 Hooks 已启用。本插件固定绑定一个项目，适合项目级安装；全局加载同一包到其他工作区会被拒绝。安装位置与 CLI 管理方式见[官方插件说明](https://antigravity.google/docs/plugins/)。仓库根含两套资源模板，需先本机导出，不能直接把 GitHub 根目录当成已绑定的 Antigravity 安装包。
-
-在新对话验证：
-
-> 使用 learning_status 核对项目与 host_scope=antigravity:default。把本轮 PreInvocation 给出的 context_handle 传给 session_context，确认 context_bound=true，再登记当前任务目标。
-
-共享 MCP 进程可能服务多个聊天。Antigravity 每次有状态请求必须显式携带本轮句柄，省略时不会继承前一个聊天；查询也应携带句柄登记展示。未获得句柄时只能做项目查询，不能猜“最近会话”。默认观察模式不安装 `PreToolUse`，因此原生聊天与每次 MCP 写入的对应仍依赖正确传递句柄及规则；显式保护模式才额外检查前置事件中的会话一致性。
-
-### 3. 宿主差异与证据边界
-
-| 流程 | Codex | Antigravity 首版 |
-|---|---|---|
-| 自动注入 | 用户提示、会话开始与恢复事件 | `PreInvocation`，使用已登记目标、近期查询和真实错误 |
-| 当前用户提示 | 使用受支持 Hook 的 prompt | 公开回调未承诺 prompt；通过 `task_update` 登记目标，不扫描 transcript |
-| 上下文投递 | 保留展示状态并避免重复正文 | 每次调用从缓存重新渲染有限 `ephemeralMessage`；不重复计为新命中 |
-| 工具观察 | 按实际响应区分结果 | `PostToolUse.error` 非空为失败，空值只表示 `call_completed` |
-| 工具保护 | 已接入的执行规则与受信许可 | 默认 observe 无前置 Hook；enforce 检查通过返回 `ask`，拒绝返回 `deny` |
-| 停止 | 按已上报任务与公开交付消息处理 | `Stop` 记录停止；`fullyIdle=false` 不结束后台任务，true 也不代表用户验收 |
-| 压缩、子 Agent、登录变化 | 使用受支持事件及显式入口 | 不伪造等价事件；编号歧义需受信重置，换号使用显式 CLI 通知 |
-| 管理员 | 可选 Codex CLI 执行器与单独 admin 接口 | 复用治理队列；未实现 Antigravity 自动模型执行器，默认仍无模型调用 |
-
-原生事件按[官方 Hooks 契约](https://antigravity.google/docs/hooks)处理。没有最终退出码、输出和后台终态时，不生成 `tool_success`，不能据此满足要求该等级的自动发布；简短反馈维持 `reported` 等级。默认观察模式的孤儿 Post 事件没有可信前置任务归属，案例保持未关联，仅将错误用于补查。PreInvocation 的重复摘要仍占模型上下文，缓存减少的是重复检索，不代表已测得 token 净节省。
-
-公开事件没有可靠的新用户提示边界时，不能自动确认当前用户要求是否替换了旧任务。worker 需在新的目标或范围变化时及时 `task_update`；执行保护核对已登记合同及受信许可，不表示已经核验每次原生用户提示的授权。Antigravity 安装忽略继承环境中的 `ALP_CONTEXT_HANDLE`，每次有状态请求使用当前 Hook 的显式句柄。
-
-多工作区事件必须挂载已绑定项目；工具路径用于验证其归属，无法归属的记录保持未关联，保护模式拒绝。原生工具不套用 Codex 参数；例如 `run_command` 仍属于命令执行，不能通过把规则标为读取来绕过只读保护。
-
-### 4. 显式保护、重置与换号
-
-需要启用执行规则时，从受信终端更新安装：
-
-```powershell
-python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
-```
-
-enforce 不返回自动 `allow`，不设置 `permissionOverrides`；仍需要已有 `execution-approve` 入口签发当前任务的精确许可，规则中的工具名和参数字段必须与原生调用一致。`ask` 会遵循宿主已有审批设置；宿主 Deny 合成、超时、进程被终止和坏 JSON 的实际行为尚未完成真实宿主验收，因此当前不能承诺所有故障都被宿主硬阻断。
-
-编号回退、复用或矛盾输入没有可靠轨迹 ID 时，不猜新执行身份。通过受信终端重置指定原生会话：
-
-```powershell
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "原生conversationId"
-# 确认实际换号后通知对应宿主
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "本次通知的稳定ID"
-```
-
-重置暂停当前任务、失效旧句柄和许可；后续 Hook 重新绑定，再显式恢复任务并重新审批。这是 CLI 专用入口，不开放给普通 MCP 工具。无法鉴别的迟到回调不增强证据，默认保护拒绝歧义轨迹。换号通知需由实际使用者或可信宿主来源提供，插件不读取登录凭证，也不自动侦测 Antigravity 换号。
-
-### 5. 共用知识、升级与管理员
-
-两个宿主使用同一 `ALP_HOME`／`--home`，且工作区映射到同一项目时，共用知识、候选、来源和治理队列；不复制一套知识算法或默认启动第二个管理员。会话 ID 加宿主命名空间；一个宿主换号不使另一个宿主的 worker 失效，但会让共享治理执行器的旧调用失效，保留未知用量等待核对。
-
-Codex 使用默认数据目录时，Antigravity 导出省略 `--home` 即可选用相同默认位置；使用示例中的自定义目录时，Codex 宿主进程也需要配置同一路径的 `ALP_HOME`。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
-
-可用单独的管理员接口人工整理 Antigravity 案例，也可显式配置现有兼容执行器。native admin skill 只是操作说明，默认 MCP 仍是 worker。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
-
-升级时保持 `--host antigravity --upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。两个宿主可复用同一固定运行 release，但只能分别更新各自的安装目录。
-
-与已有 0.13 安装共用数据时，先停止相关运行端、按需备份数据库，并把所有访问同一知识库的安装都更新到 0.14，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 不兼容而被拒绝。
 
 ## 手动处理一个问题
 
@@ -818,6 +838,14 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `install` | `--host codex\|antigravity` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
 | `antigravity-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
 
+## 0.14.1 复核与检查状态（2026-10-12）
+
+Windows／Python 3.12.14 下完整离线回归发现 **910 项：909 项通过，1 项跳过，零失败、零错误**，耗时 234.445 秒。跳过项是 Windows 创建真实符号链接所需权限；模拟链接边界检查仍通过。相比 0.14.0 新增 12 项保护回归，覆盖模型诊断字段的幂等、真实输入变化与脱敏分离、旧原生回执重置、错误宿主重置拒绝、无任务故障的重试冷却与投递预算、安装路径及拒绝请求体处理。
+
+Antigravity 适配 62 项、安装 14 项、知识浏览器 21 项专项通过。Windows 浏览器拒绝请求的连接中断已在同样的 700 次请求探针中确认：修复前 10 次中断，修复后零中断；请求仍被拒绝。91 个 Python 文件通过 Python 3.10 语法检查，中英文安装章节与围栏检查通过。全套包含 wheel 双宿主导出、实际固定脚本 Hook→中文句柄→MCP 接线、CLI 和数据库迁移保护。
+
+检查使用临时数据目录、假服务及隔离入口，没有启用真实宿主 Hooks、调用付费模型或修改用户插件配置。实际 Python 3.10 与 Linux 的结果以本次 GitHub CI 为准；真实 Antigravity 的权限合成、超时和异步终态仍待宿主验收。公开下载附件仍为 0.13.0；以上双宿主能力从当前源码安装。
+
 ## 0.14.0 双宿主检查状态（2026-10-12）
 
 Windows、Python 3.12.14 下完整离线检查发现 **897 项**，1 项因平台符号链接权限跳过。同步 schema 12／宿主安装契约的旧断言后，177 项相关复验通过。最后一次全套中，浏览器拒绝写请求的一项出现 Windows 本地连接中断 `10053`；随后整个浏览器 20 项复验全部通过，未调整拒绝策略或隐藏失败。
@@ -868,7 +896,7 @@ Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、�
 
 ## 反馈与贡献
 
-通过 [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) 提交可复现的问题、使用建议或功能需求。问题报告请提供插件版本、操作系统、Python／Codex 版本、复现步骤和必要的脱敏输出，不上传真实知识数据库或凭据。
+通过 [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) 提交可复现的问题、使用建议或功能需求。问题报告请提供插件版本、操作系统、Python 和对应 Codex／Antigravity 版本、复现步骤和必要的脱敏输出，不上传真实知识数据库或凭据。
 
 欢迎改进中英文说明、补充安装与跨平台复现、贡献检索案例及真实任务对照评估。提交代码前阅读 [AGENTS.md](AGENTS.md)，使用临时数据目录运行与改动对应的离线检查，并在 Pull Request 说明改动、验证方式及兼容影响。真实任务评估需要包含任务验收和普通 Agent、管理员、检索的完整用量；当前尚无足够数据支持 token、耗时或质量提升比例。
 
