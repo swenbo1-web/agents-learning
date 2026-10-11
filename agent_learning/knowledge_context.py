@@ -177,6 +177,7 @@ class KnowledgeContextMixin:
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
                  expected_epoch=None, tool_only=False):
         from .runtime import ContractError, clean, clip, digest, encode
+        from .knowledge_index import normalized_query_plan
         from .knowledge_output import _summary
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
         with self.transaction():
@@ -205,13 +206,14 @@ class KnowledgeContextMixin:
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         filters = self._retrieval_filters(task)
-        signature = digest([retrieval[-4000:], filters, self._task_key(task), manifest, epoch, self.config["injection_max_chars"]])
+        signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task), manifest,
+                            epoch, self.config["injection_max_chars"]])
         should_search = bool(retrieval.strip()) and (compact or signature != initial["retrieval_signature"])
         if fault:
             should_search = fault["state"] == "pending"
         elif tool_only:
             should_search = False
-        items = self.search(project, retrieval, filters=filters)["items"] if should_search else []
+        items = self.search(project, retrieval, filters=filters, _automatic=True)["items"] if should_search else []
         if fault and fault["state"] == "ready":
             for ref in json.loads(fault["results"]):
                 try:
@@ -298,7 +300,7 @@ class KnowledgeContextMixin:
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                         "title": clip(item["title"], 100), "content_summary": _summary(item, 500),
-                        "applicability": clip(item["applicability"], 180), "limitations": clip(item["limitations"], 180),
+                        "applicability": item["applicability"], "limitations": item["limitations"],
                         "category": item["category"], "knowledge_kind": item["knowledge_kind"],
                         "validation_level": item["validation_level"], "source_health": item["source_health"],
                         "maturity": item.get("maturity", "candidate"),
@@ -339,7 +341,7 @@ class KnowledgeContextMixin:
                 self.db.execute(f"UPDATE {table} SET retrieval_signature=?,retrieval_refs=? WHERE {where}",
                                 (signature, encode(refs), *key))
             if not tool_only:
-                self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}", (effective[-4000:], *key))
+                self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}", (effective[-8000:], *key))
             if fault:
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})}
                         for i in items[:5] if i.get("match", {}).get("auto_eligible", True) and i["source_health"] == "valid"]

@@ -43,22 +43,24 @@ RESPONSE_SCHEMA = _strict_schema({
 })
 
 _TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
-_PROTOCOL_FIELDS = {"turn_id", "tool_use_id", "event_id", "conversation_id", "agent_id",
-                    "session_id", "sessionId", "timestamp", "created", "updated"}
 _TRUNCATION_NOTE = "原始证据已投影或截短；结论仅限可见记录，未核对完整原文。"
+
+
 def _fingerprint(packet):
     # 去掉传输身份而非业务参数；业务对象中的 id/version 等字段仍参与比较。
+    from .event_capture import business_evidence_digest, normalize_business_payload, projected_evidence
     events, seen, actors, assignments = [], set(), {}, {}
     for event in packet["events"]:
-        payload = clean(event.get("payload", {}))
-        if isinstance(payload, dict):
-            payload = {key: value for key, value in payload.items()
-                       if key not in _PROTOCOL_FIELDS and key != "agent_identity_known"}
-            # tool_input/tool_response 里的 ID 或时间可能是业务条件，不递归删除。
-            if isinstance(payload.get("metadata"), dict):
-                payload["metadata"] = {key: value for key, value in payload["metadata"].items() if value}
-                if not payload["metadata"]:
-                    payload.pop("metadata")
+        payload = normalize_business_payload(event.get("payload", {}))
+        business_digest = event.get("business_digest")
+        if not business_digest and not projected_evidence(payload) and event.get("type") != "missing":
+            business_digest = business_evidence_digest(payload)
+        if business_digest:
+            # 比较全量业务证据；可见预览的相同首尾不能证明完整日志相同。
+            payload = {"business_digest": business_digest}
+        else:
+            # 旧截短记录没有完整业务摘要，只能复用本事件，不能跨事件推定等价。
+            payload = {"legacy_event_id": event.get("id"), "visible_payload": payload}
         actor = event.get("agent")
         actor_slot = "parent" if actor is None else actors.setdefault(actor, f"child-{len(actors)}")
         assignment = event.get("assignment_id")
@@ -88,6 +90,8 @@ def _fingerprint(packet):
 def _usage(log_path, elapsed):
     """有界流式累计全部可读报告；预览裁剪不丢累计，缺失不写成零。"""
     records, totals, seen = [], {}, {}
+    pending, failed = set(), set()
+    anonymous_pending, anonymous_failed, started_turns = 0, 0, 0
     truncated, incomplete, count, scanned = False, False, 0, 0
     if log_path is None:
         return {"elapsed_seconds": round(elapsed, 3), "token_usage": [], "token_totals": {},
@@ -119,8 +123,34 @@ def _usage(log_path, elapsed):
                 except (UnicodeError, ValueError):
                     incomplete |= line.lstrip().startswith(b"{")
                     continue
-                if not isinstance(event, dict) or event.get("type") != "turn.completed":
+                if not isinstance(event, dict):
                     continue
+                kind = event.get("type")
+                identity = event.get("turn_id", event.get("id"))
+                identity = identity if isinstance(identity, str) and identity else None
+                if kind == "turn.started":
+                    if identity is None:
+                        anonymous_pending += 1
+                        started_turns += 1
+                    elif identity not in pending and identity not in seen:
+                        pending.add(identity)
+                        started_turns += 1
+                    continue
+                if kind in {"turn.failed", "turn.cancelled", "turn.canceled"}:
+                    if identity is None:
+                        anonymous_failed += 1
+                        anonymous_pending = max(0, anonymous_pending - 1)
+                    else:
+                        # 同一turn的失败/取消与完成是终态矛盾；后到完成不能抹掉它。
+                        failed.add(identity)
+                        pending.discard(identity)
+                    continue
+                if kind != "turn.completed":
+                    continue
+                if identity is None:
+                    anonymous_pending = max(0, anonymous_pending - 1)
+                else:
+                    pending.discard(identity)
                 usage = event.get("usage")
                 if not isinstance(usage, dict):
                     incomplete = True
@@ -132,8 +162,7 @@ def _usage(log_path, elapsed):
                 incomplete |= any(key in _TOKEN_FIELDS and key not in numeric for key in usage)
                 incomplete |= ("total_tokens" in numeric and {"input_tokens", "output_tokens"} <= numeric.keys()
                                and numeric["total_tokens"] != numeric["input_tokens"] + numeric["output_tokens"])
-                identity = event.get("turn_id", event.get("id"))
-                if isinstance(identity, str) and identity:
+                if identity:
                     if identity in seen:
                         if seen[identity] != numeric:
                             incomplete = True
@@ -156,15 +185,22 @@ def _usage(log_path, elapsed):
                     incomplete = True
     except OSError:
         truncated = True
+    unreported_turns = len(pending) + len(failed) + anonymous_pending + anonymous_failed
+    incomplete |= unreported_turns > 0
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": records, "token_totals": totals,
             "reported_turns": count, "preview_truncated": count > 16,
+            "started_turns": started_turns, "unreported_turns": unreported_turns,
             "completeness": "complete" if count and not truncated and not incomplete else "partial" if totals else "unknown",
             "log_tail_truncated": truncated}
 
 
 def _finish(runtime, call_id, state, log_path, started_at):
-    from .admin_lifecycle import finish_call
+    from .admin_lifecycle import UNKNOWN_STATES, finish_call
     usage = _usage(log_path, time.monotonic() - started_at)
+    current = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()
+    if state in UNKNOWN_STATES or (current and current[0] in UNKNOWN_STATES):
+        usage["call_outcome_unknown"] = True
+        usage["completeness"] = "partial" if usage["token_totals"] else "unknown"
     row = finish_call(runtime, call_id, state, usage=usage)
     return json.loads(row["usage"])
 
@@ -188,11 +224,12 @@ def _settings(cfg):
     return list(command), cfg["timeout_seconds"]
 
 
-def _select_review(runtime, project, problem_id, scan_limit, timeout):
+def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch):
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
     from .admin_queue import eligible_query, remember_check, scan_signature
     cfg = runtime.config["admin"]
+    epoch = runtime.assert_host_epoch(expected_epoch)
     recover_calls(runtime, project)
     signature = scan_signature(runtime, project)
     preflight_signature = scan_signature(runtime, project, include_candidates=False)
@@ -247,7 +284,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout):
             runtime.db.execute("INSERT INTO admin_calls(id,project,problem,revision,day,state,created,finished,fingerprint,host_epoch) "
                                "VALUES(?,?,?,?,?,'deduplicated',?,?,?,?)",
                                (call_id, project, selected["id"], selected["revision"], time.strftime("%Y-%m-%d", time.gmtime()),
-                                time.time(), time.time(), review, runtime.host_epoch()))
+                                time.time(), time.time(), review, epoch))
             result = {"status": "skip", "decision": "skip", "reason": "identical evidence and review context already reviewed; not independent verification",
                       "problem_id": selected["id"], "duplicate_of": previous["call_id"],
                       "previous_decision": previous["decision"], "scanned_count": scanned,
@@ -268,7 +305,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout):
             remember_check(runtime, project, selected, signature, blocked_call=unknown["id"])
             return {"status": "review_required", "problem_id": selected["id"], "previous_call_id": unknown["id"],
                     "previous_state": unknown["state"], "scanned_count": scanned}
-        claim = claim_call(runtime, project, selected["id"], selected["revision"], review, runtime.host_epoch(), timeout)
+        claim = claim_call(runtime, project, selected["id"], selected["revision"], review, epoch, timeout)
         if claim["status"] != "reserved":
             return dict(claim, scanned_count=scanned)
         return {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
@@ -356,8 +393,9 @@ def _accept_response(runtime, project, reserved, response):
     return result
 
 
-def admin_once(runtime, project, problem_id=None, *, _deadline=None, _scan_limit=10):
+def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10):
     from .admin_lifecycle import mark_launch_intent, mark_started
+    epoch = runtime.assert_host_epoch(expected_epoch)
     cfg = runtime.config["admin"]
     if not cfg["enabled"]:
         return {"status": "disabled", "scanned_count": 0}
@@ -370,7 +408,7 @@ def admin_once(runtime, project, problem_id=None, *, _deadline=None, _scan_limit
             return {"status": "batch_time_exhausted", "scanned_count": 0}
         timeout = min(timeout, remaining)
     with runtime.transaction():
-        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout)
+        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch)
     if reserved["status"] != "reserved":
         return reserved
     call_id, process, started_at = reserved["call_id"], None, time.monotonic()
@@ -434,20 +472,20 @@ def admin_once(runtime, project, problem_id=None, *, _deadline=None, _scan_limit
             temporary.cleanup()
 
 
-def admin_batch(runtime, project, *, dispatch_token=None, _deadline=None):
+def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _deadline=None):
     from .admin_queue import release_dispatch
     cfg = runtime.config["admin"]
     results, scanned, calls = [], 0, 0
     started = time.monotonic()
     try:
+        epoch = runtime.assert_host_epoch(expected_epoch)
         if not cfg["enabled"]:
             return {"status": "disabled", "items": []}
         _settings(cfg)
         if dispatch_token:
             row = runtime.db.execute("SELECT * FROM admin_dispatch WHERE project=? AND token=?", (project, dispatch_token)).fetchone()
-            if not row or row["host_epoch"] != runtime.host_epoch() or row["lease_until"] <= time.time():
+            if not row or row["host_epoch"] != epoch or row["lease_until"] <= time.time():
                 return {"status": "dispatch_expired", "items": []}
-        epoch = runtime.host_epoch()
         deadline = started + cfg["max_batch_seconds"]
         if _deadline is not None:
             if not isinstance(_deadline, (int, float)) or isinstance(_deadline, bool):
@@ -458,7 +496,7 @@ def admin_batch(runtime, project, *, dispatch_token=None, _deadline=None):
             deadline = min(deadline, _deadline)
         while scanned < cfg["max_cases_per_batch"] and calls < cfg["max_calls_per_batch"]:
             runtime.assert_host_epoch(epoch)
-            result = admin_once(runtime, project, _deadline=deadline,
+            result = admin_once(runtime, project, expected_epoch=epoch, _deadline=deadline,
                                 _scan_limit=min(10, cfg["max_cases_per_batch"] - scanned))
             results.append(result)
             scanned += result.get("scanned_count", 0)

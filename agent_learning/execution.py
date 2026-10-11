@@ -16,6 +16,7 @@ _ACTIONS = {"read", "write", "execute", "network"}
 _SCOPE_MODES = {"analysis", "read_only", "implementation", "execute"}
 _RULE_KEYS = {"mode", "allowed_tools", "tool_rules", "allowed_paths", "budget", "workspace"}
 _SHELL_TOOLS = {"bash", "shell", "powershell", "cmd", "exec_command", "functions.exec_command"}
+_SCOPE_ROOTS_KEY = "_scope_path_roots"
 
 
 def _error(message):
@@ -59,6 +60,41 @@ def validate_scope(scope):
     if "budget" in scope:
         _budget(scope["budget"], "scope.budget")
     return copy.deepcopy(scope)
+
+
+def _freeze_roots(roots, workspace):
+    try:
+        return [str((Path(root) if Path(root).is_absolute()
+                     else Path(workspace) / root).resolve()) for root in roots]
+    except (OSError, TypeError, ValueError, RuntimeError):
+        _error("execution allowed_paths cannot be resolved")
+
+
+def _frozen_scope(scope, workspace):
+    if "allowed_paths" not in scope:
+        return None
+    return {"paths": copy.deepcopy(scope["allowed_paths"]),
+            "roots": _freeze_roots(scope["allowed_paths"], workspace)}
+
+
+def _approved_scope_roots(rules, scope, assignment_id=None):
+    """只读审批派生的根；scope 自身的附加字段不能提供冻结根。"""
+    frozen = rules.get(_SCOPE_ROOTS_KEY)
+    if not isinstance(frozen, dict) or frozen.get("version") != 1:
+        return None
+    parent = frozen.get("task")
+    entry = parent
+    if assignment_id is not None and (not isinstance(parent, dict)
+                                     or parent.get("paths") != scope["allowed_paths"]):
+        assignments = frozen.get("assignments")
+        entry = assignments.get(assignment_id) if isinstance(assignments, dict) else None
+    if (not isinstance(entry, dict) or entry.get("paths") != scope["allowed_paths"]
+            or not isinstance(entry.get("roots"), list)
+            or len(entry["roots"]) != len(scope["allowed_paths"])
+            or any(not isinstance(root, str) or not root or "\0" in root
+                   or not Path(root).is_absolute() for root in entry["roots"])):
+        return None
+    return entry["roots"]
 
 
 def validate_rules(rules, workspace=None, scope=None):
@@ -108,12 +144,11 @@ def validate_rules(rules, workspace=None, scope=None):
     else:
         result.pop("workspace", None)
     if "allowed_paths" in result:
-        try:
-            # 审批固定实际允许根；随后根自身被替换为 symlink 也不能扩大许可。
-            result["allowed_paths"] = [str((Path(root) if Path(root).is_absolute()
-                else bases[0] / root).resolve()) for root in result["allowed_paths"]]
-        except (OSError, ValueError, RuntimeError):
-            _error("execution allowed_paths cannot be resolved")
+        # 审批固定实际允许根；随后根自身被替换为 symlink 也不能扩大许可。
+        result["allowed_paths"] = _freeze_roots(result["allowed_paths"], result.get("workspace"))
+    result[_SCOPE_ROOTS_KEY] = {"version": 1,
+                              "task": _frozen_scope(scope or {}, result.get("workspace")),
+                              "assignments": {}}
     return result
 
 
@@ -140,16 +175,10 @@ def _paths(value):
     return value
 
 
-def _within(path, roots, workspace, frozen=False):
+def _within(path, roots):
     for root in roots:
-        candidate = Path(root)
-        if not candidate.is_absolute():
-            if workspace is None:
-                return False
-            candidate = Path(workspace) / candidate
-        resolved_root = candidate if frozen else candidate.resolve()
         try:
-            path.relative_to(resolved_root)
+            path.relative_to(Path(root))
             return True
         except ValueError:
             continue
@@ -182,6 +211,9 @@ class ExecutionMixin:
         elif (policy["task_id"], policy["task_revision"], policy["execution_epoch"]) != (
                 task["id"], task["revision"], task["execution_epoch"]):
             reason = "execution_approval_stale"
+        elif ("allowed_paths" in task["scope"]
+              and _approved_scope_roots(policy["rules"], task["scope"]) is None):
+            reason = "execution_scope_approval_required"
         elif any(source.get("budget", {}).get("remaining") == 0 for source in (policy["rules"], task["scope"])):
             reason = "execution_budget_exhausted"
         return {"ready": reason == "ready", "reason": reason, "policy": policy}
@@ -203,6 +235,20 @@ class ExecutionMixin:
             if task["status"] != "active":
                 _error("execution approval requires an active task")
             trusted = validate_rules(rules, workspace, task["scope"])
+            # 同一合同中已有的子范围也在受信审批时解析。与父范围相同的
+            # 子任务直接继承父冻结根；审批后派发也不重新解析目录链接。
+            for row in self.db.execute(
+                    "SELECT id,scope FROM assignments WHERE project=? AND conversation=? "
+                    "AND task_id=? AND task_revision=? AND execution_epoch=? AND host_epoch=?",
+                    (project, conversation_id, task["id"], task["revision"], task["execution_epoch"], epoch)):
+                scope = validate_scope(json.loads(row["scope"]))
+                if ("allowed_paths" in scope
+                        and scope["allowed_paths"] != task["scope"].get("allowed_paths")):
+                    if (any(not Path(root).is_absolute() for root in scope["allowed_paths"])
+                            and not trusted.get("workspace")):
+                        _error("relative allowed_paths require an absolute execution workspace")
+                    trusted[_SCOPE_ROOTS_KEY]["assignments"][row["id"]] = _frozen_scope(
+                        scope, trusted.get("workspace"))
             previous = self._execution_policy(project, conversation_id)
             current_binding = (task["id"], task["revision"], task["execution_epoch"], epoch)
             previous_binding = tuple(previous[key] for key in (
@@ -270,8 +316,17 @@ class ExecutionMixin:
                 return result("action_disallowed_by_scope", action=action)
             if scope.get("budget", {}).get("remaining") == 0:
                 return result("execution_budget_exhausted")
-        restrictions = ([(rules["allowed_paths"], True)] if "allowed_paths" in rules else []) + [
-            (scope["allowed_paths"], False) for scope in scopes if "allowed_paths" in scope]
+        restrictions = [rules["allowed_paths"]] if "allowed_paths" in rules else []
+        for index, scope in enumerate(scopes):
+            if "allowed_paths" not in scope:
+                continue
+            assignment_id = None
+            if index:
+                assignment_id = assignment.get("assignment_id", assignment.get("id")) or ""
+            roots = _approved_scope_roots(rules, scope, assignment_id)
+            if roots is None:
+                return result("execution_scope_approval_required")
+            restrictions.append(roots)
         fields = rule.get("path_fields", [])
         if restrictions and not fields:
             return result("resource_fields_required")
@@ -287,7 +342,7 @@ class ExecutionMixin:
                 for value in values:
                     path = Path(value)
                     path = (path if path.is_absolute() else Path(cwd) / path).resolve()
-                    if any(not _within(path, roots, rules.get("workspace"), frozen) for roots, frozen in restrictions):
+                    if any(not _within(path, roots) for roots in restrictions):
                         return result("resource_outside_approved_roots", field=field)
                     resources.append(str(path))
         except (OSError, ValueError, RuntimeError):

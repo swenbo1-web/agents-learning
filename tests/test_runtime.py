@@ -95,7 +95,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_source_change_rejects_old_candidate(self):
         candidate = self.candidate()
-        self.hook("PreToolUse", tool_use_id="new-evidence", tool_name="Bash")
+        self.hook("PreToolUse", tool_use_id="new-evidence", tool_name="Bash", tool_input={"command": "example"})
         self.hook("PostToolUse", tool_use_id="new-evidence", tool_name="Bash", tool_response={"exit_code": 0})
         with self.assertRaises(ContractError): self.r.publish(self.p, candidate)
 

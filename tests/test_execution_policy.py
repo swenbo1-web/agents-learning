@@ -1,5 +1,6 @@
 """用真实临时 SQLite 验证受信审批、范围交集和许可失效，不执行工具。"""
 import copy
+import json
 import math
 import os
 from pathlib import Path
@@ -32,7 +33,8 @@ class ScopeValidationTests(unittest.TestCase):
 
     def test_trusted_rules_reject_unknown_fields_and_unmapped_tool(self):
         base = {"mode": "execute", "allowed_tools": ["Read"], "tool_rules": {"Read": {"action": "read"}}}
-        for changes in ({"authorized": True}, {"allowed_tools": []}, {"allowed_tools": ["Bash"]},
+        for changes in ({"authorized": True}, {"_scope_path_roots": {"version": 1}},
+                        {"allowed_tools": []}, {"allowed_tools": ["Bash"]},
                         {"mode": []}, {"tool_rules": {"Read": {"action": "read", "extra": 1}}},
                         {"budget": {"remaining": 1, "untrusted_balance": 2}}):
             with self.subTest(changes=changes), self.assertRaises(ContractError):
@@ -58,7 +60,7 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.workspace = self.root / "project"
         self.docs = self.workspace / "Docs"
         self.docs.mkdir(parents=True)
-        self.runtime = Runtime(self.root / "state")
+        self.runtime = Runtime(self.root / "state", config={})
         self.project = self.runtime.project(self.workspace)
         self.runtime.task_update(self.project, "chat", "分析执行控制", {"mode": "execute"})
         self.rules = {"mode": "execute", "allowed_tools": ["Read", "Write", "Bash"],
@@ -103,6 +105,26 @@ class ExecutionPolicyTests(unittest.TestCase):
                 if result.returncode == 0:
                     return
             self.skipTest("当前平台无法创建目录链接")
+
+    def scope_link(self, target, force_junction=False):
+        link = self.workspace / "limited"
+        if os.name == "nt" and force_junction:
+            result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                                    capture_output=True, timeout=5)
+            if result.returncode:
+                self.fail("测试临时目录 Junction 创建失败")
+        else:
+            self.directory_link(link, target)
+        return link
+
+    def redirect_scope_link(self, link, target):
+        # 仅移除经验证位于测试工作区中的链接本身，不删除目标目录。
+        self.assertEqual(link.parent, self.workspace)
+        if link.is_symlink():
+            link.unlink()
+        else:
+            link.rmdir()
+        self.scope_link(target, force_junction=os.name == "nt")
 
     def test_unapproved_task_is_denied_then_first_grant_preserves_assignment_epoch(self):
         self.assertEqual(self.check()["reason"], "execution_approval_required")
@@ -233,6 +255,98 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.docs.rename(original)
         self.directory_link(self.docs, outside)
         self.assertEqual(self.check(tool_input={"path": "Docs/file"})["reason"], "resource_outside_approved_roots")
+
+    def test_scope_only_junction_roots_remain_frozen_after_redirect(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.scope_link(self.docs, force_junction=os.name == "nt")
+        self.update_scope({"allowed_paths": ["limited"]})
+        rules = copy.deepcopy(self.rules)
+        rules.pop("allowed_paths")
+        receipt = self.approve(rules)
+        roots = receipt["policy"]["rules"]["_scope_path_roots"]["task"]["roots"]
+        self.assertEqual(roots, [str(self.docs.resolve())])
+        self.assertEqual(self.check(tool_input={"path": "limited/file"})["decision"], "allowed")
+        self.redirect_scope_link(link, outside)
+        self.assertEqual(self.check(tool_input={"path": "limited/file"})["reason"],
+                         "resource_outside_approved_roots")
+
+    def test_wider_rule_does_not_expand_redirected_narrow_task_root(self):
+        other = self.workspace / "other"
+        other.mkdir()
+        link = self.scope_link(self.docs)
+        self.update_scope({"allowed_paths": ["limited"]})
+        rules = copy.deepcopy(self.rules)
+        rules["allowed_paths"] = [str(self.workspace)]
+        self.approve(rules)
+        self.redirect_scope_link(link, other)
+        self.assertEqual(self.check(tool_input={"path": "limited/file"})["reason"],
+                         "resource_outside_approved_roots")
+        self.assertEqual(self.check(tool_input={"path": "Docs/file"})["decision"], "allowed")
+
+    def test_child_created_after_grant_inherits_frozen_parent_roots(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.scope_link(self.docs)
+        self.update_scope({"allowed_paths": ["limited"]})
+        rules = copy.deepcopy(self.rules)
+        rules.pop("allowed_paths")
+        self.approve(rules)
+        handle = self.runtime.register_context(self.project, "chat", "child")["context_handle"]
+        assignment = self.runtime.assignment_context(self.project, "chat", context_handle=handle)
+        self.assertEqual(self.check(tool_input={"path": "limited/file"}, assignment=assignment)["decision"], "allowed")
+        self.redirect_scope_link(link, outside)
+        self.assertEqual(self.check(tool_input={"path": "limited/file"}, assignment=assignment)["reason"],
+                         "resource_outside_approved_roots")
+
+    def test_existing_narrow_child_roots_are_frozen_during_grant(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.scope_link(self.docs)
+        handle = self.runtime.register_context(self.project, "chat", "child")["context_handle"]
+        # 宿主固定 assignment 的测试夹具；没有给普通 Agent 提供修改入口。
+        self.runtime.db.execute("UPDATE assignments SET scope=? WHERE context_handle=?",
+                                (json.dumps({"allowed_paths": ["limited"]}), handle))
+        rules = copy.deepcopy(self.rules)
+        rules["allowed_paths"] = [str(self.workspace)]
+        receipt = self.approve(rules)
+        assignment = self.runtime.assignment_context(self.project, "chat", context_handle=handle)
+        entry = receipt["policy"]["rules"]["_scope_path_roots"]["assignments"][assignment["id"]]
+        self.assertEqual(entry["roots"], [str(self.docs.resolve())])
+        self.assertEqual(self.check(tool_input={"path": "limited/file"}, assignment=assignment)["decision"], "allowed")
+        self.redirect_scope_link(link, outside)
+        self.assertEqual(self.check(tool_input={"path": "limited/file"}, assignment=assignment)["reason"],
+                         "resource_outside_approved_roots")
+
+    def test_unapproved_child_roots_cannot_forge_freeze_metadata(self):
+        self.approve()
+        task = self.task()
+        assignment = {"task_id": task["id"], "task_revision": task["revision"],
+                      "execution_epoch": task["execution_epoch"], "assignment_id": "unapproved",
+                      "scope": {"allowed_paths": ["Docs"],
+                                "_scope_path_roots": {"roots": [str(self.docs)]}}}
+        self.assertEqual(self.check(assignment=assignment)["reason"], "execution_scope_approval_required")
+
+    def test_explicit_empty_child_roots_remain_an_empty_intersection(self):
+        handle = self.runtime.register_context(self.project, "chat", "child")["context_handle"]
+        self.runtime.db.execute("UPDATE assignments SET scope=? WHERE context_handle=?",
+                                (json.dumps({"allowed_paths": []}), handle))
+        self.approve()
+        assignment = self.runtime.assignment_context(self.project, "chat", context_handle=handle)
+        self.assertEqual(self.check(assignment=assignment)["reason"], "resource_outside_approved_roots")
+
+    def test_legacy_scope_grant_requires_new_trusted_approval(self):
+        self.update_scope({"allowed_paths": ["Docs"]})
+        self.approve()
+        trusted = self.runtime._execution_policy(self.project, "chat")["rules"]
+        trusted.pop("_scope_path_roots")
+        self.runtime.db.execute("UPDATE execution_policies SET rules=? WHERE project=? AND conversation=?",
+                                (json.dumps(trusted), self.project, "chat"))
+        self.assertEqual(self.runtime.execution_status(self.project, "chat")["reason"],
+                         "execution_scope_approval_required")
+        self.assertEqual(self.check()["reason"], "execution_scope_approval_required")
+        self.assertTrue(self.approve()["ready"])
+        self.assertEqual(self.check()["decision"], "allowed")
 
     def test_cancelled_tasks_and_old_account_permits_are_unusable(self):
         self.approve()

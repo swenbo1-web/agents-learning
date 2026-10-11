@@ -21,6 +21,7 @@ _ZH_REQUEST = re.compile("|".join(sorted({"请先", "帮我", "请问", "一下"
                         "说明", "给出", "进行", "可以", "需要", "是否", "能够", "然后", "最后", "请"},
                        key=lambda value: (-len(value), value))))
 _MAX_QUERY_TERMS = 128
+_MAX_AUTOMATIC_CANDIDATES = 64
 
 
 def terms(text):
@@ -56,6 +57,12 @@ def _query_terms(query):
     technical = [word for word in selected if not _CHINESE.fullmatch(word)]
     chinese = [word for word in selected if _CHINESE.fullmatch(word)]
     return (technical + chinese)[:_MAX_QUERY_TERMS], meaningful
+
+
+def normalized_query_plan(query):
+    """缓存和检索共享同一有效输入；短语顺序也参与自动匹配判断。"""
+    selected, meaningful = _query_terms(query)
+    return {"terms": selected, "meaningful": meaningful}
 
 
 def _index_text(body):
@@ -169,14 +176,15 @@ class KnowledgeIndexMixin:
                 count = self._rebuild_knowledge_index()
         return {"status": "rebuilt", "indexed": count, "index_version": INDEX_VERSION}
 
-    def search(self, project, query, limit=5, filters=None):
+    def search(self, project, query, limit=5, filters=None, *, _automatic=False):
         from .runtime import ContractError, digest, encode, knowledge_filters
 
         if not isinstance(query, str):
             raise ContractError("query must be a string")
         limit = max(1, min(int(limit), 10))
         filters = knowledge_filters(filters)
-        selected, meaningful = _query_terms(query)
+        plan = normalized_query_plan(query)
+        selected, meaningful = plan["terms"], plan["meaningful"]
         if not selected:
             return {"status": "no_match", "items": []}
 
@@ -184,11 +192,14 @@ class KnowledgeIndexMixin:
         if owns_snapshot:
             self.db.execute("BEGIN")
         try:
-            row = self.db.execute("SELECT generation,revocation_epoch FROM projects WHERE id=?", (project,)).fetchone()
+            row = self.db.execute("SELECT generation,revocation_epoch,source_epoch FROM projects WHERE id=?", (project,)).fetchone()
             if row is None:
                 raise ContractError("unknown project")
             manifest = dict(row)
-            key = digest([project, selected, limit, filters, manifest, "local-fts", INDEX_VERSION])
+            # 自动检索先有界过召回，再筛来源；来源变化必须使已筛掉的候选重新参与。
+            source_epoch = manifest.pop("source_epoch")
+            key = digest([project, plan, limit, filters, manifest, "local-fts", INDEX_VERSION,
+                          bool(_automatic), source_epoch if _automatic else None])
             cached = self.db.execute("SELECT body FROM cache WHERE key=?", (key,)).fetchone()
             references = None
             if cached:
@@ -227,7 +238,8 @@ class KnowledgeIndexMixin:
                                        "k.project=a.project AND k.id=a.id AND k.revision=a.revision "
                                        "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions +
                                        " ORDER BY alp_knowledge_score(k.body) DESC,k.id ASC LIMIT ?",
-                                       (match, project, *filters.values(), limit)).fetchall()
+                                       (match, project, *filters.values(),
+                                        _MAX_AUTOMATIC_CANDIDATES if _automatic else limit)).fetchall()
                 references = [{"knowledge_id": row["id"], "revision": row["revision"]} for row in rows]
             # 正文及来源都在同一快照读取，禁止通过 read() 跳转到刚发布的新修订。
             items = []
@@ -240,9 +252,13 @@ class KnowledgeIndexMixin:
                 item = self._public(project, row)
                 if item.get("source_health") in {"conflicted", "denied", "missing"}:
                     explanation["auto_eligible"] = False
+                if _automatic and not explanation["auto_eligible"]:
+                    continue
                 item["match"] = explanation
                 items.append(item)
                 retained.append({"knowledge_id": row["id"], "revision": row["revision"]})
+                if _automatic and len(items) == limit:
+                    break
             references = retained
             if owns_snapshot:
                 self.db.execute("COMMIT")

@@ -23,7 +23,8 @@ class Module4ContextTests(unittest.TestCase):
     def hook(self, kind, **fields):
         return self.r.handle_hook(dict(hook_event_name=kind, session_id="chat", cwd=str(self.workspace), **fields))
 
-    def publish(self, title, content=None, metadata=None, success=False):
+    def publish(self, title, content=None, metadata=None, success=False,
+                applicability="local tools", limitations="reported evidence only"):
         refs = []
         if success:
             self.hook("PreToolUse", tool_use_id=title, tool_name="Bash")
@@ -32,7 +33,7 @@ class Module4ContextTests(unittest.TestCase):
         problem = self.r.feedback(self.p, "chat", title + " evidence", category="operation", event_refs=refs)
         packet = self.r.review_packet(self.p, problem["id"])
         candidate = self.r.submit_candidate(self.p, problem_id=problem["id"], problem_revision=problem["revision"],
-            title=title, content=content or title + " guidance", applicability="local tools", limitations="reported evidence only",
+            title=title, content=content or title + " guidance", applicability=applicability, limitations=limitations,
             category="operation", validation_level="tool_success" if success else "reported",
             evidence_refs=[event["id"] for event in packet["events"]], metadata=metadata or {})
         return self.r.publish(self.p, candidate["candidate_id"])
@@ -197,6 +198,61 @@ class Module4ContextTests(unittest.TestCase):
         text = self.text(self.hook("UserPromptSubmit", prompt="compiler", turn_id="environment"))
         self.assertNotIn(a["knowledge_id"], text)
         self.assertIn(b["knowledge_id"], text)
+
+    def test_hook_keeps_middle_of_complete_conditions_when_budget_fits(self):
+        applicability = "当前环境已核对。" * 32 + "必须预先生成验证过的备份。" + "确认回滚入口可用。" * 12
+        limitations = "只适用于本地操作。" * 32 + "禁止覆盖共享原件。" + "继续核对执行结果。" * 12
+        item = self.publish("compiler", applicability=applicability, limitations=limitations)
+        text = self.text(self.hook("UserPromptSubmit", prompt="compiler", turn_id="full-conditions"))
+        card = next(json.loads(line) for line in text.splitlines() if line.startswith('{"'))
+        self.assertEqual(card["knowledge_id"], item["knowledge_id"])
+        self.assertEqual(card["applicability"], applicability)
+        self.assertEqual(card["limitations"], limitations)
+        self.assertFalse(card.get("read_required", False))
+
+    def test_hook_uses_read_required_when_complete_constraints_do_not_fit(self):
+        item = self.publish("compiler", limitations="执行前必须验证备份与回滚。" * 300)
+        text = self.text(self.hook("UserPromptSubmit", prompt="compiler", turn_id="read-conditions"))
+        card = next(json.loads(line) for line in text.splitlines() if line.startswith('{"'))
+        self.assertEqual(card["knowledge_id"], item["knowledge_id"])
+        self.assertTrue(card["read_required"])
+        self.assertNotIn("content_summary", card)
+        self.assertLessEqual(len(text), self.r.config["injection_max_chars"])
+
+    def test_automatic_retrieval_refills_after_five_conflicted_matches(self):
+        for index in range(5):
+            title = f"compiler recovery bad{index}"
+            self.publish(title, success=True)
+            self.hook("PostToolUse", tool_use_id=title, tool_name="Bash", tool_response={"exit_code": 1})
+        valid = self.publish("diagnosis", content="compiler recovery")
+        default = self.r.search(self.p, "compiler recovery")["items"]
+        self.assertEqual(len(default), 5)
+        self.assertTrue(all(item["source_health"] == "conflicted" for item in default))
+        text = self.text(self.hook("UserPromptSubmit", prompt="compiler recovery", turn_id="refill"))
+        self.assertIn(valid["knowledge_id"], text)
+        self.assertNotIn('"source_health":"conflicted"', text)
+
+    def test_query_plan_preserves_differences_before_last_four_thousand(self):
+        item = self.publish("newneedle")
+        common = " and " * 1100
+        self.hook("UserPromptSubmit", prompt="absentmarker" + common, turn_id="long-missing")
+        with patch.object(self.r, "search", wraps=self.r.search) as searched:
+            text = self.text(self.hook("UserPromptSubmit", prompt="newneedle" + common, turn_id="long-found"))
+        searched.assert_called_once()
+        self.assertIn(item["knowledge_id"], text)
+        saved = self.r.db.execute("SELECT last_query FROM contexts WHERE project=? AND conversation='chat'", (self.p,)).fetchone()[0]
+        self.assertIn("newneedle", saved)
+        with patch.object(self.r, "search", side_effect=AssertionError("same effective query should be reused")):
+            self.hook("UserPromptSubmit", prompt="继续", turn_id="same-long-query")
+
+    def test_automatic_cache_is_invalidated_by_source_health_change(self):
+        item = self.publish("compiler", success=True)
+        self.r.db.execute("UPDATE operations SET conflict=1 WHERE project=?", (self.p,))
+        self.assertEqual(self.r.search(self.p, "compiler", _automatic=True)["items"], [])
+        self.r.db.execute("UPDATE operations SET conflict=0 WHERE project=?", (self.p,))
+        result = self.r.search(self.p, "compiler", _automatic=True)["items"]
+        self.assertEqual([entry["knowledge_id"] for entry in result], [item["knowledge_id"]])
+        self.assertTrue(result[0]["match"]["auto_eligible"])
 
 
 if __name__ == "__main__":

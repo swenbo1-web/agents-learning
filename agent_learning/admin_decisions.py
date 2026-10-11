@@ -82,7 +82,8 @@ def review_signature(packet, cfg, evidence_signature):
     # 并发/日额度/超时属于调度；输入预算与发布规则改变审核可见性或结论用途。
     policy = {key: clean(value) for key, value in cfg.items()
               if key not in {"enabled", "max_calls_per_day", "timeout_seconds", "max_cases_per_batch",
-                             "max_calls_per_batch", "max_batch_seconds"}}
+                             "max_calls_per_batch", "max_batch_seconds", "max_concurrent_calls",
+                             "max_reported_tokens_per_day", "token_reservation_per_call"}}
     return digest({"format": 1, "evidence": evidence_signature, "dependencies": dependencies(packet, evidence_signature),
                    "instructions": REVIEW_PREFIX + REVIEW_SUFFIX, "packet_format": PACKET_FORMAT,
                    "policy": policy})

@@ -22,7 +22,7 @@ REVIEW_PREFIX = (
     "只返回schema要求的JSON。\n<untrusted_evidence>\n"
 )
 REVIEW_SUFFIX = "\n</untrusted_evidence>"
-PACKET_FORMAT = 4
+PACKET_FORMAT = 5
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
@@ -245,6 +245,7 @@ class ReviewPacketMixin:
 
     @staticmethod
     def _review_event(row):
+        from .event_capture import projected_evidence
         missing = row["id"] is None
         health = "missing" if missing else "conflicted" if row["operation_conflict"] else (
             "denied" if row["operation_decision"] == "denied" else "valid")
@@ -252,6 +253,9 @@ class ReviewPacketMixin:
                   "payload": json.loads(row["payload"]) if row["payload"] else {}, "role": row["role"],
                   "created": row["created"], "health": health,
                   "current_tool_success": health == "valid" and row["type"] == "PostToolUse" and row["outcome"] == "succeeded"}
+        # 完整可见资料可直接归一化比较，避免每条短事件重复发送摘要。
+        if missing or projected_evidence(result["payload"]):
+            result["business_digest"] = row.get("business_digest")
         for key in ("agent", "assignment_id"):
             if row[key] is not None:
                 result[key] = row[key]

@@ -62,6 +62,8 @@ def normalize_usage(usage):
     if ("total_tokens" in totals and {"input_tokens", "output_tokens"} <= totals.keys()
             and totals["total_tokens"] != totals["input_tokens"] + totals["output_tokens"]):
         completeness = "partial"
+    if usage.get("unreported_turns", 0) or usage.get("call_outcome_unknown"):
+        completeness = "partial" if totals else "unknown"
     result.update(token_totals=totals, completeness=completeness)
     return result
 
@@ -146,7 +148,8 @@ def admin_budget_status(runtime, *, now=None):
         usage_states["conflict"] += int(bool(row["conflict"]))
         known = row["reported_tokens"] or 0
         reserved = row["reserved_tokens"] if row["reserved_tokens"] is not None else settings["token_reservation_per_call"]
-        pending = row["state"] in {"reserved", "launch_intent", "started"} or completeness != "complete"
+        pending = row["state"] in {"reserved", "launch_intent", "started", "timeout_unknown",
+                                   "account_changed_unknown", "orphaned_unknown"} or completeness != "complete"
         reported += known
         reservations += reserved if pending else 0
         accounted += max(reserved, known) if pending else known

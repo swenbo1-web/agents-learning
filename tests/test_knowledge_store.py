@@ -235,7 +235,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
     def test_legacy_migration_rebuilds_clean_index_and_recovers_unique_receipt(self):
         candidate, first = self.legacy_state()
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 11)
         self.assertEqual(self.r.publish(self.p, candidate), first)
         self.assertEqual(len(self.r.read(self.p, first["knowledge_id"])["sources"]), 1)
         self.assertEqual(self.r.search(self.p, "synthetic_legacy_secret")["items"], [])

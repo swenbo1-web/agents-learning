@@ -21,7 +21,8 @@ from .knowledge_index import KnowledgeIndexMixin
 from .knowledge_context import KnowledgeContextMixin
 from .context_storage import ContextStorageMixin
 from .case_store import CaseStoreMixin
-from .event_capture import CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict
+from .event_capture import (CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict,
+                            business_evidence_digest, projected_evidence)
 from .review_packet import ReviewPacketMixin
 from .knowledge_releases import KnowledgeReleaseMixin
 from .knowledge_sync import KnowledgeSyncMixin
@@ -227,7 +228,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(11)):
+        if version not in set(range(12)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -251,6 +252,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             self._migrate_admin_storage()
             self._migrate_publication_storage()
             self._migrate_module8_storage()
+            self._migrate_audit_storage()
         except BaseException:
             self.db.close()
             raise
@@ -288,7 +290,23 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             install_budget(self)
             self._migrate_scheduler_storage()
             self._migrate_learning_evaluation()
-            self.db.execute("PRAGMA user_version=10")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 10:
+                self.db.execute("PRAGMA user_version=10")
+
+    def _migrate_audit_storage(self):
+        """全量业务摘要独立保存；旧投影不补造不可恢复的内容。"""
+        with self.transaction():
+            if self.db.execute("PRAGMA user_version").fetchone()[0] >= 11:
+                return
+            existing = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
+            if "business_digest" not in existing:
+                self.db.execute("ALTER TABLE events ADD COLUMN business_digest TEXT")
+            for row in self.db.execute("SELECT id,payload FROM events WHERE business_digest IS NULL").fetchall():
+                payload = json.loads(row["payload"])
+                if not projected_evidence(payload):
+                    self.db.execute("UPDATE events SET business_digest=? WHERE id=?",
+                                    (business_evidence_digest(payload), row["id"]))
+            self.db.execute("PRAGMA user_version=11")
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -530,9 +548,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                                         (project, task_id, task_write_version)).fetchone()
                 task_status = state[0] if state else None
         self.db.execute("INSERT INTO events(id,project,conversation,task_id,task_revision,agent,operation,type,outcome,payload,created,"
-                        "task_write_version,execution_epoch,assignment_id,task_status,capture_digest,tool_input_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "task_write_version,execution_epoch,assignment_id,task_status,capture_digest,tool_input_digest,business_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (ident, project, conversation, task_id, task_revision, agent_id,
-                         operation_id, kind, outcome, text, time.time(), task_write_version, execution_epoch, assignment_id, task_status, capture_digest, input_digest))
+                         operation_id, kind, outcome, text, time.time(), task_write_version, execution_epoch, assignment_id,
+                         task_status, capture_digest, input_digest, business_evidence_digest(payload)))
         return dict(self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()), True
 
     def record_event(self, project, conversation, kind, payload, **kwargs):
@@ -675,6 +694,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                                      "last_assistant_message", "agent_type", "turn_id") if k in raw}
         payload["agent_identity_known"] = bool(raw.get("agent_id"))
         capture_digest = digest(clean(payload))
+        legacy_event_key = event_key
+        if kind == "PostToolUse" and tool_id:
+            # 工具响应相同而输入/工具名不同仍是独立证据，由 operation 统一判冲突。
+            event_key = [conversation, agent_id, kind, tool_id, capture_digest]
         access = None
         with self.transaction():
             self.bind_session(project, conversation)
@@ -685,6 +708,19 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                     if replay[0] != capture_digest:
                         raise ContractError("event id reused with different content")
                     return {}
+                legacy_replay = self.db.execute("SELECT capture_digest,payload FROM events WHERE id=?",
+                    (digest([project, [epoch, legacy_event_key]]),)).fetchone()
+                if legacy_replay and legacy_replay[0] == capture_digest:
+                    return {}
+                if legacy_replay and legacy_replay[0] is None:
+                    legacy_payload = json.loads(legacy_replay["payload"])
+                    if not projected_evidence(legacy_payload):
+                        observable = {key: value for key, value in legacy_payload.items() if key in (
+                            "tool_name", "tool_input", "tool_response", "prompt", "source",
+                            "last_assistant_message", "agent_type", "turn_id")}
+                        observable["agent_identity_known"] = legacy_payload.get("agent_identity_known", bool(agent_id))
+                        if digest(clean(observable)) == capture_digest:
+                            return {}
             if kind in {"SessionStart", "UserPromptSubmit"} or kind == "SubagentStart" and agent_id:
                 access = self._register_context(project, conversation, agent_id)
             payload["host_epoch"] = epoch

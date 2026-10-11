@@ -42,10 +42,11 @@ WORKER_TOOLS = [
     ("knowledge_search", "检索本项目正式知识的有限预览；完整正文使用knowledge_read。预算是JSON正文字符数，默认6000。", schema({
         "query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS,
         "context_handle": NONEMPTY, "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}}, ["query"])),
-    ("knowledge_read", "分页读取当前有效正文与有限来源状态；续页传next_offset与expected_revision，默认12000个JSON正文字符。", schema({
+    ("knowledge_read", "分页读取当前有效正文、适用条件或限制；section默认content，续页保持section并传next_offset与expected_revision。fields_truncated中的条件用对应section续读；默认12000个JSON正文字符。", schema({
         "knowledge_id": NONEMPTY, "context_handle": NONEMPTY,
         "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
         "expected_revision": {"type": "integer", "minimum": 1},
+        "section": {"type": "string", "enum": ["content", "applicability", "limitations"]},
         "offset": {"type": "integer", "minimum": 0}}, ["knowledge_id"])),
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
@@ -193,12 +194,13 @@ class Server:
                 items = result["items"]
             else:
                 if args.get("offset", 0) and "expected_revision" not in args:
-                    raise ContractError("expected_revision is required to continue a content page")
+                    raise ContractError("expected_revision is required to continue a section page")
                 try:
                     current = r.read(p, args["knowledge_id"])
                     if "expected_revision" in args and current["revision"] != args["expected_revision"]:
                         raise ContractError("knowledge revision changed; restart reading from offset 0")
-                    result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0))
+                    result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0),
+                                       args.get("section", "content"))
                 except ValueError as exc:
                     raise ContractError(str(exc)) from exc
                 items = [result]

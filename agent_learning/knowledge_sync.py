@@ -156,10 +156,11 @@ class KnowledgeSyncMixin:
                 accepted[key] = value
         return accepted
 
-    def sync_once(self, project, retry=None, *, max_seconds=None):
+    def sync_once(self, project, retry=None, *, max_seconds=None, expected_epoch=None):
         """只分发知识；blocked必须显式恢复，网络调用不占数据库事务。"""
         from .runtime import ContractError, clean, encode
         from .hindsight import HindsightClient, HindsightError
+        epoch = self.assert_host_epoch(expected_epoch)
         if max_seconds is not None and (isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float))
                 or not math.isfinite(max_seconds) or not 0 < max_seconds <= 300):
             raise ContractError("sync time allowance must be finite and <=300")
@@ -167,6 +168,7 @@ class KnowledgeSyncMixin:
             return {"status": "disabled"}
         lease = str(uuid.uuid4())
         with self.transaction():
+            self.assert_host_epoch(epoch)
             self._sync_expire(project)
             self._consume_sync_dirty(project)
             if retry is not None:
@@ -208,8 +210,11 @@ class KnowledgeSyncMixin:
             self.db.execute("UPDATE outbox SET state='running',prepare_attempts=prepare_attempts+1,lease=?,lease_until=?,"
                             "lease_counted=0,write_outcome='unknown',updated=? WHERE id=?",
                             (lease, time.time() + duration, time.time(), row["id"]))
+        network_started = False
         try:
+            self.assert_host_epoch(epoch)
             suffix = ":state:" + payload["snapshot_digest"] if "envelope" in payload else ""
+            network_started = True
             result = HindsightClient(target_config).retain(
                 f"{project}:{payload['knowledge_id']}@{payload['revision']}{suffix}",
                 encode(payload.get("envelope", payload["body"])), project, payload["revision"], row["id"])
@@ -217,6 +222,8 @@ class KnowledgeSyncMixin:
             state, outcome, error = "synced", "confirmed", None
         except Exception as exc:
             diagnostic = {"error_type": type(exc).__name__, "write_outcome": "unknown"}
+            if not network_started:
+                diagnostic["write_outcome"] = "not_sent"
             if isinstance(exc, HindsightError):
                 diagnostic.update(kind=exc.kind, status_code=exc.status_code, retryable=exc.retryable,
                                   write_outcome="not_sent" if exc.write_outcome == "not_sent" else "unknown")
@@ -225,6 +232,13 @@ class KnowledgeSyncMixin:
         with self.transaction():
             # 迟到回执单独保存供人工对账，不修改已失租的队列结果。
             attempt_outcome = outcome
+            stale_account = self.host_epoch() != epoch
+            received_state = state
+            if stale_account:
+                # 旧账户执行器的远端结果只作迟到证据，不确认当前账户队列。
+                state, outcome = "blocked", "unknown"
+                result.update(kind="account_context_changed", write_outcome="unknown")
+                error = encode(result)
             if row["write_outcome"] == "unknown" and outcome == "not_sent":
                 # 本次预检失败不能证明此前未知的远端写入没有发生。
                 outcome = "unknown"
@@ -234,13 +248,13 @@ class KnowledgeSyncMixin:
                                       "lease=NULL,lease_until=0,lease_counted=0,updated=? WHERE project=? AND id=? "
                                       "AND state='running' AND lease=?",
                                       (state, error, outcome, int(attempt_outcome != "not_sent"), time.time(), project, row["id"], lease)).rowcount
-            receipt_state = state if changed else "late_" + state
+            receipt_state = "late_" + received_state if stale_account else state if changed else "late_" + state
             self.db.execute("INSERT INTO sync_receipts VALUES(?,?,?,?,?,?,?)",
                             (str(uuid.uuid4()), project, row["id"], lease, receipt_state, encode(result), time.time()))
             if not changed:
                 current = self.db.execute("SELECT state FROM outbox WHERE project=? AND id=?", (project, row["id"])).fetchone()
                 return {"status": "lease_lost", "operation_id": row["id"], "current_state": current[0] if current else "missing"}
-        return {"status": state, "operation_id": row["id"], "result": result}
+        return {"status": "reconnect_required" if stale_account else state, "operation_id": row["id"], "result": result}
 
     def _sync_summary(self, row):
         from .runtime import digest
@@ -287,8 +301,9 @@ class KnowledgeSyncMixin:
                                "created": r["created"]} for r in receipts]
         return result
 
-    def sync_batch(self, project, max_items=20, max_seconds=30):
+    def sync_batch(self, project, max_items=20, max_seconds=30, *, expected_epoch=None):
         from .runtime import ContractError
+        epoch = self.assert_host_epoch(expected_epoch)
         if isinstance(max_items, bool) or not isinstance(max_items, int) or not 1 <= max_items <= 100:
             raise ContractError("sync batch max_items must be 1..100")
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 300:
@@ -298,10 +313,13 @@ class KnowledgeSyncMixin:
             remaining = max_seconds - (time.monotonic() - started)
             if remaining <= 0:
                 break
-            item = self.sync_once(project, max_seconds=remaining)
+            item = self.sync_once(project, max_seconds=remaining, expected_epoch=epoch)
             if item["status"] in {"idle", "disabled"}:
                 break
             items.append({k: item[k] for k in ("status", "operation_id", "current_state") if k in item})
+            if item["status"] == "reconnect_required":
+                break
+        self.assert_host_epoch(epoch)
         return {"status": "disabled" if not self.config["hindsight"]["enabled"] else "completed",
                 "items": items, "processed": len(items), "elapsed_seconds": round(time.monotonic() - started, 3),
                 "budget_exhausted": len(items) >= max_items or time.monotonic() - started >= max_seconds}

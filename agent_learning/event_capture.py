@@ -26,6 +26,41 @@ def tool_outcome(response):
 
 
 _RESULT_FIELDS = ("exit_code", "exitCode", "isError", "is_error", "success", "error_code")
+BUSINESS_TRANSPORT_FIELDS = {"turn_id", "tool_use_id", "event_id", "conversation_id", "agent_id",
+                             "session_id", "sessionId", "timestamp", "created", "updated"}
+
+
+def normalize_business_payload(payload):
+    """只去掉顶层传输身份；嵌套的 ID 和时间仍可能是业务条件。"""
+    from .runtime import clean
+
+    result = clean(payload)
+    if isinstance(result, dict):
+        result = {key: value for key, value in result.items()
+                  if key not in BUSINESS_TRANSPORT_FIELDS and key != "agent_identity_known"}
+        if isinstance(result.get("metadata"), dict):
+            result["metadata"] = {key: value for key, value in result["metadata"].items() if value}
+            if not result["metadata"]:
+                result.pop("metadata")
+    return result
+
+
+def business_evidence_digest(payload):
+    """在投影前计算全量脱敏业务摘要，不保存或发送原始长日志。"""
+    from .runtime import digest
+    return digest(normalize_business_payload(payload))
+
+
+def projected_evidence(payload):
+    """旧记录含投影标记时，不能从可见首尾恢复全量业务摘要。"""
+    if isinstance(payload, dict):
+        if any(key in payload for key in ("truncated", "truncated_items", "truncated_fields")):
+            return True
+        return any(projected_evidence(value) for value in payload.values())
+    if isinstance(payload, list):
+        return any(projected_evidence(value) for value in payload)
+    return isinstance(payload, str) and "...[truncated]..." in payload
+
 _PRIORITY = {
     **{key: 0 for key in _RESULT_FIELDS},
     "tool_response": 1, "tool_name": 1, "observed_outcome": 1, "operation_conflict": 1,
@@ -131,7 +166,9 @@ def operation_input_conflict(runtime, project, operation, raw):
     if not operation or "tool_input" not in raw:
         return False
     row = runtime.db.execute(
-        "SELECT * FROM events WHERE project=? AND operation=? AND type='PreToolUse' ORDER BY created,id LIMIT 1",
+        "SELECT * FROM events WHERE project=? AND operation=? AND type IN ('PreToolUse','PostToolUse') "
+        "AND (tool_input_digest IS NOT NULL OR json_type(payload,'$.tool_input') IS NOT NULL) "
+        "ORDER BY created,id LIMIT 1",
         (project, operation)).fetchone()
     if not row:
         return False
@@ -179,9 +216,21 @@ def _targets(value, prefix="", depth=0):
 def _targets_compatible(first, second):
     a, b = _targets(first), _targets(second)
     common = a.keys() & b.keys()
+    if any(a[key] != b[key] for key in common):
+        return False
+    # 共享 cwd/workspace 不能证明两条命令相关；明确资源或相同命令才形成潜在恢复。
+    if any(key.rsplit(".", 1)[-1].lower() not in {"workspace", "cwd", "project_path"}
+           for key in common):
+        return True
     if a and b and not common:
         return False
-    return all(a[key] == b[key] for key in common)
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    for key in ("command", "cmd"):
+        command = first.get(key)
+        if isinstance(command, str) and command.strip() and command == second.get(key):
+            return True
+    return False
 
 
 class CaseCaptureMixin:
@@ -226,9 +275,6 @@ class CaseCaptureMixin:
             "AND e.type='PostToolUse' AND e.outcome='failed' AND e.agent IS ? "
             "AND e.assignment_id IS ? AND o.host_epoch=? "
             "AND json_extract(e.payload,'$.tool_name')=? "
-            "AND NOT EXISTS(SELECT 1 FROM problem_events recovery JOIN events observed ON observed.id=recovery.event "
-            "WHERE recovery.problem=p.id AND recovery.role='potential_recovery' AND observed.created>=e.created "
-            "AND observed.agent IS e.agent AND observed.assignment_id IS e.assignment_id) "
             "ORDER BY e.created DESC,e.id DESC LIMIT 20",
             (project, conversation, event["task_id"], event["task_revision"], agent_id,
              event.get("assignment_id"), epoch, raw.get("tool_name"))).fetchall()
@@ -242,6 +288,28 @@ class CaseCaptureMixin:
             if failure_input is None and prior:
                 failure_input = _payload(prior[0]).get("tool_input")
             if not _targets_compatible(failure_input, success_input):
+                continue
+            # 升级前的无目标成功可能被误关联；仅相关恢复才抑制后续证据。
+            recoveries = self.db.execute(
+                "SELECT observed.* FROM problem_events recovery JOIN events observed ON observed.id=recovery.event "
+                "JOIN operations ro ON ro.project=observed.project AND ro.id=observed.operation "
+                "WHERE recovery.problem=? AND recovery.role='potential_recovery' AND observed.created>=? "
+                "AND observed.agent IS ? AND observed.assignment_id IS ? AND observed.outcome='succeeded' "
+                "AND ro.host_epoch=? AND ro.conflict=0 AND ro.decision!='denied' AND ro.observation='succeeded' "
+                "ORDER BY observed.created DESC LIMIT 20",
+                (failure["problem_id"], failure["created"], agent_id, event.get("assignment_id"), epoch)).fetchall()
+            related = False
+            for recovery in recoveries:
+                recovery = dict(recovery)
+                recovery_input = _payload(recovery).get("tool_input")
+                if recovery_input is None:
+                    recovery_attempts = self._operation_attempts(project, recovery["operation"])
+                    if recovery_attempts:
+                        recovery_input = _payload(recovery_attempts[0]).get("tool_input")
+                if _targets_compatible(failure_input, recovery_input):
+                    related = True
+                    break
+            if related:
                 continue
             refs = [(item["id"], "attempt") for item in attempts] + [(event["id"], "potential_recovery")]
             self._attach_case_evidence(failure["problem_id"], refs, resolution_status="recovery_observed")

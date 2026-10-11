@@ -272,11 +272,11 @@ class SchedulerMixin:
                 if remaining <= 0:
                     result = {"status": "time_exhausted"}
                 elif kind == "admin":
-                    result = admin_batch(self, identifier, _deadline=deadline)
+                    result = admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
                 elif kind == "release":
                     result = self.daily_knowledge_release(identifier, max_items=cfg["max_release_items"], expected_epoch=epoch)
                 else:
-                    result = self.sync_batch(identifier, max_items=cfg["max_sync_items"], max_seconds=min(cfg["max_sync_seconds"], remaining))
+                    result = self.sync_batch(identifier, max_items=cfg["max_sync_items"], max_seconds=min(cfg["max_sync_seconds"], remaining), expected_epoch=epoch)
             except Exception as exc:
                 result = {"status": "failed", "stop_reason": type(exc).__name__}
             summary = self._scheduler_summary(result)

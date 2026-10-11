@@ -25,7 +25,9 @@ class Module4MCPTests(unittest.TestCase):
         self.project = self.runtime.project(self.workspace)
         self.sequence = 0
 
-    def published(self, content="compiler recovery", title=None):
+    def published(self, content="compiler recovery", title=None,
+                  applicability="Configured compiler environment.",
+                  limitations="Reported guidance; verify current environment."):
         self.sequence += 1
         conversation = f"source-{self.sequence}"
         self.runtime.task_update(self.project, conversation, "compiler recovery")
@@ -33,8 +35,7 @@ class Module4MCPTests(unittest.TestCase):
         packet = self.runtime.review_packet(self.project, problem["id"])
         body = dict(problem_id=problem["id"], problem_revision=packet["problem"]["revision"],
                     title=title or f"compiler recovery {self.sequence}", content=content,
-                    category="operation", applicability="Configured compiler environment.",
-                    limitations="Reported guidance; verify current environment.",
+                    category="operation", applicability=applicability, limitations=limitations,
                     metadata={"tool": "compiler", "verification": "reported"},
                     evidence_refs=[packet["events"][0]["id"]], validation_level="reported")
         candidate = self.runtime.submit_candidate(self.project, **body)
@@ -193,6 +194,62 @@ class Module4MCPTests(unittest.TestCase):
             self.assertEqual(result["source_version"], 79)
             self.assertTrue(result["problem_changed"])
             self.assertEqual(result["source_health"], "conflicted")
+
+    def test_read_returns_complete_conditions_when_large_budget_fits(self):
+        applicability = "适用环境。" * 100 + "必须已验证备份。" + "许可范围。" * 100
+        limitations = "条件限制。" * 100 + "禁止覆盖原件。" + "核对结果。" * 100
+        published = self.published(applicability=applicability, limitations=limitations)
+        page = Server(self.runtime, self.project).call("knowledge_read", {
+            "knowledge_id": published["knowledge_id"], "max_chars": 50000})
+        self.assertEqual(page["applicability"], applicability)
+        self.assertEqual(page["limitations"], limitations)
+        self.assertNotIn("applicability", page["fields_truncated"])
+        self.assertNotIn("limitations", page["fields_truncated"])
+        self.assertEqual(page["section"], "content")
+
+    def test_each_condition_section_reassembles_under_minimum_budget(self):
+        applicability = '核对\\"环境\n条件。' * 140 + "必须已验证备份。" + "仅限本机。" * 80
+        limitations = "尚未验证共享环境。" * 140 + "禁止覆盖原件。" + "需要人工确认。" * 80
+        published = self.published(applicability=applicability, limitations=limitations)
+        server = Server(self.runtime, self.project, context_handle=self.bind())
+        first = server.call("knowledge_read", {"knowledge_id": published["knowledge_id"], "max_chars": 1024})
+        self.assertIn("applicability", first["fields_truncated"])
+        self.assertIn("limitations", first["fields_truncated"])
+        for section, original in (("applicability", applicability), ("limitations", limitations)):
+            with self.subTest(section=section):
+                offset, pieces = 0, []
+                while True:
+                    args = {"knowledge_id": published["knowledge_id"], "max_chars": 1024,
+                            "section": section, "offset": offset}
+                    if offset:
+                        args["expected_revision"] = published["revision"]
+                    page = server.call("knowledge_read", args)
+                    self.assertLessEqual(len(encode(page)), 1024)
+                    self.assertEqual(page["section"], section)
+                    self.assertEqual(page["section_length"], len(original))
+                    pieces.append(page[section])
+                    if page["next_offset"] is None:
+                        self.assertFalse(page["truncated"])
+                        break
+                    self.assertGreater(page["next_offset"], offset)
+                    offset = page["next_offset"]
+                self.assertEqual("".join(pieces), original)
+
+    def test_condition_pages_require_revision_and_reject_unknown_section(self):
+        published = self.published(limitations="限制条件。" * 200)
+        server = Server(self.runtime, self.project, context_handle=self.bind())
+        for args in ({"section": "limitations", "offset": 1}, {"section": "evidence"},
+                     {"section": "limitations", "offset": 1, "expected_revision": 2}):
+            with self.assertRaises(ContractError):
+                server.call("knowledge_read", {"knowledge_id": published["knowledge_id"], **args})
+        self.assertEqual(self.shown(), [])
+
+    def test_search_marks_abbreviated_conditions_as_requiring_read(self):
+        published = self.published(limitations="必须先验证备份。" * 100)
+        result = Server(self.runtime, self.project).call("knowledge_search", {"query": "compiler recovery"})
+        card = next(item for item in result["items"] if item["knowledge_id"] == published["knowledge_id"])
+        self.assertTrue(card["read_required"])
+        self.assertTrue(card["truncated"])
 
 
 if __name__ == "__main__":

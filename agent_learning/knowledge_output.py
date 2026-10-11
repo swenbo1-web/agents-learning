@@ -61,6 +61,7 @@ def _card(item):
                                           if isinstance(term, str)]}, **_state(item)}
     result["truncated"] = (result["content_summary"] != item.get("content", "") or any(
         result[key] != item.get(key, "") for key in ("title", "applicability", "limitations")))
+    result["read_required"] = any(result[key] != item.get(key, "") for key in ("applicability", "limitations"))
     return result
 
 
@@ -74,6 +75,8 @@ def _fit_card(card, maximum):
         if len(original) <= minimum:
             continue
         card[key] = original[:minimum]
+        if key in {"applicability", "limitations"}:
+            card["read_required"] = True
         if _length(card) <= maximum:
             low, high = minimum, len(original)
             while low < high:
@@ -111,30 +114,40 @@ def search_preview(result, max_chars=6000):
     return output
 
 
-def read_page(item, max_chars=12000, offset=0):
-    """分页正文保留精确字符偏移；来源仅列有限状态，不复制原始证据。"""
+def read_page(item, max_chars=12000, offset=0, section="content"):
+    """所选字段按精确偏移分页；完整约束优先保留，裁剪字段均可独立续读。"""
     max_chars = _budget(max_chars, 1024, 50000)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError("offset must be a nonnegative integer")
+    if section not in {"content", "applicability", "limitations"}:
+        raise ValueError("section must be content, applicability or limitations")
     content = _text(item.get("content"))
-    if offset > len(content):
-        raise ValueError("offset exceeds content length")
+    selected = _text(item.get(section))
+    if offset > len(selected):
+        raise ValueError("offset exceeds section length")
     sources = item.get("sources", [])
     output = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
-              "title": _text(item.get("title"))[:160], "category": item.get("category", "unknown"),
+              "title": _text(item.get("title")), "category": item.get("category", "unknown"),
               "knowledge_kind": item.get("knowledge_kind", "solution"),
-              "applicability": _text(item.get("applicability"))[:240],
-              "limitations": _text(item.get("limitations"))[:240], **_state(item),
+              "applicability": _text(item.get("applicability")),
+              "limitations": _text(item.get("limitations")), **_state(item),
               "metadata": {key: _text(value)[:180] for key, value in item.get("metadata", {}).items()},
               "sources": [{key: source[key] for key in ("candidate_id", "problem_id", "problem_revision",
                   "problem_changed", "health", "current_tool_success") if key in source}
                   for source in sources[:3]], "sources_count": len(sources),
               "sources_omitted_count": max(0, len(sources) - 3), "metadata_truncated": False,
-              "fields_truncated": [], "offset": offset, "content_length": len(content),
-              "content": "", "next_offset": len(content), "truncated": True}
+              "fields_truncated": [], "section": section, "section_length": len(selected),
+              "offset": offset, "content_length": len(content),
+              "content": "", "next_offset": len(selected), "truncated": True}
+    # 所选字段由下面的分页器填入，其他字段不能抢占它的正文空间。
+    output[section] = ""
     output["metadata_truncated"] = output["metadata"] != item.get("metadata", {})
-    output["fields_truncated"] = [key for key in ("title", "applicability", "limitations")
-                                  if output[key] != item.get(key, "")]
+
+    def mark_fields():
+        output["fields_truncated"] = [key for key in ("title", "applicability", "limitations")
+                                      if output[key] != item.get(key, "")]
+
+    mark_fields()
     # 为正文保留空间，摘要和来源的裁剪均显式标记。
     target = max_chars - 128
     while _length(output) > target and output["sources"]:
@@ -146,26 +159,35 @@ def read_page(item, max_chars=12000, offset=0):
     for key in ("applicability", "limitations", "title"):
         if _length(output) <= target:
             break
-        if len(output[key]) > 40:
+        if key != section and len(output[key]) > 40:
             output[key] = output[key][:40]
-            if key not in output["fields_truncated"]:
-                output["fields_truncated"].append(key)
-    low, high = 0, len(content) - offset
+            mark_fields()
+    for key in ("applicability", "limitations", "title"):
+        if _length(output) <= target:
+            break
+        if key != section and output[key]:
+            output[key] = ""
+            mark_fields()
+    low, high = 0, len(selected) - offset
     while low < high:
         middle = (low + high + 1) // 2
-        output.update(content=content[offset:offset + middle], next_offset=offset + middle,
-                      truncated=offset + middle < len(content))
+        output[section] = selected[offset:offset + middle]
+        output.update(next_offset=offset + middle, truncated=offset + middle < len(selected))
+        mark_fields()
         if _length(output) <= max_chars:
             low = middle
         else:
             high = middle - 1
     end = offset + low
-    output.update(content=content[offset:end], next_offset=end if end < len(content) else None,
-                  truncated=end < len(content))
+    output[section] = selected[offset:end]
+    output.update(next_offset=end if end < len(selected) else None, truncated=end < len(selected))
+    mark_fields()
     # 采用相同编码检查；EOF的null与数字长度不同也可能影响边界。
-    while _length(output) > max_chars and output["content"]:
+    while _length(output) > max_chars and output[section]:
         end -= 1
-        output.update(content=content[offset:end], next_offset=end, truncated=True)
-    if _length(output) > max_chars or (end == offset and offset < len(content)):
-        raise ValueError("max_chars cannot fit knowledge identity and a content page")
+        output[section] = selected[offset:end]
+        output.update(next_offset=end, truncated=True)
+        mark_fields()
+    if _length(output) > max_chars or (end == offset and offset < len(selected)):
+        raise ValueError("max_chars cannot fit knowledge identity and a section page")
     return output
