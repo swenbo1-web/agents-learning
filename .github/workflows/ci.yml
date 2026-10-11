@@ -26,10 +26,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       ALP_DISABLED: '1'
-      ALP_HOME: ${{ runner.temp }}/agent-learning-state
-      ALP_CONFIG: ${{ runner.temp }}/agent-learning-config.json
-      ALP_RUNTIME_STORE: ${{ runner.temp }}/agent-learning-runtime-releases
-      CODEX_HOME: ${{ runner.temp }}/agent-learning-codex-home
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,6 +44,17 @@ jobs:
           import os
           from pathlib import Path
 
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          isolated = {
+              'ALP_HOME': str(temporary / 'agent-learning-state'),
+              'ALP_CONFIG': str(temporary / 'agent-learning-config.json'),
+              'ALP_RUNTIME_STORE': str(temporary / 'agent-learning-runtime-releases'),
+              'CODEX_HOME': str(temporary / 'agent-learning-codex-home'),
+          }
+          os.environ.update(isolated)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment_file:
+              for name, value in isolated.items():
+                  environment_file.write(f'{name}={value}\n')
           for name in ('ALP_HOME', 'ALP_RUNTIME_STORE', 'CODEX_HOME'):
               Path(os.environ[name]).mkdir(parents=True, exist_ok=True)
           config = json.loads(Path('config.example.json').read_text(encoding='utf-8'))
