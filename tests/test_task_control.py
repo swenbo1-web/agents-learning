@@ -80,7 +80,9 @@ class TaskControlTests(unittest.TestCase):
         new = self.r.task_update(self.p, "chat", "new", new_task=True)
         self.assertIsNone(self.r.task_snapshot(self.p, first["id"], 1, new["write_version"]))
         self.assertEqual(self.r.task_snapshot(self.p, first["id"], 1)["status"], "active")
-        payload = json.loads(self.r.db.execute("SELECT payload FROM events WHERE type='TaskUpdate' ORDER BY created DESC LIMIT 1").fetchone()[0])
+        # Windows 的相邻事件可能共享时间戳，按任务及写入版本定位精确事件。
+        payload = json.loads(self.r.db.execute("SELECT payload FROM events WHERE type='TaskUpdate' AND task_id=? AND task_write_version=?",
+                                             (new["id"], new["write_version"])).fetchone()[0])
         self.assertEqual(payload["write_version"], new["write_version"])
         self.assertEqual(payload["execution_epoch"], new["execution_epoch"])
 

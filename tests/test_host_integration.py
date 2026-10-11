@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -144,6 +145,7 @@ class HostIntegrationTests(unittest.TestCase):
             "category": "operation", "applicability": "Windows compiler.",
             "limitations": "Reported guidance only.", "evidence_refs": [packet["events"][0]["id"]],
             "validation_level": "reported", "metadata": {"tool": "compiler", "environment": "windows"},
+            "knowledge_kind": "pattern",
         }
         candidate_file = self.workspace / "candidate.json"
         candidate_file.write_text(json.dumps(body), encoding="utf-8")
@@ -156,10 +158,26 @@ class HostIntegrationTests(unittest.TestCase):
                                "--knowledge-id", first["knowledge_id"], "--expected-revision", str(first["revision"]))
         self.assertEqual(updated["knowledge_id"], first["knowledge_id"])
         self.assertEqual(updated["revision"], first["revision"] + 1)
-        selected = self.run_cli("search", "compiler", "--filters", '{"tool":"compiler","environment":"windows"}')
+        selected = self.run_cli("search", "compiler", "--filters", '{"tool":"compiler","environment":"windows","category":"operation","knowledge_kind":"pattern"}')
         self.assertEqual([item["knowledge_id"] for item in selected["items"]], [first["knowledge_id"]])
         self.assertEqual(selected["items"][0]["title"], body["title"])
         self.assertEqual(self.run_cli("search", "compiler", "--filters", '{"environment":"linux"}')["items"], [])
+        self.assertEqual(self.run_cli("search", "compiler", "--filters", '{"knowledge_kind":"fact"}')["items"], [])
+        # 真实子进程重放、撤销、恢复和在线备份，检查持久数据没有被旧候选覆盖。
+        self.assertEqual(self.run_cli("publish", first_candidate["candidate_id"]), first)
+        self.assertEqual(self.run_cli("read", first["knowledge_id"])["revision"], updated["revision"])
+        self.assertTrue(self.run_cli("revoke", first["knowledge_id"])["revoked"])
+        self.assertEqual(self.run_cli("publish", first_candidate["candidate_id"]), first)
+        self.assertEqual(self.run_cli("search", "compiler")["items"], [])
+        restored = self.run_cli("restore", first["knowledge_id"], "--expected-revision", str(updated["revision"]))
+        self.assertEqual(restored["revision"], updated["revision"])
+        self.assertEqual(self.run_cli("doctor")["status"], "ok")
+        self.assertEqual(self.run_cli("rebuild-index")["indexed"], 1)
+        backup_path = self.home.parent / "backup with spaces.sqlite3"
+        self.assertEqual(self.run_cli("backup", str(backup_path))["status"], "backed_up")
+        with closing(sqlite3.connect(backup_path)) as copied:
+            self.assertEqual(copied.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(copied.execute("SELECT revision FROM active WHERE id=?", (first["knowledge_id"],)).fetchone()[0], updated["revision"])
         backfill = self.run_cli("sync", "--backfill")
         self.assertEqual(backfill["sync"]["status"], "disabled")
         self.assertIn("backfill", backfill)

@@ -16,10 +16,13 @@ import uuid
 from .assignments import AssignmentMixin
 from .task_control import TaskControlMixin
 from .execution import ExecutionMixin
+from .knowledge_store import KnowledgeStoreMixin
+from .knowledge_index import KnowledgeIndexMixin, terms
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
 VALIDATION_LEVELS = {"reported", "tool_success"}
+KNOWLEDGE_KINDS = {"fact", "solution", "pattern"}
 METADATA_KEYS = {"tool", "tool_version", "error_code", "environment", "verification"}
 DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
@@ -80,8 +83,23 @@ def metadata(value):
 
 def knowledge_fingerprint(body):
     # 来源不同不应制造重复知识；适用条件不同必须保留为不同条目。
-    return digest({k: body.get(k, {}) if k == "metadata" else body[k] for k in
-                   ("title", "content", "category", "applicability", "limitations", "validation_level", "metadata")})
+    return digest({**{k: body.get(k, {}) if k == "metadata" else body[k] for k in
+                    ("title", "content", "category", "applicability", "limitations", "validation_level", "metadata")},
+                   "knowledge_kind": body.get("knowledge_kind", "solution")})
+
+
+def knowledge_filters(value):
+    """检索字段独立于工具 metadata，分类与知识用途都可精确筛选。"""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - METADATA_KEYS - {"category", "knowledge_kind"}:
+        raise ContractError("unsupported knowledge filters")
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 500 for v in value.values()):
+        raise ContractError("knowledge filters must contain nonempty string fields")
+    result = {k: clean(v).strip() for k, v in value.items()}
+    if result.get("category", "unknown") not in CATEGORIES or result.get("knowledge_kind", "solution") not in KNOWLEDGE_KINDS:
+        raise ContractError("invalid knowledge category or kind filter")
+    return result
 
 
 def project_event(value, text_limit):
@@ -100,18 +118,6 @@ def project_event(value, text_limit):
             result["truncated_fields"] = len(keys) - 30
         return result
     return value
-
-
-def terms(text):
-    # 中文二元片段用于本地 FTS；查询长度和词数受限，不扫描项目文档。
-    words = re.findall(r"[a-z0-9_./:-]{2,}|[\u3400-\u9fff]+", text.lower())
-    result = []
-    for word in words:
-        if re.fullmatch(r"[\u3400-\u9fff]+", word):
-            result.extend(word[i:i + 2] for i in range(max(1, len(word) - 1)))
-        else:
-            result.append(word)
-    return list(dict.fromkeys(result))
 
 
 SCHEMA = """
@@ -186,7 +192,7 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 """
 
 
-class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
+class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreMixin, KnowledgeIndexMixin):
     def __init__(self, home=None, config=None):
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
@@ -219,7 +225,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4}:
+        if version not in {0, 1, 2, 3, 4, 5}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
@@ -235,6 +241,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
                     self.db.execute("PRAGMA user_version=3")
         if version < 4:
             self._migrate_execution()
+        if version < 5:
+            self._migrate_knowledge_store()
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -598,7 +606,9 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
         related = self.search(project, query, 3)["items"]
         summaries = [{"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                       "title": clip(item["title"], 120), "content": clip(item["content"], 350),
-                      "applicability": clip(item["applicability"], 160), "metadata": item.get("metadata", {})} for item in related]
+                      "applicability": clip(item["applicability"], 160), "metadata": item.get("metadata", {}),
+                      "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
+                      "current_tool_success": item["current_tool_success"]} for item in related]
         candidate_rows = self.db.execute("SELECT id,body FROM candidates WHERE project=? AND problem<>? ORDER BY created DESC LIMIT 30",
                                          (project, problem_id)).fetchall()
         query_terms = set(terms(query))
@@ -621,28 +631,48 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
     def submit_candidate(self, project, expected_epoch=None, **body):
         required = {"problem_id", "problem_revision", "title", "content", "category", "applicability",
                     "limitations", "evidence_refs", "validation_level"}
-        if not required <= set(body) or set(body) - required - {"metadata"}:
+        if not required <= set(body) or set(body) - required - {"metadata", "knowledge_kind"}:
             raise ContractError("candidate fields do not match schema")
-        if body["category"] not in CATEGORIES or body["validation_level"] not in VALIDATION_LEVELS:
+        if (not isinstance(body["category"], str) or body["category"] not in CATEGORIES
+                or not isinstance(body["validation_level"], str) or body["validation_level"] not in VALIDATION_LEVELS):
             raise ContractError("invalid candidate category or evidence level")
-        if not isinstance(body["problem_revision"], int) or isinstance(body["problem_revision"], bool):
-            raise ContractError("problem_revision must be an integer")
+        if (not isinstance(body["problem_revision"], int) or isinstance(body["problem_revision"], bool)
+                or body["problem_revision"] < 1):
+            raise ContractError("problem_revision must be a positive integer")
         if any(not isinstance(body[key], str) or not body[key].strip() for key in
                ("title", "content", "applicability", "limitations")):
             raise ContractError("candidate text fields must be nonempty strings")
-        if (not isinstance(body["problem_id"], str) or not isinstance(body["evidence_refs"], list)
-                or not body["evidence_refs"] or not all(isinstance(ref, str) for ref in body["evidence_refs"])):
+        if (not isinstance(body["problem_id"], str) or not body["problem_id"].strip()
+                or not isinstance(body["evidence_refs"], list) or not body["evidence_refs"]
+                or not all(isinstance(ref, str) and ref.strip() for ref in body["evidence_refs"])):
             raise ContractError("at least one source event is required")
         body = clean(body)
         body["metadata"] = metadata(body.get("metadata"))
+        body["evidence_refs"] = sorted(set(body["evidence_refs"]))
+        body["knowledge_kind"] = body.get("knowledge_kind", "solution")
+        if not isinstance(body["knowledge_kind"], str) or body["knowledge_kind"] not in KNOWLEDGE_KINDS:
+            raise ContractError("invalid knowledge kind")
         if len(encode(body)) > 30000:
             raise ContractError("candidate is too large")
-        ident = digest([project, body])[:32]
+        identity = digest([project, body])
+        ident = identity[:32]
         with self.transaction():
             self.assert_host_epoch(expected_epoch)
+            previous = self.db.execute("SELECT c.id,c.status,c.body FROM candidate_identity i JOIN candidates c "
+                                       "ON i.project=c.project AND i.candidate_id=c.id WHERE i.project=? AND i.fingerprint=?",
+                                       (project, identity)).fetchone()
+            if previous:
+                if previous["body"] != encode(body):
+                    raise ContractError("candidate identity does not match its body; inspect storage")
+                # 已完成候选按原身份重放；旧来源变化不制造新候选绕过发布回执。
+                if previous["status"] == "published":
+                    return {"candidate_id": previous["id"], "status": previous["status"]}
             self._validate_sources(project, body)
-            self.db.execute("INSERT OR IGNORE INTO candidates VALUES(?,?,?,?,?,?,?)",
+            if previous:
+                return {"candidate_id": previous["id"], "status": previous["status"]}
+            self.db.execute("INSERT INTO candidates VALUES(?,?,?,?,?,?,?)",
                             (ident, project, body["problem_id"], body["problem_revision"], encode(body), "candidate", time.time()))
+            self.db.execute("INSERT INTO candidate_identity VALUES(?,?,?)", (project, identity, ident))
         return {"candidate_id": ident, "status": "candidate"}
 
     def _validate_sources(self, project, body):
@@ -673,9 +703,14 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
             return 0
         target = clean(self.config["hindsight"])
         payload = {"knowledge_id": knowledge_id, "revision": revision, "body": clean(body), "target": target}
-        return self.db.execute("INSERT OR IGNORE INTO outbox(id,project,kind,payload) VALUES(?,?,?,?)",
-                               (digest([project, knowledge_id, revision, self._target_identity(target)]),
-                                project, "published_sync", encode(payload))).rowcount
+        ident = digest([project, knowledge_id, revision, self._target_identity(target)])
+        created = self.db.execute("INSERT OR IGNORE INTO outbox(id,project,kind,payload) VALUES(?,?,?,?)",
+                                  (ident, project, "published_sync", encode(payload))).rowcount
+        # 撤销时尚未发送的派生操作可以重新排队；曾尝试/结果未知的写入仍需人工对账。
+        restored = self.db.execute("UPDATE outbox SET state='pending',payload=?,error=NULL,next_try=0,"
+                                   "lease=NULL,lease_until=0 WHERE project=? AND id=? AND state='superseded' AND attempts=0",
+                                   (encode(payload), project, ident)).rowcount
+        return created + restored
 
     @staticmethod
     def _target_identity(target):
@@ -690,133 +725,21 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
             count = sum(self._queue_sync(project, row["id"], row["revision"], json.loads(row["body"])) for row in rows)
         return {"status": "enqueued", "enqueued": count}
 
-    def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
-                expected_epoch=None):
-        with self.transaction():
-            self.assert_host_epoch(expected_epoch)
-            candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
-            if not candidate:
-                raise ContractError("unknown candidate")
-            body = clean(json.loads(candidate["body"]))
-            body["metadata"] = metadata(body.get("metadata"))
-            self._validate_sources(project, body)
-            version = self.db.execute("SELECT generation FROM projects WHERE id=?", (project,)).fetchone()[0]
-            if expected_generation is not None and version != expected_generation:
-                raise ContractError("publication manifest changed")
-            if knowledge_id is not None:
-                if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
-                    raise ContractError("knowledge updates require the expected active revision")
-                row = self.db.execute("SELECT revision FROM active WHERE project=? AND id=?", (project, knowledge_id)).fetchone()
-                if not row or row[0] != expected_revision:
-                    raise ContractError("knowledge revision changed or is revoked")
-            elif expected_revision is not None:
-                raise ContractError("expected_revision requires a knowledge_id")
-            else:
-                duplicate = self.db.execute("SELECT a.id,a.revision,k.body FROM knowledge_fingerprints f JOIN active a "
-                                            "ON a.project=f.project AND a.id=f.id AND a.revision=f.revision JOIN knowledge k "
-                                            "ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-                                            "WHERE f.project=? AND f.fingerprint=? LIMIT 1",
-                                            (project, knowledge_fingerprint(body))).fetchone()
-                if duplicate:
-                    self.db.execute("UPDATE candidates SET status='published' WHERE id=?", (candidate_id,))
-                    self.db.execute("UPDATE problems SET status='reviewed' WHERE id=?", (body["problem_id"],))
-                    self._queue_sync(project, duplicate["id"], duplicate["revision"], json.loads(duplicate["body"]))
-                    return {"knowledge_id": duplicate["id"], "revision": duplicate["revision"], "status": "published", "deduplicated": True}
-                knowledge_id = digest([project, "candidate", candidate_id])[:32]
-            current = self.db.execute("SELECT k.* FROM knowledge k JOIN active a ON k.project=a.project AND "
-                                      "k.id=a.id AND k.revision=a.revision WHERE k.project=? AND k.id=?",
-                                      (project, knowledge_id)).fetchone()
-            if current and current["body"] == encode(body):
-                return {"knowledge_id": knowledge_id, "revision": current["revision"], "status": "published"}
-            revision = self.db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM knowledge WHERE project=? AND id=?",
-                                       (project, knowledge_id)).fetchone()[0]
-            self.db.execute("INSERT INTO knowledge VALUES(?,?,?,?,?)", (project, knowledge_id, revision, encode(body), time.time()))
-            self.db.execute("INSERT INTO knowledge_fingerprints VALUES(?,?,?,?)", (project, knowledge_id, revision, knowledge_fingerprint(body)))
-            self.db.execute("INSERT INTO knowledge_fts VALUES(?,?,?,?)",
-                            (project, knowledge_id, revision, " ".join(terms(" ".join(body[k] for k in
-                             ("title", "content", "applicability", "category")) + " " + " ".join(body["metadata"].values())))))
-            self.db.execute("INSERT INTO active VALUES(?,?,?) ON CONFLICT(project,id) DO UPDATE SET revision=excluded.revision",
-                            (project, knowledge_id, revision))
-            self.db.execute("UPDATE projects SET generation=generation+1 WHERE id=?", (project,))
-            self.db.execute("UPDATE candidates SET status='published' WHERE id=?", (candidate_id,))
-            self.db.execute("UPDATE problems SET status='reviewed' WHERE id=?", (body["problem_id"],))
-            self._queue_sync(project, knowledge_id, revision, body)
-        return {"knowledge_id": knowledge_id, "revision": revision, "status": "published"}
-
-    def revoke(self, project, knowledge_id):
-        with self.transaction():
-            changed = self.db.execute("DELETE FROM active WHERE project=? AND id=?", (project, knowledge_id)).rowcount
-            if changed:
-                self.db.execute("UPDATE projects SET generation=generation+1,revocation_epoch=revocation_epoch+1 WHERE id=?", (project,))
-        return {"knowledge_id": knowledge_id, "revoked": bool(changed)}
-
-    def _public(self, project, row):
-        body = clean(json.loads(row["body"]))
-        evidence = []
-        for ref in body["evidence_refs"]:
-            event = self.db.execute("SELECT type,outcome,created FROM events WHERE project=? AND id=?", (project, ref)).fetchone()
-            evidence.append({"event_id": ref, **(dict(event) if event else {"outcome": "missing"})})
-        return {"knowledge_id": row["id"], "revision": row["revision"],
-                **{k: body[k] for k in ("title", "content", "category", "applicability", "limitations", "validation_level")},
-                "metadata": metadata(body.get("metadata")), "evidence": evidence}
-
-    def read(self, project, knowledge_id):
-        row = self.db.execute("SELECT k.* FROM knowledge k JOIN active a ON k.project=a.project AND k.id=a.id "
-                              "AND k.revision=a.revision WHERE k.project=? AND k.id=?", (project, knowledge_id)).fetchone()
-        if not row:
-            raise ContractError("knowledge is not currently published")
-        return self._public(project, row)
-
-    def search(self, project, query, limit=5, filters=None):
-        if not isinstance(query, str):
-            raise ContractError("query must be a string")
-        limit = max(1, min(int(limit), 10))
-        filters = metadata(filters)
-        selected = terms(query[-2000:])
-        selected = selected[:12] + selected[-12:] if len(selected) > 24 else selected
-        if not selected:
-            return {"status": "no_match", "items": []}
-        manifest = dict(self.db.execute("SELECT generation,revocation_epoch FROM projects WHERE id=?", (project,)).fetchone())
-        key = digest([project, selected, limit, filters, manifest, "local-fts-v2"])
-        cached = self.db.execute("SELECT body FROM cache WHERE key=?", (key,)).fetchone()
-        if cached:
-            ids = json.loads(cached[0])
-        else:
-            match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
-            conditions = "".join(" AND json_extract(k.body,'$.metadata." + k + "')=?" for k in filters)
-            rows = self.db.execute("SELECT knowledge_fts.id FROM knowledge_fts JOIN active a ON "
-                                   "knowledge_fts.project=a.project AND knowledge_fts.id=a.id AND "
-                                   "CAST(knowledge_fts.revision AS INTEGER)=a.revision JOIN knowledge k ON "
-                                   "k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-                                   "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions + " ORDER BY bm25(knowledge_fts) LIMIT ?",
-                                   (match, project, *filters.values(), limit)).fetchall()
-            ids = [r[0] for r in rows]
-            self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, encode(ids)))
-            self.db.execute("DELETE FROM cache WHERE rowid NOT IN (SELECT rowid FROM cache ORDER BY rowid DESC LIMIT 256)")
-        # 缓存仅存ID；每次读取重新校验active，撤销后不会复用缓存正文。
-        items = []
-        for ident in ids:
-            try:
-                items.append(self.read(project, ident))
-            except ContractError:
-                pass
-        self._metric(project, "search_queries")
-        self._metric(project, "search_matches", int(bool(items)))
-        return {"status": "matched" if items else "no_match", "items": items, **manifest}
-
     def _metric(self, project, name, value=1):
         self.db.execute("INSERT INTO metrics VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET value=value+excluded.value",
                         (project, name, value))
 
     def status(self, project):
         counts = {}
-        for table in ("events", "tasks", "problems", "candidates", "active", "outbox"):
+        for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts"):
             counts[table] = self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE project=?", (project,)).fetchone()[0]
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
         return {"project_id": project, "home": str(self.home), "host_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
+                "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+                "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
@@ -846,6 +769,41 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
         if agent_id:
             return "subagent_contexts", "project=? AND conversation=? AND agent=?", (project, conversation, agent_id)
         return "contexts", "project=? AND conversation=?", (project, conversation)
+
+    @staticmethod
+    def _source_state(item):
+        return {"health": item["source_health"], "current_tool_success": item["current_tool_success"],
+                "problem_changed": any(source["problem_changed"] for source in item["sources"])}
+
+    def _source_updates(self, project, conversation, agent_id=None, max_chars=None):
+        """只检查最近八份已展示知识的来源变化，不重新检索或调用模型。"""
+        table, where, key = self._context_state(project, conversation, agent_id)
+        row = self.db.execute(f"SELECT source_states FROM {table} WHERE {where}", key).fetchone()
+        if not row:
+            return []
+        states, messages = dict(list(dict(json.loads(row[0])).items())[-8:]), []
+        available = self.config["injection_max_chars"] if max_chars is None else max(0, max_chars)
+        for identity, previous in list(states.items()):
+            ident, revision = identity.rsplit("@", 1)
+            try:
+                item = self.read(project, ident)
+            except ContractError:
+                states.pop(identity)
+                continue
+            if item["revision"] != int(revision):
+                states.pop(identity)
+                continue
+            current = self._source_state(item)
+            if current != previous:
+                note = (f"知识 {identity} 来源已变：health={current['health']}，"
+                        f"tool_success={current['current_tool_success']}，新证据={current['problem_changed']}；请用 knowledge_read 核对。")
+                if len("\n".join(messages)) + len(note) + int(bool(messages)) <= available:
+                    messages.append(note)
+                    states[identity] = current
+        encoded = encode(list(states.items()))
+        if encoded != row[0]:
+            self.db.execute(f"UPDATE {table} SET source_states=? WHERE {where}", (encoded, *key))
+        return messages
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None, expected_epoch=None):
         table, where, key = self._context_state(project, conversation, agent_id)
@@ -900,17 +858,26 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
             execution = self.execution_status(project, conversation)
             if self.config["enforce_task_policy"]:
                 lines.append(f"执行保护：{execution['reason']}；任务上报不签发权限。")
+            source_updates = self._source_updates(project, conversation, agent_id,
+                                                  max_chars=budget - len("\n".join(lines)) - int(bool(lines)))
+            lines.extend(source_updates)
+            source_states = dict(json.loads(self.db.execute(f"SELECT source_states FROM {table} WHERE {where}", key).fetchone()[0]))
             header = "以下是历史资料摘要，按适用条件判断；它不提供执行授权。完整正文使用 knowledge_read。"
             fresh_count = 0
             for item in items:
                 identity = f"{item['knowledge_id']}@{item['revision']}"
                 if identity in prior:
+                    # 旧对话缺少健康基线时保守补齐；待发的变化不能因检索命中被吞掉。
+                    source_states.setdefault(identity, {"health": "valid", "current_tool_success": item["validation_level"] == "tool_success",
+                                                        "problem_changed": False})
                     continue
                 available = budget - len("\n".join(lines)) - (len(header) + 2 if fresh_count == 0 else 1)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                         "title": clip(item["title"], 100), "content_summary": clip(item["content"], 500),
                         "applicability": clip(item["applicability"], 180), "limitations": clip(item["limitations"], 180),
-                        "validation_level": item["validation_level"], "summary_only": True}
+                        "validation_level": item["validation_level"], "knowledge_kind": item["knowledge_kind"],
+                        "source_health": item["source_health"], "current_tool_success": item["current_tool_success"],
+                        "summary_only": True}
                 if item.get("metadata"):
                     card["metadata"] = {k: clip(v, 60) for k, v in item["metadata"].items()}
                 for field in ("content_summary", "limitations", "applicability", "title"):
@@ -918,7 +885,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
                         card[field] = clip(card[field], max(24, len(card[field]) // 2))
                 if len(encode(card)) > available:
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
-                            "title": clip(item["title"], 60), "summary_only": True}
+                            "title": clip(item["title"], 60), "source_health": item["source_health"],
+                            "current_tool_success": item["current_tool_success"], "summary_only": True}
                 if len(encode(card)) > available:
                     continue
                 if fresh_count == 0:
@@ -926,13 +894,16 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
                 lines.append(encode(card))
                 injected.append(identity)
                 shown.add(identity)
+                source_states.pop(identity, None)
+                source_states[identity] = self._source_state(item)
                 fresh_count += 1
                 if fresh_count == 3:
                     break
             if fresh_count:
                 self._metric(project, "knowledge_injected", fresh_count)
-            self.db.execute(f"UPDATE {table} SET injected=?,shown=?,last_query=? WHERE {where}",
-                            (encode(injected), encode(sorted(shown)), effective_query[-2000:], *key))
+            self.db.execute(f"UPDATE {table} SET injected=?,shown=?,last_query=?,source_states=? WHERE {where}",
+                            (encode(injected), encode(sorted(shown)), effective_query[-2000:],
+                             encode(list(source_states.items())[-8:]), *key))
             return "\n".join(lines)[:budget]
 
     def _invalidated(self, project, conversation, agent_id=None):
@@ -1130,9 +1101,13 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin):
         if kind == "PreToolUse":
             with self.transaction():
                 invalid = self._invalidated(project, conversation, agent_id)
-            if invalid:
+                invalid_note = "此前注入知识已撤销或被替换，请核对当前依据：" + ",".join(invalid) if invalid else ""
+                source_updates = self._source_updates(project, conversation, agent_id,
+                    max_chars=self.config["injection_max_chars"] - len(invalid_note) - int(bool(invalid_note)))
+            if invalid or source_updates:
+                notes = ([invalid_note] if invalid else []) + source_updates
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
-                        ("此前注入知识已撤销或被替换，请核对当前依据：" + ",".join(invalid))[:self.config["injection_max_chars"]]}}
+                        "\n".join(notes)[:self.config["injection_max_chars"]]}}
         if kind in {"UserPromptSubmit", "SessionStart", "SubagentStart"}:
             if kind == "SubagentStart" and not agent_id:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":

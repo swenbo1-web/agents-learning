@@ -80,8 +80,9 @@ class OptimizationTests(unittest.TestCase):
             self.r.publish(self.p, revised, knowledge_id=a["knowledge_id"])
         update = self.r.publish(self.p, revised, knowledge_id=a["knowledge_id"], expected_revision=1)
         self.assertEqual(update["revision"], 2)
+        self.assertEqual(self.r.publish(self.p, revised, knowledge_id=a["knowledge_id"], expected_revision=1), update)
         with self.assertRaises(ContractError):
-            self.r.publish(self.p, revised, knowledge_id=a["knowledge_id"], expected_revision=1)
+            self.r.publish(self.p, revised, knowledge_id=a["knowledge_id"], expected_revision=2)
 
     def test_exact_conclusion_reuses_active_knowledge_across_cases(self):
         a = self.r.publish(self.p, self.candidate(summary="第一次报错"))
@@ -171,7 +172,7 @@ class OptimizationTests(unittest.TestCase):
         migrated = Runtime(legacy)
         try:
             self.assertEqual(migrated.task_snapshot("p", "old-task", 1)["goal"], "旧任务")
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(migrated.db.execute("SELECT shown FROM contexts").fetchone()[0], '["knowledge@1"]')
             self.assertNotIn("SYNTHETIC_OLD_KEY", migrated.db.execute("SELECT payload FROM outbox").fetchone()[0])
         finally:

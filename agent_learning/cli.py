@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 
@@ -60,9 +61,16 @@ def parser():
     publish.add_argument("--knowledge-id", help="更新已有知识时指定稳定ID")
     publish.add_argument("--expected-revision", type=int, help="更新已有知识时校验当前active修订")
     sub.add_parser("revoke").add_argument("knowledge_id")
+    restore = sub.add_parser("restore", help="显式恢复末版知识；重核证据，不由候选重试自动恢复")
+    restore.add_argument("knowledge_id")
+    restore.add_argument("--expected-revision", type=int, required=True)
+    restore.add_argument("--expected-generation", type=int)
+    sub.add_parser("doctor", help="按需检查存储和索引一致性，不更改知识")
+    sub.add_parser("rebuild-index", help="从当前有效知识原子重建可派生索引")
+    sub.add_parser("backup", help="使用SQLite在线备份，目标必须不存在").add_argument("destination")
     search = sub.add_parser("search")
     search.add_argument("query")
-    search.add_argument("--filters", help="工具、版本、错误码、环境、验证方式的精确筛选JSON对象")
+    search.add_argument("--filters", help="分类、知识用途、工具、版本、错误码、环境、验证方式的精确筛选JSON对象")
     sub.add_parser("read").add_argument("knowledge_id")
     admin = sub.add_parser("admin-once")
     admin.add_argument("--problem")
@@ -95,6 +103,11 @@ def main(argv=None):
         if args.command == "account-changed":
             print(encode(runtime.account_changed(notification_id=args.notification_id)))
             return 0
+        if args.command in {"doctor", "rebuild-index", "backup"}:
+            result = (runtime.doctor() if args.command == "doctor" else runtime.rebuild_index()
+                      if args.command == "rebuild-index" else runtime.backup(args.destination))
+            print(encode(result))
+            return 0
         project = runtime.project(args.workspace)
         if args.command == "serve":
             Server(runtime, project, args.role, context_handle=args.context_handle).serve()
@@ -120,6 +133,8 @@ def main(argv=None):
                                                 expected_generation=args.expected_generation,
                                                 knowledge_id=args.knowledge_id, expected_revision=args.expected_revision)
         elif args.command == "revoke": result = runtime.revoke(project, args.knowledge_id)
+        elif args.command == "restore": result = runtime.restore(project, args.knowledge_id,
+                                                args.expected_revision, args.expected_generation)
         elif args.command == "search": result = runtime.search(project, args.query,
                                                 filters=json.loads(args.filters) if args.filters is not None else None)
         elif args.command == "read": result = runtime.read(project, args.knowledge_id)
@@ -132,7 +147,7 @@ def main(argv=None):
         else: raise ContractError("unknown command")
         print(encode(result))
         return 0
-    except (ContractError, OSError, ValueError) as exc:
+    except (ContractError, OSError, ValueError, sqlite3.Error) as exc:
         print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
         return 1
     finally:

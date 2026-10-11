@@ -16,6 +16,7 @@ description: "在 Agent Learning Runtime 的管理员身份下，依据新增案
 - 工具退出码只能支持具体命令结果。专业结论需要相应检查材料；编译证据不能替代玩法验证或用户验收。
 - 缺少必要证据时标明缺项或保持待补证，不反复调用模型猜测根因。保留失败、未解决及适用性未知的情况。
 - 候选内容描述现象、适用条件、方法、证据和限制，绑定 `problem_id`、`problem_revision` 和 `evidence_refs`。来源改变后，应复核受影响内容。
+- `knowledge_kind` 区分 `fact`（事实）、`solution`（具体解法）、`pattern`（可复用方法）；省略时使用 `solution`。比较现有知识时同时核对当前 `source_health` 和 `current_tool_success`。
 - 有明确来源时填写 `metadata` 的工具、版本、错误码、环境和验证方式，未知时留空。`evidence_truncated` 表示原文被截短，结论仅限可见材料，不能写成完整根因验证。
 - `validation_level` 只使用 `reported` 或 `tool_success`。前者是有记录的陈述；后者限定具体工具成功，不表示专业结论或产品已经验收。
 - 知识状态与产品验收状态独立。审核知识可以只声称某环境下的编译结果，不扩大为全部任务成功。

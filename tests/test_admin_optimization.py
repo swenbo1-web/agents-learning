@@ -39,6 +39,7 @@ if mode in ('candidate','tool_candidate'):
                'limitations':'No product acceptance',
                'evidence_refs':[event['id'] for event in packet['events']],
                'validation_level':'tool_success' if mode=='tool_candidate' else 'reported',
+               'knowledge_kind':'solution',
                'metadata':dict.fromkeys(('tool','tool_version','error_code','environment','verification'),'')}
     decision='candidate'
 reason=json.dumps({'snapshot_revision':packet['problem']['revision'],
@@ -129,6 +130,9 @@ class AdminOptimizationTests(unittest.TestCase):
         old_problems = [self.problem(summary=f"Oversized old issue {index} " + "x" * 1900)
                         for index in range(11)]
         new_problem = self.problem(summary="A small issue behind eleven oversized items")
+        # 夹具明确队列先后，不依赖 Windows 时钟能分辨连续写入。
+        self.runtime.db.executemany("UPDATE problems SET created=? WHERE id=?",
+                                   [(index, problem["id"]) for index, problem in enumerate(old_problems + [new_problem], 1)])
         original_packet = self.runtime.review_packet
         with patch.object(self.runtime, "review_packet", wraps=original_packet) as packets:
             first = admin_once(self.runtime, self.project)
@@ -270,8 +274,10 @@ class AdminOptimizationTests(unittest.TestCase):
 
     def test_strict_model_schema_does_not_change_optional_mcp_metadata(self):
         self.assertNotIn("metadata", CANDIDATE["required"])
+        self.assertNotIn("knowledge_kind", CANDIDATE["required"])
         candidate = RESPONSE_SCHEMA["properties"]["candidate"]["anyOf"][0]
         self.assertIn("metadata", candidate["required"])
+        self.assertIn("knowledge_kind", candidate["required"])
         metadata = candidate["properties"]["metadata"]
         self.assertEqual(set(metadata["required"]), set(metadata["properties"]))
         self.assertFalse(metadata["additionalProperties"])

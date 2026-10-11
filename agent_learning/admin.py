@@ -46,6 +46,7 @@ _REVIEW_PREFIX = (
     "evidence_truncated为true时原始资料已截短，结论只能限于可见证据，limitations说明缺失。"
     "tool_success仅表示引用工具明确完成成功，不等于专业正确、编译或用户验收。"
     "metadata五字段未知时填空字符串，不猜工具版本或专业验证。"
+    "knowledge_kind按用途选择fact（事实）、solution（具体解法）或pattern（可复用方法）；不确定用solution。"
     "只返回schema要求的JSON。\n<untrusted_evidence>\n"
 )
 

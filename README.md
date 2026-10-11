@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.4.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.5.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
 
-0.4.0 加入第二模块的任务并发控制、固定子任务归属和受信执行策略，沿用 0.3.0 的会话身份、换号保护与统一发布。数据库首次打开时在事务内升级到版本 4，保留既有记录与知识 ID；旧证据缺少事件时点状态时标记 `unknown_legacy`。内部发布协议为 2，不能将新旧运行文件混用。常见凭证脱敏不能保证抹除已经存在的副本。
+0.5.0 加入第三模块的发布回执、修订绑定检索、多案例来源和可重建索引，保留第二模块的任务并发控制、固定子任务归属与受信执行策略。数据库首次打开时在事务内升级到版本 5，保留既有记录与知识 ID，同时从清洗后的有效正文重建索引并清除旧缓存。旧证据缺少事件时点状态时仍标记 `unknown_legacy`。内部发布协议为 2，不能将新旧运行文件混用；旧运行端不能打开版本 5 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -119,16 +119,39 @@ python scripts/learning.py --workspace "D:\Projects\my-project" problems
 | `evidence_refs` | 实际事件 ID 字符串列表 |
 | `validation_level` | `reported` 或 `tool_success` |
 | `metadata`（可选） | `tool`、`tool_version`、`error_code`、`environment`、`verification` 字符串；未知时省略或留空 |
+| `knowledge_kind`（可选） | `fact`（事实）、`solution`（具体解法）、`pattern`（可复用方法），默认 `solution` |
 
 `reported` 表示有记录的陈述，不代表已经验证。`tool_success` 要求引用明确完成且成功的 `PostToolUse` 事件，只能支持具体工具的成功结果。标准 MCP 的 `isError:false` 记为 `call_completed`，仅表示调用协议完成，不能单独支持 `tool_success`。退出码为零不能单独证明专业根因、玩法结果或用户验收。
 
 受信操作者使用 `publish CANDIDATE_ID` 发布，使用 `revoke KNOWLEDGE_ID` 撤销。Runtime 检查证据引用、来源版本和允许的验证范围；它不能证明任意自然语言结论正确。知识审核状态与产品验收状态分别表达。
 
-默认发布创建新条目，同名但适用范围不同的知识可以并存。完全相同的结论复用当前正式条目，来源案例仍单独保留。更新已有知识必须指定 `publish CANDIDATE_ID --knowledge-id KNOWLEDGE_ID --expected-revision N`；版本不符或条目已撤销时拒绝更新，不能仅凭标题覆盖。
+默认发布创建新条目，同名但适用范围不同的知识可以并存。相同正文、适用条件、限制、分类、用途和证据等级复用当前条目，并持久化每个来源候选、问题修订和证据引用；新增来源不制造正文修订。更新已有知识必须指定 `publish CANDIDATE_ID --knowledge-id KNOWLEDGE_ID --expected-revision N`；版本不符或条目已撤销时拒绝首次更新，不能仅凭标题覆盖。更新后若与另一个有效 ID 完全重复，会拒绝并提示已有条目。
+
+每个候选只有一个发布回执。默认重试或使用原目标/CAS 参数重试显式更新时，直接返回第一次发布结果，不再次校验证据或推进版本；回执中的 `published` 表示历史发布已经完成，当前可用性用 `read` 核对。旧候选不能回滚较新知识，也不能复活已撤销知识。变更目标需提交新的候选。迁移仅恢复有明确对应依据的历史回执；对应目标无法确定时保留 `legacy_unresolved`，阻止自动重发并等待复核新候选。
+
+显式恢复使用 `restore KNOWLEDGE_ID --expected-revision N`，只允许恢复末版、核对当前至少一份完整有效来源，并检查有效知识重复；可附 `--expected-generation N`。恢复保留原正文修订，回执给出依据的来源候选 ID，不借候选重试恢复。
 
 使用 `search QUERY` 查询当前已发布内容，使用 `read KNOWLEDGE_ID` 读取条目。撤销后不再返回该知识；当前对话在下一次提示或已覆盖的工具前置事件收到版本失效提示。这不能保证从模型内部删除已经读过的内容。
 
-`knowledge_search` 的 `filters`、CLI 的 `search QUERY --filters JSON` 可按 metadata 中的已知字段精确筛选。自动注入最多三条摘要，保留条目 ID、适用条件和证据等级；长正文用 `knowledge_read` 获取。“继续”等短回复沿用任务查询，压缩后恢复有效摘要。切换任务会重置检索状态，但保留已展示知识的撤销追踪。
+`knowledge_search` 的 `filters`、CLI 的 `search QUERY --filters JSON` 可按 `category`、`knowledge_kind` 及 metadata 中的已知字段精确筛选，未知筛选字段省略。自动注入最多三条摘要，保留条目 ID、适用条件、证据等级与当前来源状态；长正文用 `knowledge_read` 获取。“继续”等短回复沿用任务查询，压缩后恢复有效摘要。切换任务会重置检索状态，但保留已展示知识的撤销追踪。
+
+正文与 `sources`、`evidence` 在同一 SQLite 快照中读取。`source_health` 可为 `valid`、`conflicted`、`denied` 或 `missing`；`current_tool_success` 表示当前引用中仍有可信的工具成功观察，`problem_changed` 单独提示来源问题已有新证据。历史 `validation_level` 不随回调变化改写，冲突由管理员复核，存储层不自动撤销专业结论。
+
+全文投影只包含当前有效知识，支持 C++、C#、C、R、中文单字与二元片段，并检索限制条件。查询先由 FTS 定位候选，再按字段加权的查询词重合度排序，以 ID 打破并列；排名不使用其他项目或历史知识的词频。缓存仅保存 ID/修订组合，每次读取核对 active 和筛选条件；返回的 generation、正文与来源属于同一快照。项目变化通过自身 generation 失效旧缓存，不清空其他项目缓存；全局缓存最多保留 256 份。缓存和计数在读快照结束后写入，派生写入被锁住时可跳过，不阻断已完成的查询。
+
+已展示知识最近八份的来源状态由 Hook 有界追踪，出现冲突或新证据时，在下一次提示或工具前置事件提醒一次。注入预算不足时保留尚未送达的变化供后续提醒。该机制不读取模型内部思考，也不自动执行管理员审核；更早展示内容的变化仍需重新读取知识核对。
+
+## 按需存储维护
+
+以下命令只在迁移、故障诊断或人工维护时使用，不加入每个任务的固定流程：
+
+```powershell
+python scripts/learning.py --home "D:\AgentLearningData" doctor
+python scripts/learning.py --home "D:\AgentLearningData" backup "D:\Backups\agent-learning-2026-10-11.sqlite3"
+python scripts/learning.py --home "D:\AgentLearningData" rebuild-index
+```
+
+`doctor` 检查数据库与发布/来源/索引关系，返回异常计数；`backup` 使用 SQLite 在线备份，目标必须是新文件；`rebuild-index` 在写事务内从有效正文重建投影并清缓存。索引可重建，正文、历史、回执和来源属于权威数据，重建索引不能修复缺失的原始证据。打开旧数据库前可先用原运行端做在线备份；本插件不自动覆盖数据库或执行备份还原。
 
 使用正式知识后发现反例，可在 `case_feedback` 中关联 `knowledge_id`，形成待审问题；反馈本身不直接撤销知识。
 
@@ -241,15 +264,16 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `feedback` | 反馈问题及结果，支持重复 `--event-ref` |
 | `problems`、`packet` | 列出问题、读取审核包 |
 | `propose` | 提交结构化候选 JSON |
-| `publish`、`revoke` | 本地受信发布入口 |
+| `publish`、`revoke`、`restore` | 本地受信发布、撤销与显式恢复入口 |
+| `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
 | `search`、`read` | 查询和读取正式知识 |
 | `admin-once` | 有预算地处理一个管理员批次 |
 | `sync` | 同步已发布知识到可选 Hindsight |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.4.0 检查状态（2026-10-11）
+## 0.5.0 检查状态（2026-10-11）
 
-171 项离线回归全套通过；新增 46 项覆盖任务版本重用、取消后的旧写入、事务回执、状态历史、子任务归属、许可审批、消息失效、中断恢复、回调重播/冲突、CLI/MCP 和版本 3 数据迁移。实际 Windows 目录链接夹具验证逃逸与许可根替换均拒绝；普通 Agent 技能通过格式校验。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+215 项离线回归全套通过，耗时约 42 秒；第三模块新增 44 项，覆盖发布回执与撤销保护、旧候选身份兼容、多来源、显式恢复、并发快照和缓存、项目独立排名、技术标识、旧库清洗、索引重建、在线备份与数据关系检查。交叉检查包含已注入来源变化提醒、微小预算下延后提醒、恢复后的同步队列和 CLI/MCP 新字段；原第二模块的任务、子任务、执行许可保护回归继续通过。两个技能通过格式校验。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

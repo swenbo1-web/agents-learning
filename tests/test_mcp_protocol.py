@@ -117,6 +117,12 @@ class MCPProtocolTests(unittest.TestCase):
     def test_schema_guides_allowed_categories_and_keeps_metadata_optional(self):
         contracts = {name: contract for name, _, contract in WORKER_TOOLS}
         self.assertNotIn("metadata", CANDIDATE["required"])
+        self.assertNotIn("knowledge_kind", CANDIDATE["required"])
+        validate({"query": "C++", "filters": {"category": "professional", "knowledge_kind": "pattern"}},
+                 contracts["knowledge_search"])
+        for filters in ({"knowledge_kind": "verified"}, {"category": "any"}, {"tool": ""}, {"sql": "1=1"}):
+            with self.assertRaises(ContractError):
+                validate({"query": "compiler", "filters": filters}, contracts["knowledge_search"])
         self.assertNotIn("conversation_id", contracts["task_update"]["required"])
         for value in ("verified", "unrestricted"):
             with self.assertRaises(ContractError):

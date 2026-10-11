@@ -6,7 +6,7 @@ import math
 import re
 import sys
 from . import __version__
-from .runtime import CATEGORIES, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
+from .runtime import CATEGORIES, KNOWLEDGE_KINDS, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
 
 
 def schema(properties, required=()):
@@ -18,6 +18,9 @@ NONEMPTY = {"type": "string", "minLength": 1, "pattern": r"\S"}
 STRINGS = {"type": "array", "items": S}
 METADATA = schema({key: S for key in sorted(METADATA_KEYS)})
 CATEGORY = {"type": "string", "enum": sorted(CATEGORIES)}
+KNOWLEDGE_KIND = {"type": "string", "enum": sorted(KNOWLEDGE_KINDS)}
+KNOWLEDGE_FILTERS = schema({**{key: NONEMPTY for key in sorted(METADATA_KEYS)},
+                            "category": CATEGORY, "knowledge_kind": KNOWLEDGE_KIND})
 TASK_SCOPE = {"type": "object", "additionalProperties": True, "properties": {
     "mode": {"type": "string", "enum": ["analysis", "read_only", "implementation", "execute"]},
     "allowed_tools": STRINGS, "allowed_paths": STRINGS,
@@ -32,10 +35,10 @@ CANDIDATE = schema({
     "applicability": NONEMPTY, "limitations": NONEMPTY,
     "evidence_refs": {"type": "array", "items": NONEMPTY, "minItems": 1},
     "validation_level": {"type": "string", "enum": sorted(VALIDATION_LEVELS)},
-    "metadata": METADATA,
+    "metadata": METADATA, "knowledge_kind": KNOWLEDGE_KIND,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
 WORKER_TOOLS = [
-    ("knowledge_search", "检索本项目当前正式知识；可按工具、版本或环境精确筛选。", schema({"query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": METADATA}, ["query"])),
+    ("knowledge_search", "检索本项目当前正式知识；可按分类、用途、工具、版本或环境精确筛选。", schema({"query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS}, ["query"])),
     ("knowledge_read", "读取当前有效正文和审核允许的证据元数据。", schema({"knowledge_id": NONEMPTY}, ["knowledge_id"])),
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
