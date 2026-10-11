@@ -1,0 +1,20 @@
+{
+  "agent-learning": {
+    "PreInvocation": [
+      {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PreInvocation", "timeout": 10}
+    ],
+    "PostToolUse": [
+      {"matcher": "*", "hooks": [
+        {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PostToolUse", "timeout": 10}
+      ]}
+    ],
+    "PreToolUse": [
+      {"matcher": "*", "hooks": [
+        {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PreToolUse", "timeout": 10}
+      ]}
+    ],
+    "Stop": [
+      {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event Stop", "timeout": 10}
+    ]
+  }
+}

@@ -79,13 +79,16 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
                         selected["source_task_updated"], time.time(), blocked_call))
 
 
-def claim_dispatch(runtime, project):
+def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
     from .admin_usage import admin_budget_status
     if not runtime.config["admin"]["enabled"] or runtime.config["admin"]["max_calls_per_day"] <= 0:
         return None
     with runtime.transaction():
+        runtime.assert_host_epoch(expected_epoch)
+        if _phase_guard:
+            _phase_guard()
         recover_calls(runtime)
         now = time.time()
         runtime.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?",

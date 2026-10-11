@@ -189,11 +189,11 @@ class CaseStoreMixin:
                                  "feedback_kind": feedback_kind, "expected_task_id": expected_task_id,
                                  "expected_task_revision": expected_task_revision})
         with self._case_transaction():
-            self.assert_host_epoch(expected_epoch)
+            self.assert_session_epoch(expected_epoch)
             access = self.access_context(project, context_handle, conversation_id, expected_epoch) if context_handle is not None else None
             self.bind_session(project, conversation_id)
             agent = access["agent_id"] if access else None
-            receipt_key = (project, conversation_id, agent or "", self.host_epoch(), idempotency_key)
+            receipt_key = (project, conversation_id, agent or "", self.session_epoch(), idempotency_key)
             if idempotency_key is not None:
                 receipt = self.db.execute("SELECT request_digest,response FROM feedback_receipts WHERE project=? AND conversation=? "
                                           "AND agent=? AND host_epoch=? AND idempotency_key=?", receipt_key).fetchone()

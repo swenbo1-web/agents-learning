@@ -14,6 +14,7 @@ import sqlite3
 import time
 import uuid
 from .assignments import AssignmentMixin
+from .host_sessions import HostSessionMixin
 from .task_control import TaskControlMixin
 from .execution import ExecutionMixin
 from .knowledge_store import KnowledgeStoreMixin
@@ -195,11 +196,17 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 """
 
 
-class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
+class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
               KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
               KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin):
-    def __init__(self, home=None, config=None):
+    def __init__(self, home=None, config=None, *, host="codex", host_instance="default"):
+        if host not in {"codex", "antigravity"}:
+            raise ContractError("unsupported host")
+        if not isinstance(host_instance, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", host_instance):
+            raise ContractError("invalid host instance")
+        self.host, self.host_scope = host, host + ":" + host_instance
+        self.host_instance = host_instance
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
         self.home = Path(home or os.environ.get("ALP_HOME") or default_home).resolve()
@@ -251,7 +258,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(12)):
+        if version not in set(range(13)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -276,6 +283,11 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             self._migrate_publication_storage()
             self._migrate_module8_storage()
             self._migrate_audit_storage()
+            with self.transaction():
+                self._install_host_storage()
+                from .antigravity import install_storage
+                install_storage(self)
+                self.db.execute("PRAGMA user_version=12")
         except BaseException:
             self.db.close()
             raise
@@ -450,6 +462,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def bind_session(self, project, conversation_id):
         if not isinstance(conversation_id, str) or not conversation_id.strip():
             raise ContractError("conversation_id is required")
+        if not self.owns_conversation(conversation_id):
+            raise ContractError("context_mismatch: conversation belongs to another host")
         self.db.execute("INSERT OR IGNORE INTO session_projects VALUES(?,?)", (conversation_id, project))
         row = self.db.execute("SELECT project FROM session_projects WHERE conversation=?", (conversation_id,)).fetchone()
         if row[0] != project:
@@ -469,7 +483,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.bind_session(project, conversation_id)
         if agent_id is not None and (not isinstance(agent_id, str) or not agent_id.strip()):
             raise ContractError("agent_id must be a nonempty string")
-        agent, epoch = agent_id or "", self.host_epoch()
+        agent, epoch = agent_id or "", self.session_epoch()
         row = self.db.execute("SELECT handle FROM context_access WHERE project=? AND conversation=? "
                               "AND agent=? AND host_epoch=?", (project, conversation_id, agent, epoch)).fetchone()
         handle = row[0] if row else uuid.uuid4().hex
@@ -481,18 +495,23 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         return {"context_handle": handle, "project_id": project, "conversation_id": conversation_id,
                 "agent_id": agent_id, "host_epoch": epoch}
 
-    def register_context(self, project, conversation_id, agent_id=None):
+    def register_context(self, project, conversation_id, agent_id=None, *, expected_epoch=None, _phase_guard=None):
         """仅 Hook/受信本地入口登记；MCP 不提供任意会话凭据查询或登记。"""
         with self.transaction():
+            self.assert_session_epoch(expected_epoch)
+            if _phase_guard:
+                _phase_guard()
             return self._register_context(project, conversation_id, agent_id)
 
     def access_context(self, project, context_handle, conversation_id=None, expected_epoch=None):
-        epoch = self.assert_host_epoch(expected_epoch)
+        epoch = self.assert_session_epoch(expected_epoch)
         if not isinstance(context_handle, str) or not context_handle:
             raise ContractError("session_context_required: use the handle supplied by the current hook")
         row = self.db.execute("SELECT * FROM context_access WHERE handle=?", (context_handle,)).fetchone()
         if not row:
             raise ContractError("context_mismatch: unknown context handle")
+        if not self.owns_conversation(row["conversation"]):
+            raise ContractError("context_mismatch: context belongs to another host")
         if row["host_epoch"] != epoch:
             raise ContractError("reconnect_required: context handle expired")
         if row["project"] != project or (conversation_id is not None and conversation_id != row["conversation"]):
@@ -503,7 +522,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def session_context(self, project, context_handle=None, expected_epoch=None):
         # 压缩恢复只读已验证的身份；不能从“最新会话”猜本次归属。
         with self.transaction():
-            epoch = self.assert_host_epoch(expected_epoch)
+            epoch = self.assert_session_epoch(expected_epoch)
             if context_handle is None:
                 return {"project_id": project, "host_epoch": epoch, "context_bound": False, "rebind_required": True}
             result = self.access_context(project, context_handle, expected_epoch=epoch)
@@ -518,26 +537,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
 
     def account_changed(self, notification_id=None):
         """宿主/操作者通知换号；不读取凭证，不按登录账户拆分项目知识。"""
-        if notification_id is not None and (not isinstance(notification_id, str)
-                or not notification_id.strip() or len(notification_id) > 200):
-            raise ContractError("notification_id must be a nonempty string of at most 200 characters")
-        with self.transaction():
-            if notification_id and self.db.execute("SELECT 1 FROM host_notifications WHERE id=?", (notification_id,)).fetchone():
-                return {"host_epoch": self.host_epoch(), "changed": False, "knowledge_scope": "shared_project"}
-            self.db.execute("UPDATE host_state SET epoch=epoch+1 WHERE id=1")
-            epoch = self.host_epoch()
-            if notification_id:
-                self.db.execute("INSERT INTO host_notifications VALUES(?,?,?)", (notification_id, epoch, time.time()))
-            self.db.execute("UPDATE operations SET state='unknown' WHERE state IN ('started','running')")
-            for task in self.db.execute("SELECT project,conversation FROM tasks").fetchall():
-                self._execution_fence(task["project"], task["conversation"], "account_changed")
-            # 未知调用仍占原额度；禁止旧执行器回写或自动重试。
-            self.db.execute("UPDATE admin_calls SET state='account_changed_unknown',finished=?,lease_until=NULL "
-                            "WHERE state IN ('reserved','launch_intent','started')", (time.time(),))
-            for table in ("contexts", "subagent_contexts"):
-                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]'")
-            return {"host_epoch": epoch, "changed": True, "knowledge_scope": "shared_project",
-                    "reconnect_required": True}
+        return self.scope_account_changed(notification_id)
 
     def task(self, project, conversation):
         row = self.db.execute("SELECT * FROM tasks WHERE project=? AND conversation=?",
@@ -577,8 +577,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                          task_status, capture_digest, input_digest, business_evidence_digest(payload)))
         return dict(self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()), True
 
-    def record_event(self, project, conversation, kind, payload, **kwargs):
+    def record_event(self, project, conversation, kind, payload, *, _phase_guard=None, **kwargs):
         with self.transaction():
+            if _phase_guard:
+                _phase_guard()
             return self._event(project, conversation, kind, payload, **kwargs)[0]
 
 
@@ -676,7 +678,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             budget = admin_budget_status(self)
         except ContractError:
             budget = {"admission_status": "invalid_configuration"}
-        return {"project_id": project, "home": str(self.home), "host_epoch": self.host_epoch(),
+        return {"project_id": project, "home": str(self.home), "host_epoch": self.session_epoch(),
+                "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
@@ -720,7 +723,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                     break
         return names
 
-    def handle_hook(self, raw):
+    def handle_hook(self, raw, *, context_delivery=True, expected_epoch=None, _phase_guard=None):
         kind = raw.get("hook_event_name")
         supported = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Interrupt", "SubagentStart", "SubagentStop"}
         if kind not in supported:
@@ -748,8 +751,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             event_key = [conversation, agent_id, kind, tool_id, capture_digest]
         access = None
         with self.transaction():
+            epoch = self.assert_session_epoch(expected_epoch)
+            if _phase_guard:
+                _phase_guard()
             self.bind_session(project, conversation)
-            epoch = self.host_epoch()
             if kind == "PostToolUse" and event_key:
                 identical_replay = False
                 replay = self.db.execute("SELECT capture_digest FROM events WHERE id=?", (digest([project, [epoch, event_key]]),)).fetchone()
@@ -919,7 +924,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         if denied:
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
-        if kind == "PreToolUse":
+        if kind == "PreToolUse" and context_delivery:
             text = self._context(project, conversation, agent_id=agent_id, expected_epoch=epoch, tool_only=True)
             if text:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":

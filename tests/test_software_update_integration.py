@@ -64,7 +64,7 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertFalse(runtime.config["admin"]["enabled"])
         self.assertFalse(runtime.config["scheduler"]["enabled"])
         self.assertFalse(runtime.config["hindsight"]["enabled"])
-        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 12)
 
     def test_invalid_update_config_rejected_before_database_open(self):
         for supplied in ([], {"enabled": "yes"}, {"repository": "https://example.org/code"},
@@ -113,7 +113,15 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(installer.call_args.kwargs, {"runtime_store": None, "hook_mode": "enforce",
-                                                      "upgrade": True, "expected_release_id": "old-release"})
+                                                      "upgrade": True, "expected_release_id": "old-release", "host": "codex"})
+
+    def test_export_cannot_silently_ignore_nondefault_host_instance(self):
+        with patch("agent_learning.cli.install") as installer:
+            code, result = self.cli("--host-instance", "other", "install", str(self.base / "plugin"))
+        self.assertEqual(code, 1)
+        self.assertIn("host_instance=default", result["reason"])
+        installer.assert_not_called()
+        self.assertFalse((self.home / "runtime.sqlite3").exists())
 
     def test_automatic_default_does_not_reserve_or_spawn(self):
         runtime = self.runtime()

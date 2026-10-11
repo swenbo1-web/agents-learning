@@ -51,7 +51,7 @@ class LearningEvaluationMixin:
                 "task_id": task["id"], "task_revision": task["revision"],
                 "task_write_version": task["write_version"], "execution_epoch": task["execution_epoch"],
                 "assignment_id": assignment["assignment_id"] if assignment else "",
-                "host_epoch": self.host_epoch()}
+                "host_epoch": self.session_epoch()}
 
     def record_task_exposure(self, project, conversation, agent_id, items, method="mcp"):
         """只记录实际返回的知识；同一精确任务边界和方式的重复展示去重。"""

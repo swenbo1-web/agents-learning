@@ -16,7 +16,8 @@ from .release import PROTOCOL_VERSION
 
 
 INSTALL_MANIFEST = "installation-manifest.json"
-INSTALL_SCHEMA = 1
+INSTALL_SCHEMA = 2
+TARGET_HOSTS = ("codex", "antigravity")
 _VERSION = re.compile(r"^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$")
 _PROTOCOL = re.compile(r"^[1-9][0-9]{0,8}$")
 
@@ -91,6 +92,19 @@ def _json(path):
         raise ContractError("existing installation identity could not be verified") from None
 
 
+def payload_mapping(files, target_host):
+    """固定副本保留两个宿主资源；导出目录仅激活指定宿主的原生入口。"""
+    if target_host not in TARGET_HOSTS:
+        raise ContractError("target host must be codex or antigravity")
+    if target_host == "codex":
+        return {name: name for name in files}
+    result = {name: name for name in files if name.startswith(("agent_learning/", "scripts/", "hooks/"))
+              or name in ("README.md", "LICENSE", "config.example.json")}
+    prefix = "host_resources/antigravity/"
+    result.update({name[len(prefix):]: name for name in files if name.startswith(prefix)})
+    return result
+
+
 def validate_previous_release(root):
     """使用副本自己的版本/协议验证旧清单，不调用只接受当前版本的校验器。"""
     root = safe_path(root)
@@ -141,7 +155,46 @@ def _expected_hook_document(runtime, python, mode, command_builder):
     return hooks
 
 
-def inspect_installation(destination, command_builder, expected_release_id=None):
+def antigravity_hooks(runtime, python, mode, command_builder, workspace, home):
+    """生成原生命名 Hook 文档；观察安装不接管宿主工具审批。"""
+    hooks = _json(runtime / "host_resources/antigravity/hooks.json")
+    try:
+        if set(hooks) != {"agent-learning"} or not isinstance(hooks["agent-learning"], dict):
+            raise TypeError
+        definition = hooks["agent-learning"]
+        if set(definition) != {"PreInvocation", "PostToolUse", "PreToolUse", "Stop"}:
+            raise TypeError
+        if mode != "enforce":
+            definition.pop("PreToolUse")
+        for event, handlers in definition.items():
+            if not isinstance(handlers, list) or not handlers:
+                raise TypeError
+            command, windows = command_builder(python, runtime / "hooks/antigravity_dispatch.py", event, mode,
+                                               host="antigravity", workspace=workspace, home=home)
+            for item in handlers:
+                if not isinstance(item, dict):
+                    raise TypeError
+                children = item.get("hooks") if event in ("PreToolUse", "PostToolUse") else [item]
+                if not isinstance(children, list) or not children:
+                    raise TypeError
+                for handler in children:
+                    if not isinstance(handler, dict) or handler.get("type") != "command":
+                        raise TypeError
+                    handler["command"] = windows if os.name == "nt" else command
+    except (KeyError, TypeError, AttributeError):
+        raise ContractError("existing fixed runtime Antigravity Hook contract is invalid") from None
+    return hooks
+
+
+def mcp_document(runtime, python, host="codex", workspace=None, home=None):
+    arguments = [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]
+    if host == "antigravity":
+        arguments = ["-B", str(runtime / "scripts/learning.py"), "--workspace", workspace, "--home", home,
+                     "serve", "--role", "worker", "--host", "antigravity"]
+    return {"mcpServers": {"agent_learning": {"command": python, "args": arguments}}}
+
+
+def inspect_installation(destination, command_builder, expected_release_id=None, *, target_host=None):
     """只读身份、受管理文件及用户额外文件；旧版本不要求已有安装清单。"""
     target = safe_path(destination)
     observed = snapshot(target)
@@ -152,6 +205,11 @@ def inspect_installation(destination, command_builder, expected_release_id=None)
             or ".git" in observed["files"] or ".git" in observed["directories"]):
         raise ContractError("refusing to replace a source checkout or fixed runtime release")
     receipt = _json(target / "runtime-release.json")
+    host = receipt.get("target_host", "codex")
+    if host not in TARGET_HOSTS:
+        raise ContractError("existing installation target host is invalid")
+    if target_host is not None and host != target_host:
+        raise ContractError("refusing to overwrite an installation for a different target host")
     required = {"runtime_directory", "release_id", "version", "protocol_version", "content_digest", "python", "hook_mode"}
     if (not required.issubset(receipt) or not isinstance(receipt.get("runtime_directory"), str)
             or not Path(receipt["runtime_directory"]).is_absolute()
@@ -159,6 +217,13 @@ def inspect_installation(destination, command_builder, expected_release_id=None)
             or not Path(receipt["python"]).is_absolute()
             or receipt.get("hook_mode") not in (None, "observe", "enforce")):
         raise ContractError("existing installation runtime receipt is invalid")
+    if host == "antigravity":
+        if (receipt.get("hook_mode") not in ("observe", "enforce")
+                or any(not isinstance(receipt.get(name), str) or not Path(receipt[name]).is_absolute()
+                       for name in ("workspace", "home"))):
+            raise ContractError("existing Antigravity installation binding is invalid")
+        for name in ("workspace", "home"):
+            safe_path(receipt[name])
     runtime = safe_path(receipt["runtime_directory"])
     if target == runtime or target in runtime.parents or runtime in target.parents:
         raise ContractError("existing installation and fixed runtime must use separate directories")
@@ -167,37 +232,53 @@ def inspect_installation(destination, command_builder, expected_release_id=None)
         raise ContractError("existing installation receipt does not match its fixed runtime")
     if expected_release_id is not None and receipt["release_id"] != expected_release_id:
         raise ContractError("existing installation release changed; expected release identity does not match")
-    plugin = _json(target / ".codex-plugin/plugin.json")
-    if (plugin.get("name") != "agent-learning" or plugin.get("version") != release["version"]
-            or plugin.get("skills") != "./skills/" or plugin.get("hooks") != "./hooks/hooks.json"
-            or plugin.get("mcpServers") != "./.mcp.json"):
-        raise ContractError("existing installation is not a valid agent-learning plugin export")
+    plugin_path = ".codex-plugin/plugin.json" if host == "codex" else "plugin.json"
+    plugin = _json(target / plugin_path)
+    if host == "codex":
+        if (plugin.get("name") != "agent-learning" or plugin.get("version") != release["version"]
+                or plugin.get("skills") != "./skills/" or plugin.get("hooks") != "./hooks/hooks.json"
+                or plugin.get("mcpServers") != "./.mcp.json"):
+            raise ContractError("existing installation is not a valid agent-learning plugin export")
+    elif (set(plugin) != {"name", "description"} or plugin.get("name") != "agent-learning"
+          or not isinstance(plugin.get("description"), str)):
+        raise ContractError("existing installation is not a valid Antigravity plugin export")
     # 这些文件只含安装时的固定路径；其余受管理文件必须与旧发布副本一致。
-    mcp = {"mcpServers": {"agent_learning": {"command": receipt["python"],
-           "args": [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]}}}
-    if _json(target / ".mcp.json") != mcp:
+    mcp = mcp_document(runtime, receipt["python"], host, receipt.get("workspace"), receipt.get("home"))
+    mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
+    hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
+    expected_hooks = (_expected_hook_document(runtime, receipt["python"], receipt["hook_mode"], command_builder)
+                      if host == "codex" else antigravity_hooks(runtime, receipt["python"], receipt["hook_mode"],
+                          command_builder, receipt["workspace"], receipt["home"]))
+    if _json(target / mcp_path) != mcp:
         raise ContractError("existing installation MCP configuration was modified")
-    if _json(target / "hooks/hooks.json") != _expected_hook_document(runtime, receipt["python"], receipt["hook_mode"], command_builder):
+    if _json(target / hook_path) != expected_hooks:
         raise ContractError("existing installation Hook configuration was modified")
-    managed = set(release["files"]) | {"runtime-release.json"}
-    for name in managed - {"runtime-release.json", ".mcp.json", "hooks/hooks.json"}:
-        if observed["files"].get(name) != release["files"].get(name):
+    mapping = payload_mapping(release["files"], host)
+    managed = set(mapping) | {"runtime-release.json"}
+    for name in managed - {"runtime-release.json", mcp_path, hook_path}:
+        if observed["files"].get(name) != release["files"].get(mapping[name]):
             raise ContractError("existing installation managed file is missing or modified: " + name)
     if INSTALL_MANIFEST in observed["files"]:
         installation = _json(target / INSTALL_MANIFEST)
-        expected = {"schema": INSTALL_SCHEMA, "plugin": "agent-learning", "release_id": release["release_id"],
+        if type(installation.get("schema")) is not int:
+            raise ContractError("existing installation file manifest is invalid or managed files changed")
+        expected = {"schema": installation.get("schema"), "plugin": "agent-learning", "release_id": release["release_id"],
                     "files": {name: observed["files"][name] for name in sorted(managed)}}
+        if installation.get("schema") == INSTALL_SCHEMA:
+            expected["target_host"] = host
+        elif installation.get("schema") != 1 or host != "codex":
+            raise ContractError("existing installation file manifest is invalid or managed files changed")
         if installation != expected:
             raise ContractError("existing installation file manifest is invalid or managed files changed")
         managed.add(INSTALL_MANIFEST)
     extras = sorted(set(observed["files"]) - managed)
     return {"target": target, "runtime_directory": runtime, "receipt": receipt, "release": release,
-            "snapshot": observed, "managed": managed, "extra_files": extras}
+            "snapshot": observed, "managed": managed, "extra_files": extras, "target_host": host}
 
 
-def write_installation_manifest(root, release_id):
+def write_installation_manifest(root, release_id, target_host="codex"):
     observed = snapshot(root)
-    manifest = {"schema": INSTALL_SCHEMA, "plugin": "agent-learning", "release_id": release_id,
+    manifest = {"schema": INSTALL_SCHEMA, "plugin": "agent-learning", "release_id": release_id, "target_host": target_host,
                 "files": {name: value for name, value in sorted(observed["files"].items()) if name != INSTALL_MANIFEST}}
     (root / INSTALL_MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

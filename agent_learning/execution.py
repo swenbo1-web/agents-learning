@@ -15,7 +15,7 @@ import time
 _ACTIONS = {"read", "write", "execute", "network"}
 _SCOPE_MODES = {"analysis", "read_only", "implementation", "execute"}
 _RULE_KEYS = {"mode", "allowed_tools", "tool_rules", "allowed_paths", "budget", "workspace"}
-_SHELL_TOOLS = {"bash", "shell", "powershell", "cmd", "exec_command", "functions.exec_command"}
+_SHELL_TOOLS = {"bash", "shell", "powershell", "cmd", "exec_command", "functions.exec_command", "run_command"}
 _SCOPE_ROOTS_KEY = "_scope_path_roots"
 
 
@@ -206,7 +206,7 @@ class ExecutionMixin:
             reason = "task_inactive"
         elif policy is None:
             reason = "execution_approval_required"
-        elif policy["host_epoch"] != self.host_epoch():
+        elif policy["host_epoch"] != self.session_epoch():
             reason = "account_context_changed"
         elif (policy["task_id"], policy["task_revision"], policy["execution_epoch"]) != (
                 task["id"], task["revision"], task["execution_epoch"]):
@@ -227,7 +227,7 @@ class ExecutionMixin:
         if isinstance(expected_write_version, bool) or not isinstance(expected_write_version, int) or expected_write_version < 1:
             _error("expected_write_version is required for execution approval")
         with self.transaction():
-            epoch = self.assert_host_epoch(expected_epoch)
+            epoch = self.assert_session_epoch(expected_epoch)
             self.bind_session(project, conversation_id)
             task = self.task(project, conversation_id)
             if not task or (task["id"], task["write_version"]) != (expected_task_id, expected_write_version):

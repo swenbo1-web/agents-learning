@@ -137,6 +137,7 @@ class KnowledgeBrowserTests(unittest.TestCase):
 
     def test_write_methods_denied_and_snapshot_is_read_only(self):
         before = self.r.db.total_changes
+        self.assertEqual(self.get("/api/stats")["schema_version"], self.r.db.execute("PRAGMA user_version").fetchone()[0])
         for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"):
             self.assertEqual(self.request("/api/knowledge", method=method, body="{}", headers={"Content-Type": "application/json"})[0], 405)
         with self.server.snapshot() as db:

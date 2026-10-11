@@ -26,7 +26,7 @@ class PackageTests(unittest.TestCase):
             base = Path(temp)
             source = base / "build source"
             source.mkdir()
-            for name in ("agent_learning", "scripts", "hooks", "skills", ".codex-plugin", ".agents"):
+            for name in ("agent_learning", "scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources"):
                 shutil.copytree(source_root / name, source / name,
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             for name in ("pyproject.toml", "README.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
@@ -48,6 +48,8 @@ class PackageTests(unittest.TestCase):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/plugin.json", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/rules/learning.md", wheel.namelist())
                 self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
                 licenses = [name for name in wheel.namelist() if ".dist-info/" in name and name.endswith("/LICENSE")]
                 self.assertTrue(licenses, "wheel must retain its distribution license")
@@ -106,6 +108,23 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(manifest["version"], __version__)
             release = json.loads((exported / "runtime-release.json").read_text(encoding="utf-8"))
             self.assertEqual(validate_release_root(Path(release["runtime_directory"]))["release_id"], release["release_id"])
+            native_export = base / "wheel exported Antigravity plugin"
+            native_home = base / "Antigravity knowledge"
+            native = subprocess.run(
+                [sys.executable, "-B", "-m", "agent_learning.cli", "--workspace", str(workspace),
+                 "--home", str(native_home), "install", str(native_export), "--host", "antigravity",
+                 "--runtime-store", str(base / "runtime releases")],
+                cwd=workspace, env=environment, capture_output=True, timeout=10,
+            )
+            self.assertEqual(native.returncode, 0, native.stderr.decode("utf-8", "replace"))
+            native_receipt = json.loads(native.stdout.decode("utf-8"))
+            self.assertEqual(native_receipt["target_host"], "antigravity")
+            self.assertEqual(native_receipt["runtime_directory"], release["runtime_directory"])
+            self.assertFalse(native_home.exists())
+            self.assertFalse((native_export / ".codex-plugin").exists())
+            for relative in ("plugin.json", "hooks.json", "mcp_config.json", "rules/learning.md",
+                             "skills/learning-worker/SKILL.md", "hooks/antigravity_dispatch.py"):
+                self.assertTrue((native_export / relative).is_file(), relative)
 
     @unittest.skipUnless(shutil.which("codex"), "Codex CLI is optional")
     def test_native_codex_catalog_and_install_in_isolated_home(self):

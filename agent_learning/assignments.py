@@ -17,18 +17,18 @@ class AssignmentMixin:
                 (str(uuid.uuid4()), project, conversation, agent, handle,
                  task["id"] if task else None, task["revision"] if task else None,
                  task["write_version"] if task else None, task["execution_epoch"] if task else None,
-                 self.host_epoch(), encode(task["scope"] if task else {}), time.time()))
+                 self.session_epoch(), encode(task["scope"] if task else {}), time.time()))
         return self.assignment_context(project, conversation, agent, handle)
 
     def assignment_context(self, project, conversation, agent_id=None, context_handle=None):
         if context_handle:
             row = self.db.execute(
                 "SELECT * FROM assignments WHERE project=? AND conversation=? AND context_handle=? AND host_epoch=?",
-                (project, conversation, context_handle, self.host_epoch())).fetchone()
+                (project, conversation, context_handle, self.session_epoch())).fetchone()
         elif agent_id:
             row = self.db.execute(
                 "SELECT * FROM assignments WHERE project=? AND conversation=? AND agent=? AND host_epoch=? "
-                "ORDER BY created DESC LIMIT 1", (project, conversation, agent_id, self.host_epoch())).fetchone()
+                "ORDER BY created DESC LIMIT 1", (project, conversation, agent_id, self.session_epoch())).fetchone()
         else:
             return None
         if not row:

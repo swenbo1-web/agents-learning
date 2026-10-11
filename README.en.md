@@ -6,7 +6,7 @@
 
 **Help Agents retain project experience and find evidence-backed guidance for the next task.**
 
-Current version: **0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Public prerelease and downloads](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
+Current source: **0.14.0** (dual host adapter, unreleased) · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published 0.13.0 and downloads](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning builds maintainable knowledge memory for long-running projects. It retrieves relevant experience at supported task events, records tool outcomes, lets an administrator organize candidates, and makes knowledge with conditions, sources and revisions available to later Agents. Workers focus on their current task while experience remains reusable across conversations.
 
@@ -19,6 +19,7 @@ agents-learning builds maintainable knowledge memory for long-running projects. 
 - **Separate organization and budgets**: event capture and incremental review proceed separately; administrator execution is optional, with bounds on calls, concurrency, review packets and context.
 - **Paired task evaluation**: freeze tasks, model, environment and knowledge snapshot; run no-memory / with-memory pairs and check acceptance, elapsed time and full-workflow usage.
 - **Installation upgrades and version checks**: validate and back up existing exports, update their entry points, and optionally check GitHub Releases in the background while retaining separate knowledge and configuration.
+- **Two host profiles**: export Codex and native Antigravity plugins from one knowledge core, with separate session identity and host-specific event/evidence handling.
 
 `Current task → Retrieve experience → Execute and observe → Organize candidates → Validate and publish → Reuse in the next task`
 
@@ -42,7 +43,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. For Codex integration, follow the [desktop and CLI installation steps](#install-in-codex-desktop-and-cli) to export, install and trust Hooks. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex installation steps](#install-in-codex-desktop-and-cli) or [native Antigravity steps](#install-in-antigravity-native-plugin). Antigravity needs the 0.14.0 source checkout or a locally built package; published 0.13.0 downloads do not include it. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## How the project took shape
 
@@ -71,7 +72,7 @@ The goal is to reduce repeated work and irrelevant context so Agents can use exi
 
 The plugin suits projects that require long-term maintenance, frequent tool use and work handed between conversations or Agents, including software development, troubleshooting, testing, data processing and experimental workflows. Project context, domain experience and tool operation knowledge can be maintained together; each domain still needs its own evidence and acceptance methods.
 
-**Codex** is currently the primary integration environment, with plugin rules, skills, MCP, Hooks and runtime working together. The framework can be configured around project tools; other Agent environments require an appropriate host adapter.
+The repository provides **Codex** and **native Antigravity** profiles using rules, skills, MCP, Hooks and the same runtime core. Antigravity capability differences and host acceptance status are documented below; other Agent environments still require their own adapters.
 
 Storage is local by default, and knowledge is managed by project. Administrator execution, background scheduling, automatic publication and remote services are off by default and may be enabled separately as needed.
 
@@ -161,6 +162,8 @@ The same project and data directory can retain knowledge across login accounts. 
 
 [runtime.py](agent_learning/runtime.py) combines the eight modules, unifying project, session, account boundaries and database transactions. The modules share versions and data contracts within the same runtime.
 
+[host_sessions.py](agent_learning/host_sessions.py) defines host session boundaries, [antigravity.py](agent_learning/antigravity.py) adapts native events, and [host_resources/antigravity](host_resources/antigravity/) holds the native profile. Both exports use the same knowledge, retrieval and governance core.
+
 ### How each module works
 
 **1. Plugin integration and protocol.** CLI provides explicit local operations, MCP exposes tools by role, Hooks receive host events and skills describe the workflow. Initial `install` validates resources and exports atomically; `--upgrade` validates the old installation and retains a backup before switching directories. Fixed runtime entry points check content identity. Optional background version checks only read GitHub Release metadata and do not participate in knowledge review or execution authorization. MCP connections bind to a session through a trusted handle, and arguments cannot elevate a role.
@@ -195,6 +198,8 @@ Candidate metadata may include `tool`, `tool_version`, `error_code`, `environmen
 
 ### How automation reduces missed steps
 
+This table describes the Codex event chain. Antigravity uses a separate adapter; see [host differences](#3-host-differences-and-evidence).
+
 | Trigger | Plugin action | Boundary |
 |---|---|---|
 | `SessionStart` / `UserPromptSubmit` | Bind identity, retrieve relevant knowledge, restore tasks and notices | Insufficient matches are not injected; short continuations may reuse an unchanged query plan |
@@ -208,6 +213,8 @@ Candidate metadata may include `tool`, `tool_version`, `error_code`, `environmen
 These mechanisms make retrieval and event recording less dependent on the Agent remembering every step. Domain judgment still requires the Agent to consider current requirements, environment and evidence, and publication checks cannot prove arbitrary natural language conclusions correct.
 
 ## Current version and compatibility
+
+0.14.0 adds native Antigravity installation and event adaptation while sharing SQLite and knowledge governance. Schema 12 adds host instances, native trajectories, receipts and taskless fault followups. Full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 11. Migration preserves legacy Codex sessions and knowledge. Older runtimes cannot open schema 12 databases. Use the existing `backup` entry before upgrading when a database backup is needed; installation backups do not back up external knowledge. Version 0.14.0 has not been published yet.
 
 0.13.0 adds explicit upgrades of existing plugin exports and optional background GitHub Release checks, disabled by default. Database schema 11, full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 10. Upgrades validate historical exports using the same manifest format without executing old code or touching live data directories. Background commands use their bound script entry, preventing a same-named package in the project directory from taking precedence. This public prerelease also includes the 0.12.0 additions below.
 
@@ -456,6 +463,89 @@ python scripts/learning.py account-changed --notification-id "unique-login-event
 A unique notification ID provides deduplication; without one, each call represents a new boundary. All notification sources must use the same `ALP_HOME` or `--home`. This entry point does not read, save or change login tokens, and does not log in, log out or reset usage limits.
 
 **Desktop account changes are not currently subscribed to automatically.** The official app-server exposes `account/updated` and login completion notifications, but a plugin cannot assume it is connected to the desktop application's internal notification channel. An adapter should emit boundary notifications from the login lifecycle it actually controls. Comparing only `authMode` or a subscription plan cannot identify an A → B switch using the same authentication mode; the implementation does not rely on the modification time of `auth.json`. See the [official app-server account API](https://learn.chatgpt.com/docs/app-server).
+
+## Install in Antigravity (native plugin)
+
+### 1. Export each host separately
+
+Use the 0.14.0 source checkout, Python 3.10+, and an Antigravity version supporting native plugins and Hooks. The published 0.13.0 downloads do not include this adapter. Export separate directories from the same repository:
+
+```powershell
+# Codex: default profile; follow the Codex installation section above
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
+
+# Antigravity: export, then install through the host
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
+```
+
+An initial Antigravity export requires an explicit existing workspace. Omitting `--home` uses the same default as the local Runtime. Both MCP and Hooks bind these absolute paths. Export creates no knowledge database and changes no host configuration. For the package entry, replace `scripts/learning.py` with `-m agent_learning.cli`; on macOS/Linux use your own Python and absolute paths.
+
+The native export contains root `plugin.json`, `mcp_config.json`, `hooks.json`, rules and worker/admin skills. Codex keeps its own manifest and entry contracts. Installation receipts record `target_host`; upgrades reject overwriting one host's export with the other profile.
+
+### 2. Load and verify
+
+The Antigravity CLI can install the generated local directory:
+
+```powershell
+agy plugin install "D:\Plugins\agent-learning-antigravity"
+```
+
+IDE/2.0 also support workspace `.agents/plugins/` directories. You can export directly to `D:\Projects\my-project\.agents\plugins\agent-learning`, reload the project, and check that MCP, rules, skills and Hooks are enabled. Prefer project installation because this export binds one workspace; loading it globally into another workspace is rejected. See the [official plugin guide](https://antigravity.google/docs/plugins/). The repository root contains both sets of resource templates and must be exported locally before installation.
+
+In a fresh conversation, ask the agent to check the project and `host_scope=antigravity:default` through `learning_status`, pass the current PreInvocation `context_handle` to `session_context`, verify `context_bound=true`, then register the current task goal.
+
+An Antigravity MCP process may serve several chats. Every stateful call must explicitly supply the current handle; omitted handles never inherit another chat. Supply it to knowledge queries to record exposure too. Without a verified handle, only project queries are available. Observe mode omits PreToolUse, so native chat origin on every MCP write still relies on correct handle use and rules. Enforce mode adds a native origin check in the pre-tool callback.
+
+### 3. Host differences and evidence
+
+| Workflow | Codex | Initial Antigravity adapter |
+|---|---|---|
+| Automatic context | Supported user prompt, session and restoration events | PreInvocation using registered goals, recent queries and actual errors |
+| Current user prompt | Supported Hook prompt | Public callback does not promise prompt text; register it through task_update |
+| Context delivery | Track previous injections and avoid repeated text | Render bounded ephemeralMessage from cached references each invocation |
+| Tool observations | Classify actual responses | Nonempty PostToolUse.error is failure; empty means call_completed only |
+| Execution checks | Connected rules and trusted approvals | Observe omits PreToolUse; enforce returns ask on passing checks and deny on rejection |
+| Stop | Registered delivery and public output | Records loop stopping; fullyIdle does not prove user acceptance |
+| Compaction, children, login | Supported events and explicit entry points | No invented equivalent events; ambiguous numbering needs trusted reset |
+| Administrator | Optional Codex CLI executor and separate admin tools | Shared governance queue; no automatic Antigravity model executor yet |
+
+The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). It does not scan transcripts, artifacts or private model reasoning. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
+
+Multi-workspace callbacks must mount the bound project. Tool resources verify attribution; uncertain callbacks stay unassociated, and enforce rejects them. Native tool argument mappings are distinct from Codex. For example, run_command is command execution and cannot bypass read-only protection through a rule labeling it as a read.
+
+Without a reliable new-user-prompt boundary, Hooks cannot automatically establish that a new requirement replaces the previous task. Workers must update the goal/scope when requirements change. Enforcement checks the registered contract and trusted approval; it does not establish authorization for every native user prompt. Native installations ignore an inherited ALP_CONTEXT_HANDLE and require the current Hook handle on each stateful request.
+
+### 4. Explicit enforcement, reset and account change
+
+From a trusted terminal, update the export to enable enforcement:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
+```
+
+The adapter never returns automatic allow or permissionOverrides. The existing trusted execution-approve entry must still authorize the current task with native tool names and argument fields. ask follows the host's approval settings. Host Deny composition, timeout, killed processes and malformed responses have not been accepted in a live host; universal hard rejection on failure is not established.
+
+When counters regress, repeat or conflict without a reliable trajectory ID, the adapter does not invent a new execution identity. Reset a specific native conversation from a trusted terminal:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "native-conversation-id"
+# After a confirmed real login account change
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "stable-id-for-this-notification"
+```
+
+Reset pauses the task and invalidates old handles and execution approvals. A later Hook binds again; explicitly resume and reapprove the task. Reset is CLI-only, not a worker MCP tool. Unknown late events cannot strengthen evidence. Account notifications require a trusted source; the plugin reads no login credentials and does not automatically detect Antigravity account changes.
+
+### 5. Shared knowledge, upgrades and administrators
+
+The same ALP_HOME/--home and project mapping share knowledge, candidates, sources and governance queues. Conversation identities are namespaced by host. Changing one host's account preserves the other host's worker sessions, while shared governance calls are fenced and unknown usage stays reserved for reconciliation.
+
+If Codex uses its default data directory, omit --home on the Antigravity export to use that default too. If choosing a custom path as in the example, configure the Codex host process with the same ALP_HOME. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
+
+An explicitly configured admin interface can review Antigravity cases, and the existing compatible executor can process the shared queue. An admin skill is guidance; the default native MCP role remains worker. Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
+
+Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
+
+Before sharing a database with existing 0.13 installations, stop the relevant runtimes, back up the database as needed, update all installations accessing it to 0.14, and reload the hosts. Updating only Antigravity leaves old Codex runtimes unable to open the migrated schema.
 
 ## Handling a problem manually
 
@@ -723,7 +813,18 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |
 | `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
 | `serve` | Start an MCP service with a specified role |
-| `install` | Export a plugin; `--upgrade` validates and replaces an existing export while retaining a full backup |
+| `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
+| `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## 0.14.0 dual host validation (2026-10-12)
+
+The full offline suite on Windows/Python 3.12.14 discovered **897 checks**, with one platform symlink-permission skip. After updating historical schema and installation assertions, 177 related checks passed. The final full run encountered one Windows loopback connection interruption (10053) in a browser write-rejection check. All 20 browser checks passed on recheck; the rejection policy was not relaxed and the failure was not hidden.
+
+After adding ambient handle isolation, the current total is **898 checks**. All 61 targeted CLI, MCP, session, dual profile installation and wheel checks passed; the new check is not included in the earlier 897-test full-run count. Coverage includes cross-chat and cross-host identities, account/reset races, late Stop callbacks, shared governance dispatch, fault followups, ephemeral cache delivery, revocation, migration/rollback, cross-profile overwrite rejection and data preservation.
+
+Actual exported scripts completed native Hook → UTF-8 handle → MCP stdio → task write in a temporary workspace. Malformed enforce input returned deny; observe exports omitted PreToolUse. Wheels included and exported both profiles. Ninety Python files passed Python 3.10 syntax checks, without running actual Python 3.10 or other systems. Skill/resource headers were checked statically; the skill-creator helper could not run because PyYAML was unavailable, and user dependencies were not changed.
+
+No live host Hooks, models, embeddings, Hindsight, background services, user configuration or live knowledge databases were enabled or changed. Native host loading, message lifetime, tool names, permission composition and timeout behavior still require actual host acceptance. Offline checks establish no token or quality gains.
 
 ## 0.13.0 validation status (2026-10-11)
 

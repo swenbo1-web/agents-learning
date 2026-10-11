@@ -68,8 +68,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] != 11:
-        raise ContractError("browser requires database schema 11; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12}:
+        raise ContractError("browser requires database schema 11 or 12; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -290,7 +290,8 @@ def _read_api(db, project, route, params):
             "SELECT " + column + ",COUNT(*) FROM " + table + " WHERE project=? GROUP BY " + column, (project,))}
         knowledge_count = db.execute("SELECT COUNT(DISTINCT id) FROM knowledge WHERE project=?", (project,)).fetchone()[0]
         active_count = count("active")
-        return {"project_id": project, "read_only": True, "schema_version": 11,
+        return {"project_id": project, "read_only": True,
+                "schema_version": db.execute("PRAGMA user_version").fetchone()[0],
                 "knowledge_total": knowledge_count, "knowledge_active": active_count,
                 "knowledge_revoked": knowledge_count - active_count,
                 "knowledge_revisions": count("knowledge"), "events": count("events"),

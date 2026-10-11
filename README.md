@@ -6,7 +6,7 @@
 
 **让 Agent 记住项目经验，在下一次任务中查到有依据的解决方法。**
 
-当前版本：**0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [公开测试版与下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
+当前源码：**0.14.0**（双宿主适配，待发布）· Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布 0.13.0 与下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)
 
 agents-learning 为长期项目建立可持续维护的知识记忆：在受支持的任务事件中检索相关经验，记录工具结果，由管理员整理候选，再把带有条件、来源和修订的知识交给后续 Agent。普通 Agent 专注当前任务，多次对话积累的经验可以继续使用。
 
@@ -19,6 +19,7 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 - **分工整理与预算控制**：事件采集和增量审核分开，管理员按需启用；调用、并发、审核包和上下文分别有预算。
 - **任务对照评估**：冻结任务、模型、环境和知识快照，对“无记忆／有记忆”成对运行，核对验收、耗时和全流程用量。
 - **覆盖安装与版本检查**：验证旧安装后保留备份并更新入口；可启用后台 GitHub Release 检查，知识库和配置独立保留。
+- **两种宿主安装**：同一知识核心分别导出 Codex 和 Antigravity 原生插件；会话隔离，事件与证据按宿主实际能力处理。
 
 `当前任务 → 查阅经验 → 执行与观察 → 整理候选 → 校验发布 → 下一次任务复用`
 
@@ -42,7 +43,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。要在 Codex 中使用，请按[桌面端与 CLI 安装步骤](#在-codex-中安装桌面端与-cli)完成导出、安装和 Hook 信任。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
+第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按[Codex 安装步骤](#在-codex-中安装桌面端与-cli)或[Antigravity 安装步骤](#在-antigravity-中安装原生插件)接入对应宿主。Antigravity 新入口需使用 0.14.0 源码或自行构建的包，已发布的 0.13.0 下载不包含该入口。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
 
 ## 项目是怎样形成的
 
@@ -71,7 +72,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . brows
 
 适合需要长期维护、频繁使用工具，并由多个对话或多个 Agent 接力完成的项目，例如软件开发、故障排查、测试验证、数据处理和实验流程。项目上下文、专业经验和工具操作知识可以共同维护，各领域的有效性仍需要自己的证据与验收方法。
 
-目前以 **Codex** 为主要接入环境，通过插件规则、技能、MCP、Hook 和运行时协同工作。框架可结合项目工具进行配置，接入其他 Agent 环境时需要相应的宿主适配。
+目前提供 **Codex** 与 **Antigravity 原生插件**两种接入，通过规则、技能、MCP、Hook 和同一运行核心协同工作。Antigravity 的宿主验收状态与能力差异见下方安装章节；其他 Agent 环境仍需要各自的宿主适配。
 
 本地存储优先，知识按项目管理。管理员、后台调度、自动发布和远端服务默认关闭，可按需要分别启用。
 
@@ -161,6 +162,8 @@ flowchart LR
 
 [runtime.py](agent_learning/runtime.py) 组合八个模块，统一项目、会话、账户边界与数据库事务。模块共用版本和数据契约，在同一运行端协作。
 
+宿主会话边界在 [host_sessions.py](agent_learning/host_sessions.py)，原生事件适配在 [antigravity.py](agent_learning/antigravity.py)；Antigravity 的独立资源位于 [host_resources/antigravity](host_resources/antigravity/)。两种安装 profile 使用同一知识、检索和治理核心。
+
 ### 各模块怎样运行
 
 **1. 插件接入与协议。** CLI 提供显式本地操作，MCP 提供按角色划分的工具，Hook 接收宿主事件，skills 描述工作方式。首次 `install` 校验资源并原子导出；`--upgrade` 校验旧安装，保留备份后切换目录。固定运行副本在入口核对内容身份。可选后台版本检查只读取 GitHub Release 元数据，不参与知识审核或执行授权。MCP 连接通过可信句柄绑定会话，参数无法提升角色。
@@ -195,6 +198,8 @@ flowchart LR
 
 ### 自动化怎样减少遗漏
 
+下表为 Codex 事件链。Antigravity 使用独立事件适配，详见[能力差异](#宿主差异与证据边界)。
+
 | 触发点 | 插件处理 | 保留的边界 |
 |---|---|---|
 | `SessionStart`／`UserPromptSubmit` | 绑定身份、检索当前相关知识、恢复任务与通知 | 匹配不足不注入；短续聊可以复用未变化的查询计划 |
@@ -208,6 +213,8 @@ flowchart LR
 这些机制让检索和事件记录更少依赖 Agent 手动记住每一步。专业判断仍由 Agent 结合当前需求、环境和证据完成，发布校验也不能证明任意自然语言结论正确。
 
 ## 当前版本与兼容
+
+0.14.0 新增 Antigravity 原生安装与事件适配，共用 SQLite 和知识治理。数据库升至 schema 12，增加宿主实例、原生轨迹、回执及无任务故障待办；全文索引 4、语义索引 1 不变，内部发布协议升至 11。旧 Codex 会话和知识迁移后保留，旧运行端不能打开 schema 12 数据库。升级前可用现有 `backup` 入口保留数据库副本；安装目录备份不会备份外部知识库。当前尚未发布 0.14.0。
 
 0.13.0 增加已有导出目录的显式覆盖升级和可选 GitHub Release 后台版本检查，默认不启用网络检查。数据库 schema 11、全文索引 4、语义索引 1 不变；内部发布协议升至 10，安装更新生成新的固定运行副本。可验证并升级使用同类清单的历史导出，不执行旧代码，不覆盖真实数据目录。后台任务统一从绑定的脚本入口启动，避免当前项目的同名包抢先导入。0.13.0 公开测试版同时包含下面的 0.12.0 新增能力。
 
@@ -456,6 +463,91 @@ python scripts/learning.py account-changed --notification-id "unique-login-event
 可用唯一通知 ID 去重，省略时每次调用均视为一次新边界。所有通知方必须指向相同 `ALP_HOME`／`--home`。这个入口不读取、保存或修改登录 token，不执行登录、退出或额度重置。
 
 **当前没有自动订阅桌面端换号。** 官方 app-server 提供 `account/updated` 和登录完成通知，但普通插件不能据此假定已经接入桌面应用的内部通知通道。适配器应依据自己拥有的登录生命周期发出边界通知；仅比较 `authMode`／套餐不能识别同模式下的 A→B 换号，也不依赖 `auth.json` 修改时间。[官方 app-server 账户接口](https://learn.chatgpt.com/docs/app-server)
+
+## 在 Antigravity 中安装（原生插件）
+
+### 1. 分别导出两个宿主
+
+使用本仓库 0.14.0 源码、Python 3.10+ 和支持原生插件／Hooks 的 Antigravity。两个宿主使用不同导出目录，代码和固定运行副本仍由同一仓库维护：
+
+```powershell
+# Codex：默认 profile，沿用上方安装步骤
+python -B scripts/learning.py install "D:\Plugins\agent-learning-codex" --host codex
+
+# Antigravity：先导出到单独目录，再由宿主安装
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" install "D:\Plugins\agent-learning-antigravity" --host antigravity --hook-mode observe
+```
+
+Antigravity 首次导出必须显式指定已有工作区；`--home` 可省略，默认与本地 Runtime 相同。MCP 与 Hook 都绑定这两个绝对路径，不从聊天猜当前项目。使用包入口时，将 `scripts/learning.py` 替换成 `-m agent_learning.cli`；macOS／Linux 使用自己的 `python3` 和绝对路径。导出不会创建知识数据库或修改宿主配置。
+
+Antigravity 包包含根 `plugin.json`、`mcp_config.json`、`hooks.json`、rules 和 worker／admin skills；Codex 包保留其专用清单与入口。安装回执记录 `target_host`，覆盖升级不允许将一个宿主的安装替换成另一个。
+
+### 2. 在宿主加载并验证
+
+Antigravity CLI 可安装上面生成的本机目录：
+
+```powershell
+agy plugin install "D:\Plugins\agent-learning-antigravity"
+```
+
+IDE／2.0 也支持项目 `.agents/plugins/` 下的原生目录，可直接把导出目标设为 `D:\Projects\my-project\.agents\plugins\agent-learning`，然后重新加载项目并核对 MCP、Rules、Skills 和 Hooks 已启用。本插件固定绑定一个项目，适合项目级安装；全局加载同一包到其他工作区会被拒绝。安装位置与 CLI 管理方式见[官方插件说明](https://antigravity.google/docs/plugins/)。仓库根含两套资源模板，需先本机导出，不能直接把 GitHub 根目录当成已绑定的 Antigravity 安装包。
+
+在新对话验证：
+
+> 使用 learning_status 核对项目与 host_scope=antigravity:default。把本轮 PreInvocation 给出的 context_handle 传给 session_context，确认 context_bound=true，再登记当前任务目标。
+
+共享 MCP 进程可能服务多个聊天。Antigravity 每次有状态请求必须显式携带本轮句柄，省略时不会继承前一个聊天；查询也应携带句柄登记展示。未获得句柄时只能做项目查询，不能猜“最近会话”。默认观察模式不安装 `PreToolUse`，因此原生聊天与每次 MCP 写入的对应仍依赖正确传递句柄及规则；显式保护模式才额外检查前置事件中的会话一致性。
+
+### 3. 宿主差异与证据边界
+
+| 流程 | Codex | Antigravity 首版 |
+|---|---|---|
+| 自动注入 | 用户提示、会话开始与恢复事件 | `PreInvocation`，使用已登记目标、近期查询和真实错误 |
+| 当前用户提示 | 使用受支持 Hook 的 prompt | 公开回调未承诺 prompt；通过 `task_update` 登记目标，不扫描 transcript |
+| 上下文投递 | 保留展示状态并避免重复正文 | 每次调用从缓存重新渲染有限 `ephemeralMessage`；不重复计为新命中 |
+| 工具观察 | 按实际响应区分结果 | `PostToolUse.error` 非空为失败，空值只表示 `call_completed` |
+| 工具保护 | 已接入的执行规则与受信许可 | 默认 observe 无前置 Hook；enforce 检查通过返回 `ask`，拒绝返回 `deny` |
+| 停止 | 按已上报任务与公开交付消息处理 | `Stop` 记录停止；`fullyIdle=false` 不结束后台任务，true 也不代表用户验收 |
+| 压缩、子 Agent、登录变化 | 使用受支持事件及显式入口 | 不伪造等价事件；编号歧义需受信重置，换号使用显式 CLI 通知 |
+| 管理员 | 可选 Codex CLI 执行器与单独 admin 接口 | 复用治理队列；未实现 Antigravity 自动模型执行器，默认仍无模型调用 |
+
+原生事件按[官方 Hooks 契约](https://antigravity.google/docs/hooks)处理。没有最终退出码、输出和后台终态时，不生成 `tool_success`，不能据此满足要求该等级的自动发布；简短反馈维持 `reported` 等级。默认观察模式的孤儿 Post 事件没有可信前置任务归属，案例保持未关联，仅将错误用于补查。PreInvocation 的重复摘要仍占模型上下文，缓存减少的是重复检索，不代表已测得 token 净节省。
+
+公开事件没有可靠的新用户提示边界时，不能自动确认当前用户要求是否替换了旧任务。worker 需在新的目标或范围变化时及时 `task_update`；执行保护核对已登记合同及受信许可，不表示已经核验每次原生用户提示的授权。Antigravity 安装忽略继承环境中的 `ALP_CONTEXT_HANDLE`，每次有状态请求使用当前 Hook 的显式句柄。
+
+多工作区事件必须挂载已绑定项目；工具路径用于验证其归属，无法归属的记录保持未关联，保护模式拒绝。原生工具不套用 Codex 参数；例如 `run_command` 仍属于命令执行，不能通过把规则标为读取来绕过只读保护。
+
+### 4. 显式保护、重置与换号
+
+需要启用执行规则时，从受信终端更新安装：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning-antigravity" --host antigravity --upgrade --hook-mode enforce
+```
+
+enforce 不返回自动 `allow`，不设置 `permissionOverrides`；仍需要已有 `execution-approve` 入口签发当前任务的精确许可，规则中的工具名和参数字段必须与原生调用一致。`ask` 会遵循宿主已有审批设置；宿主 Deny 合成、超时、进程被终止和坏 JSON 的实际行为尚未完成真实宿主验收，因此当前不能承诺所有故障都被宿主硬阻断。
+
+编号回退、复用或矛盾输入没有可靠轨迹 ID 时，不猜新执行身份。通过受信终端重置指定原生会话：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" antigravity-session-reset --conversation "原生conversationId"
+# 确认实际换号后通知对应宿主
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearningData" --host antigravity account-changed --notification-id "本次通知的稳定ID"
+```
+
+重置暂停当前任务、失效旧句柄和许可；后续 Hook 重新绑定，再显式恢复任务并重新审批。这是 CLI 专用入口，不开放给普通 MCP 工具。无法鉴别的迟到回调不增强证据，默认保护拒绝歧义轨迹。换号通知需由实际使用者或可信宿主来源提供，插件不读取登录凭证，也不自动侦测 Antigravity 换号。
+
+### 5. 共用知识、升级与管理员
+
+两个宿主使用同一 `ALP_HOME`／`--home`，且工作区映射到同一项目时，共用知识、候选、来源和治理队列；不复制一套知识算法或默认启动第二个管理员。会话 ID 加宿主命名空间；一个宿主换号不使另一个宿主的 worker 失效，但会让共享治理执行器的旧调用失效，保留未知用量等待核对。
+
+Codex 使用默认数据目录时，Antigravity 导出省略 `--home` 即可选用相同默认位置；使用示例中的自定义目录时，Codex 宿主进程也需要配置同一路径的 `ALP_HOME`。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
+
+可用单独的管理员接口人工整理 Antigravity 案例，也可显式配置现有兼容执行器。native admin skill 只是操作说明，默认 MCP 仍是 worker。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
+
+升级时保持 `--host antigravity --upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。两个宿主可复用同一固定运行 release，但只能分别更新各自的安装目录。
+
+与已有 0.13 安装共用数据时，先停止相关运行端、按需备份数据库，并把所有访问同一知识库的安装都更新到 0.14，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 不兼容而被拒绝。
 
 ## 手动处理一个问题
 
@@ -723,7 +815,18 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
 | `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
-| `install` | 导出安装副本；`--upgrade` 验证并覆盖已有导出、保留完整备份 |
+| `install` | `--host codex\|antigravity` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
+| `antigravity-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
+
+## 0.14.0 双宿主检查状态（2026-10-12）
+
+Windows、Python 3.12.14 下完整离线检查发现 **897 项**，1 项因平台符号链接权限跳过。同步 schema 12／宿主安装契约的旧断言后，177 项相关复验通过。最后一次全套中，浏览器拒绝写请求的一项出现 Windows 本地连接中断 `10053`；随后整个浏览器 20 项复验全部通过，未调整拒绝策略或隐藏失败。
+
+追加环境句柄隔离保护后，当前共 **898 项**检查；对应 CLI、MCP、会话、双宿主安装及 wheel 的 61 项专项全部通过，最后新增项不包含在前述 897 项全套计数中。覆盖跨会话句柄、跨宿主同名会话、换号和重置竞态、旧停止回调、共享治理派发、临时故障补查、瞬时摘要复用、撤销通知、旧 schema 迁移与回滚、跨宿主覆盖拒绝及安装保留数据。
+
+实际导出入口在临时工作区完成原生 Hook → UTF-8 中文句柄 → MCP stdio → 对应任务写入；enforce 畸形输入返回 deny，默认观察包不包含 PreToolUse。wheel 包含两套资源并能分别导出。90 个 Python 文件通过 Python 3.10 语法检查；未在真实 Python 3.10 或其他系统运行。技能头字段与资源静态核对完成，skill-creator 辅助校验器因缺少 PyYAML 未运行成功，未修改用户依赖环境。
+
+本轮未启用真实 Antigravity／Codex Hooks，未调用真实模型、嵌入、Hindsight 或后台服务，未修改用户配置与真实知识数据库。原生宿主加载、消息寿命、工具名称、权限合成和超时行为仍需实际宿主验收；不据离线结果宣称 token 或质量收益。
 
 ## 0.13.0 检查状态（2026-10-11）
 

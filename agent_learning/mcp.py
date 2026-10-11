@@ -159,21 +159,31 @@ class Server:
         if role not in {"worker", "admin"}:
             raise ContractError("invalid server role")
         self.runtime, self.project = runtime, project
+        self.role = role
+        self.per_request_context = runtime.host == "antigravity" and context_handle is None
         self.context_handle = context_handle
-        self.epoch = runtime.host_epoch()
+        self.epoch = runtime.session_epoch()
+        self.governance_epoch = runtime.host_epoch()
         self.state, self.protocol_version = "new", None
         self.tools = {name: (description, contract) for name, description, contract in
                       WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])}
 
     def _check_epoch(self):
-        if self.runtime.host_epoch() != self.epoch:
+        if (self.runtime.session_epoch() != self.epoch
+                or self.role == "admin" and self.runtime.host_epoch() != self.governance_epoch):
             raise ProtocolError(-32001, "reconnect_required", {"reason": "host_epoch_changed"})
 
     def _handle(self, args):
+        if self.per_request_context:
+            return args.get("context_handle")
         handle = args.get("context_handle", self.context_handle)
         if self.context_handle is not None and handle != self.context_handle:
             raise ContractError("context_mismatch: connection is bound to another handle")
         return handle
+
+    def _bind(self, handle):
+        if not self.per_request_context:
+            self.context_handle = handle
 
     def call(self, name, args):
         self._check_epoch()
@@ -207,20 +217,20 @@ class Server:
             if handle is not None:
                 # 登记生成响应中实际存在的修订；再次验证epoch关闭身份变更窗口。
                 r.record_exposure(p, handle, items, expected_epoch=self.epoch)
-                self.context_handle = handle
+                self._bind(handle)
             else:
-                r.assert_host_epoch(self.epoch)
+                r.assert_session_epoch(self.epoch)
             return result
         if name == "session_context":
             handle = self._handle(args)
             context = r.session_context(p, handle, expected_epoch=self.epoch)
             if handle is not None:
-                self.context_handle = handle
+                self._bind(handle)
             return context
         if name in {"task_update", "case_feedback"}:
             handle = self._handle(args)
             context = r.access_context(p, handle, args.get("conversation_id"), expected_epoch=self.epoch)
-            self.context_handle = handle
+            self._bind(handle)
             body = {key: value for key, value in args.items() if key != "context_handle"}
             body["conversation_id"] = context["conversation_id"]
             body.update(context_handle=handle, expected_epoch=self.epoch)
@@ -231,17 +241,17 @@ class Server:
             handle = self._handle(args)
             body = {key: value for key, value in args.items() if key != "context_handle"}
             result = r.knowledge_use(p, context_handle=handle, expected_epoch=self.epoch, **body)
-            self.context_handle = handle
+            self._bind(handle)
             return result
         if name == "problem_list": return r.problems(p, **args)
         if name == "review_packet": return r.review_packet(p, **args)
-        if name == "submit_candidate": return r.submit_candidate(p, expected_epoch=self.epoch, **args)
+        if name == "submit_candidate": return r.submit_candidate(p, expected_epoch=self.governance_epoch, **args)
         if name == "review_list":
             from .admin_decisions import get_reviews
             return get_reviews(r, p, **args)
         if name == "propose_governance":
             from .admin_governance import propose_governance
-            return propose_governance(r, p, expected_epoch=self.epoch, **args)
+            return propose_governance(r, p, expected_epoch=self.governance_epoch, **args)
         raise ContractError("unknown tool")
 
     def request(self, message):

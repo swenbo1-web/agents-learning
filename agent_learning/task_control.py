@@ -31,7 +31,7 @@ class TaskControlMixin:
             raise ContractError("resume requires an existing task and active status")
 
         with self.transaction():
-            self.assert_host_epoch(expected_epoch)
+            self.assert_session_epoch(expected_epoch)
             if context_handle is not None:
                 access = self.access_context(project, context_handle, conversation_id, expected_epoch)
                 if access["agent_id"]:

@@ -15,14 +15,17 @@ from . import __version__
 from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release_root
 from .runtime import ContractError
 from .install_update import (installation_lock, inspect_installation, preserve_extra_files,
-                             safe_path, switch_installation, write_installation_manifest)
+                             safe_path, switch_installation, write_installation_manifest,
+                             TARGET_HOSTS, antigravity_hooks, mcp_document, payload_mapping)
 
 
-RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents")
+RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
 RESOURCE_FILES = ("README.md", "LICENSE", "config.example.json", ".mcp.json")
 REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "hooks/hooks.json",
                   "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
                   ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json")
+ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
+                     "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md")
 
 
 def _resource_root():
@@ -40,8 +43,51 @@ def _resource_root():
     raise ContractError("plugin export resources are missing; use the complete source checkout or reinstall the wheel")
 
 
-def _validate_resources(root):
+def _validate_antigravity_resources(root):
+    for name in ANTIGRAVITY_FILES:
+        if not root.joinpath(name).is_file():
+            raise ContractError("Antigravity plugin resource is missing: " + name)
+    manifest = json.loads(root.joinpath("plugin.json").read_text(encoding="utf-8"))
+    if (not isinstance(manifest, dict) or set(manifest) != {"name", "description"}
+            or manifest.get("name") != "agent-learning" or not isinstance(manifest.get("description"), str)):
+        raise ContractError("Antigravity plugin manifest is invalid")
+    hooks = json.loads(root.joinpath("hooks.json").read_text(encoding="utf-8"))
+    if (not isinstance(hooks, dict) or set(hooks) != {"agent-learning"}
+            or not isinstance(hooks["agent-learning"], dict)):
+        raise ContractError("Antigravity plugin Hook resource is invalid")
+    events = hooks["agent-learning"]
+    if (not {"PreInvocation", "PostToolUse", "Stop"}.issubset(events)
+            or set(events) - {"PreInvocation", "PostToolUse", "PreToolUse", "Stop"}):
+        raise ContractError("Antigravity plugin Hook events are invalid")
+    for event, handlers in events.items():
+        if not isinstance(handlers, list) or not handlers:
+            raise ContractError("Antigravity plugin Hook handlers are invalid")
+        for item in handlers:
+            if not isinstance(item, dict):
+                raise ContractError("Antigravity plugin Hook handler is invalid")
+            children = item.get("hooks") if event in ("PreToolUse", "PostToolUse") else [item]
+            if not isinstance(children, list) or not children:
+                raise ContractError("Antigravity plugin Hook handlers are invalid")
+            for handler in children:
+                if (not isinstance(handler, dict) or handler.get("type") != "command"
+                        or not isinstance(handler.get("command"), str) or not handler["command"]
+                        or set(handler) - {"type", "command", "timeout"}
+                        or type(handler.get("timeout")) is not int or not 1 <= handler["timeout"] <= 30):
+                    raise ContractError("Antigravity plugin Hook handler contract is invalid")
+    if not isinstance(json.loads(root.joinpath("mcp_config.json").read_text(encoding="utf-8")), dict):
+        raise ContractError("Antigravity plugin MCP resource is invalid")
+    for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md"):
+        if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
+            raise ContractError("Antigravity plugin skill resource is invalid: " + name)
+
+
+def _validate_resources(root, host="codex", *, bundle=False):
     try:
+        if host == "antigravity" and not bundle:
+            _validate_antigravity_resources(root)
+            if not root.joinpath("hooks/antigravity_dispatch.py").is_file():
+                raise ContractError("Antigravity Hook dispatcher is missing")
+            return
         for name in REQUIRED_FILES:
             if not root.joinpath(name).is_file():
                 raise ContractError("plugin resource is missing: " + name)
@@ -64,6 +110,10 @@ def _validate_resources(root):
         for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md"):
             if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
                 raise ContractError("plugin skill resource is invalid: " + name)
+        if bundle:
+            _validate_antigravity_resources(root.joinpath("host_resources/antigravity"))
+            if not root.joinpath("hooks/antigravity_dispatch.py").is_file():
+                raise ContractError("Antigravity Hook dispatcher is missing")
     except ContractError:
         raise
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
@@ -142,8 +192,10 @@ def _release(source, package, store):
         _cleanup_owned(staging, store, staging_identity)
 
 
-def _hook_commands(python, script_path, event_name, hook_mode):
+def _hook_commands(python, script_path, event_name, hook_mode, *, host="codex", workspace=None, home=None):
     arguments = [str(script_path), "--event", event_name]
+    if host == "antigravity":
+        arguments = ["-B", *arguments, "--workspace", workspace, "--home", home]
     if hook_mode is not None:
         arguments.extend(["--hook-mode", hook_mode])
     command = " ".join(shlex.quote(value) for value in [python, *arguments])
@@ -153,7 +205,8 @@ def _hook_commands(python, script_path, event_name, hook_mode):
     return command, windows
 
 
-def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, expected_release_id=None):
+def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, expected_release_id=None,
+            host="codex", workspace=None, home=None):
     """导出或显式覆盖已验证的插件目录；知识库与用户宿主配置不参与切换。"""
     if not isinstance(upgrade, bool):
         raise ContractError("upgrade must be a boolean")
@@ -161,8 +214,12 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         raise ContractError("expected release identity requires an explicit upgrade")
     if hook_mode not in (None, "observe", "enforce"):
         raise ContractError("hook mode must be observe or enforce")
+    if host not in TARGET_HOSTS:
+        raise ContractError("target host must be codex or antigravity")
+    if host == "codex" and (workspace is not None or home is not None):
+        raise ContractError("fixed workspace and home bindings apply to the Antigravity installation")
     source = _resource_root()
-    _validate_resources(source)
+    _validate_resources(source, bundle=True)
     package = Path(__file__).resolve().parent
     target = safe_path(destination)
     if target.exists() and not upgrade:
@@ -170,7 +227,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if upgrade and not target.exists():
         raise ContractError("upgrade requires an existing plugin installation directory")
     # 在写入 store 前确定旧身份；锁内会再次核对以覆盖并发调用。
-    previous = inspect_installation(target, _hook_commands, expected_release_id) if upgrade else None
+    previous = inspect_installation(target, _hook_commands, expected_release_id, target_host=host) if upgrade else None
     if previous is not None:
         if tuple(map(int, previous["release"]["version"].split("."))) > tuple(map(int, __version__.split("."))):
             raise ContractError("refusing to downgrade a newer plugin installation")
@@ -178,6 +235,19 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
             hook_mode = previous["receipt"]["hook_mode"]
         if runtime_store is None:
             runtime_store = previous["runtime_directory"].parent
+        if host == "antigravity":
+            workspace = workspace if workspace is not None else previous["receipt"]["workspace"]
+            home = home if home is not None else previous["receipt"]["home"]
+    if host == "antigravity":
+        if workspace is None:
+            raise ContractError("Antigravity export requires an explicit workspace")
+        workspace = safe_path(workspace)
+        if not workspace.is_dir():
+            raise ContractError("Antigravity workspace must be an existing directory")
+        default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning" if os.environ.get("LOCALAPPDATA")
+                        else Path.home() / ".local/share/agent-learning")
+        home = safe_path(home if home is not None else os.environ.get("ALP_HOME") or default_home)
+        hook_mode = hook_mode or "observe"
     store = safe_path(runtime_store if runtime_store is not None else _default_store())
     protected = [package]
     source_release = isinstance(source, Path) and (source / MANIFEST_NAME).is_file()
@@ -189,10 +259,14 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                          for path in protected)
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
+    if host == "antigravity":
+        if (workspace == target or workspace == store or store in workspace.parents
+                or any(_overlaps(home, path) for path in (*protected, target, store))):
+            raise ContractError("Antigravity bindings must keep project and knowledge data outside export and runtime directories")
     try:
         with installation_lock(target):
             if previous is not None:
-                locked = inspect_installation(target, _hook_commands, expected_release_id)
+                locked = inspect_installation(target, _hook_commands, expected_release_id, target_host=host)
                 if locked["snapshot"] != previous["snapshot"]:
                     raise ContractError("installation changed before update lock was acquired")
             elif target.exists():
@@ -203,26 +277,39 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
             staging_identity = (stat.st_dev, stat.st_ino)
             try:
                 # 宿主资源也来自刚验证的发布副本，避免技能与运行代码分裂。
-                _copy_payload(runtime_directory, runtime_directory / "agent_learning", staging)
-                mcp = {"mcpServers": {"agent_learning": {"command": sys.executable,
-                        "args": [str(runtime_directory / "scripts/learning.py"), "serve", "--role", "worker"]}}}
-                (staging / ".mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                hook_file = staging / "hooks/hooks.json"
-                hooks = json.loads(hook_file.read_text(encoding="utf-8"))
-                for event_name, groups in hooks["hooks"].items():
-                    command, windows = _hook_commands(sys.executable, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
-                    for group in groups:
-                        for handler in group["hooks"]:
-                            handler["command"] = command
-                            handler.pop("command_windows", None)
-                            handler["commandWindows"] = windows
+                if host == "codex":
+                    _copy_payload(runtime_directory, runtime_directory / "agent_learning", staging)
+                else:
+                    for name, original in payload_mapping(release["files"], host).items():
+                        _copy_resource(runtime_directory / original, staging / name)
+                mcp = mcp_document(runtime_directory, sys.executable, host,
+                                   str(workspace) if workspace is not None else None,
+                                   str(home) if home is not None else None)
+                mcp_file = staging / (".mcp.json" if host == "codex" else "mcp_config.json")
+                mcp_file.write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                hook_file = staging / ("hooks/hooks.json" if host == "codex" else "hooks.json")
+                if host == "antigravity":
+                    hooks = antigravity_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
+                                              str(workspace), str(home))
+                else:
+                    hooks = json.loads(hook_file.read_text(encoding="utf-8"))
+                    for event_name, groups in hooks["hooks"].items():
+                        command, windows = _hook_commands(sys.executable, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
+                        for group in groups:
+                            for handler in group["hooks"]:
+                                handler["command"] = command
+                                handler.pop("command_windows", None)
+                                handler["commandWindows"] = windows
                 hook_file.write_text(json.dumps(hooks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                (staging / "runtime-release.json").write_text(json.dumps({"runtime_directory": str(runtime_directory),
+                receipt = {"runtime_directory": str(runtime_directory),
                     "release_id": release["release_id"], "version": release["version"],
                     "protocol_version": release["protocol_version"], "content_digest": release["content_digest"],
-                    "python": sys.executable, "hook_mode": hook_mode}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                _validate_resources(staging)
-                write_installation_manifest(staging, release["release_id"])
+                    "python": sys.executable, "hook_mode": hook_mode, "target_host": host}
+                if host == "antigravity":
+                    receipt.update(workspace=str(workspace), home=str(home))
+                (staging / "runtime-release.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                _validate_resources(staging, host)
+                write_installation_manifest(staging, release["release_id"], host)
                 backup = None
                 if previous is not None:
                     preserve_extra_files(previous, staging)
@@ -238,8 +325,11 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         raise ContractError("plugin export could not complete; final destination was not published") from None
     result = {"status": "updated" if upgrade else "exported", "plugin_directory": str(target), "python": sys.executable,
             "runtime_directory": str(runtime_directory), "release_id": release["release_id"],
-            "version": __version__, "hook_mode": hook_mode,
+            "version": __version__, "hook_mode": hook_mode, "target_host": host,
             "next_step": "将此目录加入本地插件源并安装；保留固定运行目录及解释器，在Codex界面审阅并信任Hooks。"}
+    if host == "antigravity":
+        result.update(workspace=str(workspace), home=str(home),
+                      next_step="在Antigravity中加载此原生插件目录，核对MCP与Hooks已启用；固定项目安装不要全局用于其他项目。")
     if previous is not None:
         result.update({"previous_release_id": previous["release"]["release_id"], "backup_directory": str(backup),
                        "preserved_extra_files": previous["extra_files"], "knowledge_and_config": "external_untouched",

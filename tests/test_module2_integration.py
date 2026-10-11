@@ -216,7 +216,7 @@ class Module2IntegrationTests(unittest.TestCase):
         db.close()
         upgraded = Runtime(legacy_home)
         try:
-            self.assertEqual(upgraded.db.execute('PRAGMA user_version').fetchone()[0], 11)
+            self.assertEqual(upgraded.db.execute('PRAGMA user_version').fetchone()[0], 12)
             self.assertEqual(upgraded.task('legacy','legacy-chat')['write_version'], 1)
             packet = upgraded.review_packet('legacy','old-problem')
             self.assertEqual(packet['events'][0]['id'], 'old-event')

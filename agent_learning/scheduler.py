@@ -186,22 +186,28 @@ class SchedulerMixin:
                 "signature=excluded.signature,next_due=excluded.next_due,wait_reason=excluded.wait_reason,updated=excluded.updated",
                 (project, kind, state, signature, due, reason, now, now))
 
-    def scheduler_wake(self, project):
+    def scheduler_wake(self, project, *, expected_epoch=None, _phase_guard=None):
         cfg = self._scheduler_config()
         self._scheduler_projects(project)
         if not cfg["enabled"]:
             return False
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            if _phase_guard:
+                _phase_guard()
             self._scheduler_recover()
             self._scheduler_refresh(project, cfg)
             return bool(self.db.execute("SELECT 1 FROM scheduler_jobs WHERE project=? AND state IN ('ready','waiting') "
                                          "AND next_due<=? LIMIT 1", (project, time.time() + cfg["max_run_seconds"])).fetchone())
 
-    def claim_scheduler_worker(self):
+    def claim_scheduler_worker(self, *, expected_epoch=None, _phase_guard=None):
         cfg = self._scheduler_config()
         if not cfg["enabled"]:
             return None
         with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            if _phase_guard:
+                _phase_guard()
             self._scheduler_recover()
             if self.db.execute("SELECT 1 FROM scheduler_worker").fetchone():
                 return None

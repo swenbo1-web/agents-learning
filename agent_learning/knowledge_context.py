@@ -175,13 +175,18 @@ class KnowledgeContextMixin:
             "ORDER BY created DESC LIMIT 32)", (*key, *key))
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
-                 expected_epoch=None, tool_only=False):
+                 expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None):
+        if delivery not in {"persistent", "ephemeral"}:
+            from .runtime import ContractError
+            raise ContractError("unsupported context delivery")
         from .runtime import ContractError, clean, clip, digest, encode
         from .knowledge_index import normalized_query_plan
         from .knowledge_output import _summary
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
         with self.transaction():
-            epoch = self.assert_host_epoch(expected_epoch)
+            epoch = self.assert_session_epoch(expected_epoch)
+            if _phase_guard:
+                _phase_guard()
             if context_handle is not None:
                 self.access_context(project, context_handle, conversation, epoch)
             table, where, key = self._ensure_context(project, conversation, agent_id)
@@ -247,7 +252,7 @@ class KnowledgeContextMixin:
         if not should_search and not tool_only and signature == previous_signature:
             already = set(json.loads(initial["injected"]))
             for ref in json.loads(initial["retrieval_refs"]):
-                if f"{ref['knowledge_id']}@{ref['revision']}" in already:
+                if delivery == "persistent" and f"{ref['knowledge_id']}@{ref['revision']}" in already:
                     continue
                 try:
                     item = self.read(project, ref["knowledge_id"])
@@ -272,7 +277,9 @@ class KnowledgeContextMixin:
                 items.append(item)
                 seen.add(ident)
         with self.transaction():
-            self.assert_host_epoch(epoch)
+            self.assert_session_epoch(epoch)
+            if _phase_guard:
+                _phase_guard()
             if context_handle is not None:
                 self.access_context(project, context_handle, conversation, epoch)
             current_task = self._retrieval_task(project, conversation, agent_id, context_handle)
@@ -304,7 +311,7 @@ class KnowledgeContextMixin:
             delivered = []
             for item in items:
                 identity = f"{item['knowledge_id']}@{item['revision']}"
-                if identity in prior or not item.get("match", {}).get("auto_eligible", True):
+                if (delivery == "persistent" and identity in prior) or not item.get("match", {}).get("auto_eligible", True):
                     continue
                 # 提交时核active与来源版本，避免快照后的撤销或冲突继续进入自动摘要。
                 active = self.db.execute("SELECT COALESCE(v.version,0) FROM active a LEFT JOIN knowledge_source_versions v "
@@ -357,9 +364,13 @@ class KnowledgeContextMixin:
                 prior.add(identity)
                 if len(delivered) == 3:
                     break
+            new_delivered = [item for item in delivered
+                             if f"{item['knowledge_id']}@{item['revision']}" not in json.loads(row[0])]
             self._record_exposure(project, conversation, agent_id, delivered, injected=True)
-            if delivered:
-                self._metric(project, "knowledge_injected", len(delivered))
+            if new_delivered:
+                self._metric(project, "knowledge_injected", len(new_delivered))
+            if delivered and delivery == "ephemeral":
+                self._metric(project, "ephemeral_cards_delivered", len(delivered))
             if should_search and (not tool_only or fault):
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})} for i in items[:10]]
                 saved_signature = signature

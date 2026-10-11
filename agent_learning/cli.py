@@ -16,7 +16,9 @@ from .runtime import ContractError, Runtime, encode
 def parser():
     p = argparse.ArgumentParser(description="Agent Learning 本地插件运行端")
     p.add_argument("--home", help="持久数据目录（默认ALP_HOME或用户数据目录）")
-    p.add_argument("--workspace", default=str(Path.cwd()), help="当前项目目录")
+    p.add_argument("--workspace", help="当前项目目录；Antigravity首次安装必须显式指定")
+    p.add_argument("--host", choices=["codex", "antigravity"], default="codex", help="宿主会话与安装配置")
+    p.add_argument("--host-instance", default="default", help="受信Runtime命令的宿主实例；安装导出当前固定为default")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     updates = sub.add_parser("update-check", help="检查 GitHub Release 版本，只读取公开元数据，不安装代码")
@@ -64,9 +66,9 @@ def parser():
         if name == "scheduler-run":
             scheduled.add_argument("--worker-token", help=argparse.SUPPRESS)
     serve = sub.add_parser("serve")
+    serve.add_argument("--host", choices=["codex", "antigravity"], default=argparse.SUPPRESS)
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
-    serve.add_argument("--context-handle", default=os.environ.get("ALP_CONTEXT_HANDLE"),
-                       help="宿主已登记的会话句柄；也可由ALP_CONTEXT_HANDLE提供")
+    serve.add_argument("--context-handle", help="受信显式绑定句柄；Codex可使用ALP_CONTEXT_HANDLE，Antigravity不继承环境句柄")
     bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
     bind.add_argument("--conversation", required=True)
     bind.add_argument("--agent-id")
@@ -190,11 +192,17 @@ def parser():
     sync_batch.add_argument("--max-items", type=int, default=20)
     sync_batch.add_argument("--max-seconds", type=float, default=30)
     export = sub.add_parser("install")
+    export.add_argument("--host", choices=["codex", "antigravity"], default=argparse.SUPPRESS)
     export.add_argument("destination")
     export.add_argument("--runtime-store", help="版本化稳定运行目录，不随插件缓存清理")
     export.add_argument("--hook-mode", choices=["observe", "enforce"], help="可信Hook故障策略；省略按配置")
     export.add_argument("--upgrade", action="store_true", help="验证并覆盖已有插件导出；保留旧目录备份")
     export.add_argument("--expected-release-id", help="覆盖时校验旧安装的固定运行版本身份")
+    native_hook = sub.add_parser("antigravity-hook", help="接收固定安装工作区的Antigravity原生事件")
+    native_hook.add_argument("--event", required=True, choices=["PreInvocation", "PreToolUse", "PostToolUse", "Stop"])
+    native_hook.add_argument("--hook-mode", choices=["observe", "enforce"])
+    reset = sub.add_parser("antigravity-session-reset", help="受信入口重置无法辨别的原生轨迹；暂停任务并失效旧句柄与许可")
+    reset.add_argument("--conversation", required=True, help="原生conversationId，不含宿主前缀")
     return p
 
 
@@ -206,14 +214,19 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.command == "install":
         try:
+            if args.host_instance != "default":
+                raise ContractError("installation exports currently require host_instance=default")
             print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode,
-                                 upgrade=args.upgrade, expected_release_id=args.expected_release_id)))
+                                 upgrade=args.upgrade, expected_release_id=args.expected_release_id,
+                                 host=args.host, **({"workspace": args.workspace, "home": args.home}
+                                                   if args.host == "antigravity" else {}))))
             return 0
         except (ContractError, OSError) as exc:
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
             return 1
     runtime = None
     try:
+        args.workspace = args.workspace or str(Path.cwd())
         if args.command in {"update-check", "update-status"}:
             from .software_updates import load_config, check_updates, update_status
             default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
@@ -257,7 +270,23 @@ def main(argv=None):
             finally:
                 browser_server.server_close()
             return 0
-        runtime = Runtime(args.home)
+        if args.command in {"antigravity-hook", "antigravity-session-reset"}:
+            args.host = "antigravity"
+        runtime = Runtime(args.home, host=args.host, host_instance=args.host_instance)
+        if args.command == "antigravity-session-reset":
+            from .antigravity import reset_session
+            print(encode(reset_session(runtime, args.workspace, args.conversation)))
+            return 0
+        if args.command == "antigravity-hook":
+            from .antigravity import AntigravityAdapter
+            data = sys.stdin.buffer.read(Server.MAX_MESSAGE_BYTES + 1)
+            if len(data) > Server.MAX_MESSAGE_BYTES:
+                raise ContractError("hook input exceeds byte limit")
+            print(encode(AntigravityAdapter(runtime, args.workspace, args.hook_mode).handle(
+                args.event, json.loads(data.decode("utf-8-sig")))))
+            return 0
+        if hasattr(args, "conversation"):
+            args.conversation = runtime.host_conversation(args.conversation)
         if args.command == "account-changed":
             print(encode(runtime.account_changed(notification_id=args.notification_id)))
             return 0
@@ -268,7 +297,10 @@ def main(argv=None):
             return 0
         project = runtime.project(args.workspace)
         if args.command == "serve":
-            Server(runtime, project, args.role, context_handle=args.context_handle).serve()
+            handle = args.context_handle
+            if handle is None and args.host == "codex":
+                handle = os.environ.get("ALP_CONTEXT_HANDLE")
+            Server(runtime, project, args.role, context_handle=handle).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
         elif args.command == "semantic-status": result = runtime.semantic_status(project)
