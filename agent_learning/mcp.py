@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from . import __version__
@@ -17,6 +18,14 @@ NONEMPTY = {"type": "string", "minLength": 1, "pattern": r"\S"}
 STRINGS = {"type": "array", "items": S}
 METADATA = schema({key: S for key in sorted(METADATA_KEYS)})
 CATEGORY = {"type": "string", "enum": sorted(CATEGORIES)}
+TASK_SCOPE = {"type": "object", "additionalProperties": True, "properties": {
+    "mode": {"type": "string", "enum": ["analysis", "read_only", "implementation", "execute"]},
+    "allowed_tools": STRINGS, "allowed_paths": STRINGS,
+    "allowed_actions": {"type": "array", "items": {"type": "string", "enum": ["read", "write", "execute", "network"]}},
+    "budget": {"type": "object", "required": ["remaining"], "properties": {
+        "remaining": {"type": ["number", "null"], "minimum": 0}, "unit": NONEMPTY}},
+    "stop_conditions": STRINGS, "verification": STRINGS,
+}}
 CANDIDATE = schema({
     "problem_id": NONEMPTY, "problem_revision": {"type": "integer", "minimum": 1},
     "title": NONEMPTY, "content": NONEMPTY, "category": CATEGORY,
@@ -31,13 +40,16 @@ WORKER_TOOLS = [
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
         "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "goal": NONEMPTY,
-        "scope": {"type": "object"}, "expected_revision": {"type": "integer", "minimum": 0},
+        "scope": TASK_SCOPE, "expected_revision": {"type": "integer", "minimum": 0},
         "status": {"type": "string", "enum": sorted(TASK_STATUSES)},
         "new_task": {"type": "boolean"},
+        "expected_task_id": NONEMPTY, "expected_write_version": {"type": "integer", "minimum": 0},
+        "resume": {"type": "boolean"},
     }, ["goal"])),
     ("case_feedback", "补充专业问题、用户纠正或关键依据；常规工具事件由Hook采集。", schema({
         "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "summary": NONEMPTY,
         "category": CATEGORY, "event_refs": STRINGS, "resolution": S, "knowledge_id": NONEMPTY,
+        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
     }, ["summary"])),
     ("learning_status", "查看本项目记录和待治理状态。", schema({})),
 ]
@@ -50,9 +62,19 @@ ADMIN_TOOLS = [
 
 def validate(value, contract, path="arguments"):
     kind = contract.get("type")
+    if isinstance(kind, list):
+        for candidate in kind:
+            try:
+                validate(value, dict(contract, type=candidate), path)
+                return
+            except ContractError:
+                pass
+        raise ContractError(f"{path} must be one of {kind}")
     valid = {"object": isinstance(value, dict), "string": isinstance(value, str),
              "integer": isinstance(value, int) and not isinstance(value, bool), "array": isinstance(value, list),
-             "boolean": isinstance(value, bool)}
+             "boolean": isinstance(value, bool), "null": value is None,
+             "number": isinstance(value, (int, float)) and not isinstance(value, bool) and
+                       (not isinstance(value, float) or math.isfinite(value))}
     if kind and not valid[kind]:
         raise ContractError(f"{path} must be {kind}")
     if "enum" in contract and value not in contract["enum"]:
@@ -62,7 +84,7 @@ def validate(value, contract, path="arguments"):
             raise ContractError(f"invalid {path} length")
         if "pattern" in contract and not re.search(contract["pattern"], value):
             raise ContractError(f"invalid {path} text")
-    if kind == "integer" and (value < contract.get("minimum", value) or value > contract.get("maximum", value)):
+    if kind in {"integer", "number"} and (value < contract.get("minimum", value) or value > contract.get("maximum", value)):
         raise ContractError(f"invalid {path} range")
     if kind == "object":
         if any(key not in value for key in contract.get("required", [])):

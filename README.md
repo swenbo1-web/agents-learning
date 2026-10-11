@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.3.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.4.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
 
-0.3.0 收口插件接入模块：Hook 提供会话句柄，MCP 校验身份与初始化协议，换号通知使旧连接失效；安装采用原子导出和统一发布副本。数据库首次打开时在事务内升级到版本 3，保留既有记录、任务快照与知识 ID。常见凭证脱敏用于减少后续记录与外发，不能保证抹除已经存在的副本。
+0.4.0 加入第二模块的任务并发控制、固定子任务归属和受信执行策略，沿用 0.3.0 的会话身份、换号保护与统一发布。数据库首次打开时在事务内升级到版本 4，保留既有记录与知识 ID；旧证据缺少事件时点状态时标记 `unknown_legacy`。内部发布协议为 2，不能将新旧运行文件混用。常见凭证脱敏不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -80,9 +80,9 @@ MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数�
 
 `SessionStart` 和 `UserPromptSubmit` 注入 `context_handle=...`。普通 Agent 首次调用 `session_context(context_handle=...)`，或直接在 `task_update`／`case_feedback` 传这个句柄；之后当前 MCP 连接固定绑定该句柄，`conversation_id` 可省略。传入其他会话或句柄会被拒绝。写入身份和业务更新在同一事务内复核，失败不会留下错误项目绑定。
 
-压缩后用 `session_context` 恢复当前任务、revision 和状态，无需重新总结历史。没有可信句柄时只能查询项目知识和项目状态，不能猜最近会话或登记任意会话。受信本地操作者可使用 `session-bind --conversation ID` 登记明确身份，再用 `serve --context-handle HANDLE` 启动绑定服务。手动 CLI 的 `task`／`feedback` 仍是显式本地操作入口。
+压缩后用 `session_context` 恢复任务、revision、write_version、状态和执行准备情况，无需重新总结历史。没有可信句柄时只能查询项目知识和项目状态，不能猜最近会话或登记任意会话。受信本地操作者可使用 `session-bind --conversation ID` 登记明确身份，再用 `serve --context-handle HANDLE` 启动绑定服务。手动 CLI 的 `task`／`feedback` 仍是显式本地操作入口。
 
-`SubagentStart` 有可靠 `agent_id` 时，子 Agent 获得独立句柄和独立知识展示状态；共享父会话中的任务边界，不能用自己的句柄覆盖父任务。无可靠 ID 时不发写入句柄，也不根据最近启动的子 Agent 猜工具归属。若宿主让父子 Agent 共用一个已绑定的 MCP 连接，子 Agent 需要单独的绑定连接；当前不声称已验收宿主的父子 MCP 连接生命周期。
+`SubagentStart` 有可靠 `agent_id` 时，子 Agent 获得独立句柄、知识展示状态和固定 assignment，绑定派发时的父任务 ID、revision、状态版本与执行轮次。父任务改变后，旧反馈仍记入原任务，旧 assignment 不能使用新许可；`session_context` 同时返回派发任务和当前父任务，不能覆盖父任务。无可靠 ID 或升级前无 assignment 的子身份不猜归属，需要新的子 Agent 身份重新派发。若宿主让父子 Agent 共用一个已绑定的 MCP 连接，子 Agent 需要单独的绑定连接；当前不声称已验收宿主的父子 MCP 连接生命周期。
 
 ### Codex／ChatGPT 登录账户切换
 
@@ -132,11 +132,48 @@ python scripts/learning.py --workspace "D:\Projects\my-project" problems
 
 使用正式知识后发现反例，可在 `case_feedback` 中关联 `knowledge_id`，形成待审问题；反馈本身不直接撤销知识。
 
-同一对话开始真正的新任务时，使用 `task --new-task`，或 MCP 的 `task_update(new_task=true)` 创建新任务标识。修改现有目标或范围时更新当前任务；仅将状态改为 `delivered` 不应使来源证据失效。已知任务版本时传 `--expected-revision`，避免覆盖其他更新。目标或范围改变才增加任务 revision。
+同一对话开始真正的新任务时，使用 `task --new-task` 或 `task_update(new_task=true)`。已有任务的 MCP 更新必须传 `expected_task_id` 和 `expected_write_version`；仅比较 `expected_revision` 不能保护状态写入或新任务 revision 重用，因此不再接受旧的单字段更新。显式本地 CLI 可以省略并发条件；提供条件时也必须成对传入。目标或范围改变才增加 `revision`，每次实际状态/目标/执行边界变化增加 `write_version`，回执在同一事务内读取。
+
+省略 `status` 保留状态；暂停、取消或已交付任务恢复需明确 `resume=true`／`--resume`，并不会恢复过期执行许可。父 Agent 的 `case_feedback` 同时传 `expected_task_id` 与 `expected_task_revision`，避免压缩前的反馈写进新任务。子反馈使用固定 assignment。合同快照与事件时点状态分别保存，后续交付不改写早期案例；管理员也不会因此重复预检未变的素材。
 
 历史案例依据自己的任务快照审核，后续任务不提供历史执行权限。MCP 和 Hook 共用项目身份：仓库子目录使用仓库根目录，已登记工作区的普通子目录沿用该工作区；会话跨到不同项目时给出身份冲突。多目录共享知识可显式配置 `project_aliases`，不自动合并不同仓库。
 
 普通 Agent 将明确任务更新为 `delivered` 后，下一次 `Stop` 为该任务版本保存一次交付结果案例，并附上有限的工具结果。此记录只代表已报告交付，不证明专业结论或用户验收。`capture_deliveries=false` 可关闭该采集；尚未交付的专业问题继续用 `case_feedback` 简短补充，无需生成复盘文档。
+
+## 任务范围与执行保护
+
+`scope` 的已知字段会检查类型；项目附加字段仍可保存，但不提供权限：
+
+| 字段 | 类型与含义 |
+|---|---|
+| `mode` | `analysis`、`read_only`、`implementation`、`execute` |
+| `allowed_tools`、`allowed_paths`、`allowed_actions` | 字符串数组；动作是 `read/write/execute/network`，显式空数组限制为零 |
+| `budget` | `{remaining: 非负数或null, unit: 可选字符串}`，0 阻止执行，null 表示未知 |
+| `stop_conditions`、`verification` | 字符串数组，保存停止条件和验收要求，尚不自动解释任意自然语言条件 |
+
+保护模式要求受信操作者或宿主先签发规则；普通 Agent 更新任务不能给自己签发许可。操作者将规则保存为 JSON 文件，并用当前任务回执中的真实 ID 和 write_version 调用：
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" execution-approve --conversation demo --expected-task-id "真实任务ID" --expected-write-version 1 --rules "D:\Policies\read-only.json"
+```
+
+规则文件示例（工具名和参数字段必须对应接入宿主的真实契约）：
+
+```json
+{
+  "mode": "read_only",
+  "allowed_tools": ["Read"],
+  "tool_rules": {"Read": {"action": "read", "path_fields": ["file_path"]}},
+  "allowed_paths": ["Docs"],
+  "budget": {"remaining": null}
+}
+```
+
+审批时固定 workspace 和许可资源根；工具资源相对实际 cwd 解析，再与固定根、任务 scope 和 assignment 范围取交集。缺少字段、越界、含 `..` 或符号链接逃逸时拒绝。有限的结构字段检查不能证明任意工具的全部副作用；任意 Shell 在只读模式下拒绝，不靠解析命令猜权限。FPS 等项目的 UE/PIE/训练动作需要项目适配器声明，不硬编码进通用插件。
+
+新用户消息使旧执行轮次失效，完全匹配的“继续／继续吧／接着／continue／go on”仅保留已有范围，不扩大许可；无需额外模型分类。重复带同一 turn_id 的消息不重复失效。`Interrupt` 暂停父任务而非取消；清空上下文也暂停，压缩恢复保留现有版本。任务修正、规则替换和换号会失效旧许可，普通 Agent 不能靠恢复状态绕过。保护模式对其他新消息保守要求受信入口重新确认；自动接线需宿主适配器支持，目前 CLI 是可用的手动入口。
+
+`PreToolUse` 记录许可决定，`PostToolUse` 记录观察结果，二者分别保存。已拒绝却收到完成、同一操作有矛盾终态等回调标为 conflict，不能晋升为 `tool_success`；这是异常回调处理，不代表真实宿主已经出现这类回调。明确的 Pre 绑定保留晚到结果；无 Pre 且无 assignment 的结果保持无任务归属。当前仍不能撤回已运行的外部命令，也没有完整执行租约。余额仅消费第八模块/宿主提供的快照，尚未实现原子扣费或动态资金预算。
 
 ## 可选管理员执行器
 
@@ -182,7 +219,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 
 - 注入量由 `injection_max_chars` 限制，事件投影由 `event_max_chars` 限制；这些是字符限制。
 - 宿主 Hook 的 `additionalContextLimit` 使用近似 token 阈值，当前设为 2500；它与上述字符预算单位不同。显著提高注入字符预算时应核对宿主预览行为，具体机制见 [官方 Hook 说明](https://learn.chatgpt.com/docs/hooks)。
-- `enforce_task_policy` 默认关闭。启用保护时，应明确允许工具和当前任务边界；任务未知、已取消、已交付或中断时，覆盖的项目工具入口会拒绝调用，任务更新与查询入口仍可用。已确认保护模式的 `PreToolUse` 遇输入、配置、发布或数据库故障会拒绝；坏配置且未固定模式时只能报告保护未知。
+- `enforce_task_policy` 默认关闭。启用保护时，项目工具必须有当前受信执行策略并满足状态、动作、资源与余额限制；普通学习 MCP 工具可用于恢复状态，不能签发许可。已确认保护模式的 `PreToolUse` 遇输入、配置、发布或数据库故障会拒绝；坏配置且未固定模式时只能报告保护未知。
 - Hook 未被信任、进程无法启动、宿主超时、Hosted WebSearch 或未再触发 `PreToolUse` 的 `write_stdin`，不在上述拒绝保证内。当前不停止外部已运行的工具进程。[官方 Hook 覆盖说明](https://learn.chatgpt.com/docs/hooks)
 - 子 Agent 知识展示按可靠 `agent_id` 分开；无该字段的工具事件不能保证及时通知仅对子 Agent 展示的知识撤销，读取正文仍核对当前有效版本。
 - 任务目标或授权未知时，不推断为全权执行。用户修正后，以最新任务版本为准。
@@ -199,7 +236,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `status` | 读取运行状态 |
 | `session-bind` | 受信本地入口登记明确会话／子 Agent，返回可验证句柄 |
 | `account-changed` | 通知登录边界变化，使旧连接失效；支持通知 ID 去重 |
-| `task` | 保存明确任务，支持 `--expected-revision` 检查版本和 `--new-task` 开始新任务 |
+| `task` | 保存明确任务，支持任务ID与write_version并发检查、`--new-task` 和 `--resume` |
+| `execution-approve` | 受信本地入口为当前任务签发结构执行规则，不在 MCP 暴露 |
 | `feedback` | 反馈问题及结果，支持重复 `--event-ref` |
 | `problems`、`packet` | 列出问题、读取审核包 |
 | `propose` | 提交结构化候选 JSON |
@@ -210,8 +248,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.3.0 检查状态（2026-10-11）
+## 0.4.0 检查状态（2026-10-11）
 
-125 项离线回归覆盖协议、身份、账户通知、管理员、Hindsight 适配、包装和 Windows 入口。首次全套发现管理员启动占用事务的回归；修复后对受影响的管理员和身份链重检 26 项，全部通过。两份技能通过格式校验。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+171 项离线回归全套通过；新增 46 项覆盖任务版本重用、取消后的旧写入、事务回执、状态历史、子任务归属、许可审批、消息失效、中断恢复、回调重播/冲突、CLI/MCP 和版本 3 数据迁移。实际 Windows 目录链接夹具验证逃逸与许可根替换均拒绝；普通 Agent 技能通过格式校验。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

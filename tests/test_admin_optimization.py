@@ -153,18 +153,18 @@ class AdminOptimizationTests(unittest.TestCase):
         self.assertEqual(len(blocked["skipped_problem_ids"]), 10)
         self.assertEqual(len(self.calls()), 1)
 
-        # 同一任务 revision 的状态快照也可能更新，不能继续使用旧包的超限结论。
+        # 当前任务交付不改变历史事件时点，既有超限结论无需再次取包。
         self.runtime.task_update(self.project, "chat-a", "Review tools", status="delivered")
         with patch.object(self.runtime, "review_packet", wraps=self.runtime.review_packet) as packets:
             changed_snapshot = admin_once(self.runtime, self.project)
             self.assertEqual(changed_snapshot["status"], "needs_evidence")
-            self.assertEqual(packets.call_count, 10)
+            self.assertEqual(packets.call_count, 0)
         self.runtime.feedback(self.project, "chat-a", old_problems[0]["summary"],
                               category="operation", resolution="Additional evidence")
         with patch.object(self.runtime, "review_packet", wraps=self.runtime.review_packet) as packets:
             changed_evidence = admin_once(self.runtime, self.project)
             self.assertEqual(changed_evidence["status"], "needs_evidence")
-            self.assertEqual(packets.call_count, 2)
+            self.assertEqual(packets.call_count, 1)
             self.assertIn(old_problems[0]["id"], changed_evidence["skipped_problem_ids"])
         self.assertEqual(len(self.calls()), 1)
 
@@ -293,6 +293,8 @@ class AdminOptimizationTests(unittest.TestCase):
         self.configure(mode="tool_candidate")
         self.runtime.config["admin"]["auto_publish"] = True
         self.runtime.config["event_max_chars"] = 256
+        self.runtime.handle_hook({"hook_event_name": "PreToolUse", "session_id": "chat-a",
+                                  "cwd": str(self.workspace), "tool_use_id": "success", "tool_name": "Bash"})
         self.runtime.handle_hook({"hook_event_name": "PostToolUse", "session_id": "chat-a",
                                   "cwd": str(self.workspace), "tool_use_id": "success", "tool_name": "Bash",
                                   "tool_response": {"exit_code": 0, "output": "x" * 2000}})

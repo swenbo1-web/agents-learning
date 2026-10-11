@@ -111,8 +111,9 @@ class SessionIdentityTests(unittest.TestCase):
 
     def test_subagent_cannot_attach_another_agents_evidence(self):
         handle = self.handle("SubagentStart", agent_id="child-1")
+        self.handle("SubagentStart", agent_id="child-2")
         self.hook("PostToolUse", agent_id="child-2", tool_name="Bash", tool_response={"exit_code": 0})
-        event = self.r.db.execute("SELECT id FROM events WHERE agent='child-2'").fetchone()[0]
+        event = self.r.db.execute("SELECT id FROM events WHERE agent='child-2' AND type='PostToolUse'").fetchone()[0]
         with self.assertRaisesRegex(ContractError, "current subagent"):
             self.r.feedback(self.p, "chat", "错误引用", event_refs=[event], context_handle=handle)
 

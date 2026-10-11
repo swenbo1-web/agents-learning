@@ -75,14 +75,16 @@ class RuntimeTests(unittest.TestCase):
         self.hook("PreToolUse", tool_use_id="long", tool_name="Bash")
         self.hook("PostToolUse", tool_use_id="long", tool_name="Bash", tool_response={"session_id": 42, "exit_code": None})
         self.assertEqual(self.r.db.execute("SELECT state FROM operations").fetchone()[0], "running")
-        self.r.task_update(self.p, "chat-a", "只读新范围", expected_revision=1)
+        task = self.r.task(self.p, "chat-a")
+        self.r.task_update(self.p, "chat-a", "只读新范围", expected_revision=1,
+                           expected_task_id=task["id"], expected_write_version=task["write_version"])
         self.hook("PostToolUse", tool_use_id="long", tool_name="Bash", tool_response={"exit_code": 0})
         operation = self.r.db.execute("SELECT state,task_revision FROM operations").fetchone()
         self.assertEqual(tuple(operation), ("succeeded", 1))
 
     def test_cancel_and_interrupt_preserve_unknown(self):
-        self.r.config["enforce_task_policy"] = True
         self.hook("PreToolUse", tool_use_id="open", tool_name="Bash")
+        self.r.config["enforce_task_policy"] = True
         self.hook("Interrupt")
         self.assertEqual(self.r.db.execute("SELECT state FROM operations").fetchone()[0], "unknown")
         self.r.task_update(self.p, "chat-a", "修复工具错误", {"mode": "analysis"}, status="cancelled")
@@ -92,6 +94,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_source_change_rejects_old_candidate(self):
         candidate = self.candidate()
+        self.hook("PreToolUse", tool_use_id="new-evidence", tool_name="Bash")
         self.hook("PostToolUse", tool_use_id="new-evidence", tool_name="Bash", tool_response={"exit_code": 0})
         with self.assertRaises(ContractError): self.r.publish(self.p, candidate)
 

@@ -157,7 +157,8 @@ class MCPProtocolTests(unittest.TestCase):
         recovered = self.data(self.tool(server, "session_context"))
         self.assertEqual(recovered["conversation_id"], "chat-a")
         self.assertEqual(recovered["task"]["revision"], updated["revision"])
-        feedback = self.data(self.tool(server, "case_feedback", {"summary": "中文依据", "category": "professional"}))
+        feedback = self.data(self.tool(server, "case_feedback", {"summary": "中文依据", "category": "professional",
+            "expected_task_id": updated["id"], "expected_task_revision": updated["revision"]}))
         self.assertEqual(feedback["conversation"], "chat-a")
 
     def test_connection_cannot_switch_handle_or_conversation(self):

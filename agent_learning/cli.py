@@ -32,8 +32,16 @@ def parser():
     task.add_argument("--goal", required=True)
     task.add_argument("--scope", help="JSON对象；省略时保留现有范围")
     task.add_argument("--expected-revision", type=int)
+    task.add_argument("--expected-task-id")
+    task.add_argument("--expected-write-version", type=int)
+    task.add_argument("--resume", action="store_true", help="明确恢复非活动任务；不自动恢复执行许可")
     task.add_argument("--new-task", action="store_true")
-    task.add_argument("--status", choices=["active", "delivered", "cancelled", "interrupted"], default="active")
+    task.add_argument("--status", choices=["active", "delivered", "cancelled", "interrupted", "paused"])
+    approval = sub.add_parser("execution-approve", help="本地受信入口签发当前任务的执行范围，MCP 不提供此工具")
+    approval.add_argument("--conversation", required=True)
+    approval.add_argument("--expected-task-id", required=True)
+    approval.add_argument("--expected-write-version", required=True, type=int)
+    approval.add_argument("--rules", required=True, help="执行规则 JSON 文件")
     feedback = sub.add_parser("feedback")
     feedback.add_argument("--conversation", required=True)
     feedback.add_argument("--summary", required=True)
@@ -41,6 +49,8 @@ def parser():
     feedback.add_argument("--event-ref", action="append", default=[])
     feedback.add_argument("--resolution", default="")
     feedback.add_argument("--knowledge-id")
+    feedback.add_argument("--expected-task-id")
+    feedback.add_argument("--expected-task-revision", type=int)
     sub.add_parser("problems")
     sub.add_parser("packet").add_argument("problem_id")
     sub.add_parser("propose").add_argument("file")
@@ -93,9 +103,16 @@ def main(argv=None):
         elif args.command == "session-bind": result = runtime.register_context(project, args.conversation, agent_id=args.agent_id)
         elif args.command == "task": result = runtime.task_update(project, args.conversation, args.goal,
                                                 json.loads(args.scope) if args.scope is not None else None,
-                                                args.expected_revision, args.status, args.new_task)
+                                                args.expected_revision, args.status, args.new_task,
+                                                expected_task_id=args.expected_task_id,
+                                                expected_write_version=args.expected_write_version, resume=args.resume)
+        elif args.command == "execution-approve": result = runtime.approve_execution(
+            project, args.conversation, args.expected_task_id, args.expected_write_version,
+            json.loads(Path(args.rules).read_text(encoding="utf-8-sig")), workspace=str(Path(args.workspace).resolve()))
         elif args.command == "feedback": result = runtime.feedback(project, args.conversation, args.summary,
-                                                args.category, args.event_ref, args.resolution, args.knowledge_id)
+                                                args.category, args.event_ref, args.resolution, args.knowledge_id,
+                                                expected_task_id=args.expected_task_id,
+                                                expected_task_revision=args.expected_task_revision)
         elif args.command == "problems": result = runtime.problems(project)
         elif args.command == "packet": result = runtime.review_packet(project, args.problem_id)
         elif args.command == "propose": result = runtime.submit_candidate(project, **json.loads(Path(args.file).read_text(encoding="utf-8-sig")))
