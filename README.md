@@ -4,7 +4,7 @@
 
 **让 Agent 记住项目经验，在下一次任务中查到有依据的解决方法。**
 
-开发版本：**0.12.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布测试版 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+开发版本：**0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布测试版 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
 
 agents-learning 为长期项目建立可持续维护的知识记忆：在受支持的任务事件中检索相关经验，记录工具结果，由管理员整理候选，再把带有条件、来源和修订的知识交给后续 Agent。普通 Agent 专注当前任务，多次对话积累的经验可以继续使用。
 
@@ -16,6 +16,7 @@ agents-learning 为长期项目建立可持续维护的知识记忆：在受支�
 - **本机知识浏览器**：搜索知识、查看修订、来源事件和管理员待办，使用只读页面了解知识库内容。
 - **分工整理与预算控制**：事件采集和增量审核分开，管理员按需启用；调用、并发、审核包和上下文分别有预算。
 - **任务对照评估**：冻结任务、模型、环境和知识快照，对“无记忆／有记忆”成对运行，核对验收、耗时和全流程用量。
+- **覆盖安装与版本检查**：验证旧安装后保留备份并更新入口；可启用后台 GitHub Release 检查，知识库和配置独立保留。
 
 `当前任务 → 查阅经验 → 执行与观察 → 整理候选 → 校验发布 → 下一次任务复用`
 
@@ -135,7 +136,7 @@ flowchart LR
 
 | 模块 | 职责与边界 | 关键源码／资源 |
 |---|---|---|
-| 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出固定运行副本，核对发布内容及角色权限 | [install.py](agent_learning/install.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
+| 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出与升级固定运行副本，检查软件版本，核对内容及角色权限 | [install.py](agent_learning/install.py)、[install_update.py](agent_learning/install_update.py)、[software_updates.py](agent_learning/software_updates.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
 | 2. 任务与执行控制 | 保存任务合同与版本，绑定父子 Agent，核对受信许可、状态、动作和余额；知识不能签发权限 | [task_control.py](agent_learning/task_control.py)、[execution.py](agent_learning/execution.py)、[assignments.py](agent_learning/assignments.py) |
 | 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；全文与可选向量均为可重建派生索引 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py)、[semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. 检索与上下文管理 | 有限混合召回与筛选、摘要／分页预算、展示台账、失效通知、压缩恢复、失败补查与只读浏览 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py)、[knowledge_browser.py](agent_learning/knowledge_browser.py) |
@@ -148,7 +149,7 @@ flowchart LR
 
 ### 各模块怎样运行
 
-**1. 插件接入与协议。** CLI 提供显式本地操作，MCP 提供按角色划分的工具，Hook 接收宿主事件，skills 描述工作方式。`install` 校验资源并原子导出，固定运行副本在入口核对内容身份。MCP 连接通过可信句柄绑定会话，参数无法提升角色。
+**1. 插件接入与协议。** CLI 提供显式本地操作，MCP 提供按角色划分的工具，Hook 接收宿主事件，skills 描述工作方式。首次 `install` 校验资源并原子导出；`--upgrade` 校验旧安装，保留备份后切换目录。固定运行副本在入口核对内容身份。可选后台版本检查只读取 GitHub Release 元数据，不参与知识审核或执行授权。MCP 连接通过可信句柄绑定会话，参数无法提升角色。
 
 **2. 任务与执行控制。** 当前任务保存目标、范围和状态，以合同修订、状态写版本及执行轮次区分变化。子 Agent 的 assignment 固定派发时的父任务快照。执行保护核对显式许可、动作、路径、预算与时效；更换任务或暂停后，旧许可不能支持新操作。
 
@@ -193,6 +194,8 @@ flowchart LR
 这些机制让检索和事件记录更少依赖 Agent 手动记住每一步。专业判断仍由 Agent 结合当前需求、环境和证据完成，发布校验也不能证明任意自然语言结论正确。
 
 ## 当前版本与兼容
+
+0.13.0 增加已有导出目录的显式覆盖升级和可选 GitHub Release 后台版本检查，默认不启用网络检查。数据库 schema 11、全文索引 4、语义索引 1 不变；内部发布协议升至 10，安装更新生成新的固定运行副本。可验证并升级使用同类清单的历史导出，不执行旧代码，不覆盖真实数据目录。后台任务统一从绑定的脚本入口启动，避免当前项目的同名包抢先导入。GitHub 已发布标签及附件仍为 0.11.1，当前开发版本尚未发布。
 
 0.12.0 增加可选本地语义混合检索、本机只读知识浏览器和任务对照评估工具。数据库 schema 仍为 11，全文索引仍为 4，可选语义索引为 1；内部发布协议升至 9，新版需要重新导出固定运行副本。向量索引按项目、知识修订及模型配置派生，默认关闭；查询不自动构建索引或下载模型。浏览器与文件评估入口不初始化 Runtime、不升级数据库。GitHub 已发布标签及附件仍对应 0.11.1。
 
@@ -308,6 +311,49 @@ codex plugin add agent-learning@agent-learning-local
 源码中的 `.mcp.json` 是模板，安装副本会将路径渲染为实际绝对路径。本机已用隔离配置验证 Codex 原生加载与安装命令，未改当前用户的插件配置。
 
 标准 wheel 包含导出资源，也支持 `python -m agent_learning.cli` 入口。运行时、CLI 和 MCP 均使用 UTF-8；无需把中文请求转义成 ASCII 来绕过系统编码。
+
+### 覆盖更新已有安装
+
+取得新版源码或解压新版发布包后，从新版入口执行：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade
+# 可选：从原目录 runtime-release.json 取得 release_id，校验预期的旧安装
+python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade --expected-release-id OLD_RELEASE_ID
+```
+
+升级先核对原目录的插件身份、固定副本、MCP／Hook 路径和管理文件摘要，再准备完整新版。省略 `--runtime-store` 和 `--hook-mode` 时沿用旧值。管理文件已改动、额外文件与新版路径冲突、目标是源码／固定副本、出现链接或目录内含 `runtime.sqlite3` 等知识数据库时拒绝覆盖。外部 `ALP_HOME` 与 `ALP_CONFIG` 不被读取或修改；知识数据库应保持在导出目录之外。额外个人文件和空目录会保留，不纳入插件管理文件。
+
+回执给出 `backup_directory` 和新旧 `release_id`；旧导出目录完整保留为同级备份，旧固定运行副本也保留。目标锁和快照检测并发改动，切换失败尝试恢复原目录。切换有短暂目录间隙；进程硬退出可能留锁或备份，需要人工核对回执、目标及 `.alp-install-*.lock` 后恢复，安装器不自动抢锁或删除备份。不支持通过此入口降级。
+
+更新源目录后重启 Codex，使插件缓存重新加载，并重新审阅变化后的 Hook 信任。已运行的 MCP 仍可能使用旧副本，文件更新回执不代表当前进程已切换。若宿主仍沿用旧缓存，按宿主的插件安装入口重新加载该本地目录。[官方本地插件更新说明](https://developers.openai.com/plugins/build/plugins)
+
+### 从 GitHub 自动检查版本
+
+版本检查读取公开 Release 元数据，检查结果与知识数据库分开保存。显式命令不初始化 Runtime：
+
+```powershell
+python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
+python -B scripts/learning.py --home "D:\AgentLearningData" update-status
+```
+
+`update-status` 只读缓存，不访问网络，也不创建数据库。`update-check` 可在自动检查关闭时手动运行；`--force` 跳过常规间隔，仍遵守服务端限流。请求失败会返回 `state=error` 或 `rate_limited`，不能据此判断已经是最新版；命令成功输出状态 JSON 时退出码为 0，配置或本地读写异常才退出 1。
+
+要启用自动检查，在自己的配置中加入：
+
+```json
+"software_updates": {
+  "enabled": true,
+  "repository": "swenbo1-web/agents-learning",
+  "channel": "prerelease",
+  "interval_seconds": 86400,
+  "timeout_seconds": 3
+}
+```
+
+主会话 `SessionStart(startup/resume)` 在事件事务外预留检查，由独立短进程访问 GitHub；压缩、清空和子 Agent 不派发检查。默认每天按间隔检查，同一数据目录按仓库和通道共用缓存、短租约与进程锁，避免多个对话重复请求。检测到新版本后，在后续 `startup/resume` 提醒；完整检查状态通过 `update-status`／`status` 查看，不阻塞当前知识注入。失败会退避，响应大小受限，支持 ETag/304；超时约束 socket 与响应读取，操作系统 DNS 不属于严格进程总时长限制。
+
+`prerelease` 通道包含测试版，`stable` 排除测试版。仅比较最近 20 条 Release 中的合格语义版本；不把提交、普通标签或尚未发布的开发版本当成更新。`ahead` 表示本地版本比检查到的发布版本新。检查只连接官方 GitHub API，不读登录令牌、不下载或执行代码、不自动替换安装；新版通过上面的显式覆盖命令安装。[GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 
 也可以单独启动 stdio MCP 服务：
 
@@ -588,6 +634,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | 子命令 | 用途 |
 |---|---|
 | `status` | 读取运行状态 |
+| `update-check`、`update-status` | 有界检查 GitHub Release，或只读缓存版本状态 |
 | `learning-effects`、`knowledge-use` | 时间窗效果观察及准确任务下的简短采用声明 |
 | `scheduler-status`、`scheduler-tick`、`scheduler-run` | 持久待办状态、有界单轮和有界续跑 |
 | `session-bind` | 受信本地入口登记明确会话／子 Agent，返回可验证句柄 |
@@ -612,9 +659,17 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
 | `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
-| `install` | 创建待启用的独立安装副本 |
+| `install` | 导出安装副本；`--upgrade` 验证并覆盖已有导出、保留完整备份 |
 
-## 0.12.0 检查状态（2026-10-11）
+## 0.13.0 检查状态（2026-10-11）
+
+Windows、Python 3.12.14 下全套发现 **814 项检查：813 项通过，1 项跳过，零失败、零错误**，运行耗时 200.517 秒。新增 78 项覆盖安装 24、GitHub 版本检查 35、跨模块接线 19；跳过项因 Windows 无创建真实符号链接权限，独立模拟 junction 标记的拒绝检查通过。覆盖旧安装身份、额外文件、并发快照、切换失败恢复、保留备份、防降级、协议异常、缓存损坏、限流、ETag/304、租约去重、关闭后的后台取消和固定脚本入口。既有八模块、wheel、MCP／Hook 与隔离 Codex 插件检查继续通过；wheel 资源脚本的后台入口实际运行通过。
+
+84 个 Python 文件通过 Python 3.10 语法检查；本轮未运行实际 Python 3.10 或其他操作系统。使用 Git 历史中的真实 0.11.1 文件纯数据重建旧导出，协议 8、`hook_mode=None` 覆盖升级成功，未执行旧代码。临时目录的真实 GitHub API 检查成功，正确返回本地 0.13.0 比公开 0.11.1 新的 `ahead` 状态，未创建知识数据库。
+
+本轮未覆盖用户实际安装、启用真实 Hook、修改用户配置、调用模型或开启常驻服务。自动检查默认关闭；本轮代码尚未推送或创建 GitHub Release，宿主实际重载需另外验收。
+
+## 0.12.0 历史检查状态（2026-10-11）
 
 Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、零错误、零跳过，耗时 166.081 秒。在原 649 项基础上增加 87 项：语义检索 30、知识浏览 19、任务评估 26、跨模块接线 12。覆盖向量损坏与重建、修订／撤销、精确标识、来源健康、并发索引刷新、模型离线回退、跨进程冷却、待发结果失效、只读访问与项目隔离、评估缺失／异常及全成本边界。wheel 和导出副本包含三个新模块，既有安装、MCP、Hook 和八模块检查继续通过。
 

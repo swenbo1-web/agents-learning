@@ -1,0 +1,286 @@
+"""安装目录身份校验与可回滚切换；不会创建 Runtime 或打开知识数据库。"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import uuid
+
+from .runtime import ContractError
+from .release import PROTOCOL_VERSION
+
+
+INSTALL_MANIFEST = "installation-manifest.json"
+INSTALL_SCHEMA = 1
+_VERSION = re.compile(r"^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$")
+_PROTOCOL = re.compile(r"^[1-9][0-9]{0,8}$")
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _linked(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (stat.S_ISLNK(info.st_mode)
+            or bool(getattr(info, "st_file_attributes", 0) & 0x400))
+
+
+def safe_path(value):
+    """在 resolve 之前拒绝链接、Windows junction 和路径穿越。"""
+    try:
+        path = Path(value).expanduser()
+        if ".." in path.parts:
+            raise ContractError("installation paths must not contain parent traversal")
+        path = path.absolute()
+        for item in (path, *path.parents):
+            if _linked(item):
+                raise ContractError("installation paths must not contain symbolic links or junctions")
+        return path.resolve()
+    except ContractError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise ContractError("installation path could not be verified") from None
+
+
+def _hash_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def snapshot(root):
+    root = safe_path(root)
+    if not root.is_dir():
+        raise ContractError("installation destination must be an existing directory")
+    info = root.stat()
+    files, directories = {}, []
+    for current, subdirs, names in os.walk(root, followlinks=False):
+        current = Path(current)
+        for name in subdirs:
+            child = current / name
+            if _linked(child):
+                raise ContractError("installation directories must not contain links or junctions")
+            directories.append(child.relative_to(root).as_posix())
+        for name in names:
+            child = current / name
+            if _linked(child) or not child.is_file():
+                raise ContractError("installation files must be regular files")
+            files[child.relative_to(root).as_posix()] = _hash_file(child)
+    return {"root_identity": [info.st_dev, info.st_ino], "files": files,
+            "directories": sorted(directories)}
+
+
+def _json(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError
+        return value
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        raise ContractError("existing installation identity could not be verified") from None
+
+
+def validate_previous_release(root):
+    """使用副本自己的版本/协议验证旧清单，不调用只接受当前版本的校验器。"""
+    root = safe_path(root)
+    tree = snapshot(root)
+    manifest = _json(root / "release.json")
+    if (set(manifest) != {"version", "protocol_version", "files", "content_digest", "release_id"}
+            or not isinstance(manifest.get("version"), str) or not _VERSION.fullmatch(manifest["version"])
+            or not isinstance(manifest.get("protocol_version"), str)
+            or not _PROTOCOL.fullmatch(manifest["protocol_version"])
+            or not 1 <= int(manifest["protocol_version"]) <= int(PROTOCOL_VERSION)
+            or not isinstance(manifest.get("files"), dict)):
+        raise ContractError("existing fixed runtime release manifest is invalid")
+    files = {name: value for name, value in tree["files"].items()
+             if name != "release.json" and not name.endswith(".pyc") and "__pycache__" not in Path(name).parts}
+    body = {"version": manifest["version"], "protocol_version": manifest["protocol_version"], "files": files}
+    digest = hashlib.sha256(_canonical(body)).hexdigest()
+    if (manifest["files"] != files or manifest["content_digest"] != digest
+            or manifest["release_id"] != manifest["version"] + "-" + digest
+            or root.name != manifest["release_id"]):
+        raise ContractError("existing fixed runtime release has changed or lost its pinned identity")
+    plugin = _json(root / ".codex-plugin/plugin.json")
+    if plugin.get("name") != "agent-learning" or plugin.get("version") != manifest["version"]:
+        raise ContractError("existing fixed runtime release is not an agent-learning plugin")
+    return manifest
+
+
+def _expected_hook_document(runtime, python, mode, command_builder):
+    hooks = _json(runtime / "hooks/hooks.json")
+    try:
+        if not isinstance(hooks.get("hooks"), dict) or not hooks["hooks"]:
+            raise TypeError
+        for event, groups in hooks["hooks"].items():
+            if not event or not isinstance(groups, list) or not groups:
+                raise TypeError
+            command, windows = command_builder(python, runtime / "hooks/dispatch.py", event, mode)
+            for group in groups:
+                if (not isinstance(group, dict) or not isinstance(group.get("hooks"), list)
+                        or not group["hooks"]):
+                    raise TypeError
+                for handler in group["hooks"]:
+                    if not isinstance(handler, dict) or handler.get("type") != "command":
+                        raise TypeError
+                    handler["command"] = command
+                    handler.pop("command_windows", None)
+                    handler["commandWindows"] = windows
+    except (KeyError, TypeError, AttributeError):
+        raise ContractError("existing fixed runtime Hook contract is invalid") from None
+    return hooks
+
+
+def inspect_installation(destination, command_builder, expected_release_id=None):
+    """只读身份、受管理文件及用户额外文件；旧版本不要求已有安装清单。"""
+    target = safe_path(destination)
+    observed = snapshot(target)
+    if any(Path(name).name.lower() in {"runtime.sqlite3", "runtime.sqlite3-wal", "runtime.sqlite3-shm", "runtime.sqlite3-journal"}
+           for name in observed["files"]):
+        raise ContractError("installation contains a knowledge database; move its data outside the export before upgrading")
+    if ("pyproject.toml" in observed["files"] or "release.json" in observed["files"]
+            or ".git" in observed["files"] or ".git" in observed["directories"]):
+        raise ContractError("refusing to replace a source checkout or fixed runtime release")
+    receipt = _json(target / "runtime-release.json")
+    required = {"runtime_directory", "release_id", "version", "protocol_version", "content_digest", "python", "hook_mode"}
+    if (not required.issubset(receipt) or not isinstance(receipt.get("runtime_directory"), str)
+            or not Path(receipt["runtime_directory"]).is_absolute()
+            or not isinstance(receipt.get("python"), str) or not receipt["python"]
+            or not Path(receipt["python"]).is_absolute()
+            or receipt.get("hook_mode") not in (None, "observe", "enforce")):
+        raise ContractError("existing installation runtime receipt is invalid")
+    runtime = safe_path(receipt["runtime_directory"])
+    if target == runtime or target in runtime.parents or runtime in target.parents:
+        raise ContractError("existing installation and fixed runtime must use separate directories")
+    release = validate_previous_release(runtime)
+    if any(receipt[key] != release[key] for key in ("release_id", "version", "protocol_version", "content_digest")):
+        raise ContractError("existing installation receipt does not match its fixed runtime")
+    if expected_release_id is not None and receipt["release_id"] != expected_release_id:
+        raise ContractError("existing installation release changed; expected release identity does not match")
+    plugin = _json(target / ".codex-plugin/plugin.json")
+    if (plugin.get("name") != "agent-learning" or plugin.get("version") != release["version"]
+            or plugin.get("skills") != "./skills/" or plugin.get("hooks") != "./hooks/hooks.json"
+            or plugin.get("mcpServers") != "./.mcp.json"):
+        raise ContractError("existing installation is not a valid agent-learning plugin export")
+    # 这些文件只含安装时的固定路径；其余受管理文件必须与旧发布副本一致。
+    mcp = {"mcpServers": {"agent_learning": {"command": receipt["python"],
+           "args": [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]}}}
+    if _json(target / ".mcp.json") != mcp:
+        raise ContractError("existing installation MCP configuration was modified")
+    if _json(target / "hooks/hooks.json") != _expected_hook_document(runtime, receipt["python"], receipt["hook_mode"], command_builder):
+        raise ContractError("existing installation Hook configuration was modified")
+    managed = set(release["files"]) | {"runtime-release.json"}
+    for name in managed - {"runtime-release.json", ".mcp.json", "hooks/hooks.json"}:
+        if observed["files"].get(name) != release["files"].get(name):
+            raise ContractError("existing installation managed file is missing or modified: " + name)
+    if INSTALL_MANIFEST in observed["files"]:
+        installation = _json(target / INSTALL_MANIFEST)
+        expected = {"schema": INSTALL_SCHEMA, "plugin": "agent-learning", "release_id": release["release_id"],
+                    "files": {name: observed["files"][name] for name in sorted(managed)}}
+        if installation != expected:
+            raise ContractError("existing installation file manifest is invalid or managed files changed")
+        managed.add(INSTALL_MANIFEST)
+    extras = sorted(set(observed["files"]) - managed)
+    return {"target": target, "runtime_directory": runtime, "receipt": receipt, "release": release,
+            "snapshot": observed, "managed": managed, "extra_files": extras}
+
+
+def write_installation_manifest(root, release_id):
+    observed = snapshot(root)
+    manifest = {"schema": INSTALL_SCHEMA, "plugin": "agent-learning", "release_id": release_id,
+                "files": {name: value for name, value in sorted(observed["files"].items()) if name != INSTALL_MANIFEST}}
+    (root / INSTALL_MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def preserve_extra_files(previous, staging):
+    """新清单先写，再复制额外文件，避免把个人文件归入插件管理范围。"""
+    fresh = snapshot(staging)
+    for name in previous["snapshot"]["directories"]:
+        if name in fresh["files"]:
+            raise ContractError("user directory conflicts with a new managed plugin path: " + name)
+    for name in previous["extra_files"]:
+        path = Path(name)
+        if (name in fresh["files"] or name in fresh["directories"]
+                or any(parent.as_posix() in fresh["files"] for parent in path.parents if parent != Path("."))):
+            raise ContractError("user file conflicts with a new managed plugin path: " + name)
+    for name in previous["extra_files"]:
+        destination = staging / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(previous["target"] / name, destination)
+    for name in previous["snapshot"]["directories"]:
+        destination = staging / name
+        if not destination.exists():
+            destination.mkdir(parents=True, exist_ok=True)
+
+
+@contextmanager
+def installation_lock(target):
+    """同目录安装与升级互斥；遗留锁不自动删除，避免抢占仍在运行的进程。"""
+    target = safe_path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(os.path.normcase(str(target)).encode("utf-8")).hexdigest()[:24]
+    lock = target.parent / (".alp-install-" + key + ".lock")
+    token = uuid.uuid4().hex
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise ContractError("another installation is in progress or an interrupted installation lock needs review") from None
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump({"schema": 1, "target": str(target), "pid": os.getpid(), "token": token}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield
+    finally:
+        # 只解除仍属于本次调用的锁；外部替换的锁保留。
+        try:
+            if not _linked(lock) and _json(lock).get("token") == token:
+                lock.unlink()
+        except (OSError, ContractError):
+            pass
+
+
+def switch_installation(previous, staging):
+    """兄弟目录重命名切换。Windows 占用会停止；失败尽可能恢复旧目录。"""
+    target = safe_path(previous["target"])
+    staging = safe_path(staging)
+    if staging.parent != target.parent or not staging.name.startswith(".alp-staging-"):
+        raise ContractError("refusing to publish an unexpected staging directory")
+    if snapshot(target) != previous["snapshot"]:
+        raise ContractError("installation destination changed during preparation; it was preserved")
+    validate_previous_release(previous["runtime_directory"])
+    backup = target.parent / (".alp-backup-" + target.name[:40] + "-" + uuid.uuid4().hex)
+    safe_path(backup)
+    if backup.exists():
+        raise ContractError("installation backup destination already exists")
+    moved = False
+    try:
+        target.rename(backup)
+        moved = True
+        if snapshot(backup) != previous["snapshot"]:
+            raise ContractError("installation destination changed during switching")
+        if target.exists() or _linked(target):
+            raise ContractError("installation destination appeared during switching; backup was preserved")
+        staging.rename(target)
+    except (OSError, ContractError) as error:
+        if moved and not target.exists() and not _linked(target):
+            try:
+                backup.rename(target)
+            except OSError:
+                raise ContractError("installation switch failed; restore the retained backup at " + str(backup)) from None
+        if moved and backup.exists():
+            raise ContractError("installation switch failed; existing destination and backup were preserved at " + str(backup)) from None
+        if isinstance(error, ContractError):
+            raise
+        raise ContractError("installation switch failed; previous installation was preserved or restored") from None
+    return backup

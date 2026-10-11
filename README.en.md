@@ -4,7 +4,7 @@
 
 **Help Agents retain project experience and find evidence-backed guidance for the next task.**
 
-Development version: **0.12.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published prerelease 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+Development version: **0.13.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published prerelease 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
 
 agents-learning builds maintainable knowledge memory for long-running projects. It retrieves relevant experience at supported task events, records tool outcomes, lets an administrator organize candidates, and makes knowledge with conditions, sources and revisions available to later Agents. Workers focus on their current task while experience remains reusable across conversations.
 
@@ -16,6 +16,7 @@ agents-learning builds maintainable knowledge memory for long-running projects. 
 - **Local knowledge browser**: search knowledge and inspect revisions, source events and administrator work through a read-only page.
 - **Separate organization and budgets**: event capture and incremental review proceed separately; administrator execution is optional, with bounds on calls, concurrency, review packets and context.
 - **Paired task evaluation**: freeze tasks, model, environment and knowledge snapshot; run no-memory / with-memory pairs and check acceptance, elapsed time and full-workflow usage.
+- **Installation upgrades and version checks**: validate and back up existing exports, update their entry points, and optionally check GitHub Releases in the background while retaining separate knowledge and configuration.
 
 `Current task → Retrieve experience → Execute and observe → Organize candidates → Validate and publish → Reuse in the next task`
 
@@ -135,7 +136,7 @@ The same project and data directory can retain knowledge across login accounts. 
 
 | Module | Responsibilities and boundaries | Key source / resources |
 |---|---|---|
-| 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export fixed runtime copies; check release contents and role permissions | [install.py](agent_learning/install.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
+| 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export and upgrade fixed runtimes, check software versions, contents and role permissions | [install.py](agent_learning/install.py), [install_update.py](agent_learning/install_update.py), [software_updates.py](agent_learning/software_updates.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
 | 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
 | 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. Retrieval and context management | Bounded hybrid recall and filtering, summary/page budgets, exposure tracking, notices, restoration, failure follow-up and read-only browsing | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
@@ -148,7 +149,7 @@ The same project and data directory can retain knowledge across login accounts. 
 
 ### How each module works
 
-**1. Plugin integration and protocol.** CLI provides explicit local operations, MCP exposes tools by role, Hooks receive host events and skills describe the workflow. `install` validates resources and exports atomically; fixed runtime entry points check content identity. MCP connections bind to a session through a trusted handle, and arguments cannot elevate a role.
+**1. Plugin integration and protocol.** CLI provides explicit local operations, MCP exposes tools by role, Hooks receive host events and skills describe the workflow. Initial `install` validates resources and exports atomically; `--upgrade` validates the old installation and retains a backup before switching directories. Fixed runtime entry points check content identity. Optional background version checks only read GitHub Release metadata and do not participate in knowledge review or execution authorization. MCP connections bind to a session through a trusted handle, and arguments cannot elevate a role.
 
 **2. Task and execution control.** The current task stores goal, scope and status. Contract revision, state write version and execution epoch distinguish changes. A child Agent's assignment freezes the parent task snapshot at dispatch. Execution protection checks explicit authorization, actions, paths, budget and validity; after a task change or pause, old permission cannot authorize a new operation.
 
@@ -193,6 +194,8 @@ Candidate metadata may include `tool`, `tool_version`, `error_code`, `environmen
 These mechanisms make retrieval and event recording less dependent on the Agent remembering every step. Domain judgment still requires the Agent to consider current requirements, environment and evidence, and publication checks cannot prove arbitrary natural language conclusions correct.
 
 ## Current version and compatibility
+
+0.13.0 adds explicit upgrades of existing plugin exports and optional background GitHub Release checks, disabled by default. Database schema 11, full-text index 4 and semantic index 1 remain unchanged; the internal publication protocol advances to 10. Upgrades validate historical exports using the same manifest format without executing old code or touching live data directories. Background commands use their bound script entry, preventing a same-named package in the project directory from taking precedence. Published GitHub tags and assets remain at 0.11.1; the current development version has not been published.
 
 0.12.0 adds optional local semantic hybrid retrieval, a local read-only knowledge browser and paired task evaluation tools. Database schema stays at 11 and the full-text index at 4; the optional semantic index is version 1. Internal publication protocol becomes 9, requiring a new export of the fixed runtime copy. Vectors are derived by project, knowledge revision and model configuration and are disabled by default. Queries never build an index or download a model. Browser and file evaluation entry points do not initialize Runtime or migrate a database. Published GitHub tags and assets still correspond to 0.11.1.
 
@@ -308,6 +311,49 @@ To make covered tool calls fail closed even when configuration is damaged, expli
 The source `.mcp.json` is a template; installation renders actual absolute paths into the exported copy. Native Codex catalog loading and installation commands have been checked locally with isolated configuration, without changing the current user's plugin configuration.
 
 The standard wheel includes export resources and supports `python -m agent_learning.cli`. The runtime, CLI and MCP use UTF-8; Chinese requests do not need ASCII escaping to work around system encoding.
+
+### Update an existing installation
+
+After obtaining the new source or extracting a new release package, run its entry:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade
+# Optional: use release_id from the old directory's runtime-release.json
+python -B scripts/learning.py install "D:\Plugins\agent-learning" --upgrade --expected-release-id OLD_RELEASE_ID
+```
+
+The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and managed file digests before preparing the new export. Omitted `--runtime-store` and `--hook-mode` inherit their old values. Modified managed files, conflicting extra files, source/fixed runtime targets, links or a knowledge database such as `runtime.sqlite3` inside the export cause rejection. External `ALP_HOME` and `ALP_CONFIG` are neither read nor modified. Keep the database outside the export. Extra personal files and empty directories are retained without becoming managed plugin files.
+
+The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
+
+Restart Codex after updating the local source directory and review the changed Hook definitions again. Existing MCP processes may still use the old runtime; a file update receipt does not confirm that they have switched. Reload the local plugin through the host installation entry if its cache remains old. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
+
+### Automatic GitHub version checks
+
+Release checks read public metadata and keep their cache separate from the knowledge database. These commands do not initialize Runtime:
+
+```powershell
+python -B scripts/learning.py --home "D:\AgentLearningData" update-check --force
+python -B scripts/learning.py --home "D:\AgentLearningData" update-status
+```
+
+`update-status` only reads the cache: no network request or database creation. Manual `update-check` works with automatic checks disabled. `--force` skips the normal interval while respecting server rate limits. Failures return `state=error` or `rate_limited`, which does not establish that the installation is current. A successfully printed state JSON exits 0; invalid configuration or local I/O errors exit 1.
+
+To opt in, add this section to your configuration:
+
+```json
+"software_updates": {
+  "enabled": true,
+  "repository": "swenbo1-web/agents-learning",
+  "channel": "prerelease",
+  "interval_seconds": 86400,
+  "timeout_seconds": 3
+}
+```
+
+Root `SessionStart(startup/resume)` events reserve a check outside the event transaction and dispatch a separate short process. Compaction, clear and subagent events do not dispatch it. Checks default to a daily interval; conversations share a cache, short lease and process lock per data directory/repository/channel. An available update is announced on a later startup/resume; inspect all check states through `update-status` or `status`. Knowledge injection does not wait for the network. Failures back off, responses are bounded, and ETag/304 is supported. The timeout controls sockets and response reads, not a strict process deadline for operating system DNS.
+
+The `prerelease` channel includes previews; `stable` excludes them. Only eligible semantic versions in the latest 20 Releases are compared. Commits, ordinary tags and unpublished development versions are not updates; `ahead` means the local version exceeds the published version found. Checks use the official GitHub API without reading login tokens, downloading/executing code or replacing an installation. Apply new code with the explicit upgrade command above. [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 
 You can also start a standalone stdio MCP service:
 
@@ -588,6 +634,7 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | Subcommand | Purpose |
 |---|---|
 | `status` | Read runtime status |
+| `update-check`, `update-status` | Check bounded GitHub Release metadata or read cached version state |
 | `learning-effects`, `knowledge-use` | Windowed effect observations and short adoption declarations for the exact task |
 | `scheduler-status`, `scheduler-tick`, `scheduler-run` | Persistent work status, bounded single round and bounded continuation |
 | `session-bind` | Trusted local registration of an explicit conversation/subagent, returning a verifiable handle |
@@ -612,9 +659,17 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |
 | `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
 | `serve` | Start an MCP service with a specified role |
-| `install` | Create a separate installation copy for later enablement |
+| `install` | Export a plugin; `--upgrade` validates and replaces an existing export while retaining a full backup |
 
-## 0.12.0 validation status (2026-10-11)
+## 0.13.0 validation status (2026-10-11)
+
+On Windows with Python 3.12.14, the full suite discovered **814 checks: 813 passed, one skipped, no failures or errors**, in 200.517 seconds. The 78 additions comprise 24 installation upgrade checks, 35 GitHub version checks and 19 integration checks. Windows permissions prevented creation of a real symlink in the skipped check; a separate simulated junction rejection check passed. Coverage includes legacy identities, extra files, concurrent snapshots, failed switches and restoration, retained backups, downgrade prevention, invalid protocols, corrupt caches, rate limits, ETag/304, reservation deduplication, cancellation after disabling and bound script entry points. Existing eight-module, wheel, MCP/Hook and isolated Codex installation checks passed; the wheel's resource script background entry also ran successfully.
+
+Eighty-four Python files passed Python 3.10 syntax checks; actual Python 3.10 and other operating systems were not run this round. A pure-data reconstruction of the real historical 0.11.1 export upgraded successfully from protocol 8 with `hook_mode=None`, without executing old code. A real public GitHub API check in a temporary directory returned `ahead` for local 0.13.0 versus published 0.11.1 and created no knowledge database.
+
+No live user installation was overwritten, no live Hook or persistent service was enabled, no user configuration was changed and no model was called. Automatic checks remain disabled by default. This code has not been pushed or released on GitHub; actual host reloading remains a separate acceptance step.
+
+## 0.12.0 historical validation status (2026-10-11)
 
 On Windows with Python 3.12.14, **all 736 offline regression tests passed**, with no failures, errors or skips, in 166.081 seconds. The 87 additions comprise 30 semantic retrieval tests, 19 browser tests, 26 task evaluation tests and 12 integration tests. Coverage includes damaged vectors and rebuilding, revisions/revocation, exact identifiers, source health, concurrent refresh, provider fallback, cross-process cooldown, stale pending results, read-only access/project isolation, and incomplete or failed evaluations with full-cost boundaries. Wheel and exported copies include the three new modules; existing installation, MCP, Hook and eight-module checks continue to pass.
 

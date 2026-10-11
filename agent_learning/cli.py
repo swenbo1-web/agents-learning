@@ -19,6 +19,10 @@ def parser():
     p.add_argument("--workspace", default=str(Path.cwd()), help="当前项目目录")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    updates = sub.add_parser("update-check", help="检查 GitHub Release 版本，只读取公开元数据，不安装代码")
+    updates.add_argument("--force", action="store_true", help="跳过常规检查间隔；仍遵守服务端限流")
+    updates.add_argument("--reservation", help=argparse.SUPPRESS)
+    sub.add_parser("update-status", help="只查看缓存的插件版本状态，不访问网络或知识数据库")
     browser = sub.add_parser("browser", help="临时启动本机只读知识浏览器，不创建或升级数据库")
     browser.add_argument("--port", type=int, default=0)
     browser.add_argument("--open", action="store_true", help="在默认浏览器打开页面")
@@ -189,6 +193,8 @@ def parser():
     export.add_argument("destination")
     export.add_argument("--runtime-store", help="版本化稳定运行目录，不随插件缓存清理")
     export.add_argument("--hook-mode", choices=["observe", "enforce"], help="可信Hook故障策略；省略按配置")
+    export.add_argument("--upgrade", action="store_true", help="验证并覆盖已有插件导出；保留旧目录备份")
+    export.add_argument("--expected-release-id", help="覆盖时校验旧安装的固定运行版本身份")
     return p
 
 
@@ -200,13 +206,24 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.command == "install":
         try:
-            print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode)))
+            print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode,
+                                 upgrade=args.upgrade, expected_release_id=args.expected_release_id)))
             return 0
         except (ContractError, OSError) as exc:
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
             return 1
     runtime = None
     try:
+        if args.command in {"update-check", "update-status"}:
+            from .software_updates import load_config, check_updates, update_status
+            default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
+                            if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
+            home = Path(args.home or os.environ.get("ALP_HOME") or default_home).resolve()
+            settings = load_config(home)
+            result = (update_status(home, settings) if args.command == "update-status" else
+                      check_updates(home, settings, force=args.force, reservation=args.reservation))
+            print(encode(result))
+            return 0
         if args.command.startswith("evaluation-"):
             from .task_evaluation import write_protocol, run_protocol, report_files
             if args.command == "evaluation-protocol":

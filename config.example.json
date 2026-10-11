@@ -4,6 +4,13 @@
   "enforce_task_policy": false,
   "capture_deliveries": true,
   "allowed_tools": [],
+  "software_updates": {
+    "enabled": false,
+    "repository": "swenbo1-web/agents-learning",
+    "channel": "prerelease",
+    "interval_seconds": 86400,
+    "timeout_seconds": 3
+  },
   "retrieval": {
     "semantic": {
       "enabled": false,

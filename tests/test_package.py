@@ -44,7 +44,7 @@ class PackageTests(unittest.TestCase):
             wheels = list(wheel_directory.glob("*.whl"))
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
-                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation"):
+                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
@@ -68,6 +68,25 @@ class PackageTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr.decode("utf-8", "replace"))
             self.assertIsInstance(json.loads(status.stdout.decode("utf-8"))["project_id"], str)
+            # A directly installed wheel has its scripts under _plugin_resources.
+            # Capture the child argv, then actually run its harmless cached read.
+            background_probe = (
+                "import contextlib,json,subprocess; from pathlib import Path; from unittest.mock import patch; "
+                "from agent_learning.runtime import Runtime; "
+                "r=Runtime(); "
+                "probe=patch('subprocess.Popen'); child=probe.start(); "
+                "r._launch_background(Path.cwd(),'update-status',[]); "
+                "argv=child.call_args.args[0]; env=child.call_args.kwargs['env']; "
+                "probe.stop(); r.close(); "
+                "assert '_plugin_resources' in argv[2],argv; "
+                "result=subprocess.run(argv,env=env,capture_output=True,timeout=10); "
+                "assert result.returncode==0,result.stderr; "
+                "print(json.dumps({'state':json.loads(result.stdout)['state'],'entry':argv[2]}))"
+            )
+            background = subprocess.run([sys.executable, "-B", "-c", background_probe],
+                cwd=workspace, env=environment, capture_output=True, timeout=15)
+            self.assertEqual(background.returncode, 0, background.stderr.decode("utf-8", "replace"))
+            self.assertEqual(json.loads(background.stdout)["state"], "unchecked")
             exported = base / "wheel exported plugin"
             result = subprocess.run(
                 [sys.executable, "-m", "agent_learning.cli", "install", str(exported),
@@ -80,7 +99,7 @@ class PackageTests(unittest.TestCase):
                              "skills/learning-admin/SKILL.md", ".codex-plugin/plugin.json",
                              ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json", "LICENSE"):
                 self.assertTrue((exported / relative).is_file(), relative)
-            for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation"):
+            for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates"):
                 self.assertTrue((exported / "agent_learning" / f"{module}.py").is_file(), module)
             self.assertEqual((exported / "LICENSE").read_bytes(), (source_root / "LICENSE").read_bytes())
             manifest = json.loads((exported / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))

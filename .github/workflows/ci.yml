@@ -65,6 +65,7 @@ jobs:
           assert config['scheduler']['sync_enabled'] is False
           assert config['hindsight']['enabled'] is False
           assert config['retrieval']['semantic']['enabled'] is False
+          assert config['software_updates']['enabled'] is False
           configuration = json.dumps(config)
           Path(os.environ['ALP_CONFIG']).write_text(configuration, encoding='utf-8')
           (Path(os.environ['ALP_HOME']) / 'config.json').write_text(configuration, encoding='utf-8')

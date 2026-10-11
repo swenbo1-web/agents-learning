@@ -30,6 +30,7 @@ from .publication_state import PublicationStateMixin
 from .scheduler import SCHEDULER_DEFAULTS, SchedulerMixin, validate_scheduler_config
 from .learning_evaluation import LearningEvaluationMixin
 from .semantic_retrieval import SEMANTIC_DEFAULTS, validate_semantic_config
+from .software_updates import DEFAULTS as SOFTWARE_UPDATE_DEFAULTS, validate_config as validate_update_config
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -46,6 +47,7 @@ DEFAULTS = {
               "token_reservation_per_call": 4000},
     "scheduler": SCHEDULER_DEFAULTS,
     "retrieval": {"semantic": SEMANTIC_DEFAULTS},
+    "software_updates": SOFTWARE_UPDATE_DEFAULTS,
     "hindsight": {"enabled": False, "url": "http://127.0.0.1:8888", "bank_id": "",
                   "api_key_env": "HINDSIGHT_API_KEY", "strategy": "alp_chunks",
                   "timeout_seconds": 10},
@@ -217,6 +219,11 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                         self.config[key]["semantic"] = validate_semantic_config(value["semantic"])
                     except ValueError as exc:
                         raise ContractError(str(exc)) from exc
+            elif key == "software_updates":
+                try:
+                    self.config[key] = validate_update_config(value)
+                except ValueError as exc:
+                    raise ContractError(str(exc)) from exc
             elif key in {"admin", "hindsight", "scheduler"} and isinstance(value, dict):
                 self.config[key].update(value)
             else:
@@ -657,6 +664,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
 
     def status(self, project):
         from .admin_usage import admin_budget_status
+        from .software_updates import update_status
         counts = {}
         for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts",
                       "review_receipts", "governance_proposals", "knowledge_actions", "knowledge_releases", "knowledge_sync_dirty"):
@@ -675,6 +683,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
+                "software_updates": update_status(self.home, self.config["software_updates"]),
                 "learning_effects": self.learning_effects(project),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
                 "knowledge_release_head": self._release_head(project),
@@ -884,6 +893,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             if kind == "Stop" and not agent_id and fresh:
                 self._capture_delivery(project, conversation, task, event, raw)
         schedule_warning = None
+        if (fresh and kind == "SessionStart" and not agent_id
+                and raw.get("source") in {None, "startup", "resume"}
+                and self.config["software_updates"]["enabled"]):
+            schedule_warning = self._schedule_software_update(raw["cwd"])
         if fresh and kind in {"Stop", "SessionStart"} and self.config["scheduler"]["enabled"]:
             token = None
             try:
@@ -901,7 +914,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                     self._metric(project, "scheduler_schedule_failed")
                 except sqlite3.Error:
                     pass
-                schedule_warning = "Agent Learning: 事件已保存，后台调度未确认启动；待办保留。"
+                warning = "Agent Learning: 事件已保存，后台调度未确认启动；待办保留。"
+                schedule_warning = "\n".join(filter(None, (schedule_warning, warning)))
         if denied:
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
@@ -952,13 +966,40 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def _launch_scheduler(self, workspace, worker_token):
         self._launch_background(workspace, "scheduler-run", ["--all", "--worker-token", worker_token])
 
+    def _schedule_software_update(self, workspace):
+        """Hook 只读缓存及预留一次派发，网络检查在独立短进程中执行。"""
+        from .software_updates import reserve_automatic_check, cancel_reserved_check, update_status
+        settings = self.config["software_updates"]
+        token = None
+        try:
+            cached = update_status(self.home, settings)
+            token = reserve_automatic_check(self.home, settings)
+            if token:
+                self._launch_background(workspace, "update-check", ["--reservation", token])
+            if cached["state"] == "update_available":
+                return (f"Agent Learning: 插件新版本 {cached['latest']} 可用（当前 {cached['current']}）；"
+                        "运行 update-status 查看，安装后需重启 Codex。")
+        except (OSError, ValueError, TypeError):
+            if token:
+                try:
+                    cancel_reserved_check(self.home, settings, token)
+                except (OSError, ValueError):
+                    pass
+            return "Agent Learning: 后台版本检查未确认启动；当前任务继续，稍后可运行 update-check。"
+        return None
+
     def _launch_background(self, workspace, command, arguments):
         import subprocess
         import sys
         options = {"start_new_session": True} if os.name != "nt" else {
             "creationflags": subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS}
         env = dict(os.environ, ALP_HOME=str(self.home), ALP_DISABLED="1")
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
+        root = Path(__file__).resolve().parents[1]
+        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        entry = root / "scripts/learning.py"
+        if not entry.is_file() and not (root / "release.json").exists():
+            # wheel 直接运行时资源在包内；导出副本仍走同一固定脚本及内容校验。
+            entry = root / "agent_learning/_plugin_resources/scripts/learning.py"
         log_path = self.home / "background.log"
         try:
             if log_path.exists() and log_path.stat().st_size > 1024 * 1024:
@@ -970,6 +1011,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             except (OSError, sqlite3.Error):
                 pass
         with log_path.open("ab") as log:
-            subprocess.Popen([sys.executable, "-m", "agent_learning.cli", "--home", str(self.home), "--workspace",
+            subprocess.Popen([sys.executable, "-B", str(entry),
+                              "--home", str(self.home), "--workspace",
                               str(workspace), command, *arguments], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, env=env, **options)

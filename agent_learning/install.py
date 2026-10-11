@@ -14,6 +14,8 @@ import tempfile
 from . import __version__
 from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release_root
 from .runtime import ContractError
+from .install_update import (installation_lock, inspect_installation, preserve_extra_files,
+                             safe_path, switch_installation, write_installation_manifest)
 
 
 RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents")
@@ -99,24 +101,32 @@ def _overlaps(left, right):
     return left == right or left in right.parents or right in left.parents
 
 
-def _cleanup_owned(staging, parent):
+def _cleanup_owned(staging, parent, identity=None):
     # 仅删除本次 mkdtemp 返回且仍位于预期父目录的临时目录。
     if staging is not None:
-        resolved = staging.resolve()
+        if not staging.exists():
+            return
+        resolved = safe_path(staging)
         if resolved.parent != parent.resolve() or not staging.name.startswith(".alp-staging-"):
             raise ContractError("refusing to remove an unexpected staging path")
+        if identity is not None:
+            observed = staging.stat()
+            if (observed.st_dev, observed.st_ino) != identity:
+                raise ContractError("refusing to remove a staging directory replaced by another process")
         shutil.rmtree(staging)
 
 
 def _release(source, package, store):
     store.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".alp-staging-", dir=store))
+    stat = staging.stat()
+    staging_identity = (stat.st_dev, stat.st_ino)
     try:
         _copy_payload(source, package, staging)
         manifest = manifest_for(staging)
         (staging / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         validate_release_root(staging)
-        target = store / manifest["release_id"]
+        target = safe_path(store / manifest["release_id"])
         if target.exists():
             if validate_release_root(target) != manifest:
                 raise ContractError("existing runtime release has a different identity")
@@ -129,7 +139,7 @@ def _release(source, package, store):
                     raise
         return target, manifest
     finally:
-        _cleanup_owned(staging, store)
+        _cleanup_owned(staging, store, staging_identity)
 
 
 def _hook_commands(python, script_path, event_name, hook_mode):
@@ -143,14 +153,32 @@ def _hook_commands(python, script_path, event_name, hook_mode):
     return command, windows
 
 
-def install(destination, runtime_store=None, hook_mode=None):
+def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, expected_release_id=None):
+    """导出或显式覆盖已验证的插件目录；知识库与用户宿主配置不参与切换。"""
+    if not isinstance(upgrade, bool):
+        raise ContractError("upgrade must be a boolean")
+    if expected_release_id is not None and (not upgrade or not isinstance(expected_release_id, str)):
+        raise ContractError("expected release identity requires an explicit upgrade")
     if hook_mode not in (None, "observe", "enforce"):
         raise ContractError("hook mode must be observe or enforce")
     source = _resource_root()
     _validate_resources(source)
     package = Path(__file__).resolve().parent
-    target = Path(destination).expanduser().resolve()
-    store = (Path(runtime_store).expanduser() if runtime_store is not None else _default_store()).resolve()
+    target = safe_path(destination)
+    if target.exists() and not upgrade:
+        raise ContractError("installation destination already exists; choose a new directory or use --upgrade")
+    if upgrade and not target.exists():
+        raise ContractError("upgrade requires an existing plugin installation directory")
+    # 在写入 store 前确定旧身份；锁内会再次核对以覆盖并发调用。
+    previous = inspect_installation(target, _hook_commands, expected_release_id) if upgrade else None
+    if previous is not None:
+        if tuple(map(int, previous["release"]["version"].split("."))) > tuple(map(int, __version__.split("."))):
+            raise ContractError("refusing to downgrade a newer plugin installation")
+        if hook_mode is None:
+            hook_mode = previous["receipt"]["hook_mode"]
+        if runtime_store is None:
+            runtime_store = previous["runtime_directory"].parent
+    store = safe_path(runtime_store if runtime_store is not None else _default_store())
     protected = [package]
     source_release = isinstance(source, Path) and (source / MANIFEST_NAME).is_file()
     if isinstance(source, Path):
@@ -161,42 +189,60 @@ def install(destination, runtime_store=None, hook_mode=None):
                          for path in protected)
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
-    if target.exists():
-        raise ContractError("installation destination already exists; choose a new directory")
     try:
-        runtime_directory, release = _release(source, package, store)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=".alp-staging-", dir=target.parent))
-        try:
-            # 宿主资源也来自刚验证的发布副本，避免构建源变化使技能与运行代码分裂。
-            _copy_payload(runtime_directory, runtime_directory / "agent_learning", staging)
-            mcp = {"mcpServers": {"agent_learning": {"command": sys.executable,
-                    "args": [str(runtime_directory / "scripts/learning.py"), "serve", "--role", "worker"]}}}
-            (staging / ".mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            hook_file = staging / "hooks/hooks.json"
-            hooks = json.loads(hook_file.read_text(encoding="utf-8"))
-            for event_name, groups in hooks["hooks"].items():
-                command, windows = _hook_commands(sys.executable, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
-                for group in groups:
-                    for handler in group["hooks"]:
-                        handler["command"] = command
-                        handler.pop("command_windows", None)
-                        handler["commandWindows"] = windows
-            hook_file.write_text(json.dumps(hooks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            (staging / "runtime-release.json").write_text(json.dumps({"runtime_directory": str(runtime_directory),
-                "release_id": release["release_id"], "version": release["version"],
-                "protocol_version": release["protocol_version"], "content_digest": release["content_digest"],
-                "python": sys.executable, "hook_mode": hook_mode}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            _validate_resources(staging)
-            if target.exists():
+        with installation_lock(target):
+            if previous is not None:
+                locked = inspect_installation(target, _hook_commands, expected_release_id)
+                if locked["snapshot"] != previous["snapshot"]:
+                    raise ContractError("installation changed before update lock was acquired")
+            elif target.exists():
                 raise ContractError("installation destination appeared during export; it was preserved")
-            staging.rename(target)
-            staging = None
-        finally:
-            _cleanup_owned(staging, target.parent)
+            runtime_directory, release = _release(source, package, store)
+            staging = Path(tempfile.mkdtemp(prefix=".alp-staging-", dir=target.parent))
+            stat = staging.stat()
+            staging_identity = (stat.st_dev, stat.st_ino)
+            try:
+                # 宿主资源也来自刚验证的发布副本，避免技能与运行代码分裂。
+                _copy_payload(runtime_directory, runtime_directory / "agent_learning", staging)
+                mcp = {"mcpServers": {"agent_learning": {"command": sys.executable,
+                        "args": [str(runtime_directory / "scripts/learning.py"), "serve", "--role", "worker"]}}}
+                (staging / ".mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                hook_file = staging / "hooks/hooks.json"
+                hooks = json.loads(hook_file.read_text(encoding="utf-8"))
+                for event_name, groups in hooks["hooks"].items():
+                    command, windows = _hook_commands(sys.executable, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
+                    for group in groups:
+                        for handler in group["hooks"]:
+                            handler["command"] = command
+                            handler.pop("command_windows", None)
+                            handler["commandWindows"] = windows
+                hook_file.write_text(json.dumps(hooks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                (staging / "runtime-release.json").write_text(json.dumps({"runtime_directory": str(runtime_directory),
+                    "release_id": release["release_id"], "version": release["version"],
+                    "protocol_version": release["protocol_version"], "content_digest": release["content_digest"],
+                    "python": sys.executable, "hook_mode": hook_mode}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                _validate_resources(staging)
+                write_installation_manifest(staging, release["release_id"])
+                backup = None
+                if previous is not None:
+                    preserve_extra_files(previous, staging)
+                    backup = switch_installation(previous, staging)
+                else:
+                    if target.exists():
+                        raise ContractError("installation destination appeared during export; it was preserved")
+                    staging.rename(target)
+                staging = None
+            finally:
+                _cleanup_owned(staging, target.parent, staging_identity)
     except (OSError, ReleaseError):
         raise ContractError("plugin export could not complete; final destination was not published") from None
-    return {"status": "exported", "plugin_directory": str(target), "python": sys.executable,
+    result = {"status": "updated" if upgrade else "exported", "plugin_directory": str(target), "python": sys.executable,
             "runtime_directory": str(runtime_directory), "release_id": release["release_id"],
             "version": __version__, "hook_mode": hook_mode,
             "next_step": "将此目录加入本地插件源并安装；保留固定运行目录及解释器，在Codex界面审阅并信任Hooks。"}
+    if previous is not None:
+        result.update({"previous_release_id": previous["release"]["release_id"], "backup_directory": str(backup),
+                       "preserved_extra_files": previous["extra_files"], "knowledge_and_config": "external_untouched",
+                       "host_reload_required": True, "hook_review_required": True,
+                       "next_step": "重新加载或重新安装宿主缓存中的插件，并审阅Hook路径变化；旧目录与固定副本保留，可用于恢复。"})
+    return result
