@@ -82,10 +82,11 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
 def claim_dispatch(runtime, project):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
+    from .admin_usage import admin_budget_status
     if not runtime.config["admin"]["enabled"] or runtime.config["admin"]["max_calls_per_day"] <= 0:
         return None
     with runtime.transaction():
-        recover_calls(runtime, project)
+        recover_calls(runtime)
         now = time.time()
         runtime.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?",
                            (now, runtime.host_epoch()))
@@ -95,10 +96,14 @@ def claim_dispatch(runtime, project):
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
                               (project, *ACTIVE_STATES)).fetchone():
             return None
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        count = runtime.db.execute("SELECT COUNT(*) FROM admin_calls WHERE day=? "
-                                   "AND state NOT IN ('not_started','deduplicated')", (day,)).fetchone()[0]
-        if count >= runtime.config["admin"]["max_calls_per_day"]:
+        budget = admin_budget_status(runtime, now=now)
+        if budget["admission_status"] != "available":
+            return None
+        # 已在审核的派发与调用占同一槽，不能重复计算并发占用。
+        dispatched = runtime.db.execute("SELECT COUNT(*) FROM admin_dispatch d WHERE NOT EXISTS("
+                                        "SELECT 1 FROM admin_calls c WHERE c.project=d.project "
+                                        "AND c.state IN ('reserved','launch_intent','started'))").fetchone()[0]
+        if dispatched + budget["global_active_calls"] >= budget["max_concurrent_calls"]:
             return None
         query, args = eligible_query(scan_signature(runtime, project),
                                      preflight_signature=scan_signature(runtime, project, include_candidates=False))

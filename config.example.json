@@ -13,7 +13,24 @@
     "auto_publish": false,
     "max_cases_per_batch": 20,
     "max_calls_per_batch": 2,
-    "max_batch_seconds": 180
+    "max_batch_seconds": 180,
+    "max_concurrent_calls": 1,
+    "max_reported_tokens_per_day": null,
+    "token_reservation_per_call": 4000
+  },
+  "scheduler": {
+    "enabled": false,
+    "max_jobs_per_tick": 3,
+    "max_tick_seconds": 180,
+    "max_run_seconds": 300,
+    "poll_seconds": 5,
+    "retry_seconds": 30,
+    "auto_release": false,
+    "release_interval_seconds": 86400,
+    "max_release_items": 500,
+    "sync_enabled": false,
+    "max_sync_items": 20,
+    "max_sync_seconds": 30
   },
   "hindsight": {
     "enabled": false,

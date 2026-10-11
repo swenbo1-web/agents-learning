@@ -295,9 +295,10 @@ class KnowledgeSyncMixin:
             raise ContractError("sync batch max_seconds must be finite and <=300")
         started, items = time.monotonic(), []
         for _ in range(max_items):
-            if time.monotonic() - started >= max_seconds:
+            remaining = max_seconds - (time.monotonic() - started)
+            if remaining <= 0:
                 break
-            item = self.sync_once(project, max_seconds=max_seconds - (time.monotonic() - started))
+            item = self.sync_once(project, max_seconds=remaining)
             if item["status"] in {"idle", "disabled"}:
                 break
             items.append({k: item[k] for k in ("status", "operation_id", "current_state") if k in item})

@@ -1,8 +1,8 @@
 # Agent Learning Plugin
 
-面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.9.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识。
+面向项目 Agent 的本地经验记录、知识检索与候选审核工具。当前版本 0.10.0，使用 Python 3.10+ 和 SQLite，默认不调用付费模型，不连接 Hindsight，不自动发布知识，不启用后台调度。
 
-0.9.0 完善第七模块的准确撤销、反例恢复、生命周期回执、Stable 认证、知识发布批次和可选分发恢复，保留前六模块契约。数据库首次打开时在事务内升级到版本 9，保留记录和知识 ID；不补造旧撤销／恢复理由或认证，旧知识成熟度默认 candidate。全文索引版本为 4，内部发布协议为 6，不能将新旧运行文件混用；旧运行端不能打开版本 9 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
+0.10.0 完善第八模块的持久调度、全局准入预算、调用用量账本和知识采用回执，保留前七模块契约。数据库首次打开时将第八模块表在同一事务升级到版本 10，保留记录和知识 ID；不补造旧知识采用或历史用量。全文索引版本为 4，内部发布协议为 7，不能将新旧运行文件混用；旧运行端不能打开版本 10 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
 
 ## 首版流程
 
@@ -70,7 +70,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" serve --role adm
 | 身份 | MCP 工具 |
 |---|---|
 | 普通 Agent | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`learning_status` |
-| 管理员 | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate` |
+| 管理员 | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate`、`review_list`、`propose_governance` |
 
 MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数不能提升角色。技能位于 [learning-worker](skills/learning-worker/SKILL.md) 和 [learning-admin](skills/learning-admin/SKILL.md)。
 
@@ -224,7 +224,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" execution-approv
 
 默认 `admin.enabled` 和 `admin.auto_publish` 都为 `false`。未启用执行器时，可用管理员技能人工整理候选。
 
-需要自动提出候选时，配置可信的 Codex CLI 路径并启用 `admin.enabled`。此时 `Stop` Hook 先持久预留派发位置，再启动一个独立后台 `admin-batch` 短批次，不等待模型完成。没有可审增量、已有派发或审核在途、额度耗尽时不启动。它不是常驻守护进程，也不会持续轮询队列。也可以手动运行：
+需要自动提出候选时，配置可信的 Codex CLI 路径并启用 `admin.enabled`。未启用调度时，`Stop` Hook 先持久预留派发位置，再启动一个独立后台 `admin-batch` 短批次，不等待模型完成。没有可审增量、已有派发或审核在途、额度耗尽时不启动。启用 `scheduler.enabled` 后由下述持久调度安排有界续跑。也可以手动运行：
 
 ```powershell
 python scripts/learning.py --workspace "D:\Projects\my-project" admin-once
@@ -234,11 +234,11 @@ python scripts/learning.py --workspace "D:\Projects\my-project" reviews --proble
 
 可用 `admin-once --problem ID` 限定问题。执行器在隔离临时目录使用只读沙箱、临时会话和结构化输出，并设置 `ALP_DISABLED=1` 避免学习递归。自动提出候选不等于自动发布；默认仍由受信操作者发布。
 
-审核快照与调用预留在同一事务完成，模型调用在事务外执行。同一项目的模型预留在事务内互斥。调用持久经历 reserved → launch_intent → started → 终态，启动意图在创建进程前提交；超时、换号或启动窗口崩溃按未知保留额度。新协议严格启动意图前的过期预留、明确未启动的进程可以恢复；遗留活动记录不能证明未启动，升级后按 orphaned_unknown 处理。不会按进程名称杀其他任务。
+审核快照与调用预留在同一事务完成，模型调用在事务外执行。同一项目的模型预留在事务内互斥，全局并发默认为 1。调用持久经历 reserved → launch_intent → started → 终态，启动意图在创建进程前提交；超时、换号或启动窗口崩溃按未知保留额度。判断全局预算之前安全回收全部项目的过期预留，严格启动意图前的记录或明确未启动的进程可以释放；遗留活动记录不能证明未启动，升级后按 orphaned_unknown 处理。不会按进程名称杀其他任务。
 
 审核决定与调用计量分开保存：`reviews` / 管理员 `review_list` 可查看理由、结构化缺证项、候选和提议引用。候选对应 candidate_ready，缺证对应 awaiting_evidence，生成提议对应 proposal_ready；与案例是否恢复、产品是否验收独立。精确复用同时检查业务证据及实际比较知识、候选、反例目标、来源健康和审核策略；失败或未知调用不复用为成功决定。自身证据产生的候选不形成再次审核循环，新相关资料才可能复审。发布或候选变化先唤醒有界比较，实际审核签名不变则不调用模型。
 
-审核结果写入前，在同一事务重核案例、宿主、租约及实际比较资料；变化则拒绝旧决定。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
+审核结果写入前及最终提交边界，在同一事务重核案例、宿主、租约及实际比较资料；变化则回滚候选、治理提议和决定回执，保留实际调用终态与用量。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
 
 直接 MCP / CLI 取包同样使用一致快照。整包按实际管理员提示、任务、证据与比较材料计算预算，完整可容纳的 41 条事件可审核，不再固定丢弃第 41 条。单页最多读取 512 条，事件展示必要归属、角色及当前 health；比较资料只使用剩余空间。预算不足明确返回 incomplete、omitted_count、omission_reasons 和有限 missing_refs，不完整材料仍不自动调用模型。
 
@@ -250,11 +250,11 @@ python scripts/learning.py --workspace "D:\Projects\my-project" reviews --proble
 
 即使开启 `auto_publish`，也仅限无截短、具备真实工具成功证据的 operation/solution 新知识。已有知识治理、反例、professional、pattern 和未验证事实仍交受信入口处理；工具成功不证明专业结论正确。
 
-`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；单次审核日志受超时约束，不是磁盘写入硬上限。当前清理只保证直属审核进程，CLI自行启动的后代进程仍需宿主级约束。
+`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；Windows活动句柄导致轮换失败时记录延迟并继续派发。单次审核日志受超时约束，不是磁盘写入硬上限。当前清理只保证直属审核进程，CLI自行启动的后代进程仍需宿主级约束。
 
 是否降低消耗，需要结合实际调用和任务结果衡量。
 
-`status` 提供检索次数、命中次数、注入条目次数与管理员状态计数；检索统计含自动注入和管理员查询。管理员记录真实耗时及 CLI 实际上报的 token 数字，缺失时不估算为零。命中和注入不代表已采用，实际节省的 token 和任务质量仍需使用反馈验证。
+`status` 提供检索次数、命中次数、注入条目次数、管理员状态、全局预算、调度等待原因和 `knowledge_sync_dirty` 数量；检索统计含自动注入和管理员查询。累计检索计数是运行观察，不作为计费账本。知识采用与用量完整度见第八模块。
 
 真实付费模型调用与宿主端 Hook 启用须单独验收；本地离线检查不代表这两项已通过。
 
@@ -266,7 +266,7 @@ Stable 认证绑定正文、来源与反例状态，变化后 effective maturity
 
 `knowledge-release-prepare` 保存紧凑清单，引用 ID、正文修订、来源／生命周期版本、成熟度、健康和摘要哈希，不复制正文或日志。`knowledge-release-commit RELEASE_ID` 在同一事务内重核有效知识全集、来源快照和父批次，变化则拒绝并要求重新准备。完成批次不可改写，重复提交回放结果；`knowledge-releases` 和 `knowledge-release ID --offset N --limit N` 分页读取摘要及 added/updated/removed 差异。
 
-`knowledge-daily-release` 将准备／提交组合成显式的一步入口，有变化才发布，无变化跳过，也不新增管理员模型调用。此入口没有创建定时任务；第八模块或操作者决定调用时机。
+`knowledge-daily-release` 将准备／提交组合成显式的一步入口，有变化才发布，无变化跳过，也不新增管理员模型调用。操作者可显式调用，也可启用第八模块的 `scheduler.auto_release` 安排正式知识批次；不会将候选自动转为正式知识。
 
 `knowledge-release-rollback ID --expected-head CURRENT --request-id REQUEST` 只回退分发清单：历史目标必须仍为当前有效修订、来源有效且无反例，保存新的回退批次；不会复活撤销知识、倒退正文或撤销后来新增知识。当前 Runtime 检索仍使用本地 active，批次指针尚未作为检索可见性过滤器。知识批次与 `release.py` 管理的软件运行副本分别维护。
 
@@ -300,6 +300,28 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 - 技能和检索提示属于软约束。证据引用、版本与服务角色可由程序校验；任意专业结论和全部模型遗漏不能由本工具保证。
 - 不为经验留痕自动生成项目复盘文件，也不重写现有项目文档。
 
+## 第八模块：调度、准入预算与效果回执
+
+`scheduler.enabled` 默认关闭。启用后，`Stop` 和 `SessionStart` 检查持久待办；有近期可执行工作才派发独立有限 runner，同一数据目录只有一个所属调度执行器。待办按项目及 admin/release/sync 合并，保存 `next_due`、等待原因、租约、最近执行与有限摘要，不复制案例或日志。项目轮转和全局调用并发限制减少单项目挤占。
+
+`scheduler-tick` 执行一轮，`scheduler-run` 在 `max_run_seconds` 内继续处理后续批次。单批达到调用上限后保存下一次执行时间；日额度不足等下一 UTC 周期，未变缺证等材料变化，未知调用及 blocked 同步仍待显式核对。启动失败采用有限退避。runner 退出后待办继续保留，后续 Hook 或显式命令可以续跑；本插件没有安装操作系统定时服务，不能保证退出后全天离线唤醒。
+
+```powershell
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-status
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-tick --max-jobs 3 --max-seconds 60
+python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --all --max-seconds 300
+```
+
+`--all` 仅处理同一数据目录已经登记的项目。`scheduler.auto_release` 默认关闭，启用后按 `release_interval_seconds` 打包已正式知识；无变化跳过，容量不足保留诊断。`scheduler.sync_enabled` 默认关闭，并且必须同时启用 Hindsight 才分发。调度不替代治理授权，不执行管理员提出的撤销、修改或反例处置。
+
+管理员预算独立于普通任务的余额快照和程序批次时长。`admin.max_concurrent_calls` 默认 1；`admin.max_reported_tokens_per_day` 默认 null，设置后按 `token_reservation_per_call` 先预留，再依据完整的 input+output 上报结算，缓存输入属于输入量而不重复相加。未知或部分上报保留预留，已知超量仍展示，不因失败、重试或换号清零。该参数是上报用量的准入门槛，执行器没有严格输出上限时，单次仍可能超过预留；本地账本不代表订阅余额或实际货币账单。
+
+调用用量区分 complete/partial/unknown，流式累计与最近16条诊断预览分开；预览裁剪不丢累计。读取和行长仍有界，超过读取边界时标 partial；缺失不当零。用量观察追加幂等记录，空补量不覆盖已有数字，矛盾报告保留冲突和保守消费量，不将不同累计快照重复求和。原始临时调用日志不作为长期知识正文保存。
+
+普通 Agent 真正使用已展示知识时，可调用 `knowledge_use` 提供准确知识修订、任务 ID/revision/write_version、幂等键和可选 `operation_id`。Runtime核句柄、当前任务或assignment、宿主版本及实际展示；关联操作必须有同边界的Pre记录，且展示发生在该操作之前。采用声明保持 reported，操作结果与来源健康查询时重算；成功后来转冲突或知识撤销会反映在观察中，不增加执行权限，也不要求复盘文档。
+
+`learning-effects --days 30` 或 `status.learning_effects` 返回窗口内声明采用和首次唯一展示数，区分 Hook/MCP；动态操作与来源状态仅统计最近200个声明，显示样本量及截断。重复展示按准确任务版本、Agent、宿主、知识修订和方式去重，窗口使用首次展示时间。展示不表示阅读，声明采用不证明因果，工具成功不证明专业结论正确或用户验收；普通任务总用量未接入前，不能声称净节省百分比。
+
 ## CLI 入口
 
 用 `python scripts/learning.py --help` 查看实际参数。全局参数 `--home`、`--workspace` 放在子命令之前。
@@ -307,6 +329,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | 子命令 | 用途 |
 |---|---|
 | `status` | 读取运行状态 |
+| `learning-effects`、`knowledge-use` | 时间窗效果观察及准确任务下的简短采用声明 |
+| `scheduler-status`、`scheduler-tick`、`scheduler-run` | 持久待办状态、有界单轮和有界续跑 |
 | `session-bind` | 受信本地入口登记明确会话／子 Agent，返回可验证句柄 |
 | `account-changed` | 通知登录边界变化，使旧连接失效；支持通知 ID 去重 |
 | `task` | 保存明确任务，支持任务ID与write_version并发检查、`--new-task` 和 `--resume` |
@@ -328,10 +352,12 @@ python scripts/learning.py --workspace "D:\Projects\my-project" sync
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.9.0 检查状态（2026-10-11）
+## 0.10.0 检查状态（2026-10-11）
 
-489 项离线回归全套通过，耗时约 95 秒；第七模块新增 97 项隔离 SQLite 与模拟分发检查，覆盖撤销CAS、反例恢复、生命周期回执、Stable认证、批次prepare/commit/diff/回退、无变化跳过、旧库迁移、来源与上下文成熟度变化、预检次数、未知写入保留、失租及迟到回执、旧版墓碑与新版同步共存、跨知识证据归属及真实CLI/MCP接口。前六模块回归继续通过。模型输出使用受控测试进程，Hindsight 使用测试服务，不代表真实模型或服务验收。
+594 项离线回归全套通过，耗时 117.935 秒；第八模块新增 105 项，覆盖跨项目安全回收、全局并发和token准入、完整/部分/未知用量、冲突重放、租约跨界回滚、持久续跑与公平调度、缺证和预算等待、迟到及禁用后的所有权、发布和同步启用条件、采用身份/任务/assignment隔离、动态工具冲突/来源/反例、窗口样本、schema9升级与迁移失败回滚、CLI/MCP和Windows日志降级。前七模块兼容回归继续通过。检查使用隔离SQLite、内存审核器与受控进程，不代表真实模型或服务验收。
 
-持久语义聚类、professional/pattern 专门验证、持续调度和总成本评估仍待后续模块；当前 Stable 与知识批次仅使用上述明确规则。
+配置示例与运行默认值一致，技能原有头字段及必需内容静态核对通过；辅助 `quick_validate.py` 因当前解释器缺少 PyYAML 未运行成功，未为此修改用户环境。
+
+持久语义聚类、professional/pattern 专门验证、全天服务唤醒、普通任务用量与货币账单接入仍未实现；当前 Stable、发布、调度和效果观察使用上述明确规则。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。

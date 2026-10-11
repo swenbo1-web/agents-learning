@@ -26,6 +26,8 @@ from .review_packet import ReviewPacketMixin
 from .knowledge_releases import KnowledgeReleaseMixin
 from .knowledge_sync import KnowledgeSyncMixin
 from .publication_state import PublicationStateMixin
+from .scheduler import SCHEDULER_DEFAULTS, SchedulerMixin, validate_scheduler_config
+from .learning_evaluation import LearningEvaluationMixin
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -37,7 +39,10 @@ DEFAULTS = {
     "enforce_task_policy": False, "capture_deliveries": True, "allowed_tools": [], "project_aliases": {},
     "admin": {"enabled": False, "command": ["codex"], "max_calls_per_day": 5,
               "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False,
-              "max_cases_per_batch": 20, "max_calls_per_batch": 2, "max_batch_seconds": 180},
+              "max_cases_per_batch": 20, "max_calls_per_batch": 2, "max_batch_seconds": 180,
+              "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
+              "token_reservation_per_call": 4000},
+    "scheduler": SCHEDULER_DEFAULTS,
     "hindsight": {"enabled": False, "url": "http://127.0.0.1:8888", "bank_id": "",
                   "api_key_env": "HINDSIGHT_API_KEY", "strategy": "alp_chunks",
                   "timeout_seconds": 10},
@@ -188,7 +193,7 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
               KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
-              KnowledgeSyncMixin, PublicationStateMixin):
+              KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin):
     def __init__(self, home=None, config=None):
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
@@ -199,7 +204,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.is_file() else {})
         self.config = json.loads(encode(DEFAULTS))
         for key, value in supplied.items():
-            if key in {"admin", "hindsight"} and isinstance(value, dict):
+            if key in {"admin", "hindsight", "scheduler"} and isinstance(value, dict):
                 self.config[key].update(value)
             else:
                 self.config[key] = value
@@ -210,6 +215,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                       self.config["admin"]["enabled"], self.config["admin"]["auto_publish"], self.config["hindsight"]["enabled"]):
             if not isinstance(value, bool):
                 raise ContractError("enable flags must be booleans")
+        validate_scheduler_config(self.config["scheduler"])
         if not isinstance(self.config["allowed_tools"], list) or not all(isinstance(v, str) for v in self.config["allowed_tools"]):
             raise ContractError("allowed_tools must be a string array")
         if not isinstance(self.config["project_aliases"], dict) or not all(isinstance(k, str) and isinstance(v, str)
@@ -221,7 +227,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}:
+        if version not in set(range(11)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -244,6 +250,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             self._migrate_case_store()
             self._migrate_admin_storage()
             self._migrate_publication_storage()
+            self._migrate_module8_storage()
         except BaseException:
             self.db.close()
             raise
@@ -271,7 +278,17 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             install_releases(self)
             install_sync(self)
             install_publication_triggers(self)
-            self.db.execute("PRAGMA user_version=9")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 9:
+                self.db.execute("PRAGMA user_version=9")
+
+    def _migrate_module8_storage(self):
+        """调度、调用计量与采用回执共享迁移事务；重开不降低 schema。"""
+        from .admin_usage import install_budget
+        with self.transaction():
+            install_budget(self)
+            self._migrate_scheduler_storage()
+            self._migrate_learning_evaluation()
+            self.db.execute("PRAGMA user_version=10")
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -604,19 +621,26 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                         (project, name, value))
 
     def status(self, project):
+        from .admin_usage import admin_budget_status
         counts = {}
         for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts",
-                      "review_receipts", "governance_proposals", "knowledge_actions", "knowledge_releases"):
+                      "review_receipts", "governance_proposals", "knowledge_actions", "knowledge_releases", "knowledge_sync_dirty"):
             counts[table] = self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE project=?", (project,)).fetchone()[0]
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
+        try:
+            budget = admin_budget_status(self)
+        except ContractError:
+            budget = {"admission_status": "invalid_configuration"}
         return {"project_id": project, "home": str(self.home), "host_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
+                "admin_budget": budget, "scheduler": self.scheduler_status(project),
+                "learning_effects": self.learning_effects(project),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
                 "knowledge_release_head": self._release_head(project),
                 "metrics": {r[0]: r[1] for r in self.db.execute("SELECT name,value FROM metrics WHERE project=?", (project,))},
@@ -683,7 +707,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             decision = binding["decision"] if binding else "unobserved"
             if kind == "PreToolUse":
                 recovery_tools = {"mcp__agent_learning__" + name for name in (
-                    "knowledge_search", "knowledge_read", "session_context", "task_update", "case_feedback", "learning_status")}
+                    "knowledge_search", "knowledge_read", "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
                 if self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
                     verdict = self.check_execution(project, conversation, task, raw, assignment)
                     denied, deny_reason = verdict["decision"] == "denied", verdict["reason"]
@@ -767,6 +791,25 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 self._execution_fence(project, conversation, "context_cleared", pause=True)
             if kind == "Stop" and not agent_id and fresh:
                 self._capture_delivery(project, conversation, task, event, raw)
+        schedule_warning = None
+        if fresh and kind in {"Stop", "SessionStart"} and self.config["scheduler"]["enabled"]:
+            token = None
+            try:
+                if self.scheduler_wake(project):
+                    token = self.claim_scheduler_worker()
+                    if token:
+                        self._launch_scheduler(raw["cwd"], token)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                if token:
+                    try:
+                        self.release_scheduler_worker(token)
+                    except sqlite3.Error:
+                        pass
+                try:
+                    self._metric(project, "scheduler_schedule_failed")
+                except sqlite3.Error:
+                    pass
+                schedule_warning = "Agent Learning: 事件已保存，后台调度未确认启动；待办保留。"
         if denied:
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
@@ -783,8 +826,11 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
                                  agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"])
             if text:
-                return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
-        if kind == "Stop" and fresh and self.config["admin"]["enabled"]:
+                result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
+                if schedule_warning:
+                    result["systemMessage"] = schedule_warning
+                return result
+        if kind == "Stop" and fresh and self.config["admin"]["enabled"] and not self.config["scheduler"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
             token = None
             try:
@@ -796,15 +842,25 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                     self._launch_admin(raw["cwd"], token)
             except (OSError, ValueError, TypeError, sqlite3.Error):
                 if token:
-                    release_dispatch(self, project, token)
+                    try:
+                        release_dispatch(self, project, token)
+                    except sqlite3.Error:
+                        pass
                 try:
                     self._metric(project, "admin_schedule_failed")
                 except sqlite3.Error:
                     pass
                 return {"systemMessage": "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"}
-        return {}
+        return {"systemMessage": schedule_warning} if schedule_warning else {}
 
     def _launch_admin(self, workspace, dispatch_token=None):
+        self._launch_background(workspace, "admin-batch",
+                                ["--dispatch-token", dispatch_token] if dispatch_token else [])
+
+    def _launch_scheduler(self, workspace, worker_token):
+        self._launch_background(workspace, "scheduler-run", ["--all", "--worker-token", worker_token])
+
+    def _launch_background(self, workspace, command, arguments):
         import subprocess
         import sys
         options = {"start_new_session": True} if os.name != "nt" else {
@@ -812,9 +868,16 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         env = dict(os.environ, ALP_HOME=str(self.home), ALP_DISABLED="1")
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
         log_path = self.home / "background.log"
-        if log_path.exists() and log_path.stat().st_size > 1024 * 1024:
-            log_path.replace(self.home / "background.previous.log")
+        try:
+            if log_path.exists() and log_path.stat().st_size > 1024 * 1024:
+                log_path.replace(self.home / "background.previous.log")
+        except OSError:
+            # Windows 活动写句柄可能禁止重命名，轮换失败不能阻断已授权派发。
+            try:
+                self._metric(self.project(workspace), "background_log_rotation_deferred")
+            except (OSError, sqlite3.Error):
+                pass
         with log_path.open("ab") as log:
             subprocess.Popen([sys.executable, "-m", "agent_learning.cli", "--home", str(self.home), "--workspace",
-                              str(workspace), "admin-batch", *(["--dispatch-token", dispatch_token] if dispatch_token else [])], stdin=subprocess.DEVNULL,
+                              str(workspace), command, *arguments], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, env=env, **options)

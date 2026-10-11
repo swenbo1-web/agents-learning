@@ -139,6 +139,8 @@ class Module6LifecycleTests(unittest.TestCase):
         self.assertEqual(self.row(call)["pid"], 12345)
 
     def test_recovery_project_filter_and_now(self):
+        # 此案例验证项目过滤，明确允许两个项目同时占用新全局并发槽。
+        self.r.config["admin"]["max_concurrent_calls"] = 2
         first = self.claim()
         other = self.r.project(Path(self.temp.name) / "other")
         second = self.claim(other, "other-case")

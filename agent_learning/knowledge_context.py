@@ -51,6 +51,9 @@ class KnowledgeContextMixin:
         # 活跃恢复集合有界；完整历史追踪由索引化台账保存。
         self.db.execute(f"UPDATE {table} SET injected=?,shown=?,source_states=? WHERE {where}",
                         (encode(current[-32:]), encode(shown[-64:]), encode(list(states.items())[-8:]), *key))
+        # 保存准确任务下的有限展示身份，不把展示推断为知识采用。
+        self.record_task_exposure(project, conversation, agent_id, items,
+                                  method="hook" if injected else "mcp")
 
     def record_exposure(self, project, context_handle, items, expected_epoch=None):
         """MCP仅登记实际返回资料；未绑定查询不猜测会话归属。"""

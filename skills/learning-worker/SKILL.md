@@ -7,7 +7,7 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 
 继续完成用户当前授权的任务。知识服务提供经验和记录能力，不扩大任务范围。
 
-- 使用普通 Agent 的 `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`learning_status` 工具。发布和撤销由独立权限入口处理。
+- 使用普通 Agent 的 `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`knowledge_use`、`learning_status` 工具。发布和撤销由独立权限入口处理。
 - 首次写入使用当前 Hook 提供的 `context_handle`；可先用 `session_context(context_handle=...)` 读取会话和任务版本。压缩后恢复这份结构状态，不猜 `conversation_id` 或最新会话；没有句柄时只查询项目知识。连接绑定后不能换用另一个句柄。
 - `reconnect_required` 表示登录边界变化，需宿主重连并提供新句柄；项目知识仍共享，不能重置额度或重跑结果未知的操作。子 Agent 的句柄只能读取父任务边界并反馈自身证据，不能覆盖父任务。
 - 有相关注入知识时，先检查适用条件和证据等级；新问题、实际报错或任务目标变化时再补查。普通续聊不强制重复检索。
@@ -21,6 +21,7 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 - 明确交付后更新为 `delivered`。`Stop` 按交付状态的 write_version 记录公开结果；同轮重复停止不重复采集，明确恢复后再次交付会追加历史，无需另写总结。
 - 用 `case_feedback` 简短反馈实际问题结果和真实 `event_refs`；父 Agent 同时传 `expected_task_id` 和 `expected_task_revision`。子 Agent 按固定 assignment 反馈；assignment 过期后仍归属原任务，不继承新父任务的权限。没有证据时保留未知。
 - 同一次 `case_feedback` 提供 `idempotency_key`，失败重试沿用原键和原参数；真实再次发生使用新键。知识反例同时传 `knowledge_id`、`knowledge_revision` 和 `feedback_kind=counterexample`，不猜被反馈的修订，也不直接撤销知识。
+- 真正采用已展示知识时，用 `knowledge_use` 简短记录准确知识修订、当前任务 ID/revision/write_version 和幂等键；有实际关联操作时提供 `operation_id`。无需写复盘文档，不为只看到或未采用的知识制造回执。采用声明、工具观察和用户验收分别判断，不能用工具成功推断专业结论正确。
 - `pending_counterexample_count` 表示知识存在待核实反例，先核对相关依据；它不等于结论已被证伪。`recovery_observed` 仅表示观察到潜在后续成功，不等于已解决或用户验收。
 - 案例被审核或生成新知识后，旧反例仍可能未处置；继续核对知识的准确修订及当前提醒，普通 Agent 不自行执行知识治理或等待后台整理。
 - 系统记录可观察的消息、工具事件和结果。只有缺少关键决策依据时才补一句说明，无需额外生成复盘文件。

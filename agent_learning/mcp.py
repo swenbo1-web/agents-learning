@@ -64,6 +64,14 @@ WORKER_TOOLS = [
         "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
         "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
     }, ["summary"])),
+    ("knowledge_use", "简短声明实际采用的知识修订，可关联本任务工具操作；声明和工具观察不证明因果或用户验收。", schema({
+        "context_handle": NONEMPTY, "knowledge_id": NONEMPTY,
+        "knowledge_revision": {"type": "integer", "minimum": 1},
+        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
+        "expected_write_version": {"type": "integer", "minimum": 1},
+        "operation_id": NONEMPTY,
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+    }, ["knowledge_id", "knowledge_revision", "expected_task_id", "expected_task_revision", "expected_write_version"])),
     ("learning_status", "查看本项目记录和待治理状态。", schema({})),
 ]
 ADMIN_TOOLS = [
@@ -217,6 +225,12 @@ class Server:
             if name == "task_update": return r.task_update(p, **body)
             return r.feedback(p, **body)
         if name == "learning_status": return r.status(p)
+        if name == "knowledge_use":
+            handle = self._handle(args)
+            body = {key: value for key, value in args.items() if key != "context_handle"}
+            result = r.knowledge_use(p, context_handle=handle, expected_epoch=self.epoch, **body)
+            self.context_handle = handle
+            return result
         if name == "problem_list": return r.problems(p, **args)
         if name == "review_packet": return r.review_packet(p, **args)
         if name == "submit_candidate": return r.submit_candidate(p, expected_epoch=self.epoch, **args)

@@ -63,27 +63,26 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
     runtime.assert_host_epoch(host_epoch)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
         raise ContractError("invalid administrator lease timeout")
-    recover_calls(runtime, project)
+    # 日额度跨项目共享，安全释放也必须先覆盖全部项目。
+    recover_calls(runtime)
     active = runtime.db.execute(
         "SELECT id,state FROM admin_calls WHERE project=? AND state IN ('reserved','launch_intent','started') "
         "ORDER BY created,id LIMIT 1", (project,)).fetchone()
     if active:
         return {"status": "waiting_for_review", "call_id": active["id"], "active_state": active["state"]}
+    from .admin_usage import admin_budget_status, reserve_usage
     current = time.time()
-    day = time.strftime("%Y-%m-%d", time.gmtime(current))
-    count = runtime.db.execute("SELECT COUNT(*) FROM admin_calls WHERE day=? "
-                               "AND state NOT IN ('not_started','deduplicated')", (day,)).fetchone()[0]
-    maximum = runtime.config["admin"]["max_calls_per_day"]
-    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 0:
-        raise ContractError("invalid administrator daily budget")
-    if count >= maximum:
-        return {"status": "budget_exhausted"}
+    budget = admin_budget_status(runtime, now=current)
+    if budget["admission_status"] != "available":
+        return {"status": budget["admission_status"], "budget": budget}
+    day = budget["utc_day"]
     call_id, owner = str(uuid.uuid4()), str(uuid.uuid4())
     lease_until = current + timeout + 30
     runtime.db.execute(
         "INSERT INTO admin_calls(id,project,problem,revision,day,state,created,fingerprint,host_epoch,owner,lease_until) "
         "VALUES(?,?,?,?,?,'reserved',?,?,?,?,?)",
         (call_id, project, problem, revision, day, current, fingerprint, host_epoch, owner, lease_until))
+    reserve_usage(runtime, call_id)
     runtime.db.execute("UPDATE admin_calls SET retry_allowed=2 WHERE project=? AND problem=? AND revision=? "
                        "AND retry_allowed=1 AND id!=?", (project, problem, revision, call_id))
     return {"status": "reserved", "call_id": call_id, "owner": owner, "lease_until": lease_until,
@@ -145,7 +144,8 @@ def finish_call(runtime, call_id, state, usage=None, response=None):
         elif final == "account_changed_unknown" and known_no_start and row["launch_intent"] is None:
             final = "not_started"
         # 已完成或已回收状态只能补计量，不能由旧执行器改变结论或再次开始。
-        encoded_usage = None if usage is None else encode(usage)
+        from .admin_usage import record_usage
+        encoded_usage = None if usage is None else encode(record_usage(runtime, call_id, usage))
         runtime.db.execute("UPDATE admin_calls SET state=?,finished=COALESCE(finished,?),lease_until=NULL,"
                            "usage=CASE WHEN ? IS NULL THEN usage ELSE ? END WHERE id=?",
                            (final, time.time(), encoded_usage, encoded_usage, call_id))

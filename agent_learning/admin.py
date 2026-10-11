@@ -86,52 +86,87 @@ def _fingerprint(packet):
 
 
 def _usage(log_path, elapsed):
-    """只保留 CLI 实际上报的有限数字，不估算费用，不把缺失值写成零。"""
-    records, truncated = [], False
+    """有界流式累计全部可读报告；预览裁剪不丢累计，缺失不写成零。"""
+    records, totals, seen = [], {}, {}
+    truncated, incomplete, count, scanned = False, False, 0, 0
     if log_path is None:
-        return {"elapsed_seconds": round(elapsed, 3), "token_usage": [], "log_tail_truncated": False}
+        return {"elapsed_seconds": round(elapsed, 3), "token_usage": [], "token_totals": {},
+                "completeness": "unknown", "log_tail_truncated": False, "preview_truncated": False,
+                "reported_turns": 0}
     try:
         with log_path.open("rb") as stream:
-            size = log_path.stat().st_size
-            if size > 2 * 1024 * 1024:
-                stream.seek(size - 2 * 1024 * 1024)
-                stream.readline(65537)
-                truncated = True
             while True:
                 line = stream.readline(65537)
                 if not line:
                     break
+                scanned += len(line)
+                if scanned > 64 * 1024 * 1024:
+                    truncated = True
+                    break
                 if len(line) > 65536:
                     truncated = True
+                    # 跳过整条超长记录，不把其余片段当成新的完整事件。
+                    while line and not line.endswith(b"\n"):
+                        line = stream.readline(65537)
+                        scanned += len(line)
+                        if scanned > 64 * 1024 * 1024:
+                            break
+                    if scanned > 64 * 1024 * 1024:
+                        break
                     continue
                 try:
                     event = json.loads(line)
                 except (UnicodeError, ValueError):
+                    incomplete |= line.lstrip().startswith(b"{")
                     continue
                 if not isinstance(event, dict) or event.get("type") != "turn.completed":
                     continue
                 usage = event.get("usage")
                 if not isinstance(usage, dict):
+                    incomplete = True
                     continue
                 numeric = {key: value for key, value in usage.items()
                            if key in _TOKEN_FIELDS and isinstance(value, int)
                            and not isinstance(value, bool) and value >= 0}
+                incomplete |= not {"input_tokens", "output_tokens"} <= numeric.keys()
+                incomplete |= any(key in _TOKEN_FIELDS and key not in numeric for key in usage)
+                incomplete |= ("total_tokens" in numeric and {"input_tokens", "output_tokens"} <= numeric.keys()
+                               and numeric["total_tokens"] != numeric["input_tokens"] + numeric["output_tokens"])
+                identity = event.get("turn_id", event.get("id"))
+                if isinstance(identity, str) and identity:
+                    if identity in seen:
+                        if seen[identity] != numeric:
+                            incomplete = True
+                            # 冲突报告保留已观察最大值；不重复累加同一turn。
+                            old = seen[identity]
+                            for key, value in numeric.items():
+                                if value > old.get(key, 0):
+                                    totals[key] = totals.get(key, 0) + value - old.get(key, 0)
+                                    old[key] = value
+                        continue
+                    seen[identity] = dict(numeric)
                 if numeric:
+                    count += 1
+                    for key, value in numeric.items():
+                        totals[key] = totals.get(key, 0) + value
                     records.append(numeric)
                     if len(records) > 16:
                         records.pop(0)
-                        truncated = True
+                else:
+                    incomplete = True
     except OSError:
         truncated = True
-    return {"elapsed_seconds": round(elapsed, 3), "token_usage": records,
+    return {"elapsed_seconds": round(elapsed, 3), "token_usage": records, "token_totals": totals,
+            "reported_turns": count, "preview_truncated": count > 16,
+            "completeness": "complete" if count and not truncated and not incomplete else "partial" if totals else "unknown",
             "log_tail_truncated": truncated}
 
 
 def _finish(runtime, call_id, state, log_path, started_at):
     from .admin_lifecycle import finish_call
     usage = _usage(log_path, time.monotonic() - started_at)
-    finish_call(runtime, call_id, state, usage=usage)
-    return usage
+    row = finish_call(runtime, call_id, state, usage=usage)
+    return json.loads(row["usage"])
 
 
 def _settings(cfg):
@@ -146,6 +181,10 @@ def _settings(cfg):
         value = cfg[key]
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
             raise ContractError(f"invalid admin.{key}")
+    from .admin_usage import budget_settings
+    class Settings:
+        config = {"admin": cfg}
+    budget_settings(Settings())
     return list(command), cfg["timeout_seconds"]
 
 
@@ -312,6 +351,8 @@ def _accept_response(runtime, project, reserved, response):
                     call_id, dict(response, **result, decision=response["decision"]))
     from .admin_queue import scan_signature
     remember_check(runtime, project, reserved["selected"], scan_signature(runtime, project))
+    # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
+    validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
     return result
 
 
@@ -376,6 +417,10 @@ def admin_once(runtime, project, problem_id=None, *, _deadline=None, _scan_limit
         with runtime.transaction():
             result = _accept_response(runtime, project, reserved, response)
             result["usage"] = _finish(runtime, call_id, response["decision"], log_path, started_at)
+            actual = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
+            if actual != response["decision"]:
+                # 同一事务回滚候选、治理提议、回执和错误终态；异常路径补真实未知结果。
+                raise ContractError("administrator decision could not commit with its call state")
         return dict(result, **context)
     except (OSError, ValueError, TypeError, ContractError) as exc:
         usage = _finish(runtime, call_id, "not_started" if process is None else "failed", log_path, started_at)
@@ -389,7 +434,7 @@ def admin_once(runtime, project, problem_id=None, *, _deadline=None, _scan_limit
             temporary.cleanup()
 
 
-def admin_batch(runtime, project, *, dispatch_token=None):
+def admin_batch(runtime, project, *, dispatch_token=None, _deadline=None):
     from .admin_queue import release_dispatch
     cfg = runtime.config["admin"]
     results, scanned, calls = [], 0, 0
@@ -403,15 +448,24 @@ def admin_batch(runtime, project, *, dispatch_token=None):
             if not row or row["host_epoch"] != runtime.host_epoch() or row["lease_until"] <= time.time():
                 return {"status": "dispatch_expired", "items": []}
         epoch = runtime.host_epoch()
+        deadline = started + cfg["max_batch_seconds"]
+        if _deadline is not None:
+            if not isinstance(_deadline, (int, float)) or isinstance(_deadline, bool):
+                raise ContractError("invalid administrator batch deadline")
+            import math
+            if not math.isfinite(_deadline):
+                raise ContractError("invalid administrator batch deadline")
+            deadline = min(deadline, _deadline)
         while scanned < cfg["max_cases_per_batch"] and calls < cfg["max_calls_per_batch"]:
             runtime.assert_host_epoch(epoch)
-            result = admin_once(runtime, project, _deadline=started + cfg["max_batch_seconds"],
+            result = admin_once(runtime, project, _deadline=deadline,
                                 _scan_limit=min(10, cfg["max_cases_per_batch"] - scanned))
             results.append(result)
             scanned += result.get("scanned_count", 0)
             calls += int("call_id" in result and "usage" in result
                          and result["status"] not in {"not_started", "batch_time_exhausted"})
-            if result["status"] in {"disabled", "idle", "budget_exhausted", "batch_time_exhausted", "waiting_for_review", "not_started"}:
+            if result["status"] in {"disabled", "idle", "budget_exhausted", "token_budget_exhausted", "concurrency_limited",
+                                    "batch_time_exhausted", "waiting_for_review", "not_started"}:
                 break
             if result.get("scanned_count", 0) == 0:
                 break

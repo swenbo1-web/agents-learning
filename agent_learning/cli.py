@@ -19,6 +19,26 @@ def parser():
     p.add_argument("--workspace", default=str(Path.cwd()), help="当前项目目录")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    effects = sub.add_parser("learning-effects", help="按时间窗查看声明采用与实际工具观察，不推断净节省")
+    effects.add_argument("--days", type=int, default=30)
+    use = sub.add_parser("knowledge-use", help="记录一次知识采用声明，不增加执行权限")
+    use.add_argument("--context-handle", required=True)
+    use.add_argument("--knowledge-id", required=True)
+    use.add_argument("--knowledge-revision", required=True, type=int)
+    use.add_argument("--expected-task-id", required=True)
+    use.add_argument("--expected-task-revision", required=True, type=int)
+    use.add_argument("--expected-write-version", required=True, type=int)
+    use.add_argument("--operation-id")
+    use.add_argument("--idempotency-key")
+    for name in ("scheduler-status", "scheduler-tick", "scheduler-run"):
+        scheduled = sub.add_parser(name, help="持久调度的状态、有界单轮或有界续跑；默认关闭")
+        scheduled.add_argument("--all", action="store_true", help="处理同一数据目录已登记项目")
+        if name != "scheduler-status":
+            scheduled.add_argument("--max-seconds", type=float)
+        if name == "scheduler-tick":
+            scheduled.add_argument("--max-jobs", type=int)
+        if name == "scheduler-run":
+            scheduled.add_argument("--worker-token", help=argparse.SUPPRESS)
     serve = sub.add_parser("serve")
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
     serve.add_argument("--context-handle", default=os.environ.get("ALP_CONTEXT_HANDLE"),
@@ -181,6 +201,16 @@ def main(argv=None):
             Server(runtime, project, args.role, context_handle=args.context_handle).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
+        elif args.command == "learning-effects": result = runtime.learning_effects(project, days=args.days)
+        elif args.command == "knowledge-use": result = runtime.knowledge_use(
+            project, args.context_handle, args.knowledge_id, args.knowledge_revision,
+            args.expected_task_id, args.expected_task_revision, args.expected_write_version,
+            operation_id=args.operation_id, idempotency_key=args.idempotency_key)
+        elif args.command == "scheduler-status": result = runtime.scheduler_status(None if args.all else project)
+        elif args.command == "scheduler-tick": result = runtime.scheduler_tick(
+            None if args.all else project, max_jobs=args.max_jobs, max_seconds=args.max_seconds)
+        elif args.command == "scheduler-run": result = runtime.scheduler_run(
+            None if args.all else project, max_seconds=args.max_seconds, worker_token=args.worker_token)
         elif args.command == "session-bind": result = runtime.register_context(project, args.conversation, agent_id=args.agent_id)
         elif args.command == "task": result = runtime.task_update(project, args.conversation, args.goal,
                                                 json.loads(args.scope) if args.scope is not None else None,
