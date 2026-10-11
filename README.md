@@ -32,7 +32,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。接入 Agent 请继续阅读[本地运行](#本地运行)与安装说明。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
+第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。要在 Codex 中使用，请按[桌面端与 CLI 安装步骤](#在-codex-中安装桌面端与-cli)完成导出、安装和 Hook 信任。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
 
 ## 项目是怎样形成的
 
@@ -295,20 +295,70 @@ python scripts/learning.py status
 
 配置文件与状态库分离。不要在配置文件写入 API 密钥；可选 Hindsight 从配置指定的环境变量读取密钥。
 
-## 接入插件与 MCP
+## 在 Codex 中安装（桌面端与 CLI）
+
+### 1. 检查环境
+
+需要 Python 3.10+ 和支持插件命令的 Codex CLI。在与桌面端相同的系统用户及 `CODEX_HOME` 下运行；自定义 `CODEX_HOME` 会改变插件配置和缓存位置。
 
 ```powershell
-python scripts/learning.py install "D:\Plugins\agent-learning"
+python --version
+codex --version
+codex plugin --help
 ```
 
-`install` 先验证资源，在临时目录完成复制后原子发布。MCP 和 Hook 均指向同一份固定运行副本，不依赖导出目录或宿主缓存中的另一份代码。发布清单记录版本、协议和逐文件摘要，入口核对内容一致性；这不是数字签名或操作系统权限隔离。它不更改既有 Codex 配置。导出副本含本地插件目录，随后运行：
+如果没有 `codex` 命令，先按[官方 Codex CLI 说明](https://learn.chatgpt.com/docs/cli)安装并配置 PATH。桌面端最终通过插件目录管理本地插件；CLI 用于下面的源登记、安装和诊断。
+
+### 2. 导出本机插件
+
+下载并解压上方源码 ZIP，在解压后的仓库目录执行。导出目标应是源码和知识数据目录之外的新目录：
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning"
+```
+
+也可安装下载的 wheel 后从包入口导出，两种方式选一种：
+
+```powershell
+python -B -m pip install "D:\Downloads\agent_learning_plugin-0.13.0-py3-none-any.whl"
+python -B -m agent_learning.cli install "D:\Plugins\agent-learning"
+```
+
+macOS／Linux 用自己的 Python 和绝对路径，例如 `python3 -B scripts/learning.py install /absolute/path/agent-learning`。目标已存在时使用下方的[覆盖更新](#覆盖更新已有安装)。不要把其他设备导出的目录直接拿来安装：其中已绑定那台设备的解释器和固定运行路径。
+
+### 3. 登记插件源并安装
 
 ```powershell
 codex plugin marketplace add "D:\Plugins\agent-learning"
 codex plugin add agent-learning@agent-learning-local
+codex plugin list --json
 ```
 
-在 Codex 中开启新对话，审阅并信任 Hooks（CLI 可用 `/hooks`）。安装器不会代替用户设置 Hook 信任。固定运行副本默认位于 Windows 的 `%LOCALAPPDATA%\AgentLearning\runtime-releases` 或 POSIX 的 `~/.local/share/agent-learning/runtime-releases`。保留这个目录和对应解释器；移动导出源不影响已生成的运行入口。运行目录可通过 `install --runtime-store PATH` 或 `ALP_RUNTIME_STORE` 指定，不随临时 `ALP_HOME` 改变。Hook 的信任规则见 [官方插件说明](https://developers.openai.com/plugins/build/plugins)。
+插件 ID 为 `agent-learning@agent-learning-local`，界面名称为 **Agent Learning**。检查列表中的安装与启用状态。重启 Codex 桌面端，在插件目录中选择 `agent-learning-local` 来源，确认该插件已安装并启用；CLI 用户也可在交互会话用 `/plugins` 查看。[官方插件安装与来源说明](https://developers.openai.com/plugins/build/plugins)
+
+### 4. 信任 Hooks 并验证接入
+
+在要使用插件的项目中开启新对话，按宿主提示审阅并信任插件 Hooks。CLI 可进入该项目后运行 `codex`，在交互界面输入 `/hooks`；它不是 PowerShell 命令。安装、启用插件和信任 Hooks 是不同步骤，未信任的插件 Hooks 会被跳过。[官方 Hook 信任说明](https://learn.chatgpt.com/docs/hooks)
+
+在新对话中可以要求 Agent：
+
+> 使用 Agent Learning 的 learning_status 确认当前项目，再把本轮 Hook 提供的 context_handle 传给 session_context，检查 context_bound 是否为 true。没有句柄时请报告缺少接入，不要猜测。
+
+`learning_status` 返回预期的 `project_id`，且使用真实句柄的 `session_context` 返回 `context_bound=true`，才说明本轮会话身份已接入。仅能搜索知识不能证明 Hooks 正常运行。初始知识为空是正常状态，安装不会凭空生成经验，管理员默认也不自动调用模型。
+
+| 现象 | 检查方法 |
+|---|---|
+| 没有 `codex` 或 `plugin` 子命令 | 检查 PATH 与 CLI 版本，按官方说明更新 CLI |
+| 桌面端看不到插件 | 核对系统用户、`CODEX_HOME`、插件源列表和当前来源，重启后检查 |
+| 有知识工具，没有本轮句柄 | 检查插件启用状态与 Hook 信任；使用新的项目对话验证 |
+| MCP／Hook 无法启动 | 核对导出回执中的解释器及 `runtime_directory` 是否仍存在 |
+| 更新后仍显示旧运行版本 | 重启宿主并重新审阅 Hooks；按下方更新说明检查缓存 |
+
+### 安装契约与 MCP 入口
+
+`install` 先验证资源，在临时目录完成复制后原子发布。MCP 和 Hook 均指向同一份固定运行副本，不依赖导出目录或宿主缓存中的另一份代码。发布清单记录版本、协议和逐文件摘要，入口核对内容一致性；这不是数字签名或操作系统权限隔离。导出不会更改既有 Codex 配置；上面的 `codex plugin` 命令才向宿主登记并安装。
+
+固定运行副本默认位于 Windows 的 `%LOCALAPPDATA%\AgentLearning\runtime-releases` 或 POSIX 的 `~/.local/share/agent-learning/runtime-releases`。保留这个目录和对应解释器；移动导出源不影响已生成的运行入口。运行目录可通过 `install --runtime-store PATH` 或 `ALP_RUNTIME_STORE` 指定，不随临时 `ALP_HOME` 改变。
 
 需要在配置损坏时也拒绝覆盖工具调用，导出时显式使用 `install PATH --hook-mode enforce`，将保护模式写入可信入口。`--hook-mode observe` 固定观察模式；省略时依据当前有效配置。更换入口命令后需由宿主重新审阅 Hook 信任。
 

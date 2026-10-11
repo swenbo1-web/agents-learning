@@ -32,7 +32,7 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. For Agent integration, continue with [local operation](#local-operation) and installation below. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. For Codex integration, follow the [desktop and CLI installation steps](#install-in-codex-desktop-and-cli) to export, install and trust Hooks. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## How the project took shape
 
@@ -295,20 +295,70 @@ python scripts/learning.py status
 
 Configuration and the state database are separate. Do not put API keys in the configuration file; the optional Hindsight adapter reads its key from the configured environment variable.
 
-## Plugin and MCP integration
+## Install in Codex (desktop and CLI)
+
+### 1. Check prerequisites
+
+Use Python 3.10+ and a Codex CLI with plugin commands. Run under the same operating system user and `CODEX_HOME` as the desktop app; a custom `CODEX_HOME` changes plugin configuration and cache locations.
 
 ```powershell
-python scripts/learning.py install "D:\Plugins\agent-learning"
+python --version
+codex --version
+codex plugin --help
 ```
 
-`install` validates resources, copies them into a temporary directory and publishes the export atomically. Both MCP and Hooks point to the same fixed runtime copy, rather than another copy in the export directory or host cache. The release manifest records the version, protocol and digest of each file; entry points check that their contents agree. This is neither a digital signature nor operating system permission isolation. The installer does not change existing Codex configuration. The export contains a local plugin catalog. Then run:
+If `codex` is unavailable, install it and configure PATH using the [official Codex CLI guide](https://learn.chatgpt.com/docs/cli). The desktop plugin directory manages local plugins; the CLI provides source registration, installation and diagnostics below.
+
+### 2. Export for this machine
+
+Download and extract the source ZIP, then run from the extracted repository. Choose a new export directory outside the source and knowledge data directories:
+
+```powershell
+python -B scripts/learning.py install "D:\Plugins\agent-learning"
+```
+
+Alternatively, install the downloaded wheel and export through its package entry point. Choose one of these two methods:
+
+```powershell
+python -B -m pip install "D:\Downloads\agent_learning_plugin-0.13.0-py3-none-any.whl"
+python -B -m agent_learning.cli install "D:\Plugins\agent-learning"
+```
+
+On macOS/Linux, use your interpreter and an absolute path, for example `python3 -B scripts/learning.py install /absolute/path/agent-learning`. If the target exists, use [installation upgrades](#update-an-existing-installation) below. Do not install another machine's export: it binds that machine's interpreter and fixed runtime paths.
+
+### 3. Register the source and install
 
 ```powershell
 codex plugin marketplace add "D:\Plugins\agent-learning"
 codex plugin add agent-learning@agent-learning-local
+codex plugin list --json
 ```
 
-Start a new conversation in Codex, then review and trust the Hooks (the CLI provides `/hooks`). The installer cannot grant Hook trust on the user's behalf. By default, fixed runtime copies reside in `%LOCALAPPDATA%\AgentLearning\runtime-releases` on Windows or `~/.local/share/agent-learning/runtime-releases` on POSIX. Retain that directory and its interpreter. Moving the export source does not affect generated runtime entry points. Set the runtime directory with `install --runtime-store PATH` or `ALP_RUNTIME_STORE`; a temporary `ALP_HOME` does not change it. See the [official plugin documentation](https://developers.openai.com/plugins/build/plugins) for Hook trust requirements.
+The plugin ID is `agent-learning@agent-learning-local`; its display name is **Agent Learning**. Check its installed and enabled state in the list. Restart Codex desktop, select the `agent-learning-local` source in the plugin directory, and confirm the plugin is installed and enabled. CLI users can also inspect it with `/plugins` in an interactive session. [Official plugin installation and sources](https://developers.openai.com/plugins/build/plugins)
+
+### 4. Trust Hooks and verify integration
+
+Start a new conversation in your target project and review/trust the plugin Hooks when prompted. In the CLI, launch `codex` from that project and enter `/hooks` interactively; it is not a PowerShell command. Installation, enablement and Hook trust are separate steps. Untrusted plugin Hooks are skipped. [Official Hook trust guidance](https://learn.chatgpt.com/docs/hooks)
+
+In a new conversation, ask the Agent:
+
+> Use Agent Learning's learning_status to confirm the project, then pass the context_handle supplied by this turn's Hook to session_context and check that context_bound is true. If no handle was supplied, report the missing integration rather than guessing.
+
+Verify the expected `project_id` in `learning_status` and `context_bound=true` when using a real handle. Search tools alone do not prove Hooks are running. An initially empty knowledge base is normal; installation invents no experience and administrator model calls remain disabled by default.
+
+| Symptom | Check |
+|---|---|
+| No `codex` command or `plugin` subcommand | Check PATH and CLI version; update using the official guide |
+| Plugin absent in desktop | Check the OS user, `CODEX_HOME`, registered sources and selected source; restart |
+| Knowledge tools present but no current handle | Check plugin enablement and Hook trust; verify in a new project conversation |
+| MCP/Hook entry cannot start | Check the receipt's interpreter and `runtime_directory` still exist |
+| Old runtime still appears after an update | Restart, review changed Hooks and inspect the cache using the update guidance below |
+
+### Installation contract and MCP entry
+
+`install` validates resources, copies them into a temporary directory and publishes the export atomically. Both MCP and Hooks point to the same fixed runtime copy, rather than another copy in the export directory or host cache. The release manifest records the version, protocol and digest of each file; entry points check that their contents agree. This is neither a digital signature nor operating system permission isolation. Export does not change Codex configuration; the `codex plugin` commands above register and install it.
+
+By default, fixed runtime copies reside in `%LOCALAPPDATA%\AgentLearning\runtime-releases` on Windows or `~/.local/share/agent-learning/runtime-releases` on POSIX. Retain that directory and its interpreter. Moving the export source does not affect generated runtime entry points. Set the runtime directory with `install --runtime-store PATH` or `ALP_RUNTIME_STORE`; a temporary `ALP_HOME` does not change it.
 
 To make covered tool calls fail closed even when configuration is damaged, explicitly export with `install PATH --hook-mode enforce`. This writes the protection mode into the trusted entry point. `--hook-mode observe` fixes observation mode; when omitted, the current effective configuration is used. Changing an entry command requires the host to review Hook trust again.
 
