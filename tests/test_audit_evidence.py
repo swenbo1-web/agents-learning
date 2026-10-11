@@ -69,6 +69,163 @@ class AuditEvidenceTests(unittest.TestCase):
         self.hook("PostToolUse", **values, tool_input={"command": "pwd"})
         self.assertEqual(self.r.db.execute("SELECT state FROM operations").fetchone()[0], "conflict")
 
+    def test_missing_pre_name_learns_first_post_and_invalidates_changed_name(self):
+        values = dict(tool_use_id="unknown-name", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        self.hook("PostToolUse", **values, tool_name="Read", tool_response={"exit_code": 0})
+        event = self.r.db.execute("SELECT id FROM events WHERE type='PostToolUse'").fetchone()[0]
+        problem = self.r.feedback(self.p, "chat", "Recorded success", category="operation", event_refs=[event])
+        body = dict(problem_id=problem["id"], problem_revision=problem["revision"], title="Observed read",
+                    content="The supplied operation completed", category="operation", applicability="This observation",
+                    limitations="No product acceptance claim", evidence_refs=[event], validation_level="tool_success")
+        candidate = self.r.submit_candidate(self.p, **body)
+        published = self.r.publish(self.p, candidate["candidate_id"])
+        self.hook("PostToolUse", **values, tool_name="Bash", tool_response={"exit_code": 0})
+        operation = self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()
+        self.assertEqual(tuple(operation), ("conflict", 1, "Read"))
+        current = self.r.read(self.p, published["knowledge_id"])
+        self.assertEqual(current["source_health"], "conflicted")
+        self.assertFalse(current["current_tool_success"])
+        revision = self.r.db.execute("SELECT revision FROM problems WHERE id=?", (problem["id"],)).fetchone()[0]
+        with self.assertRaises(ContractError):
+            self.r.submit_candidate(self.p, **dict(body, problem_revision=revision, title="Invalid reused success"))
+
+    def test_post_only_missing_name_learns_first_known_name_and_detects_change(self):
+        values = dict(tool_use_id="post-only-name", tool_input={"file_path": "file-a"}, tool_response={"exit_code": 0})
+        self.hook("PostToolUse", **values)
+        self.hook("PostToolUse", **values, tool_name="Read")
+        self.hook("PostToolUse", **values, tool_name="Bash")
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("conflict", 1, "Read"))
+        self.assertEqual([row[0] for row in self.r.db.execute("SELECT outcome FROM events WHERE type='PostToolUse' ORDER BY rowid")],
+                         ["succeeded", "succeeded", "conflict"])
+
+    def test_first_known_name_replays_without_duplicate_evidence(self):
+        values = dict(tool_use_id="name-replay", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        response = dict(values, tool_name="Read", tool_response={"exit_code": 0})
+        self.hook("PostToolUse", **response)
+        count = self.r.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        self.hook("PostToolUse", **response)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], count)
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("succeeded", 0, "Read"))
+
+    def test_missing_post_name_keeps_known_name_without_fabricating_conflict(self):
+        values = dict(tool_use_id="missing-post-name", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values, tool_name="Read")
+        self.hook("PostToolUse", **values, tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("succeeded", 0, "Read"))
+        self.hook("PostToolUse", **values, tool_name="Bash", tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("conflict", 1, "Read"))
+
+    def test_legacy_null_name_uses_complete_known_post_before_incoming_name(self):
+        values = dict(tool_use_id="legacy-name", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        response = dict(values, tool_name="Read", tool_response={"exit_code": 0})
+        self.hook("PostToolUse", **response)
+        self.r.db.execute("UPDATE operations SET tool_name=NULL")
+        self.hook("PostToolUse", **response)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events WHERE type='PostToolUse'").fetchone()[0], 1)
+        self.hook("PostToolUse", **values, tool_name="Bash", tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("conflict", 1, "Read"))
+
+    def test_legacy_null_name_preserves_already_observed_name_conflict(self):
+        values = dict(tool_use_id="legacy-name-conflict", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        task = self.r.task(self.p, "chat")
+        operation = self.r.db.execute("SELECT id FROM operations").fetchone()[0]
+        for name in ("Read", "Bash"):
+            self.r.record_event(self.p, "chat", "PostToolUse",
+                {"tool_name": name, "tool_input": values["tool_input"], "tool_response": {"exit_code": 0}},
+                task_id=task["id"], task_revision=task["revision"], operation_id=operation, outcome="succeeded")
+        self.hook("PostToolUse", **values, tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("conflict", 1, "Read"))
+        self.hook("PostToolUse", **values, tool_name="Read", tool_response={"exit_code": 0})
+        self.assertEqual(self.r.db.execute("SELECT conflict FROM operations").fetchone()[0], 1)
+
+    def test_identical_legacy_replay_converges_confirmed_name_conflict_once(self):
+        for mode in ("current", "legacy_digest", "legacy_without_digest"):
+            with self.subTest(mode=mode):
+                self.r.config["event_max_chars"] = 6000
+                self.r.task_update(self.p, mode, "Review the same tool observation")
+                values = dict(tool_use_id=mode, tool_input={"file_path": "file-a"})
+                response = dict(values, tool_name="Read", tool_response={"exit_code": 0})
+                self.hook("PreToolUse", mode, **values)
+                self.hook("PostToolUse", mode, **response)
+                operation = dict(self.r.db.execute("SELECT * FROM operations WHERE conversation=?", (mode,)).fetchone())
+                event = dict(self.r.db.execute("SELECT * FROM events WHERE conversation=? AND type='PostToolUse'", (mode,)).fetchone())
+                if mode != "current":
+                    old_key = [mode, None, "PostToolUse", mode, digest(response["tool_response"])]
+                    old_id = digest([self.p, [self.r.host_epoch(), old_key]])
+                    self.r.db.execute("UPDATE events SET id=? WHERE id=?", (old_id, event["id"]))
+                    if mode == "legacy_without_digest":
+                        self.r.db.execute("UPDATE events SET capture_digest=NULL WHERE id=?", (old_id,))
+                    self.r.db.execute("UPDATE operations SET last_event=? WHERE id=?", (old_id, operation["id"]))
+                    event = dict(self.r.db.execute("SELECT * FROM events WHERE id=?", (old_id,)).fetchone())
+                task = self.r.task(self.p, mode)
+                self.r.record_event(self.p, mode, "PostToolUse",
+                    {"tool_name": "Bash", "tool_input": values["tool_input"], "tool_response": {"exit_code": 0}},
+                    task_id=task["id"], task_revision=task["revision"], operation_id=operation["id"], outcome="succeeded")
+                self.r.db.execute("UPDATE operations SET tool_name=NULL WHERE id=?", (operation["id"],))
+                problem = self.r.feedback(self.p, mode, "Legacy tool success " + mode,
+                                          category="operation", event_refs=[event["id"]])
+                body = dict(problem_id=problem["id"], problem_revision=problem["revision"], title="Legacy " + mode,
+                    content="The recorded operation completed", category="operation", applicability="This observation",
+                    limitations="No product acceptance claim", evidence_refs=[event["id"]], validation_level="tool_success")
+                candidate = self.r.submit_candidate(self.p, **body)
+                published = self.r.publish(self.p, candidate["candidate_id"])
+                before = self.r.read(self.p, published["knowledge_id"])
+                self.assertTrue(before["current_tool_success"])
+                count = self.r.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+                if mode == "current":
+                    self.r.config["event_max_chars"] = 128
+                self.hook("PostToolUse", mode, **response)
+                self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], count + 1)
+                self.assertEqual(dict(self.r.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()), event)
+                derived = self.r.db.execute("SELECT * FROM events WHERE conversation=? AND outcome='conflict'", (mode,)).fetchone()
+                self.assertTrue(json.loads(derived["payload"])["legacy_name_conflict"])
+                self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations WHERE id=?",
+                                                       (operation["id"],)).fetchone()), ("conflict", 1, "Read"))
+                current = self.r.read(self.p, published["knowledge_id"])
+                self.assertEqual(current["source_health"], "conflicted")
+                self.assertFalse(current["current_tool_success"])
+                self.assertGreater(current["source_version"], before["source_version"])
+                revision = self.r.db.execute("SELECT revision FROM problems WHERE id=?", (problem["id"],)).fetchone()[0]
+                with self.assertRaises(ContractError):
+                    self.r.submit_candidate(self.p, **dict(body, problem_revision=revision, title="Invalid reused " + mode))
+                self.hook("PostToolUse", mode, **response)
+                self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events").fetchone()[0], count + 1)
+                self.assertEqual(self.r.db.execute("SELECT revision FROM problems WHERE id=?", (problem["id"],)).fetchone()[0], revision)
+
+    def test_clipped_legacy_name_is_unknown_but_new_full_name_is_frozen(self):
+        self.r.config["event_max_chars"] = 128
+        values = dict(tool_use_id="clipped-name", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        original_name = "same-prefix-" + "x" * 1000
+        self.hook("PostToolUse", **values, tool_name=original_name, tool_response={"exit_code": 0})
+        self.assertTrue(json.loads(self.r.db.execute("SELECT payload FROM events WHERE type='PostToolUse'").fetchone()[0])["truncated"])
+        self.assertEqual(self.r.db.execute("SELECT tool_name FROM operations").fetchone()[0], original_name)
+        self.r.db.execute("UPDATE operations SET tool_name=NULL")
+        self.hook("PostToolUse", **values, tool_name="Read", tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("succeeded", 0, "Read"))
+        self.hook("PostToolUse", **values, tool_name="Bash", tool_response={"exit_code": 0})
+        self.assertEqual(self.r.db.execute("SELECT conflict FROM operations").fetchone()[0], 1)
+
+    def test_late_old_account_name_does_not_change_frozen_name_or_create_conflict(self):
+        values = dict(tool_use_id="old-account-name", tool_input={"file_path": "file-a"})
+        self.hook("PreToolUse", **values)
+        self.hook("PostToolUse", **values, tool_name="Read", tool_response={"exit_code": 0})
+        self.r.account_changed("name-boundary")
+        self.hook("PostToolUse", **values, tool_name="Bash", tool_response={"exit_code": 0})
+        self.assertEqual(tuple(self.r.db.execute("SELECT state,conflict,tool_name FROM operations").fetchone()),
+                         ("unknown", 0, "Read"))
+
     def test_legacy_identical_replay_stays_idempotent_but_changed_input_is_saved(self):
         event = self.tool("legacy", 0, {"command": "build"})
         key = ["chat", None, "PostToolUse", "legacy", digest({"exit_code": 0, "output": ""})]

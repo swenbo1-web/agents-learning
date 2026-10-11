@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Record supported Codex events, retrieve relevant knowledge, and queue evidence for administrator review.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",

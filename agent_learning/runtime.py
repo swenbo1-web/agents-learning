@@ -672,6 +672,29 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def outcome(response):
         return tool_outcome(response)
 
+    def _operation_tool_names(self, project, operation, binding):
+        """冻结首次明确名称；旧 NULL 台账只从完整历史事件恢复，不猜截短名称。"""
+        name = binding["tool_name"] if binding else None
+        if isinstance(name, str) and name.strip():
+            return [name]
+        if not binding:
+            return []
+        names = []
+        rows = self.db.execute(
+            "SELECT payload FROM events WHERE project=? AND operation=? "
+            "AND type IN ('PreToolUse','PostToolUse') AND json_type(payload,'$.tool_name')='text' "
+            "ORDER BY created,rowid", (project, operation))
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if projected_evidence(payload):
+                continue
+            name = payload.get("tool_name")
+            if isinstance(name, str) and name.strip() and name not in names:
+                names.append(name)
+                if len(names) == 2:
+                    break
+        return names
+
     def handle_hook(self, raw):
         kind = raw.get("hook_event_name")
         supported = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Interrupt", "SubagentStart", "SubagentStop"}
@@ -703,15 +726,16 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             self.bind_session(project, conversation)
             epoch = self.host_epoch()
             if kind == "PostToolUse" and event_key:
+                identical_replay = False
                 replay = self.db.execute("SELECT capture_digest FROM events WHERE id=?", (digest([project, [epoch, event_key]]),)).fetchone()
                 if replay and replay[0] is not None:
                     if replay[0] != capture_digest:
                         raise ContractError("event id reused with different content")
-                    return {}
+                    identical_replay = True
                 legacy_replay = self.db.execute("SELECT capture_digest,payload FROM events WHERE id=?",
                     (digest([project, [epoch, legacy_event_key]]),)).fetchone()
                 if legacy_replay and legacy_replay[0] == capture_digest:
-                    return {}
+                    identical_replay = True
                 if legacy_replay and legacy_replay[0] is None:
                     legacy_payload = json.loads(legacy_replay["payload"])
                     if not projected_evidence(legacy_payload):
@@ -720,7 +744,16 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                             "last_assistant_message", "agent_type", "turn_id")}
                         observable["agent_identity_known"] = legacy_payload.get("agent_identity_known", bool(agent_id))
                         if digest(clean(observable)) == capture_digest:
-                            return {}
+                            identical_replay = True
+                if identical_replay:
+                    previous = self.db.execute("SELECT * FROM operations WHERE project=? AND id=?",
+                                               (project, operation)).fetchone()
+                    if (not previous or previous["host_epoch"] != epoch or previous["conflict"]
+                            or len(self._operation_tool_names(project, operation, previous)) < 2):
+                        return {}
+                    # 旧 NULL 台账的完整历史已确认矛盾；追加一次派生观察，不改原回调。
+                    event_key = ["legacy-name-conflict", operation]
+                    payload["legacy_name_conflict"] = True
             if kind in {"SessionStart", "UserPromptSubmit"} or kind == "SubagentStart" and agent_id:
                 access = self._register_context(project, conversation, agent_id)
             payload["host_epoch"] = epoch
@@ -728,6 +761,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             task = self.task(project, conversation)
             binding = self.db.execute("SELECT * FROM operations WHERE project=? AND id=?", (project, operation)).fetchone() if operation else None
             obsolete_operation = binding and binding["host_epoch"] != epoch
+            tool_name = raw.get("tool_name")
+            tool_name = tool_name if isinstance(tool_name, str) and tool_name.strip() else None
+            known_tool_names = self._operation_tool_names(project, operation, binding) if not obsolete_operation else []
+            fixed_tool_name = (known_tool_names[0] if known_tool_names else tool_name) if not obsolete_operation else binding["tool_name"]
             assignment = self.assignment_context(project, conversation, agent_id) if agent_id else None
             assigned = self.hook_binding(project, conversation, agent_id) if agent_id else None
             # 只有 Pre 能绑定父任务；缺少 Pre 的 Post 不能按“此刻任务”猜历史归属。
@@ -774,7 +811,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 terminals = {"succeeded", "failed", "call_completed"}
                 conflict |= binding["decision"] == "denied" and outcome != "unknown"
                 conflict |= binding["observation"] in terminals and outcome in terminals and binding["observation"] != outcome
-                conflict |= bool(binding["tool_name"] and raw.get("tool_name") != binding["tool_name"])
+                conflict |= len(known_tool_names) > 1 or bool(
+                    tool_name is not None and known_tool_names and tool_name != known_tool_names[0])
                 conflict |= operation_input_conflict(self, project, operation, raw)
                 if conflict:
                     payload["observed_outcome"] = outcome
@@ -808,10 +846,12 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                                 "task_write_version,execution_epoch,assignment_id,decision,observation,conflict,tool_name) "
                                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project,id) "
                                 "DO UPDATE SET state=excluded.state,last_event=excluded.last_event,decision=excluded.decision,"
-                                "observation=excluded.observation,conflict=excluded.conflict",
+                                "observation=excluded.observation,conflict=excluded.conflict,"
+                                "tool_name=CASE WHEN operations.tool_name IS NULL OR trim(operations.tool_name)='' "
+                                "THEN excluded.tool_name ELSE operations.tool_name END",
                                 (project, operation, conversation, task_id, task_revision,
                                  agent_id, state, event["id"], epoch, task_write_version, execution_epoch, assignment_id,
-                                 decision, observation, int(conflict), raw.get("tool_name")))
+                                 decision, observation, int(conflict), fixed_tool_name))
             if fresh and kind == "PostToolUse":
                 self._capture_tool_case(project, conversation, agent_id, event, outcome, raw,
                                         {"id": task_id, "revision": task_revision}, source, epoch, operation)

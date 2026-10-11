@@ -64,6 +64,7 @@ def projected_evidence(payload):
 _PRIORITY = {
     **{key: 0 for key in _RESULT_FIELDS},
     "tool_response": 1, "tool_name": 1, "observed_outcome": 1, "operation_conflict": 1,
+    "legacy_name_conflict": 1,
     "control_decision": 1, "host_epoch": 1, "session_id": 2, "tool_input": 2,
     "error": 2, "stderr": 2, "message": 2, "last_assistant_message": 2,
     "prompt": 2, "command": 2, "path": 2, "resource": 2, "source": 2,
@@ -134,7 +135,7 @@ def prepare_event(payload, budget):
                     if len(encode({"truncated": True, "tool_response": candidate})) <= budget:
                         fields = candidate
             result["tool_response"] = fields
-    for key in ("operation_conflict", "observed_outcome", "host_epoch", "tool_name"):
+    for key in ("operation_conflict", "legacy_name_conflict", "observed_outcome", "host_epoch", "tool_name"):
         if key not in sanitized:
             continue
         value = sanitized[key]
