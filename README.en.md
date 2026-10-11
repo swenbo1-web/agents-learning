@@ -842,6 +842,8 @@ The complete offline suite on Windows/Python 3.12.14 discovered **910 checks: 90
 
 Targeted runs passed all 62 native adapter, 14 native installation and 21 browser checks. The Windows browser connection interruption was reproduced with 700 rejected requests: ten interruptions before the fix, none afterward, with the rejection policy preserved. Ninety-one Python files passed Python 3.10 syntax checks, and both installation sections and code fences were checked. The full suite includes wheel exports for both profiles, actual fixed-script Hook→Chinese handle→MCP integration, CLI checks and migration protection.
 
+The first Linux CI run exposed a diagnostic difference: a file in a parent path is rejected during POSIX path verification, while Windows reaches the directory check. Regressions now assert `ContractError`, unchanged installation state and preserved user files rather than a platform-specific message. The rejection policy is unchanged.
+
 Checks used temporary data directories, fake services and isolated entries, without enabling live host Hooks, calling paid models or changing user plugin configuration. Actual Python 3.10 and Linux results are reported by GitHub CI. Live Antigravity permission composition, timeouts and asynchronous terminal states still need host acceptance. Downloadable release assets remain at 0.13.0; install the dual-host capabilities from current source.
 
 ## 0.14.0 dual host validation (2026-10-12)
