@@ -97,7 +97,7 @@ class TaskControlMixin:
                         task_id=task_id, task_revision=next_revision)
             if changed_contract:
                 for table in ("contexts", "subagent_contexts"):
-                    self.db.execute(f"UPDATE {table} SET injected='[]',last_query='' WHERE project=? AND conversation=?",
+                    self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]' WHERE project=? AND conversation=?",
                                     (project, conversation_id))
             # 在事务内取得回执，避免提交后被并发写入替换成另一项任务。
             return self.task(project, conversation_id)

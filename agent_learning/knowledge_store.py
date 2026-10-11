@@ -282,11 +282,15 @@ class KnowledgeStoreMixin:
             # 迁移无法恢复某个旧来源时仍可展示历史证据，但不会凭空生成 source。
             combined = {item["event_id"]: item for item in self._source_evidence(project, body["evidence_refs"], body.get("problem_id"))}
         evidence = list(combined.values())
+        source_version = self.db.execute("SELECT version FROM knowledge_source_versions WHERE project=? AND knowledge_id=? AND revision=?",
+                                         (project, row["id"], row["revision"])).fetchone()
         return {"knowledge_id": row["id"], "revision": row["revision"],
                 **{k: body[k] for k in ("title", "content", "category", "applicability", "limitations", "validation_level")},
                 "knowledge_kind": body.get("knowledge_kind", "solution"), "metadata": metadata(body.get("metadata")),
                 "sources": sources, "source_health": self._source_health(evidence),
-                "current_tool_success": any(item["current_tool_success"] for item in evidence), "evidence": evidence}
+                "current_tool_success": any(item["current_tool_success"] for item in evidence), "evidence": evidence,
+                "source_version": source_version[0] if source_version else 0,
+                "problem_changed": any(source["problem_changed"] for source in sources)}
 
     def read(self, project, knowledge_id):
         from .runtime import ContractError

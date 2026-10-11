@@ -18,6 +18,8 @@ from .task_control import TaskControlMixin
 from .execution import ExecutionMixin
 from .knowledge_store import KnowledgeStoreMixin
 from .knowledge_index import KnowledgeIndexMixin, terms
+from .knowledge_context import KnowledgeContextMixin
+from .context_storage import ContextStorageMixin
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -192,7 +194,8 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 """
 
 
-class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreMixin, KnowledgeIndexMixin):
+class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
+              ContextStorageMixin, KnowledgeStoreMixin, KnowledgeIndexMixin):
     def __init__(self, home=None, config=None):
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
@@ -225,7 +228,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, 5}:
+        if version not in {0, 1, 2, 3, 4, 5, 6}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
@@ -243,6 +246,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
             self._migrate_execution()
         if version < 5:
             self._migrate_knowledge_store()
+        self._migrate_context_storage()
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -448,7 +452,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
             self.db.execute("UPDATE admin_calls SET state='account_changed_unknown',finished=? "
                             "WHERE state IN ('reserved','started')", (time.time(),))
             for table in ("contexts", "subagent_contexts"):
-                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query=''")
+                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]'")
             return {"host_epoch": epoch, "changed": True, "knowledge_scope": "shared_project",
                     "reconnect_required": True}
 
@@ -765,167 +769,6 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
             return "call_completed"
         return "unknown"
 
-    def _context_state(self, project, conversation, agent_id=None):
-        if agent_id:
-            return "subagent_contexts", "project=? AND conversation=? AND agent=?", (project, conversation, agent_id)
-        return "contexts", "project=? AND conversation=?", (project, conversation)
-
-    @staticmethod
-    def _source_state(item):
-        return {"health": item["source_health"], "current_tool_success": item["current_tool_success"],
-                "problem_changed": any(source["problem_changed"] for source in item["sources"])}
-
-    def _source_updates(self, project, conversation, agent_id=None, max_chars=None):
-        """只检查最近八份已展示知识的来源变化，不重新检索或调用模型。"""
-        table, where, key = self._context_state(project, conversation, agent_id)
-        row = self.db.execute(f"SELECT source_states FROM {table} WHERE {where}", key).fetchone()
-        if not row:
-            return []
-        states, messages = dict(list(dict(json.loads(row[0])).items())[-8:]), []
-        available = self.config["injection_max_chars"] if max_chars is None else max(0, max_chars)
-        for identity, previous in list(states.items()):
-            ident, revision = identity.rsplit("@", 1)
-            try:
-                item = self.read(project, ident)
-            except ContractError:
-                states.pop(identity)
-                continue
-            if item["revision"] != int(revision):
-                states.pop(identity)
-                continue
-            current = self._source_state(item)
-            if current != previous:
-                note = (f"知识 {identity} 来源已变：health={current['health']}，"
-                        f"tool_success={current['current_tool_success']}，新证据={current['problem_changed']}；请用 knowledge_read 核对。")
-                if len("\n".join(messages)) + len(note) + int(bool(messages)) <= available:
-                    messages.append(note)
-                    states[identity] = current
-        encoded = encode(list(states.items()))
-        if encoded != row[0]:
-            self.db.execute(f"UPDATE {table} SET source_states=? WHERE {where}", (encoded, *key))
-        return messages
-
-    def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None, expected_epoch=None):
-        table, where, key = self._context_state(project, conversation, agent_id)
-        with self.transaction():
-            self.assert_host_epoch(expected_epoch)
-            if context_handle is not None:
-                self.access_context(project, context_handle, conversation, expected_epoch)
-            columns = "project,conversation,agent" if agent_id else "project,conversation"
-            marks = ",".join("?" for _ in key)
-            self.db.execute(f"INSERT OR IGNORE INTO {table}({columns}) VALUES({marks})", key)
-            invalid = self._invalidated(project, conversation, agent_id)
-            row = self.db.execute(f"SELECT * FROM {table} WHERE {where}", key).fetchone()
-            remembered = json.loads(row["injected"])
-            if compact:
-                self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]' WHERE {where}", key)
-            task = self.task(project, conversation)
-            if agent_id:
-                assignment = self.assignment_context(project, conversation, agent_id, context_handle)
-                task = self.task_snapshot(project, assignment["task_id"], assignment["task_revision"],
-                                          assignment["task_write_version"]) if assignment and assignment["task_id"] else None
-            query = clean(query).strip()
-            continuation = not query or query.lower().strip("。.!！ ") in {
-                "继续", "好的", "可以", "接着", "继续吧", "好", "continue", "go on", "ok", "yes"}
-            effective_query = row["last_query"] if continuation else query
-            if not effective_query and task:
-                effective_query = task["goal"]
-            retrieval_query = effective_query + (" " + task["goal"] if compact and task else "")
-            items = self.search(project, retrieval_query)["items"] if retrieval_query.strip() else []
-            if compact:
-                restored = []
-                for identity in remembered[-5:]:
-                    try:
-                        restored.append(self.read(project, identity.rsplit("@", 1)[0]))
-                    except ContractError:
-                        pass
-                unique = {item["knowledge_id"]: item for item in restored + items}
-                items = list(unique.values())
-            prior = set() if compact else set(remembered)
-            lines, injected = [], list(prior)
-            if context_handle:
-                # 先放最短可靠句柄，极小注入预算下也不截断身份。
-                lines.append(f"[Agent Learning] context_handle={context_handle}; host_epoch={self.host_epoch()}")
-            if agent_id:
-                lines.append("子 Agent 继承父任务边界；session_context 可读取任务，不能覆盖父任务；只反馈自身可靠证据。")
-            shown = set(json.loads(row["shown"]))
-            if invalid:
-                lines.append("此前注入知识已撤销或被替换，不能继续依据旧版本执行：" + ",".join(invalid))
-            budget = self.config["injection_max_chars"]
-            # 历史知识没有执行授权。当前用户修正仍需Agent更新任务快照。
-            if task:
-                lines.append(f"[Agent Learning] task={task['id']} revision={task['revision']} write_version={task.get('write_version', 'unknown')} status={task['status']}; 当前要求优先，更新需同时比较任务ID与write_version。")
-            execution = self.execution_status(project, conversation)
-            if self.config["enforce_task_policy"]:
-                lines.append(f"执行保护：{execution['reason']}；任务上报不签发权限。")
-            source_updates = self._source_updates(project, conversation, agent_id,
-                                                  max_chars=budget - len("\n".join(lines)) - int(bool(lines)))
-            lines.extend(source_updates)
-            source_states = dict(json.loads(self.db.execute(f"SELECT source_states FROM {table} WHERE {where}", key).fetchone()[0]))
-            header = "以下是历史资料摘要，按适用条件判断；它不提供执行授权。完整正文使用 knowledge_read。"
-            fresh_count = 0
-            for item in items:
-                identity = f"{item['knowledge_id']}@{item['revision']}"
-                if identity in prior:
-                    # 旧对话缺少健康基线时保守补齐；待发的变化不能因检索命中被吞掉。
-                    source_states.setdefault(identity, {"health": "valid", "current_tool_success": item["validation_level"] == "tool_success",
-                                                        "problem_changed": False})
-                    continue
-                available = budget - len("\n".join(lines)) - (len(header) + 2 if fresh_count == 0 else 1)
-                card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
-                        "title": clip(item["title"], 100), "content_summary": clip(item["content"], 500),
-                        "applicability": clip(item["applicability"], 180), "limitations": clip(item["limitations"], 180),
-                        "validation_level": item["validation_level"], "knowledge_kind": item["knowledge_kind"],
-                        "source_health": item["source_health"], "current_tool_success": item["current_tool_success"],
-                        "summary_only": True}
-                if item.get("metadata"):
-                    card["metadata"] = {k: clip(v, 60) for k, v in item["metadata"].items()}
-                for field in ("content_summary", "limitations", "applicability", "title"):
-                    while len(encode(card)) > available and len(card[field]) > 24:
-                        card[field] = clip(card[field], max(24, len(card[field]) // 2))
-                if len(encode(card)) > available:
-                    card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
-                            "title": clip(item["title"], 60), "source_health": item["source_health"],
-                            "current_tool_success": item["current_tool_success"], "summary_only": True}
-                if len(encode(card)) > available:
-                    continue
-                if fresh_count == 0:
-                    lines.append(header)
-                lines.append(encode(card))
-                injected.append(identity)
-                shown.add(identity)
-                source_states.pop(identity, None)
-                source_states[identity] = self._source_state(item)
-                fresh_count += 1
-                if fresh_count == 3:
-                    break
-            if fresh_count:
-                self._metric(project, "knowledge_injected", fresh_count)
-            self.db.execute(f"UPDATE {table} SET injected=?,shown=?,last_query=?,source_states=? WHERE {where}",
-                            (encode(injected), encode(sorted(shown)), effective_query[-2000:],
-                             encode(list(source_states.items())[-8:]), *key))
-            return "\n".join(lines)[:budget]
-
-    def _invalidated(self, project, conversation, agent_id=None):
-        table, where, key = self._context_state(project, conversation, agent_id)
-        row = self.db.execute(f"SELECT injected,shown FROM {table} WHERE {where}", key).fetchone()
-        if not row:
-            return []
-        valid, invalid = [], []
-        identities = set(json.loads(row[0])) | set(json.loads(row[1]))
-        max_invalid = max(1, (self.config["injection_max_chars"] - 120) // 40)
-        for identity in sorted(identities):
-            ident, revision = identity.rsplit("@", 1)
-            exists = self.db.execute("SELECT 1 FROM active WHERE project=? AND id=? AND revision=?",
-                                     (project, ident, int(revision))).fetchone()
-            (invalid if not exists and len(invalid) < max_invalid else valid).append(identity)
-        if invalid:
-            invalid_set = set(invalid)
-            self.db.execute(f"UPDATE {table} SET injected=?,shown=? WHERE {where}",
-                            (encode([i for i in json.loads(row[0]) if i not in invalid_set]),
-                             encode([i for i in json.loads(row[1]) if i not in invalid_set]), *key))
-        return invalid
-
     def handle_hook(self, raw):
         kind = raw.get("hook_event_name")
         supported = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Interrupt", "SubagentStart", "SubagentStop"}
@@ -1049,6 +892,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
                                  agent_id, state, event["id"], epoch, task_write_version, execution_epoch, assignment_id,
                                  decision, observation, int(conflict), raw.get("tool_name")))
             if fresh and outcome in {"failed", "conflict"} and not raw.get("tool_name", "").startswith("mcp__agent_learning__"):
+                self._queue_fault(project, conversation, agent_id, source, epoch, raw)
                 summary = f"{raw.get('tool_name', 'unknown tool')} {outcome}: " + encode(clean(raw.get("tool_response")))[:300]
                 self._problem(project, conversation, summary, "operation", [event["id"]],
                               task_binding={"id": task_id, "revision": task_revision})
@@ -1099,15 +943,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeStoreM
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
         if kind == "PreToolUse":
-            with self.transaction():
-                invalid = self._invalidated(project, conversation, agent_id)
-                invalid_note = "此前注入知识已撤销或被替换，请核对当前依据：" + ",".join(invalid) if invalid else ""
-                source_updates = self._source_updates(project, conversation, agent_id,
-                    max_chars=self.config["injection_max_chars"] - len(invalid_note) - int(bool(invalid_note)))
-            if invalid or source_updates:
-                notes = ([invalid_note] if invalid else []) + source_updates
+            text = self._context(project, conversation, agent_id=agent_id, expected_epoch=epoch, tool_only=True)
+            if text:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
-                        "\n".join(notes)[:self.config["injection_max_chars"]]}}
+                        text}}
         if kind in {"UserPromptSubmit", "SessionStart", "SubagentStart"}:
             if kind == "SubagentStart" and not agent_id:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":

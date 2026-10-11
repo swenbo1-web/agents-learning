@@ -7,6 +7,7 @@ import re
 import sys
 from . import __version__
 from .runtime import CATEGORIES, KNOWLEDGE_KINDS, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
+from .knowledge_output import read_page, search_preview
 
 
 def schema(properties, required=()):
@@ -38,8 +39,14 @@ CANDIDATE = schema({
     "metadata": METADATA, "knowledge_kind": KNOWLEDGE_KIND,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
 WORKER_TOOLS = [
-    ("knowledge_search", "检索本项目当前正式知识；可按分类、用途、工具、版本或环境精确筛选。", schema({"query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS}, ["query"])),
-    ("knowledge_read", "读取当前有效正文和审核允许的证据元数据。", schema({"knowledge_id": NONEMPTY}, ["knowledge_id"])),
+    ("knowledge_search", "检索本项目正式知识的有限预览；完整正文使用knowledge_read。预算是JSON正文字符数，默认6000。", schema({
+        "query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS,
+        "context_handle": NONEMPTY, "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}}, ["query"])),
+    ("knowledge_read", "分页读取当前有效正文与有限来源状态；续页传next_offset与expected_revision，默认12000个JSON正文字符。", schema({
+        "knowledge_id": NONEMPTY, "context_handle": NONEMPTY,
+        "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
+        "expected_revision": {"type": "integer", "minimum": 1},
+        "offset": {"type": "integer", "minimum": 0}}, ["knowledge_id"])),
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
         "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "goal": NONEMPTY,
@@ -151,8 +158,33 @@ class Server:
             raise ProtocolError(-32602, "unknown tool")
         validate(args, self.tools[name][1])
         p, r = self.project, self.runtime
-        if name == "knowledge_search": return r.search(p, **args)
-        if name == "knowledge_read": return r.read(p, **args)
+        if name in {"knowledge_search", "knowledge_read"}:
+            handle = self._handle(args)
+            if handle is not None:
+                # 先验证身份再读知识；无效句柄不能得到正文后才报错。
+                r.access_context(p, handle, expected_epoch=self.epoch)
+            if name == "knowledge_search":
+                body = {key: value for key, value in args.items() if key not in {"context_handle", "max_chars"}}
+                result = search_preview(r.search(p, **body), args.get("max_chars", 6000))
+                items = result["items"]
+            else:
+                if args.get("offset", 0) and "expected_revision" not in args:
+                    raise ContractError("expected_revision is required to continue a content page")
+                try:
+                    current = r.read(p, args["knowledge_id"])
+                    if "expected_revision" in args and current["revision"] != args["expected_revision"]:
+                        raise ContractError("knowledge revision changed; restart reading from offset 0")
+                    result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0))
+                except ValueError as exc:
+                    raise ContractError(str(exc)) from exc
+                items = [result]
+            if handle is not None:
+                # 登记生成响应中实际存在的修订；再次验证epoch关闭身份变更窗口。
+                r.record_exposure(p, handle, items, expected_epoch=self.epoch)
+                self.context_handle = handle
+            else:
+                r.assert_host_epoch(self.epoch)
+            return result
         if name == "session_context":
             handle = self._handle(args)
             context = r.session_context(p, handle, expected_epoch=self.epoch)

@@ -6,15 +6,25 @@ import re
 import sqlite3
 
 
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 _WORDS = re.compile(r"c\+\+(?:[0-9]+)?|c#|[a-z0-9_]+(?:[./:-][a-z0-9_]+)*|[\u3400-\u9fff]+")
 _CHINESE = re.compile(r"[\u3400-\u9fff]+\Z")
 _FIELD_WEIGHTS = {"title": 4, "content": 2, "applicability": 2, "limitations": 1,
                   "category": 1, "knowledge_kind": 1}
+_EN_REQUEST_WORDS = {"please", "help", "find", "check", "inspect", "explain", "analyze", "analyse",
+                     "detail", "details", "carefully", "first", "then", "finally", "how", "what", "why",
+                     "the", "a", "an", "to", "of", "for", "in", "on", "and", "or", "is", "are", "can",
+                     "could", "would", "should", "this", "that", "with", "my", "our", "me", "we"}
+_ZH_REQUEST = re.compile("|".join(sorted({"请先", "帮我", "请问", "一下", "认真", "深度", "详细", "仔细",
+                        "查找", "查询", "检查", "看看", "查看", "解决", "分析", "如何", "怎么", "怎样",
+                        "问题", "这个", "那个", "这些", "我们", "现在", "目前", "相关", "内容", "方法",
+                        "说明", "给出", "进行", "可以", "需要", "是否", "能够", "然后", "最后", "请"},
+                       key=lambda value: (-len(value), value))))
+_MAX_QUERY_TERMS = 128
 
 
 def terms(text):
-    """技术语言名使用独立别名；中文保留单字和二元片段。"""
+    """索引与评分共用词元；技术标识同时保留整体及其可独立检索的组件。"""
     result = []
     for word in _WORDS.findall(text.lower()):
         if word.startswith("c++"):
@@ -24,14 +34,28 @@ def terms(text):
         elif word == "c#":
             result.append("csharp")
         elif _CHINESE.fullmatch(word):
-            result.extend(word)
             result.extend(word[i:i + 2] for i in range(len(word) - 1))
+            result.extend(word)
         else:
             result.append(word)
+            if re.search(r"[./:_-]", word):
+                result.extend(component for component in re.split(r"[./:_-]+", word) if component)
     return list(dict.fromkeys(result))
 
 
 tokenize = terms
+
+
+def _query_terms(query):
+    # 请求修饰语不参与相关度；先保留双字和标识，再限制总量，避免单字占满预算。
+    meaningful = _ZH_REQUEST.sub(" ", query[-8000:])
+    selected = [word for word in terms(meaningful) if word not in _EN_REQUEST_WORDS]
+    if any(_CHINESE.fullmatch(word) and len(word) > 1 for word in selected):
+        selected = [word for word in selected if not (_CHINESE.fullmatch(word) and len(word) == 1)]
+    # 技术标识通常比自然语言连接片段明确，超预算时优先保留。
+    technical = [word for word in selected if not _CHINESE.fullmatch(word)]
+    chinese = [word for word in selected if _CHINESE.fullmatch(word)]
+    return (technical + chinese)[:_MAX_QUERY_TERMS], meaningful
 
 
 def _index_text(body):
@@ -41,18 +65,50 @@ def _index_text(body):
     return " ".join(terms(" ".join(value for value in parts if isinstance(value, str))))
 
 
-def _rank(body_json, query_weights, denominator):
-    """只比较查询与当前知识字段的重合，其他项目和历史条目不影响排名。"""
+def _match_values(body_json, query_weights, denominator):
+    """查询覆盖优先；每个词只取最高字段权重，重复字段不能累加刷高分。"""
     body = json.loads(body_json)
-    score = 0
+    matches = {}
     for field, weight in _FIELD_WEIGHTS.items():
         value = body.get(field, "solution" if field == "knowledge_kind" else "")
         if isinstance(value, str):
-            score += weight * sum(query_weights.get(token, 0) for token in terms(value))
+            for token in terms(value):
+                if token in query_weights:
+                    matches[token] = max(weight, matches.get(token, 0))
     values = body.get("metadata", {}).values()
-    score += 2 * sum(query_weights.get(token, 0) for token in
-                     terms(" ".join(value for value in values if isinstance(value, str))))
-    return score / denominator
+    for token in terms(" ".join(value for value in values if isinstance(value, str))):
+        if token in query_weights:
+            matches[token] = max(2, matches.get(token, 0))
+    coverage = sum(query_weights[token] for token in matches) / denominator
+    field_score = sum(query_weights[token] * weight for token, weight in matches.items()) / denominator
+    # 查询最多128词且权重最多2，因此相差一个词的覆盖增益始终大于字段增益。
+    return coverage * 2048 + field_score, coverage, matches
+
+
+def _rank(body_json, query_weights, denominator):
+    """只使用当前知识和查询，其他项目、历史条目和词频不影响排名。"""
+    return _match_values(body_json, query_weights, denominator)[0]
+
+
+def _match_info(body_json, query_weights, denominator, query):
+    # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
+    score, coverage, matches = _match_values(body_json, query_weights, denominator)
+    strong = [token for token in matches if len(token) > 1]
+    eligible = bool(strong) and coverage >= 0.65
+    if not eligible and len(strong) >= 3:
+        # 长中文请求会降低全句覆盖；连续四字的问题短语仍可作为明确命中依据。
+        for segment in re.findall(r"[\u3400-\u9fff]+", query):
+            run = 0
+            for index in range(len(segment) - 1):
+                run = run + 1 if segment[index:index + 2] in matches else 0
+                if run >= 3:
+                    eligible = True
+                    break
+            if eligible:
+                break
+    return {"score": round(score, 6), "coverage": round(coverage, 6),
+            "matched_terms": [token for token in query_weights if token in matches][:12],
+            "auto_eligible": eligible}
 
 
 def _filter_sql(filters):
@@ -120,8 +176,7 @@ class KnowledgeIndexMixin:
             raise ContractError("query must be a string")
         limit = max(1, min(int(limit), 10))
         filters = knowledge_filters(filters)
-        selected = terms(query[-2000:])
-        selected = selected[:12] + selected[-12:] if len(selected) > 24 else selected
+        selected, meaningful = _query_terms(query)
         if not selected:
             return {"status": "no_match", "items": []}
 
@@ -149,6 +204,8 @@ class KnowledgeIndexMixin:
                     references = None
 
             conditions = _filter_sql(filters)
+            weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
+            denominator = sum(weights.values())
             rows = []
             if references is not None:
                 for ref in references:
@@ -156,14 +213,12 @@ class KnowledgeIndexMixin:
                                           "AND k.id=a.id AND k.revision=a.revision WHERE k.project=? "
                                           "AND k.id=? AND k.revision=?" + conditions,
                                           (project, ref["knowledge_id"], ref["revision"], *filters.values())).fetchone()
-                    if row is None:
+                    if row is None or _match_values(row["body"], weights, denominator)[0] <= 0:
                         references = None
                         rows = []
                         break
                     rows.append(row)
             if references is None:
-                weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
-                denominator = sum(weights.values())
                 self.db.create_function("alp_knowledge_score", 1, lambda body: _rank(body, weights, denominator))
                 match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
                 rows = self.db.execute("SELECT k.* FROM knowledge_fts JOIN active a ON "
@@ -175,7 +230,20 @@ class KnowledgeIndexMixin:
                                        (match, project, *filters.values(), limit)).fetchall()
                 references = [{"knowledge_id": row["id"], "revision": row["revision"]} for row in rows]
             # 正文及来源都在同一快照读取，禁止通过 read() 跳转到刚发布的新修订。
-            items = [self._public(project, row) for row in rows]
+            items = []
+            retained = []
+            for row in rows:
+                explanation = _match_info(row["body"], weights, denominator, meaningful)
+                # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
+                if explanation["score"] <= 0:
+                    continue
+                item = self._public(project, row)
+                if item.get("source_health") in {"conflicted", "denied", "missing"}:
+                    explanation["auto_eligible"] = False
+                item["match"] = explanation
+                items.append(item)
+                retained.append({"knowledge_id": row["id"], "revision": row["revision"]})
+            references = retained
             if owns_snapshot:
                 self.db.execute("COMMIT")
         except BaseException:

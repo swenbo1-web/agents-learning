@@ -172,7 +172,7 @@ class OptimizationTests(unittest.TestCase):
         migrated = Runtime(legacy)
         try:
             self.assertEqual(migrated.task_snapshot("p", "old-task", 1)["goal"], "旧任务")
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 6)
             self.assertEqual(migrated.db.execute("SELECT shown FROM contexts").fetchone()[0], '["knowledge@1"]')
             self.assertNotIn("SYNTHETIC_OLD_KEY", migrated.db.execute("SELECT payload FROM outbox").fetchone()[0])
         finally:

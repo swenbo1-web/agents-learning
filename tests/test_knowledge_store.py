@@ -205,6 +205,9 @@ class KnowledgeStoreTests(unittest.TestCase):
         if dedup:
             second_candidate = self.candidate("来源B", "api_key=SYNTHETIC_LEGACY_SECRET compiler guidance")
             self.r.publish(self.p, second_candidate)
+        # 模拟真实旧库，不能残留新版触发器对已删除来源表的依赖。
+        for row in self.r.db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'context_source_%'").fetchall():
+            self.r.db.execute('DROP TRIGGER "' + row[0] + '"')
         self.r.db.execute("DROP TABLE knowledge_sources")
         self.r.db.execute("DROP TABLE publication_receipts")
         self.r.db.execute("DROP TABLE candidate_identity")
@@ -232,7 +235,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
     def test_legacy_migration_rebuilds_clean_index_and_recovers_unique_receipt(self):
         candidate, first = self.legacy_state()
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(self.r.publish(self.p, candidate), first)
         self.assertEqual(len(self.r.read(self.p, first["knowledge_id"])["sources"]), 1)
         self.assertEqual(self.r.search(self.p, "synthetic_legacy_secret")["items"], [])
