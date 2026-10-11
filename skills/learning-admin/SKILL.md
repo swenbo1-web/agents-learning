@@ -15,6 +15,8 @@ description: "在 Agent Learning Runtime 的管理员身份下，依据新增案
 - 区分原始记录、模型推断和验证结果。重复引用同一日志或同一成功声明，不算多份独立证据。
 - 工具退出码只能支持具体命令结果。专业结论需要相应检查材料；编译证据不能替代玩法验证或用户验收。
 - 缺少必要证据时标明缺项或保持待补证，不反复调用模型猜测根因。保留失败、未解决及适用性未知的情况。
+- 按证据 `role` 区分尝试、失败、冲突、潜在恢复、交付和反馈，同时核对事件当前 `health`。后续成功不自动证明修复因果；`reviewed` 与 `resolution_status` 分别表达审核和解决观察。
+- 审核包有遗漏时使用 `next_offset`、同一 `problem.revision` 的 `expected_revision` 继续读取；大任务原文用 `section=task` 分页。分页材料仍属于同一案例，不能把不完整或已截短证据晋升为完整验证。
 - 候选内容描述现象、适用条件、方法、证据和限制，绑定 `problem_id`、`problem_revision` 和 `evidence_refs`。来源改变后，应复核受影响内容。
 - `knowledge_kind` 区分 `fact`（事实）、`solution`（具体解法）、`pattern`（可复用方法）；省略时使用 `solution`。比较现有知识时同时核对当前 `source_health` 和 `current_tool_success`。
 - 有明确来源时填写 `metadata` 的工具、版本、错误码、环境和验证方式，未知时留空。`evidence_truncated` 表示原文被截短，结论仅限可见材料，不能写成完整根因验证。

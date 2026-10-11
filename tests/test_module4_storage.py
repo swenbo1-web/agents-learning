@@ -74,6 +74,7 @@ class Module4StorageTests(unittest.TestCase):
         child = next(row for row in rows if row["agent"] == "child")
         self.assertEqual(json.loads(child["state"]), {})
         self.assertEqual(self.version(knowledge), 0)
+        # 单独调用第四模块迁移只推进到6，完整Runtime另运行案例迁移到7。
         self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.r._migrate_context_storage()
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM context_exposures").fetchone()[0], 3)
@@ -148,10 +149,10 @@ class Module4StorageTests(unittest.TestCase):
         before = self.version(knowledge)
         self.r.db.execute("DELETE FROM problem_events WHERE problem=? AND event=?", (problem["id"], ref))
         self.assertEqual(self.version(knowledge), before + 1)
-        self.r.db.execute("INSERT INTO problem_events VALUES(?,?)", (problem["id"], ref))
+        self.r.db.execute("INSERT INTO problem_events(problem,event) VALUES(?,?)", (problem["id"], ref))
         self.assertEqual(self.version(knowledge), before + 2)
         unrelated = self.r.record_event(self.p, "chat", "Feedback", {"summary": "unrelated"})["id"]
-        self.r.db.execute("INSERT INTO problem_events VALUES(?,?)", (problem["id"], unrelated))
+        self.r.db.execute("INSERT INTO problem_events(problem,event) VALUES(?,?)", (problem["id"], unrelated))
         self.assertEqual(self.version(knowledge), before + 2)
 
     def test_new_duplicate_source_dirties_revision_without_new_body(self):

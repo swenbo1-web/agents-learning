@@ -61,7 +61,8 @@ class RuntimeTests(unittest.TestCase):
         operations = self.r.db.execute("SELECT conversation,state FROM operations ORDER BY conversation").fetchall()
         self.assertEqual([(r[0], r[1]) for r in operations], [("chat-a", "failed"), ("chat-b", "succeeded")])
         for event in self.r.review_packet(self.p, self.r.problems(self.p)[0]["id"])["events"]:
-            self.assertEqual(event["conversation"], "chat-a")
+            source = self.r.db.execute("SELECT conversation FROM events WHERE id=?", (event["id"],)).fetchone()
+            self.assertEqual(source[0], "chat-a")
 
     def test_replay_and_missing_ids_are_distinct(self):
         self.problem()

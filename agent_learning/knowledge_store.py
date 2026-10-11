@@ -290,7 +290,8 @@ class KnowledgeStoreMixin:
                 "sources": sources, "source_health": self._source_health(evidence),
                 "current_tool_success": any(item["current_tool_success"] for item in evidence), "evidence": evidence,
                 "source_version": source_version[0] if source_version else 0,
-                "problem_changed": any(source["problem_changed"] for source in sources)}
+                "problem_changed": any(source["problem_changed"] for source in sources),
+                **self._knowledge_feedback_state(project, row["id"], row["revision"])}
 
     def read(self, project, knowledge_id):
         from .runtime import ContractError

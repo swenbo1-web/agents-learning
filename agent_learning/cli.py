@@ -50,10 +50,18 @@ def parser():
     feedback.add_argument("--event-ref", action="append", default=[])
     feedback.add_argument("--resolution", default="")
     feedback.add_argument("--knowledge-id")
+    feedback.add_argument("--knowledge-revision", type=int)
+    feedback.add_argument("--feedback-kind", choices=["observation", "counterexample"])
+    feedback.add_argument("--idempotency-key", help="同一次反馈重试沿用此键；实际再次发生使用新键")
     feedback.add_argument("--expected-task-id")
     feedback.add_argument("--expected-task-revision", type=int)
     sub.add_parser("problems")
-    sub.add_parser("packet").add_argument("problem_id")
+    packet = sub.add_parser("packet")
+    packet.add_argument("problem_id")
+    packet.add_argument("--offset", type=int, default=0)
+    packet.add_argument("--expected-revision", type=int)
+    packet.add_argument("--max-chars", type=int)
+    packet.add_argument("--section", choices=["events", "task"], default="events")
     sub.add_parser("propose").add_argument("file")
     publish = sub.add_parser("publish")
     publish.add_argument("candidate_id")
@@ -125,9 +133,13 @@ def main(argv=None):
         elif args.command == "feedback": result = runtime.feedback(project, args.conversation, args.summary,
                                                 args.category, args.event_ref, args.resolution, args.knowledge_id,
                                                 expected_task_id=args.expected_task_id,
-                                                expected_task_revision=args.expected_task_revision)
+                                                expected_task_revision=args.expected_task_revision,
+                                                knowledge_revision=args.knowledge_revision,
+                                                feedback_kind=args.feedback_kind, idempotency_key=args.idempotency_key)
         elif args.command == "problems": result = runtime.problems(project)
-        elif args.command == "packet": result = runtime.review_packet(project, args.problem_id)
+        elif args.command == "packet": result = runtime.review_packet(project, args.problem_id,
+                                                offset=args.offset, expected_revision=args.expected_revision,
+                                                max_chars=args.max_chars, section=args.section)
         elif args.command == "propose": result = runtime.submit_candidate(project, **json.loads(Path(args.file).read_text(encoding="utf-8-sig")))
         elif args.command == "publish": result = runtime.publish(project, args.candidate_id,
                                                 expected_generation=args.expected_generation,

@@ -17,9 +17,12 @@ from .assignments import AssignmentMixin
 from .task_control import TaskControlMixin
 from .execution import ExecutionMixin
 from .knowledge_store import KnowledgeStoreMixin
-from .knowledge_index import KnowledgeIndexMixin, terms
+from .knowledge_index import KnowledgeIndexMixin
 from .knowledge_context import KnowledgeContextMixin
 from .context_storage import ContextStorageMixin
+from .case_store import CaseStoreMixin
+from .event_capture import CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict
+from .review_packet import ReviewPacketMixin
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -104,22 +107,6 @@ def knowledge_filters(value):
     return result
 
 
-def project_event(value, text_limit):
-    if isinstance(value, str):
-        return clip(value, text_limit)
-    if isinstance(value, list):
-        items = [project_event(v, text_limit) for v in value[:20]]
-        return items + ([{"truncated_items": len(value) - 20}] if len(value) > 20 else [])
-    if isinstance(value, dict):
-        # 返回码、工具身份等结构字段优先；正文首尾裁剪，不转换为不可解析的大字符串。
-        keys = list(value)
-        priorities = {"tool_name", "exit_code", "exitCode", "session_id", "isError", "success", "tool_response", "tool_input"}
-        keys.sort(key=lambda key: key not in priorities)
-        result = {k: project_event(value[k], text_limit) for k in keys[:30]}
-        if len(keys) > 30:
-            result["truncated_fields"] = len(keys) - 30
-        return result
-    return value
 
 
 SCHEMA = """
@@ -195,7 +182,8 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 
 
 class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
-              ContextStorageMixin, KnowledgeStoreMixin, KnowledgeIndexMixin):
+              ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
+              KnowledgeStoreMixin, KnowledgeIndexMixin):
     def __init__(self, home=None, config=None):
         default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                         if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
@@ -228,7 +216,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, 5, 6}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7}:
             self.db.close()
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
@@ -247,6 +235,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         if version < 5:
             self._migrate_knowledge_store()
         self._migrate_context_storage()
+        self._migrate_case_store()
 
     def _migrate_execution(self):
         """只增加控制字段；旧来源缺少事件时点版本时保持未知。"""
@@ -468,29 +457,14 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
     def _event(self, project, conversation, kind, payload, event_id=None, task_id=None,
                task_revision=None, agent_id=None, operation_id=None, outcome="unknown",
                task_write_version=None, execution_epoch=None, assignment_id=None, task_status=None, capture_digest=None):
-        sanitized = clean(payload)
-        text = encode(sanitized)
-        if len(text) > self.config["event_max_chars"]:
-            limit = self.config["event_max_chars"] // 4
-            while True:
-                projected = project_event(sanitized, limit)
-                projected.update(truncated=True, original_digest=digest(sanitized))
-                text = encode(projected)
-                if len(text) <= self.config["event_max_chars"] or limit <= 32:
-                    break
-                limit //= 2
-            if len(text) > self.config["event_max_chars"]:
-                # 极小预算保留可观察状态。正常默认预算下保留命令与日志首尾。
-                projected = {"truncated": True, "tool_name": clip(str(sanitized.get("tool_name", "")), 32)}
-                response = sanitized.get("tool_response")
-                if isinstance(response, dict):
-                    projected["tool_response"] = {k: v for k, v in response.items()
-                                                  if k in {"exit_code", "exitCode", "success", "isError"} and isinstance(v, (int, bool))}
-                text = encode(projected)
+        text, payload_digest = prepare_event(payload, self.config["event_max_chars"])
+        capture_digest = capture_digest or payload_digest
+        input_digest = digest(clean(payload["tool_input"])) if "tool_input" in payload else None
         ident = digest([project, event_id]) if event_id else str(uuid.uuid4())
         old = self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()
         if old:
-            if old["payload"] != text or old["type"] != kind or old["conversation"] != conversation:
+            if (old["payload"] != text or old["type"] != kind or old["conversation"] != conversation
+                    or old["capture_digest"] and old["capture_digest"] != capture_digest):
                 raise ContractError("event id reused with different content")
             return dict(old), False
         if task_id:
@@ -503,134 +477,18 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                                         (project, task_id, task_write_version)).fetchone()
                 task_status = state[0] if state else None
         self.db.execute("INSERT INTO events(id,project,conversation,task_id,task_revision,agent,operation,type,outcome,payload,created,"
-                        "task_write_version,execution_epoch,assignment_id,task_status,capture_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "task_write_version,execution_epoch,assignment_id,task_status,capture_digest,tool_input_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (ident, project, conversation, task_id, task_revision, agent_id,
-                         operation_id, kind, outcome, text, time.time(), task_write_version, execution_epoch, assignment_id, task_status, capture_digest))
+                         operation_id, kind, outcome, text, time.time(), task_write_version, execution_epoch, assignment_id, task_status, capture_digest, input_digest))
         return dict(self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()), True
 
     def record_event(self, project, conversation, kind, payload, **kwargs):
         with self.transaction():
             return self._event(project, conversation, kind, payload, **kwargs)[0]
 
-    def _problem(self, project, conversation, summary, category, event_ids, knowledge_id=None, task_binding=None):
-        summary = clip(clean(summary), 2000)
-        task = task_binding if task_binding is not None else self.task(project, conversation)
-        task_id, revision = (task["id"], task["revision"]) if task else (None, None)
-        ident = digest([project, conversation, task_id, revision, category, summary, knowledge_id])[:32]
-        self.db.execute("INSERT OR IGNORE INTO problems VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                        (ident, project, conversation, task_id, revision, 0, summary, category,
-                         "pending", knowledge_id, time.time()))
-        changed = 0
-        for event in event_ids:
-            changed += self.db.execute("INSERT OR IGNORE INTO problem_events VALUES(?,?)", (ident, event)).rowcount
-        if changed:
-            self.db.execute("UPDATE problems SET revision=revision+1,status='pending' WHERE id=?", (ident,))
-        return dict(self.db.execute("SELECT * FROM problems WHERE id=?", (ident,)).fetchone())
 
-    def feedback(self, project, conversation_id, summary, category="unknown", event_refs=None,
-                 resolution="", knowledge_id=None, context_handle=None, expected_epoch=None,
-                 expected_task_id=None, expected_task_revision=None):
-        if category not in CATEGORIES or not summary.strip():
-            raise ContractError("valid category and summary are required")
-        if expected_task_id is not None and (not isinstance(expected_task_id, str) or not expected_task_id.strip()):
-            raise ContractError("expected_task_id must be a nonempty string")
-        if expected_task_revision is not None and (isinstance(expected_task_revision, bool)
-                or not isinstance(expected_task_revision, int) or expected_task_revision < 1):
-            raise ContractError("expected_task_revision must be a positive integer")
-        refs = list(event_refs or [])
-        with self.transaction():
-            self.assert_host_epoch(expected_epoch)
-            access = self.access_context(project, context_handle, conversation_id, expected_epoch) if context_handle is not None else None
-            self.bind_session(project, conversation_id)
-            task = self.task(project, conversation_id)
-            assignment = None
-            if access and access["agent_id"]:
-                assignment = self.assignment_context(project, conversation_id, access["agent_id"], context_handle)
-                if not assignment or not assignment["task_id"]:
-                    raise ContractError("assignment_required: child has no verified task assignment")
-                task = self.task_snapshot(project, assignment["task_id"], assignment["task_revision"], assignment["task_write_version"])
-            if access and not access["agent_id"] and task and (expected_task_id is None or expected_task_revision is None):
-                raise ContractError("feedback_task_required: supply expected_task_id and expected_task_revision")
-            if expected_task_id is not None and (not task or expected_task_id != task["id"]):
-                raise ContractError("stale feedback task identity")
-            if expected_task_revision is not None and (not task or expected_task_revision != task["revision"]):
-                raise ContractError("stale feedback task revision")
-            for ref in refs:
-                if not self.db.execute("SELECT 1 FROM events WHERE id=? AND project=? AND conversation=? "
-                                       "AND task_id IS ? AND task_revision IS ?",
-                                       (ref, project, conversation_id, task["id"] if task else None,
-                                        task["revision"] if task else None)).fetchone():
-                    raise ContractError("evidence must belong to the current project, conversation and task revision")
-                if access and access["agent_id"] and not self.db.execute(
-                        "SELECT 1 FROM events WHERE id=? AND agent=?", (ref, access["agent_id"])).fetchone():
-                    raise ContractError("evidence must belong to the current subagent")
-            event, _ = self._event(project, conversation_id, "Feedback",
-                                   {"summary": summary, "resolution": resolution, "knowledge_id": knowledge_id},
-                                   task_id=task["id"] if task else None,
-                                   task_revision=task["revision"] if task else None,
-                                   agent_id=access["agent_id"] if access else None, outcome="reported",
-                                   task_write_version=task.get("write_version") if task else None,
-                                   execution_epoch=task.get("execution_epoch") if task else None,
-                                   assignment_id=assignment["id"] if assignment else None)
-            return self._problem(project, conversation_id, summary, category, refs + [event["id"]], knowledge_id, task_binding=task)
 
-    def problems(self, project, limit=20):
-        return [dict(r) for r in self.db.execute("SELECT * FROM problems WHERE project=? AND status='pending' "
-                                               "ORDER BY created LIMIT ?", (project, max(1, min(limit, 100))))]
 
-    def review_packet(self, project, problem_id):
-        problem = self.db.execute("SELECT * FROM problems WHERE id=? AND project=?", (problem_id, project)).fetchone()
-        if not problem:
-            raise ContractError("unknown problem")
-        count = self.db.execute("SELECT COUNT(*) FROM problem_events WHERE problem=?", (problem_id,)).fetchone()[0]
-        events = [dict(r) for r in self.db.execute("SELECT e.* FROM events e JOIN problem_events p ON p.event=e.id "
-                                                 "WHERE p.problem=? ORDER BY e.created DESC LIMIT 40", (problem_id,))]
-        max_chars = int(self.config["admin"]["max_input_chars"])
-        if not 1000 <= max_chars <= 200000:
-            raise ContractError("invalid admin input budget")
-        selected, used = [], 0
-        # 晚到的新证据优先；明确标记截断，不把部分证据写成完整。
-        truncated = False
-        for event in events:
-            event["payload"] = json.loads(event["payload"])
-            truncated |= bool(event["payload"].get("truncated"))
-            size = len(encode(event))
-            if used + size > max_chars - 2000:
-                continue
-            selected.append(event)
-            used += size
-        origin = self.db.execute("SELECT e.* FROM events e JOIN problem_events pe ON pe.event=e.id "
-                                 "WHERE pe.problem=? AND e.type IN ('Feedback','Stop','PostToolUse') "
-                                 "ORDER BY e.created,e.id LIMIT 1", (problem_id,)).fetchone()
-        task = self.task_snapshot(project, problem["task_id"], problem["task_revision"],
-                                  origin["task_write_version"] if origin else None) if problem["task_id"] else None
-        if task and origin:
-            task["status"] = origin["task_status"] or "unknown_legacy"
-        query = problem["summary"] + " " + (task["goal"] if task else "")
-        related = self.search(project, query, 3)["items"]
-        summaries = [{"knowledge_id": item["knowledge_id"], "revision": item["revision"],
-                      "title": clip(item["title"], 120), "content": clip(item["content"], 350),
-                      "applicability": clip(item["applicability"], 160), "metadata": item.get("metadata", {}),
-                      "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
-                      "current_tool_success": item["current_tool_success"]} for item in related]
-        candidate_rows = self.db.execute("SELECT id,body FROM candidates WHERE project=? AND problem<>? ORDER BY created DESC LIMIT 30",
-                                         (project, problem_id)).fetchall()
-        query_terms = set(terms(query))
-        candidate_summaries = []
-        for row in candidate_rows:
-            body = clean(json.loads(row["body"]))
-            if query_terms.intersection(terms(body["title"] + " " + body["content"])):
-                candidate_summaries.append({"candidate_id": row["id"], "title": clip(body["title"], 120),
-                                            "content": clip(body["content"], 350), "applicability": clip(body["applicability"], 160)})
-                if len(candidate_summaries) == 3:
-                    break
-        packet = {"problem": clean(dict(problem)), "task": task, "events": list(reversed(selected)),
-                  "incomplete": len(selected) != count, "evidence_truncated": truncated, "evidence_count": count,
-                  "related_knowledge": summaries, "related_candidates": candidate_summaries}
-        # 去重提示不能挤占真实证据；完整输入仍由管理员在调用前核预算。
-        while len(encode(packet)) > max_chars - 500 and (packet["related_candidates"] or packet["related_knowledge"]):
-            (packet["related_candidates"] or packet["related_knowledge"]).pop()
-        return packet
 
     def submit_candidate(self, project, expected_epoch=None, **body):
         required = {"problem_id", "problem_revision", "title", "content", "category", "applicability",
@@ -753,21 +611,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
 
     @staticmethod
     def outcome(response):
-        if not isinstance(response, dict):
-            return "unknown"
-        exit_code = response.get("exit_code", response.get("exitCode"))
-        if response.get("session_id") is not None and exit_code is None:
-            return "running"
-        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-            return "succeeded" if exit_code == 0 else "failed"
-        if response.get("isError") is True or response.get("is_error") is True or response.get("success") is False:
-            return "failed"
-        if response.get("success") is True:
-            return "succeeded"
-        if response.get("isError") is False or response.get("is_error") is False:
-            # MCP 协议完成不代表业务验证通过，不能用于 tool_success 晋升。
-            return "call_completed"
-        return "unknown"
+        return tool_outcome(response)
 
     def handle_hook(self, raw):
         kind = raw.get("hook_event_name")
@@ -855,6 +699,7 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 conflict |= binding["decision"] == "denied" and outcome != "unknown"
                 conflict |= binding["observation"] in terminals and outcome in terminals and binding["observation"] != outcome
                 conflict |= bool(binding["tool_name"] and raw.get("tool_name") != binding["tool_name"])
+                conflict |= operation_input_conflict(self, project, operation, raw)
                 if conflict:
                     payload["observed_outcome"] = outcome
                     payload["operation_conflict"] = True
@@ -891,31 +736,9 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                                 (project, operation, conversation, task_id, task_revision,
                                  agent_id, state, event["id"], epoch, task_write_version, execution_epoch, assignment_id,
                                  decision, observation, int(conflict), raw.get("tool_name")))
-            if fresh and outcome in {"failed", "conflict"} and not raw.get("tool_name", "").startswith("mcp__agent_learning__"):
-                self._queue_fault(project, conversation, agent_id, source, epoch, raw)
-                summary = f"{raw.get('tool_name', 'unknown tool')} {outcome}: " + encode(clean(raw.get("tool_response")))[:300]
-                self._problem(project, conversation, summary, "operation", [event["id"]],
-                              task_binding={"id": task_id, "revision": task_revision})
-                if outcome == "conflict" and operation:
-                    affected = self.db.execute("SELECT DISTINCT pe.problem FROM problem_events pe JOIN events e ON e.id=pe.event "
-                                               "WHERE e.project=? AND e.operation=?", (project, operation)).fetchall()
-                    for item in affected:
-                        if self.db.execute("INSERT OR IGNORE INTO problem_events VALUES(?,?)", (item[0], event["id"])).rowcount:
-                            self.db.execute("UPDATE problems SET revision=revision+1,status='pending' WHERE id=?", (item[0],))
-            elif fresh and kind == "PostToolUse" and outcome == "succeeded" and not raw.get("tool_name", "").startswith("mcp__agent_learning__"):
-                # 仅保留同工具的首次潜在后续成功；它不证明错误根因或修复成功。
-                # 插件自查和unknown结果不会推进问题版本，避免学习自身触发循环。
-                pending = self.db.execute(
-                    "SELECT p.id FROM problems p WHERE p.project=? AND p.conversation=? "
-                    "AND p.status='pending' AND p.task_id IS ? AND p.task_revision IS ? "
-                    "AND EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
-                    "WHERE pe.problem=p.id AND e.outcome='failed' AND json_extract(e.payload,'$.tool_name')=?) "
-                    "AND NOT EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
-                    "WHERE pe.problem=p.id AND e.type='PostToolUse' AND e.outcome='succeeded') "
-                    "ORDER BY p.created DESC LIMIT 1", (project, conversation, task_id, task_revision, raw.get("tool_name"))).fetchall()
-                for problem in pending:
-                    self.db.execute("INSERT OR IGNORE INTO problem_events VALUES(?,?)", (problem[0], event["id"]))
-                    self.db.execute("UPDATE problems SET revision=revision+1 WHERE id=?", (problem[0],))
+            if fresh and kind == "PostToolUse":
+                self._capture_tool_case(project, conversation, agent_id, event, outcome, raw,
+                                        {"id": task_id, "revision": task_revision}, source, epoch, operation)
             if kind == "Interrupt":
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
                                 "AND (? IS NULL OR agent=?) AND state IN ('running','started')", (project, conversation, agent_id, agent_id))
@@ -926,19 +749,8 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
                 self._execution_fence(project, conversation, "new_user_prompt")
             if kind == "SessionStart" and raw.get("source") == "clear" and not agent_id:
                 self._execution_fence(project, conversation, "context_cleared", pause=True)
-            if (kind == "Stop" and not agent_id and fresh and self.config["capture_deliveries"] and task
-                    and task["status"] == "delivered" and raw.get("last_assistant_message")):
-                delivered = self.db.execute("SELECT 1 FROM deliveries WHERE project=? AND task_id=? AND revision=?",
-                                            (project, task["id"], task["revision"])).fetchone()
-                if not delivered:
-                    refs = [event["id"]] + [r[0] for r in self.db.execute(
-                        "SELECT id FROM events WHERE project=? AND conversation=? AND task_id=? AND task_revision=? "
-                        "AND type='PostToolUse' AND outcome IN ('succeeded','failed') ORDER BY created DESC LIMIT 3",
-                        (project, conversation, task["id"], task["revision"]))]
-                    problem = self._problem(project, conversation, "已交付任务结果（待审核）：" + clip(task["goal"], 200),
-                                            "mixed", refs)
-                    self.db.execute("INSERT INTO deliveries VALUES(?,?,?,?)",
-                                    (project, task["id"], task["revision"], problem["id"]))
+            if kind == "Stop" and not agent_id and fresh:
+                self._capture_delivery(project, conversation, task, event, raw)
         if denied:
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}

@@ -165,6 +165,8 @@ class KnowledgeIndexTests(unittest.TestCase):
 
     def test_search_inside_existing_write_transaction_keeps_ownership(self):
         published = self.publish(title="compiler")
+        # 审核包现在使用只读比较检索；显式建立搜索计数基线。
+        self.r.search(self.p, "compiler")
         before = self.r.db.execute("SELECT value FROM metrics WHERE project=? AND name='search_queries'", (self.p,)).fetchone()[0]
         try:
             with self.r.transaction():

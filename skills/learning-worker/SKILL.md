@@ -17,8 +17,10 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 - 真正开始新任务时用 `task_update(new_task=true)`；已有任务的任何更新都传 `expected_task_id` 和 `expected_write_version`（取自任务回执或 `session_context`）。写入过期时读当前状态后按最新要求判断，不直接重放旧更新。`expected_revision` 只作额外合同检查。
 - 只有目标或范围改变才增加任务 revision；单纯更新为 `delivered` 不等于新任务，也不应让现有证据失效。
 - 省略 status 会保留现状；恢复非活动任务需 `resume=true`，不恢复旧执行许可。保护模式的许可由受信宿主或操作者设置，不能通过任务 scope 签发。遇到许可过期时保留拒绝并报告所缺接入。
-- 明确交付后更新为 `delivered`。`Stop` 会为该任务版本记录一次公开结果案例，保留待审核状态，无需另写总结；任务尚未完成时保留真实状态。
+- 明确交付后更新为 `delivered`。`Stop` 按交付状态的 write_version 记录公开结果；同轮重复停止不重复采集，明确恢复后再次交付会追加历史，无需另写总结。
 - 用 `case_feedback` 简短反馈实际问题结果和真实 `event_refs`；父 Agent 同时传 `expected_task_id` 和 `expected_task_revision`。子 Agent 按固定 assignment 反馈；assignment 过期后仍归属原任务，不继承新父任务的权限。没有证据时保留未知。
+- 同一次 `case_feedback` 提供 `idempotency_key`，失败重试沿用原键和原参数；真实再次发生使用新键。知识反例同时传 `knowledge_id`、`knowledge_revision` 和 `feedback_kind=counterexample`，不猜被反馈的修订，也不直接撤销知识。
+- `pending_counterexample_count` 表示知识存在待核实反例，先核对相关依据；它不等于结论已被证伪。`recovery_observed` 仅表示观察到潜在后续成功，不等于已解决或用户验收。
 - 系统记录可观察的消息、工具事件和结果。只有缺少关键决策依据时才补一句说明，无需额外生成复盘文件。
 - 区分已执行、命令成功、编译通过和用户验收通过。退出码为零不证明专业结论或主流程验收成立。
 - 观察模式下知识服务不可达时继续已授权任务，并明确记录仍待同步；执行保护返回拒绝时保留该拒绝，不绕过入口。不自行安装服务、更改配置或扩大检查范围。

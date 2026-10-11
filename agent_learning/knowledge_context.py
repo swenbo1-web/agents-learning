@@ -22,7 +22,8 @@ class KnowledgeContextMixin:
     def _source_state(item):
         return {"health": item.get("source_health", "missing"),
                 "current_tool_success": item.get("current_tool_success", False),
-                "problem_changed": item.get("problem_changed", any(s.get("problem_changed", False) for s in item.get("sources", [])))}
+                "problem_changed": item.get("problem_changed", any(s.get("problem_changed", False) for s in item.get("sources", []))),
+                "pending_counterexample_count": item.get("pending_counterexample_count", 0)}
 
     def _record_exposure(self, project, conversation, agent_id, items, injected=False):
         from .runtime import encode
@@ -99,7 +100,8 @@ class KnowledgeContextMixin:
             identity = f"{row['knowledge_id']}@{row['revision']}"
             if state != json.loads(row["state"]):
                 note = (f"知识 {identity} 来源已变：health={state['health']}，"
-                        f"tool_success={state['current_tool_success']}，新证据={state['problem_changed']}；请用 knowledge_read 核对。")
+                        f"tool_success={state['current_tool_success']}，新证据={state['problem_changed']}，"
+                        f"待核实反例={state['pending_counterexample_count']}；请用 knowledge_read 核对。")
                 cost = len(note) + int(bool(notes))
                 if cost > remaining:
                     continue
@@ -290,6 +292,9 @@ class KnowledgeContextMixin:
                         "validation_level": item["validation_level"], "source_health": item["source_health"],
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
+                if item.get("pending_counterexample_count", 0):
+                    card["pending_counterexample_count"] = item["pending_counterexample_count"]
+                    card["feedback_status"] = "pending_counterexample"
                 if item.get("metadata"):
                     card["metadata"] = {k: clip(v, 60) for k, v in item["metadata"].items()}
                 if item.get("match"):
@@ -302,6 +307,8 @@ class KnowledgeContextMixin:
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                             "title": clip(item["title"], 60), "summary_only": True,
                             "read_required": True, "source_health": item["source_health"]}
+                    if item.get("pending_counterexample_count", 0):
+                        card["pending_counterexample_count"] = item["pending_counterexample_count"]
                 if len(encode(card)) > available:
                     continue
                 if not delivered:

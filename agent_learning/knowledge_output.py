@@ -28,6 +28,8 @@ def _state(item):
             "current_tool_success": bool(item.get("current_tool_success", False)),
             "validation_level": item.get("validation_level", "reported"),
             "source_version": item.get("source_version", -1),
+            "pending_counterexample_count": item.get("pending_counterexample_count", 0),
+            "feedback_status": item.get("feedback_status", "none"),
             "problem_changed": bool(item.get("problem_changed", any(
                 source.get("problem_changed", False) for source in item.get("sources", []))))}
 

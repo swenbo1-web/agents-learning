@@ -38,15 +38,17 @@ class OptimizationTests(unittest.TestCase):
         return self.r.submit_candidate(self.p, **body)["candidate_id"]
 
     def test_long_log_keeps_identity_tail_and_success_link(self):
+        self.hook("PreToolUse", tool_use_id="fail", tool_name="Bash", tool_input={"command": "compile module"})
         self.hook("PostToolUse", tool_use_id="fail", tool_name="Bash", tool_input={"command": "compile module"},
                   tool_response={"exit_code": 1, "output": "header " + "x" * 9000 + " FATAL missing include"})
         problem = self.r.problems(self.p)[0]
         packet = self.r.review_packet(self.p, problem["id"])
-        payload = packet["events"][0]["payload"]
+        payload = next(event["payload"] for event in packet["events"] if event["type"] == "PostToolUse")
         self.assertEqual(payload["tool_name"], "Bash")
         self.assertIn("FATAL missing include", payload["tool_response"]["output"])
         self.assertTrue(packet["evidence_truncated"])
         self.assertFalse(packet["incomplete"])
+        self.hook("PreToolUse", tool_use_id="repair", tool_name="Bash", tool_input={"command": "repair module"})
         self.hook("PostToolUse", tool_use_id="repair", tool_name="Bash", tool_response={"exit_code": 0})
         self.assertEqual(self.r.review_packet(self.p, problem["id"])["problem"]["revision"], problem["revision"] + 1)
 
@@ -172,7 +174,7 @@ class OptimizationTests(unittest.TestCase):
         migrated = Runtime(legacy)
         try:
             self.assertEqual(migrated.task_snapshot("p", "old-task", 1)["goal"], "旧任务")
-            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 7)
             self.assertEqual(migrated.db.execute("SELECT shown FROM contexts").fetchone()[0], '["knowledge@1"]')
             self.assertNotIn("SYNTHETIC_OLD_KEY", migrated.db.execute("SELECT payload FROM outbox").fetchone()[0])
         finally:
