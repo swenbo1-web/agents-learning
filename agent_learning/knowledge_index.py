@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from .semantic_retrieval import (SemanticRetrievalMixin, semantic_automatic_allowed,
+                                 semantic_exact_anchors_allowed)
 
 
 INDEX_VERSION = 4
@@ -131,7 +133,7 @@ def _filter_sql(filters):
     return "".join(conditions)
 
 
-class KnowledgeIndexMixin:
+class KnowledgeIndexMixin(SemanticRetrievalMixin):
     def _index_knowledge(self, project, knowledge_id, revision, body):
         from .runtime import clean
 
@@ -188,6 +190,11 @@ class KnowledgeIndexMixin:
         if not selected:
             return {"status": "no_match", "items": []}
 
+        # Prepare the one query embedding before acquiring the SQLite snapshot. Index
+        # construction remains an explicit operation, never part of a prompt query.
+        semantic = self._semantic_prepare(project, query)
+        hybrid = semantic["vector"] is not None
+
         owns_snapshot = not self.db.in_transaction
         if owns_snapshot:
             self.db.execute("BEGIN")
@@ -196,9 +203,17 @@ class KnowledgeIndexMixin:
             if row is None:
                 raise ContractError("unknown project")
             manifest = dict(row)
+            if hybrid and semantic["signature"] != self.semantic_signature(project):
+                # The provider request ran without a database lock. A concurrent
+                # refresh can change the vector space before this snapshot starts.
+                hybrid = False
+                semantic["vector"] = None
+                semantic["diagnostics"].update(semantic_status="index_changed", retryable=True,
+                                               retry_after_seconds=5)
             # 自动检索先有界过召回，再筛来源；来源变化必须使已筛掉的候选重新参与。
             source_epoch = manifest.pop("source_epoch")
-            key = digest([project, plan, limit, filters, manifest, "local-fts", INDEX_VERSION,
+            cache_identity = [self.semantic_signature(project), "hybrid"] if hybrid else "local-fts"
+            key = digest([project, plan, limit, filters, manifest, cache_identity, INDEX_VERSION,
                           bool(_automatic), source_epoch if _automatic else None])
             cached = self.db.execute("SELECT body FROM cache WHERE key=?", (key,)).fetchone()
             references = None
@@ -217,6 +232,7 @@ class KnowledgeIndexMixin:
             conditions = _filter_sql(filters)
             weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
             denominator = sum(weights.values())
+            semantic_matches = self._semantic_candidates(project, semantic, filters) if hybrid else {}
             rows = []
             if references is not None:
                 for ref in references:
@@ -224,7 +240,8 @@ class KnowledgeIndexMixin:
                                           "AND k.id=a.id AND k.revision=a.revision WHERE k.project=? "
                                           "AND k.id=? AND k.revision=?" + conditions,
                                           (project, ref["knowledge_id"], ref["revision"], *filters.values())).fetchone()
-                    if row is None or _match_values(row["body"], weights, denominator)[0] <= 0:
+                    if row is None or (_match_values(row["body"], weights, denominator)[0] <= 0
+                                      and row["id"] not in semantic_matches):
                         references = None
                         rows = []
                         break
@@ -239,7 +256,16 @@ class KnowledgeIndexMixin:
                                        "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions +
                                        " ORDER BY alp_knowledge_score(k.body) DESC,k.id ASC LIMIT ?",
                                        (match, project, *filters.values(),
-                                        _MAX_AUTOMATIC_CANDIDATES if _automatic else limit)).fetchall()
+                                        _MAX_AUTOMATIC_CANDIDATES if _automatic or hybrid else limit)).fetchall()
+                if hybrid:
+                    lexical_ranks = {row["id"]: rank for rank, row in enumerate(rows, 1)}
+                    merged = {row["id"]: row for row in rows}
+                    merged.update({identity: match["row"] for identity, match in semantic_matches.items()})
+                    def fusion(identity):
+                        return (1 / (60 + lexical_ranks[identity]) if identity in lexical_ranks else 0) + (
+                            1 / (60 + semantic_matches[identity]["rank"]) if identity in semantic_matches else 0)
+                    rows = sorted(merged.values(), key=lambda row: (-fusion(row["id"]), row["id"]))
+                    semantic["lexical_ranks"] = lexical_ranks
                 references = [{"knowledge_id": row["id"], "revision": row["revision"]} for row in rows]
             # 正文及来源都在同一快照读取，禁止通过 read() 跳转到刚发布的新修订。
             items = []
@@ -247,8 +273,25 @@ class KnowledgeIndexMixin:
             for row in rows:
                 explanation = _match_info(row["body"], weights, denominator, meaningful)
                 # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
-                if explanation["score"] <= 0:
+                semantic_match = semantic_matches.get(row["id"])
+                if explanation["score"] <= 0 and semantic_match is None:
                     continue
+                if hybrid:
+                    full_matches = _match_values(row["body"], weights, denominator)[2]
+                    # Cached references preserve ranking; scores remain query-specific.
+                    explanation.update(method="hybrid", semantic_score=round(semantic_match["score"], 6)
+                        if semantic_match else None, semantic_rank=semantic_match["rank"] if semantic_match else None,
+                        fusion_method="reciprocal_rank_k60", semantic_input_truncated=bool(
+                            semantic_match and semantic_match["input_truncated"]))
+                    if semantic_match and not explanation["auto_eligible"]:
+                        explanation["auto_eligible"] = semantic_automatic_allowed(
+                            meaningful, full_matches, semantic_match, semantic["config"])
+                if semantic["config"]["enabled"]:
+                    # Optional-provider failure must not weaken the configured exact
+                    # identifier gate when results fall back to the lexical channel.
+                    full_matches = _match_values(row["body"], weights, denominator)[2]
+                    if not semantic_exact_anchors_allowed(meaningful, full_matches):
+                        explanation["auto_eligible"] = False
                 item = self._public(project, row)
                 if item.get("source_health") in {"conflicted", "denied", "missing"}:
                     explanation["auto_eligible"] = False
@@ -257,7 +300,7 @@ class KnowledgeIndexMixin:
                 item["match"] = explanation
                 items.append(item)
                 retained.append({"knowledge_id": row["id"], "revision": row["revision"]})
-                if _automatic and len(items) == limit:
+                if len(items) == limit:
                     break
             references = retained
             if owns_snapshot:
@@ -269,9 +312,12 @@ class KnowledgeIndexMixin:
 
         # 先结束只读快照再写派生缓存/计数，避免 WAL 读事务升级引发 BUSY_SNAPSHOT。
         def write_derived():
-            self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, encode(references)))
-            self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
-                            "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT 256)")
+            # Retryable provider failure must not cache a hybrid absence and suppress
+            # recovery. Existing lexical cache may still be read safely.
+            if not semantic["diagnostics"].get("retryable"):
+                self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, encode(references)))
+                self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
+                                "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT 256)")
             self._metric(project, "search_queries")
             self._metric(project, "search_matches", int(bool(items)))
 
@@ -289,4 +335,7 @@ class KnowledgeIndexMixin:
                 # 结果已经按完整快照获得，派生缓存/计数锁竞争不能阻断检索。
         else:
             write_derived()
-        return {"status": "matched" if items else "no_match", "items": items, **manifest}
+        result = {"status": "matched" if items else "no_match", "items": items, **manifest}
+        if semantic["config"]["enabled"]:
+            result["retrieval"] = semantic["diagnostics"]
+        return result

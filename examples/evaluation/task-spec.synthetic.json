@@ -1,0 +1,22 @@
+{
+  "id": "synthetic-runner-smoke",
+  "data_class": "synthetic_template",
+  "model": {
+    "provider": "offline-fixture",
+    "name": "no-model-called",
+    "version": "stdlib-only",
+    "parameters": {}
+  },
+  "environment_sha256": "e08f9566719b36c2a8e878024fe1f414c07d10d55b3904ea5f756121c4c19871",
+  "knowledge_sha256": "c07e72b3cbdea94f8e4b38d03c78f4845696b1444a0aae5062a7010ad9b2257f",
+  "repeats": 2,
+  "seed": 42,
+  "tasks": [
+    {
+      "id": "toy-sum",
+      "prompt": "Synthetic runner fixture: prepare fixture.json containing {\"numbers\":[2,3,5]} followed by newline and sum its numbers. No AI task is executed.",
+      "dataset_sha256": "8503944fdfe0f549a24fa379b53f6cf8c384a9e288e736b58fc42f55eab8497a",
+      "acceptance_criteria": "The stdlib adapter checks that sum(numbers) equals 10. This validates runner plumbing only, not agent quality, retrieval effectiveness, token savings or speed."
+    }
+  ]
+}

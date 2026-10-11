@@ -62,6 +62,15 @@ def _card(item):
     result["truncated"] = (result["content_summary"] != item.get("content", "") or any(
         result[key] != item.get(key, "") for key in ("title", "applicability", "limitations")))
     result["read_required"] = any(result[key] != item.get(key, "") for key in ("applicability", "limitations"))
+    if match.get("method") in {"lexical", "semantic", "hybrid"}:
+        result["match"]["method"] = match["method"]
+    for key in ("semantic_score", "semantic_rank"):
+        if key in match and isinstance(match[key], (int, float)):
+            result["match"][key] = match[key]
+    if match.get("fusion_method") in {"rrf", "reciprocal_rank_k60"}:
+        result["match"]["fusion_method"] = match["fusion_method"]
+    if "semantic_input_truncated" in match:
+        result["match"]["semantic_input_truncated"] = bool(match["semantic_input_truncated"])
     return result
 
 
@@ -97,7 +106,23 @@ def search_preview(result, max_chars=6000):
     max_chars = _budget(max_chars, 512, 20000)
     source_items = result.get("items", [])
     output = {key: result[key] for key in ("status", "generation", "revocation_epoch") if key in result}
+    if isinstance(result.get("retrieval"), dict):
+        # 仅保留有限诊断，不把服务端响应或任意异常文本带入上下文。
+        diagnostics = {}
+        for key in ("mode", "semantic_status", "reason"):
+            if isinstance(result["retrieval"].get(key), str):
+                diagnostics[key] = result["retrieval"][key][:80]
+        for key in ("retryable", "query_cache_hit", "query_truncated", "scan_truncated"):
+            if isinstance(result["retrieval"].get(key), bool):
+                diagnostics[key] = result["retrieval"][key]
+        for key in ("retry_after_seconds", "scanned", "candidates"):
+            if isinstance(result["retrieval"].get(key), (int, float)):
+                diagnostics[key] = result["retrieval"][key]
+        if diagnostics:
+            output["retrieval"] = diagnostics
     output.update(items=[], truncated=False, omitted_count=len(source_items))
+    if _length(output) > max_chars:
+        output.pop("retrieval", None)
     for index, item in enumerate(source_items):
         # 平分剩余空间，避免首条长正文耗尽所有卡片的预算。
         remaining = max_chars - _length(output) - 2

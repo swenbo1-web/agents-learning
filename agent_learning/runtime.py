@@ -29,6 +29,7 @@ from .knowledge_sync import KnowledgeSyncMixin
 from .publication_state import PublicationStateMixin
 from .scheduler import SCHEDULER_DEFAULTS, SchedulerMixin, validate_scheduler_config
 from .learning_evaluation import LearningEvaluationMixin
+from .semantic_retrieval import SEMANTIC_DEFAULTS, validate_semantic_config
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -44,6 +45,7 @@ DEFAULTS = {
               "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
               "token_reservation_per_call": 4000},
     "scheduler": SCHEDULER_DEFAULTS,
+    "retrieval": {"semantic": SEMANTIC_DEFAULTS},
     "hindsight": {"enabled": False, "url": "http://127.0.0.1:8888", "bank_id": "",
                   "api_key_env": "HINDSIGHT_API_KEY", "strategy": "alp_chunks",
                   "timeout_seconds": 10},
@@ -204,8 +206,18 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
         supplied = config if config is not None else (
             json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.is_file() else {})
         self.config = json.loads(encode(DEFAULTS))
+        if not isinstance(supplied, dict):
+            raise ContractError("configuration must be a JSON object")
         for key, value in supplied.items():
-            if key in {"admin", "hindsight", "scheduler"} and isinstance(value, dict):
+            if key == "retrieval":
+                if not isinstance(value, dict) or set(value) - {"semantic"}:
+                    raise ContractError("retrieval must contain supported configuration fields")
+                if "semantic" in value:
+                    try:
+                        self.config[key]["semantic"] = validate_semantic_config(value["semantic"])
+                    except ValueError as exc:
+                        raise ContractError(str(exc)) from exc
+            elif key in {"admin", "hindsight", "scheduler"} and isinstance(value, dict):
                 self.config[key].update(value)
             else:
                 self.config[key] = value
@@ -217,6 +229,10 @@ class Runtime(TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContex
             if not isinstance(value, bool):
                 raise ContractError("enable flags must be booleans")
         validate_scheduler_config(self.config["scheduler"])
+        try:
+            self.config["retrieval"]["semantic"] = validate_semantic_config(self.config["retrieval"]["semantic"])
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
         if not isinstance(self.config["allowed_tools"], list) or not all(isinstance(v, str) for v in self.config["allowed_tools"]):
             raise ContractError("allowed_tools must be a string array")
         if not isinstance(self.config["project_aliases"], dict) or not all(isinstance(k, str) and isinstance(v, str)

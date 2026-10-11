@@ -1,13 +1,13 @@
 {
   "name": "agent-learning",
-  "version": "0.11.1",
-  "description": "Record supported Codex events, retrieve relevant knowledge, and queue evidence for administrator review.",
+  "version": "0.12.0",
+  "description": "Retain project experience with bounded retrieval, evidence-based knowledge governance, a local browser and paired task evaluation.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Learning",
-    "shortDescription": "自动记录问题、检索知识并维护经验候选",
-    "longDescription": "在受支持的 Codex 本地事件中保存执行证据，按任务检索知识，并将待整理记录交给管理员流程。正式知识发布与任务验收分别管理。"
+    "shortDescription": "让 Agent 记住项目经验，查阅有依据的知识",
+    "longDescription": "在受支持的任务事件中查阅经验、记录工具结果，由管理员整理候选并经受信入口发布。支持本地全文与可选语义检索、只读知识浏览和成对任务评估；知识保留条件、来源与修订。"
   }
 }

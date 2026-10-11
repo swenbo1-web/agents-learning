@@ -44,6 +44,8 @@ class PackageTests(unittest.TestCase):
             wheels = list(wheel_directory.glob("*.whl"))
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
+                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation"):
+                    self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
                 self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
@@ -78,6 +80,8 @@ class PackageTests(unittest.TestCase):
                              "skills/learning-admin/SKILL.md", ".codex-plugin/plugin.json",
                              ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json", "LICENSE"):
                 self.assertTrue((exported / relative).is_file(), relative)
+            for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation"):
+                self.assertTrue((exported / "agent_learning" / f"{module}.py").is_file(), module)
             self.assertEqual((exported / "LICENSE").read_bytes(), (source_root / "LICENSE").read_bytes())
             manifest = json.loads((exported / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["version"], __version__)

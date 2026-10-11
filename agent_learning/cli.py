@@ -19,6 +19,26 @@ def parser():
     p.add_argument("--workspace", default=str(Path.cwd()), help="当前项目目录")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    browser = sub.add_parser("browser", help="临时启动本机只读知识浏览器，不创建或升级数据库")
+    browser.add_argument("--port", type=int, default=0)
+    browser.add_argument("--open", action="store_true", help="在默认浏览器打开页面")
+    browser.add_argument("--project-id", help="选择已有项目；省略按已登记workspace解析")
+    sub.add_parser("semantic-status", help="查看可选本地向量索引状态，不调用模型")
+    semantic = sub.add_parser("semantic-refresh", help="显式调用已配置的本地嵌入模型，增量刷新派生索引")
+    semantic.add_argument("--limit", type=int, default=100)
+    semantic.add_argument("--rebuild", action="store_true", help="清除此项目当前配置的旧向量后重建")
+    protocol = sub.add_parser("evaluation-protocol", help="从评估说明冻结任务、模型、环境与两组执行顺序")
+    protocol.add_argument("--spec", required=True)
+    protocol.add_argument("--output", required=True)
+    evaluation = sub.add_parser("evaluation-run", help="显式运行用户提供的评估adapter；该命令可能调用adapter中的模型")
+    evaluation.add_argument("--protocol", required=True)
+    evaluation.add_argument("--adapter", required=True)
+    evaluation.add_argument("--output", required=True)
+    evaluation.add_argument("--timeout-seconds", type=float, default=300)
+    report = sub.add_parser("evaluation-report", help="检查成对任务记录并汇总时间、验收与完整用量")
+    report.add_argument("--protocol", required=True)
+    report.add_argument("--records", required=True)
+    report.add_argument("--output")
     effects = sub.add_parser("learning-effects", help="按时间窗查看声明采用与实际工具观察，不推断净节省")
     effects.add_argument("--days", type=int, default=30)
     use = sub.add_parser("knowledge-use", help="记录一次知识采用声明，不增加执行权限")
@@ -187,6 +207,39 @@ def main(argv=None):
             return 1
     runtime = None
     try:
+        if args.command.startswith("evaluation-"):
+            from .task_evaluation import write_protocol, run_protocol, report_files
+            if args.command == "evaluation-protocol":
+                result = write_protocol(args.spec, args.output)
+            elif args.command == "evaluation-run":
+                result = run_protocol(args.protocol, args.adapter, args.output,
+                                      timeout_seconds=args.timeout_seconds)
+            else:
+                result = report_files(args.protocol, args.records, args.output)
+            print(encode(result))
+            return 0
+        if args.command == "browser":
+            from .knowledge_browser import make_browser_server, resolve_browser_project
+            default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
+                            if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
+            home = Path(args.home or os.environ.get("ALP_HOME") or default_home).resolve()
+            database = home / "runtime.sqlite3"
+            project = resolve_browser_project(database, args.workspace, args.project_id)
+            browser_server = make_browser_server(database, project, port=args.port)
+            try:
+                print(encode({"status": "serving", "project": project, "url": browser_server.url,
+                              "access_token": browser_server.access_token,
+                              "read_only": True, "stop": "Ctrl+C"}), flush=True)
+                if args.open:
+                    import webbrowser
+                    webbrowser.open(browser_server.browser_url)
+                try:
+                    browser_server.serve_forever(poll_interval=0.25)
+                except KeyboardInterrupt:
+                    pass
+            finally:
+                browser_server.server_close()
+            return 0
         runtime = Runtime(args.home)
         if args.command == "account-changed":
             print(encode(runtime.account_changed(notification_id=args.notification_id)))
@@ -201,6 +254,8 @@ def main(argv=None):
             Server(runtime, project, args.role, context_handle=args.context_handle).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
+        elif args.command == "semantic-status": result = runtime.semantic_status(project)
+        elif args.command == "semantic-refresh": result = runtime.semantic_refresh(project, limit=args.limit, rebuild=args.rebuild)
         elif args.command == "learning-effects": result = runtime.learning_effects(project, days=args.days)
         elif args.command == "knowledge-use": result = runtime.knowledge_use(
             project, args.context_handle, args.knowledge_id, args.knowledge_revision,

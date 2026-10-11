@@ -206,16 +206,37 @@ class KnowledgeContextMixin:
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         filters = self._retrieval_filters(task)
+        semantic_signature = self.semantic_signature(project)
+        # 预算变化只影响待发卡容纳，不必重新召回；知识、来源、模型与任务变化需重查。
+        fault_result_signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task),
+                                         manifest, epoch, semantic_signature])
         signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task), manifest,
-                            epoch, self.config["injection_max_chars"]])
-        should_search = bool(retrieval.strip()) and (compact or signature != initial["retrieval_signature"])
+                            epoch, self.config["injection_max_chars"], semantic_signature])
+        # 跨短时Hook进程保留重试冷却，不将临时嵌入失败永久缓存成无结果。
+        previous_signature = initial["retrieval_signature"]
+        retry_at = 0.0
+        if previous_signature.startswith("retry:"):
+            parts = previous_signature.split(":", 2)
+            if len(parts) == 3:
+                try:
+                    retry_at = float(parts[1])
+                    previous_signature = parts[2]
+                except ValueError:
+                    pass
+        cooling = signature == previous_signature and retry_at > time.time()
+        should_search = bool(retrieval.strip()) and not cooling and (
+            compact or signature != previous_signature or bool(retry_at))
+        fault_refs = json.loads(fault["results"]) if fault else []
         if fault:
-            should_search = fault["state"] == "pending"
+            stale_results = any(ref.get("retrieval_signature") != fault_result_signature for ref in fault_refs)
+            should_search = (fault["state"] == "pending" or stale_results) and not cooling
         elif tool_only:
             should_search = False
-        items = self.search(project, retrieval, filters=filters, _automatic=True)["items"] if should_search else []
-        if fault and fault["state"] == "ready":
-            for ref in json.loads(fault["results"]):
+        search_result = self.search(project, retrieval, filters=filters, _automatic=True) if should_search else {}
+        items = search_result.get("items", [])
+        retryable = bool(search_result.get("retrieval", {}).get("retryable", False))
+        if fault and fault["state"] == "ready" and not should_search:
+            for ref in fault_refs:
                 try:
                     item = self.read(project, ref["knowledge_id"])
                 except ContractError:
@@ -223,7 +244,7 @@ class KnowledgeContextMixin:
                 if item["revision"] == ref["revision"]:
                     item["match"] = ref.get("match", {})
                     items.append(item)
-        if not should_search and not tool_only and signature == initial["retrieval_signature"]:
+        if not should_search and not tool_only and signature == previous_signature:
             already = set(json.loads(initial["injected"]))
             for ref in json.loads(initial["retrieval_refs"]):
                 if f"{ref['knowledge_id']}@{ref['revision']}" in already:
@@ -313,6 +334,9 @@ class KnowledgeContextMixin:
                     card["metadata"] = {k: clip(v, 60) for k, v in item["metadata"].items()}
                 if item.get("match"):
                     card["matched_terms"] = item["match"]["matched_terms"][:6]
+                    if item["match"].get("method") in {"semantic", "hybrid"}:
+                        card["retrieval_method"] = item["match"]["method"]
+                        card["semantic_score"] = item["match"].get("semantic_score")
                 for field in ("content_summary", "title"):
                     while len(encode(card)) > available and len(card[field]) > 24:
                         card[field] = clip(card[field], max(24, len(card[field]) // 2))
@@ -336,18 +360,27 @@ class KnowledgeContextMixin:
             self._record_exposure(project, conversation, agent_id, delivered, injected=True)
             if delivered:
                 self._metric(project, "knowledge_injected", len(delivered))
-            if should_search and not tool_only and not fault:
+            if should_search and (not tool_only or fault):
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})} for i in items[:10]]
+                saved_signature = signature
+                if retryable:
+                    # 最短五秒、最长一分钟；提醒链在冷却期间仍独立运行。
+                    delay = search_result.get("retrieval", {}).get("retry_after_seconds", 5)
+                    delay = max(5, min(60, delay if isinstance(delay, (int, float)) else 5))
+                    saved_signature = f"retry:{time.time() + delay}:{signature}"
                 self.db.execute(f"UPDATE {table} SET retrieval_signature=?,retrieval_refs=? WHERE {where}",
-                                (signature, encode(refs), *key))
+                                (saved_signature, encode(refs), *key))
             if not tool_only:
                 self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}", (effective[-8000:], *key))
             if fault:
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})}
                         for i in items[:5] if i.get("match", {}).get("auto_eligible", True) and i["source_health"] == "valid"]
+                for ref in refs:
+                    ref["retrieval_signature"] = fault_result_signature
                 pending = [ref for ref in refs if f"{ref['knowledge_id']}@{ref['revision']}" not in prior]
                 self.db.execute("UPDATE context_faults SET state=?,results=? WHERE project=? AND conversation=? AND agent=? AND signature=?",
-                                ("ready" if pending else "done", encode(pending), project, conversation, agent_id or "", fault["signature"]))
+                                ("pending" if retryable or fault["state"] == "pending" and not should_search
+                                 else "ready" if pending else "done", encode(pending), project, conversation, agent_id or "", fault["signature"]))
                 if should_search:
                     self._metric(project, "failure_retrievals")
             return "\n".join(lines)

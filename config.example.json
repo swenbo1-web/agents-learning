@@ -4,6 +4,22 @@
   "enforce_task_policy": false,
   "capture_deliveries": true,
   "allowed_tools": [],
+  "retrieval": {
+    "semantic": {
+      "enabled": false,
+      "provider": "ollama",
+      "url": "http://127.0.0.1:11434",
+      "model": "",
+      "timeout_seconds": 2,
+      "query_max_chars": 2000,
+      "document_max_chars": 8000,
+      "candidate_limit": 32,
+      "scan_limit": 2000,
+      "sync_batch_size": 16,
+      "min_similarity": 0.55,
+      "automatic_min_similarity": 0.85
+    }
+  },
   "admin": {
     "enabled": false,
     "command": ["codex"],

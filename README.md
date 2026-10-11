@@ -2,9 +2,32 @@
 
 [简体中文](README.md) | [English](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md)
 
-**面向长期项目协作的 Agent 持续学习插件，让任务中积累的经验成为后续工作可检索、可核查、可更新的项目知识。**
+**让 Agent 记住项目经验，在下一次任务中查到有依据的解决方法。**
 
-当前测试版：**0.11.1** · Python **3.10+** · SQLite · [MIT](LICENSE) · [下载](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+开发版本：**0.12.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [已发布测试版 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+
+agents-learning 为长期项目建立可持续维护的知识记忆：在受支持的任务事件中检索相关经验，记录工具结果，由管理员整理候选，再把带有条件、来源和修订的知识交给后续 Agent。普通 Agent 专注当前任务，多次对话积累的经验可以继续使用。
+
+## 核心能力
+
+- **自动查阅与有限上下文**：任务提示、上下文恢复和工具失败补查按当前问题检索；先给摘要，正文与条件按需读取。
+- **关键词与语义混合检索**：默认使用本地全文索引；可接入已运行的本地嵌入模型，补充用词不同的相关经验，并显示匹配依据。
+- **可核查的知识记忆**：保存适用条件、限制、来源、正文修订和撤销状态；来源变化后通知已展示的会话。
+- **本机知识浏览器**：搜索知识、查看修订、来源事件和管理员待办，使用只读页面了解知识库内容。
+- **分工整理与预算控制**：事件采集和增量审核分开，管理员按需启用；调用、并发、审核包和上下文分别有预算。
+- **任务对照评估**：冻结任务、模型、环境和知识快照，对“无记忆／有记忆”成对运行，核对验收、耗时和全流程用量。
+
+`当前任务 → 查阅经验 → 执行与观察 → 整理候选 → 校验发布 → 下一次任务复用`
+
+## 快速体验（源码）
+
+```sh
+python -B scripts/learning.py --help
+python -B scripts/learning.py --home ../agents-learning-data --workspace . status
+python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
+```
+
+第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。接入 Agent 请继续阅读[本地运行](#本地运行)与安装说明。查看[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
 
 ## 项目是怎样形成的
 
@@ -27,7 +50,7 @@
 | 整理和上下文消耗不断增加 | 管理员增量审核，有界检索、按需分页，并分别管理调用次数、并发和上报用量 |
 | 自动化越过当前任务范围 | 启用执行保护后，对已接入的调用核对任务身份、状态和显式执行许可，知识只提供参考 |
 
-目标是减少重复劳动和无关上下文，让 Agent 更有效地使用已有经验。知识展示、声明采用和工具观察分别记录，用户验收需要独立确认；当前没有普通任务总用量与货币账单的完整接入，因此不宣称净节省比例或质量提升百分比。
+目标是减少重复劳动和无关上下文，让 Agent 更有效地使用已有经验。知识展示、声明采用和工具观察分别记录，用户验收需要独立确认。任务评估工具可接收外部执行器上报的用量与成本；尚未取得本项目真实任务对照数据，因此不宣称净节省比例或质量提升百分比。
 
 ## 适用范围
 
@@ -45,7 +68,7 @@
 flowchart TD
     User["用户当前任务"] --> Entry["插件入口：核对项目、会话与宿主版本"]
     Entry --> Task["当前任务合同与子 Agent assignment"]
-    Task --> Retrieve["本地检索、摘要注入与压缩恢复"]
+    Task --> Retrieve["本地全文／可选语义检索、摘要与压缩恢复"]
     Knowledge[("正式知识：正文、条件、修订与来源")] --> Retrieve
     Retrieve --> Worker["普通 Agent 分析并执行任务"]
     Worker --> Guard["已接入的 PreToolUse：执行规则与状态检查"]
@@ -68,6 +91,8 @@ flowchart TD
     Schedule -.-> Publish
     Retrieve --> Exposure["展示与声明采用记录"]
     Worker --> Exposure
+    Knowledge --> Browser["本机只读知识浏览器"]
+    Evaluation["冻结输入：无记忆／有记忆成对运行"] --> Report["验收、耗时与全流程用量报告"]
 ```
 
 主任务、知识检索和经验整理各自推进。普通任务交付不等待后台整理完成；工具失败先登记补查，在下一次受支持的提示、恢复或工具前置事件中检索。管理员模型调用、自动发布与知识批次分别配置，流程图中的节点不表示默认全部开启。
@@ -96,6 +121,9 @@ flowchart LR
     CLI["显式 CLI 操作"] --> Runtime
     Runtime --> DB[("独立 ALP_HOME：SQLite 权威记录")]
     DB --> FTS["当前有效知识的全文索引"]
+    DB -.-> Vectors["显式刷新：可选本地向量索引"]
+    Vectors -.-> Embedding["已配置的本地嵌入模型"]
+    DB --> Browser["本机只读浏览"]
     DB -.-> Remote["可选派生分发目标"]
 ```
 
@@ -109,12 +137,12 @@ flowchart LR
 |---|---|---|
 | 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出固定运行副本，核对发布内容及角色权限 | [install.py](agent_learning/install.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
 | 2. 任务与执行控制 | 保存任务合同与版本，绑定父子 Agent，核对受信许可、状态、动作和余额；知识不能签发权限 | [task_control.py](agent_learning/task_control.py)、[execution.py](agent_learning/execution.py)、[assignments.py](agent_learning/assignments.py) |
-| 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；维护当前有效内容的全文投影及一致读取 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py) |
-| 4. 检索与上下文管理 | 有限召回与匹配筛选、摘要／分页预算、展示台账、失效通知、压缩恢复和失败补查 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py) |
+| 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；全文与可选向量均为可重建派生索引 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py)、[semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
+| 4. 检索与上下文管理 | 有限混合召回与筛选、摘要／分页预算、展示台账、失效通知、压缩恢复、失败补查与只读浏览 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py)、[knowledge_browser.py](agent_learning/knowledge_browser.py) |
 | 5. 事件、证据与案例采集 | 记录可观察事件与工具结果，处理幂等、冲突、迟到回调和用户反馈，形成可追溯的问题增量 | [event_capture.py](agent_learning/event_capture.py)、[case_store.py](agent_learning/case_store.py)、[runtime.py](agent_learning/runtime.py) |
 | 6. 管理员知识治理 | 组织有限审核包，增量排队、调用及回执，提出候选和治理建议；管理员 MCP 不发布知识 | [review_packet.py](agent_learning/review_packet.py)、[admin.py](agent_learning/admin.py)、[admin_queue.py](agent_learning/admin_queue.py)、[admin_lifecycle.py](agent_learning/admin_lifecycle.py)、[admin_decisions.py](agent_learning/admin_decisions.py)、[admin_governance.py](agent_learning/admin_governance.py) |
 | 7. 知识发布与版本治理 | 通过受信入口发布、更新、撤销、恢复和晋升；保存批次清单、安全回退与可选分发状态 | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py)、[publication_state.py](agent_learning/publication_state.py)、[knowledge_releases.py](agent_learning/knowledge_releases.py)、[knowledge_sync.py](agent_learning/knowledge_sync.py)、[hindsight.py](agent_learning/hindsight.py) |
-| 8. 后台调度、预算与效果评估 | 持久待办与有限续跑，全局调用／上报用量准入，记录知识展示和声明采用；不推断阅读或因果 | [scheduler.py](agent_learning/scheduler.py)、[admin_usage.py](agent_learning/admin_usage.py)、[learning_evaluation.py](agent_learning/learning_evaluation.py) |
+| 8. 后台调度、预算与效果评估 | 持久待办、调用预算、知识展示与采用记录，以及独立的成对任务评估 | [scheduler.py](agent_learning/scheduler.py)、[admin_usage.py](agent_learning/admin_usage.py)、[learning_evaluation.py](agent_learning/learning_evaluation.py)、[task_evaluation.py](agent_learning/task_evaluation.py) |
 
 [runtime.py](agent_learning/runtime.py) 组合八个模块，统一项目、会话、账户边界与数据库事务。模块共用版本和数据契约，在同一运行端协作。
 
@@ -166,6 +194,8 @@ flowchart LR
 
 ## 当前版本与兼容
 
+0.12.0 增加可选本地语义混合检索、本机只读知识浏览器和任务对照评估工具。数据库 schema 仍为 11，全文索引仍为 4，可选语义索引为 1；内部发布协议升至 9，新版需要重新导出固定运行副本。向量索引按项目、知识修订及模型配置派生，默认关闭；查询不自动构建索引或下载模型。浏览器与文件评估入口不初始化 Runtime、不升级数据库。GitHub 已发布标签及附件仍对应 0.11.1。
+
 0.11.0 修复整合审查发现的执行范围、工具证据、账户隔离、知识检索与管理员计量问题。数据库升级到 schema 11，在事务内增加全量脱敏业务证据摘要；旧截短资料无法恢复的摘要保持未知，保留事件、知识 ID 和历史回执。全文索引版本为 4，内部发布协议为 8，不能将新旧运行文件混用；旧运行端不能打开版本 11 数据库。旧 scope 执行许可缺少冻结路径台账时须通过受信入口重新审批。常见凭证脱敏不能保证抹除已经存在的副本。
 
 0.11.1 补齐工具名称缺失时的证据边界：同一操作保存首次明确名称，后续缺名保持未知，明确不同名称使该操作及旧成功来源失效；旧空名称台账只使用完整历史事件补充依据，不猜截短名称。完全相同的历史回调重放若确认已有名称矛盾，追加一次标为 legacy_name_conflict 的派生观察，保留原事件并推进来源版本，后续重放保持幂等。数据库 schema、全文索引和内部发布协议保持上述版本。
@@ -175,6 +205,60 @@ flowchart LR
 本仓库维护八模块整合后的源码与 Git 历史。项目显示名称为 `agents-learning`，Python 包名为 `agent_learning`，插件和 CLI 名为 `agent-learning`。
 
 开发仓库保存源码、配置示例、技能和检查代码；`install` 生成的导出目录与固定运行副本用于安装。实际知识库位于独立的数据目录（默认位置及覆盖方式见下节），不随开发项目复制，也不写入仓库。现有安装入口不会因开发目录改变而自动切换；更新运行副本须重新导出，并由宿主审阅对应入口。
+
+## 语义混合检索
+
+默认使用 SQLite 全文索引，不需要嵌入服务。需要补充同义表述和不同用词的经验时，可以配置本机已运行的 Ollama 与已安装的本地嵌入模型：
+
+```json
+{"retrieval":{"semantic":{"enabled":true,"provider":"ollama","url":"http://127.0.0.1:11434","model":"embeddinggemma"}}}
+```
+
+把配置合并到独立数据目录的 `config.json`，或通过 `ALP_CONFIG` 指定自己的文件，保留现有管理员和任务设置。模型名称须对应本机已有模型。插件使用 [Ollama 的 `/api/embed` 接口](https://docs.ollama.com/api/embed)，不自动安装服务、下载模型或调用文本生成模型。仅允许 HTTP 回环地址，不使用代理或跟随重定向。
+
+```sh
+python -B scripts/learning.py --workspace . semantic-status
+python -B scripts/learning.py --workspace . semantic-refresh --limit 100
+python -B scripts/learning.py --workspace . search "之前类似的导入故障是怎么排查的"
+```
+
+`semantic-status` 只看索引完整度。`semantic-refresh` 显式对当前有效知识生成向量，默认每次最多 100 条、每批 16 条；仍有 `pending` 时继续增量刷新。正文修订、撤销或模型配置变化后，旧向量不能支持对应的新知识。模型名称不变但本地模型被替换时，执行 `semantic-refresh --rebuild`，之后按 `pending` 继续刷新。
+
+查询把有界全文候选与余弦相似候选用 RRF 融合，返回 `match.method`、`semantic_score`、`semantic_rank` 与 `fusion_method`。相似度不能证明结论正确。自动注入继续检查精确筛选、有效修订、来源健康和匹配门槛；启用语义后，自动结果须覆盖查询中的错误码、版本、路径及 C++／C# 等精确标识，服务降级也保留此检查。知识不能提供执行许可。完整条件和摘要预算沿用现有协议。
+
+服务离线、响应异常或索引在查询间变化时回退到全文检索，返回 `retrieval` 诊断。临时故障最少冷却五秒，后续受支持事件可以重试，通知链继续运行。查询不隐式刷新整库。向量扫描默认最多 2000 条、候选最多 32 条，超出范围标记 `scan_truncated`；当前为有界线性扫描，没有全库 ANN 保证。启用嵌入增加本机计算和首次查询延迟，是否更快需要实测。
+
+## 知识浏览界面
+
+```sh
+python -B scripts/learning.py --workspace . browser --open
+```
+
+按现有 `--home`／`ALP_HOME` 定位数据库，按已登记 workspace 选择项目；可用 `--project-id ID` 明确选择已有项目。默认随机端口，`--port N` 可指定端口。命令显示本机地址和临时访问码；`--open` 使用 URL fragment 传递访问码，页面立即清除 fragment，访问码仅留在页面内存。终端保持运行，`Ctrl+C` 结束服务。
+
+界面提供知识文本搜索、分类与状态筛选、正文／条件分页、修订与撤销历史、来源健康、事件时间线和管理员待办。浏览查询不调用嵌入模型。所有 API 固定当前项目，以只读 SQLite 快照读取；正文续页固定修订，不混拼新版本。没有知识时显示空视图。
+
+浏览器只监听 `127.0.0.1`，校验访问码、Host 和 Origin。页面不发布、撤销知识，不执行任务或启动管理员；不创建项目、迁移数据库或登记模型展示。旧 schema 数据库需先通过显式运行端操作升级。这是临时本机浏览入口，跨设备共享仍需独立的同步与服务设计。
+
+## 真实任务对照评估
+
+评估独立于真实知识数据库。先冻结任务提示、数据集和验收方法，固定模型版本／参数、环境与知识快照，再比较 `no_memory` 与 `with_memory`。每个任务至少两次重复，执行顺序按固定 seed 交替。
+
+仓库提供[可执行测试示例](examples/evaluation/task-spec.synthetic.json)：
+
+```sh
+python -B scripts/learning.py evaluation-protocol --spec examples/evaluation/task-spec.synthetic.json --output ../eval-protocol.json
+python -B scripts/learning.py evaluation-run --protocol ../eval-protocol.json --adapter examples/evaluation/adapter.synthetic.json --output ../eval-results.jsonl --timeout-seconds 30
+python -B scripts/learning.py evaluation-report --protocol ../eval-protocol.json --records ../eval-results.jsonl --output ../eval-report.json
+```
+
+示例执行器使用 PATH 中的 `python`；按环境可把 adapter 的 `argv[0]` 改为实际 Python 路径。示例标记 `synthetic_template`，只验证执行链，不产生真实对照结论，未知 token 保持 `null`。输出文件必须不存在。
+
+真实评估另写 `real_protocol` 任务说明和 `real_adapter` 配置。adapter 的 `argv` 是明确命令，`argv_path_indices` 指出相对 adapter 文件解析的文件参数，`knowledge_snapshot_path` 指定匹配协议 SHA-256 的冻结快照。`evaluation-run` 显式执行此命令，可能产生其中模型的费用；插件不选择模型，也不自动发起评估。执行器按 stdin 中的冻结条件初始化数据集、运行同一提示与验收检查，stdout 输出观测 JSON。也可从外部执行器导入兼容 JSONL 记录。
+
+每次运行分配独立 workspace、`ALP_HOME`、`CODEX_HOME` 和用户／SDK 数据目录。无记忆组不提供快照，有记忆组接收私有副本；执行器负责实际模型接线、数据集重置和关闭其他记忆入口。这是输入隔离，执行器仍具有当前系统用户权限。声明指纹用于一致性检查，不认证执行真实性。
+
+报告包含验收通过／失败／未知、完整任务耗时、检索 p50／p95 与命中观察，以及 `worker`、`admin`、`retrieval`、`model_other` 四项用量。失败与超时保留，退出码为零不代表验收。未知或部分用量不按零计算；费用须相同币种并声明 `scope="all_calls"`，建库开销由执行器分摊到管理员用量和成本。缺对、条件冲突、synthetic、验收或用量缺失禁用相应完整比较，成对子集只作描述。报告不自动证明因果、统计显著性或净节省。
 
 ## 本地运行
 
@@ -445,7 +529,7 @@ Stable 认证绑定正文、来源与反例状态，变化后 effective maturity
 
 ## 可选 Hindsight
 
-默认使用本地 SQLite 全文检索。Hindsight 是可选的已发布知识同步目标，不是本地记录成功的前提，也不会自动成为 Codex 内置资料库。
+默认使用本地 SQLite 全文检索，可启用本地语义混合检索。Hindsight 是可选的已发布知识同步目标，不是本地记录成功的前提，也不会自动成为 Codex 内置资料库。
 
 启用前须配置 URL、Bank 和密钥环境变量，并在 Hindsight 端预先设置相应的 chunks 命名策略。默认 `strategy` 为 `alp_chunks`；每次新客户端写入前实际核对目标策略。旧配置里的 `chunks_strategy_verified` 不作为验证依据。
 
@@ -519,6 +603,9 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `knowledge-release-prepare`、`knowledge-release-commit`、`knowledge-daily-release` | 准备、复查及提交知识批次，无变更跳过 |
 | `knowledge-releases`、`knowledge-release`、`knowledge-release-rollback` | 查询知识清单、差异与安全回退 |
 | `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
+| `semantic-status`、`semantic-refresh` | 查看向量完整度、显式增量刷新或重建 |
+| `browser` | 临时启动本机只读知识浏览页面 |
+| `evaluation-protocol`、`evaluation-run`、`evaluation-report` | 冻结成对实验、运行显式执行器、导入并汇总观测 |
 | `search`、`read` | 查询和读取正式知识 |
 | `admin-once`、`admin-batch` | 单次审核、受多项预算限制的后台短批次 |
 | `reviews`、`admin-retry` | 查询持久回执、明确允许一次失败或未知调用再审 |
@@ -527,7 +614,15 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | 创建待启用的独立安装副本 |
 
-## 0.11.1 检查状态（2026-10-11）
+## 0.12.0 检查状态（2026-10-11）
+
+Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、零错误、零跳过，耗时 166.081 秒。在原 649 项基础上增加 87 项：语义检索 30、知识浏览 19、任务评估 26、跨模块接线 12。覆盖向量损坏与重建、修订／撤销、精确标识、来源健康、并发索引刷新、模型离线回退、跨进程冷却、待发结果失效、只读访问与项目隔离、评估缺失／异常及全成本边界。wheel 和导出副本包含三个新模块，既有安装、MCP、Hook 和八模块检查继续通过。
+
+79 个 Python 文件通过 Python 3.10 语法检查；本轮未在实际 Python 3.10 或其他操作系统运行。临时数据库配合本地假嵌入服务验证检索；实际 Edge 页面点击验证连接、详情、条件、时间线、管理员待办与断开，无页面运行错误。CLI 测试示例完成协议生成、四次隔离执行、JSONL 导入和报告，未创建真实 Runtime 数据目录；synthetic 数据的真实比较资格保持关闭。
+
+本轮未调用真实嵌入／付费模型，未启用真实宿主 Hook、管理员或远端服务，未修改用户插件配置。尚无真实任务的净 token、时间或质量收益数据；当前新增能力与既有 0.11.1 的线上 CI 证据分别表达。
+
+## 0.11.1 历史检查状态（2026-10-11）
 
 649 项离线回归全套通过，零失败、零错误、零跳过，耗时 128.382 秒；本轮在 0.11.0 的 640 项基础上增加 9 项工具名称保护回归。覆盖首次缺名、Post-only、后续缺名、旧 NULL 台账、完整历史双名的重放收敛、三种历史事件键/摘要兼容、极小预算、来源失效、幂等和账户迟到；独立审查复验历史矛盾不能支持新 tool_success 候选。原十项审查修复及八模块、CLI/MCP、安装导出和 Windows 编码检查继续通过，包含路径根冻结、调度和同步换号竞态、完整条件分页、长查询、恢复关联、业务摘要、保守计量及 schema10→11 回滚。检查使用临时 SQLite、内存审核器与受控进程，不代表真实模型或服务验收。
 
@@ -535,7 +630,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 
 配置示例与运行默认值一致，技能原有头字段及必需内容静态核对通过；辅助 `quick_validate.py` 因当前解释器缺少 PyYAML 未运行成功，未为此修改用户环境。
 
-持久语义聚类、professional/pattern 专门验证、全天服务唤醒、普通任务用量与货币账单接入仍未实现；当前 Stable、发布、调度和效果观察使用上述明确规则。
+持久语义聚类、professional/pattern 专门验证、全天服务唤醒、普通任务用量与货币账单自动接入仍未实现；0.12.0 的成对评估通过显式执行器上报任务用量与费用观测。当前 Stable、发布、调度和效果观察使用上述明确规则。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。
 

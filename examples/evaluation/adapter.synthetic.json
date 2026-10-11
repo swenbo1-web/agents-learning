@@ -1,0 +1,6 @@
+{
+  "data_class": "synthetic_template",
+  "argv": ["python", "-B", "synthetic_adapter.py"],
+  "argv_path_indices": [2],
+  "knowledge_snapshot_path": "knowledge.synthetic.json"
+}

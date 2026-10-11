@@ -2,9 +2,32 @@
 
 [中文](README.md) | English
 
-**A continuous learning plugin for Agents working on long-running projects, turning task experience into project knowledge that later work can retrieve, check and update.**
+**Help Agents retain project experience and find evidence-backed guidance for the next task.**
 
-Current prerelease: **0.11.1** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Download](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+Development version: **0.12.0** · Python **3.10+** · SQLite · [MIT](LICENSE) · [Published prerelease 0.11.1](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.11.1)
+
+agents-learning builds maintainable knowledge memory for long-running projects. It retrieves relevant experience at supported task events, records tool outcomes, lets an administrator organize candidates, and makes knowledge with conditions, sources and revisions available to later Agents. Workers focus on their current task while experience remains reusable across conversations.
+
+## Core capabilities
+
+- **Automatic lookup with bounded context**: retrieve for task prompts, context restoration and tool failure follow-up; provide summaries first, then read content and conditions on demand.
+- **Lexical and semantic hybrid retrieval**: local full-text search works by default; an optional running local embedding model finds related experience expressed with different words and exposes match information.
+- **Inspectable knowledge memory**: retain applicability, limitations, sources, revisions and revocation state, and notify exposed conversations when sources change.
+- **Local knowledge browser**: search knowledge and inspect revisions, source events and administrator work through a read-only page.
+- **Separate organization and budgets**: event capture and incremental review proceed separately; administrator execution is optional, with bounds on calls, concurrency, review packets and context.
+- **Paired task evaluation**: freeze tasks, model, environment and knowledge snapshot; run no-memory / with-memory pairs and check acceptance, elapsed time and full-workflow usage.
+
+`Current task → Retrieve experience → Execute and observe → Organize candidates → Validate and publish → Reuse in the next task`
+
+## Quick try from source
+
+```sh
+python -B scripts/learning.py --help
+python -B scripts/learning.py --home ../agents-learning-data --workspace . status
+python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
+```
+
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. For Agent integration, continue with [local operation](#local-operation) and installation below. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## How the project took shape
 
@@ -27,7 +50,7 @@ Continuous learning here works through accumulated and reused project knowledge.
 | Organization and context consumption keep growing | Review increments, bound retrieval, paginate on demand, and manage call count, concurrency and reported usage separately |
 | Automation exceeds the current task scope | With execution protection enabled, check task identity, state and explicit execution authorization for integrated calls; knowledge remains reference material |
 
-The goal is to reduce repeated work and irrelevant context so Agents can use existing experience more effectively. Knowledge exposure, declared adoption and tool observations are recorded separately; user acceptance requires independent confirmation. Ordinary task total usage and monetary bills are not fully integrated, so the project does not claim a net savings ratio or percentage improvement in quality.
+The goal is to reduce repeated work and irrelevant context so Agents can use existing experience more effectively. Knowledge exposure, declared adoption and tool observations are recorded separately; user acceptance requires independent confirmation. Task evaluation accepts usage and costs reported by an external runner. No real-task paired results have been collected for this project, so it claims no net savings ratio or percentage improvement in quality.
 
 ## Where it fits
 
@@ -45,7 +68,7 @@ Storage is local by default, and knowledge is managed by project. Administrator 
 flowchart TD
     User["Current user task"] --> Entry["Plugin entry: check project, session and host epoch"]
     Entry --> Task["Current task contract and subagent assignment"]
-    Task --> Retrieve["Local retrieval, summary injection and compaction restoration"]
+    Task --> Retrieve["Local full-text / optional semantic retrieval, summaries and restoration"]
     Knowledge[("Published knowledge: content, conditions, revisions and sources")] --> Retrieve
     Retrieve --> Worker["Worker Agent analyzes and executes the task"]
     Worker --> Guard["Integrated PreToolUse: execution rules and state checks"]
@@ -68,6 +91,8 @@ flowchart TD
     Schedule -.-> Publish
     Retrieve --> Exposure["Exposure and declared adoption records"]
     Worker --> Exposure
+    Knowledge --> Browser["Local read-only knowledge browser"]
+    Evaluation["Frozen inputs: no-memory / with-memory paired runs"] --> Report["Acceptance, elapsed time and full-workflow usage report"]
 ```
 
 The main task, knowledge retrieval and experience organization proceed independently. Task delivery does not wait for background organization. Tool failures first register follow-up retrieval, which runs at the next supported prompt, restoration or tool pre-event. Administrator model calls, automatic publication and knowledge batches are configured separately; nodes in the diagram do not imply that everything is enabled by default.
@@ -96,6 +121,9 @@ flowchart LR
     CLI["Explicit CLI operations"] --> Runtime
     Runtime --> DB[("Separate ALP_HOME: authoritative SQLite records")]
     DB --> FTS["Full-text index of active knowledge"]
+    DB -.-> Vectors["Explicit refresh: optional local vector index"]
+    Vectors -.-> Embedding["Configured local embedding model"]
+    DB --> Browser["Local read-only browser"]
     DB -.-> Remote["Optional derived distribution target"]
 ```
 
@@ -109,12 +137,12 @@ The same project and data directory can retain knowledge across login accounts. 
 |---|---|---|
 | 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export fixed runtime copies; check release contents and role permissions | [install.py](agent_learning/install.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
 | 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
-| 3. Knowledge storage and indexing | Store published knowledge, revisions and evidence sources in SQLite; maintain a full-text projection of active content and consistent reads | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py) |
-| 4. Retrieval and context management | Bounded recall and match filtering, summary/page budgets, exposure ledgers, invalidation notices, compaction restoration and failure follow-up retrieval | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py) |
+| 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
+| 4. Retrieval and context management | Bounded hybrid recall and filtering, summary/page budgets, exposure tracking, notices, restoration, failure follow-up and read-only browsing | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
 | 5. Event, evidence and case collection | Record observable events and tool results; handle idempotency, conflicts, late callbacks and user feedback; form traceable problem increments | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [runtime.py](agent_learning/runtime.py) |
 | 6. Administrator knowledge governance | Organize bounded review packets, incremental queues, calls and receipts; propose candidates and governance; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
 | 7. Knowledge publication and version governance | Publish, update, revoke, restore and promote through trusted entry points; save batch manifests, safe rollback and optional distribution state | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py), [publication_state.py](agent_learning/publication_state.py), [knowledge_releases.py](agent_learning/knowledge_releases.py), [knowledge_sync.py](agent_learning/knowledge_sync.py), [hindsight.py](agent_learning/hindsight.py) |
-| 8. Background scheduling, budgets and effect evaluation | Persistent work and bounded continuation, global call/reported usage admission, knowledge exposure and declared adoption; no inferred reading or causation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py) |
+| 8. Background scheduling, budgets and effect evaluation | Persistent work, call budgets, exposure/adoption observations and independent paired task evaluation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py), [task_evaluation.py](agent_learning/task_evaluation.py) |
 
 [runtime.py](agent_learning/runtime.py) combines the eight modules, unifying project, session, account boundaries and database transactions. The modules share versions and data contracts within the same runtime.
 
@@ -166,6 +194,8 @@ These mechanisms make retrieval and event recording less dependent on the Agent 
 
 ## Current version and compatibility
 
+0.12.0 adds optional local semantic hybrid retrieval, a local read-only knowledge browser and paired task evaluation tools. Database schema stays at 11 and the full-text index at 4; the optional semantic index is version 1. Internal publication protocol becomes 9, requiring a new export of the fixed runtime copy. Vectors are derived by project, knowledge revision and model configuration and are disabled by default. Queries never build an index or download a model. Browser and file evaluation entry points do not initialize Runtime or migrate a database. Published GitHub tags and assets still correspond to 0.11.1.
+
 0.11.0 fixes execution scope, tool evidence, account isolation, retrieval and administrator accounting issues identified during integration review. The database advances to schema 11, adding complete redacted business evidence digests within transactions. Digests that cannot be reconstructed from old truncated material remain unknown; events, knowledge IDs and historical receipts are preserved. The full-text index is version 4 and internal publication protocol is version 8. Do not mix old and new runtime files; older runtimes cannot open a version 11 database. Old scope authorizations without frozen path ledgers require approval again through a trusted entry point. Common credential redaction cannot guarantee removal of copies that already exist.
 
 0.11.1 strengthens evidence boundaries when tool names are missing. An operation retains its first explicit name; later missing names remain unknown, while explicitly different names invalidate the operation and its old success sources. Legacy empty name ledgers use only complete historical events as evidence and do not guess truncated names. When an otherwise identical historical callback replay confirms an existing name conflict, one derived observation marked legacy_name_conflict is appended, preserving the original events and advancing source version. Later replays remain idempotent. Database schema, full-text index and internal publication protocol remain at the versions above.
@@ -175,6 +205,60 @@ These mechanisms make retrieval and event recording less dependent on the Agent 
 This repository maintains the source and Git history of the integrated eight modules. The display name is `agents-learning`, the Python package is `agent_learning`, and the plugin and CLI are named `agent-learning`.
 
 The development repository contains source code, example configuration, skills and checks. The exported directory and fixed runtime copy generated by `install` are used for installation. The actual knowledge database resides in a separate data directory (see the defaults and overrides below); it is neither copied with the development project nor stored in this repository. Changing the development directory does not automatically switch an existing installation. Export a new runtime copy and have the host review its entry points when updating.
+
+## Semantic hybrid retrieval
+
+SQLite full-text search works by default without an embedding service. To find related experience expressed with different words, configure an already running local Ollama service and an installed local embedding model:
+
+```json
+{"retrieval":{"semantic":{"enabled":true,"provider":"ollama","url":"http://127.0.0.1:11434","model":"embeddinggemma"}}}
+```
+
+Merge this into the separate data directory's `config.json`, or select your configuration with `ALP_CONFIG`, retaining existing administrator and task settings. The model name must match an installed local model. The plugin uses [Ollama's `/api/embed` interface](https://docs.ollama.com/api/embed). It never installs a service, downloads a model or calls a text generation model automatically. Only HTTP loopback origins are accepted, without proxies or redirects.
+
+```sh
+python -B scripts/learning.py --workspace . semantic-status
+python -B scripts/learning.py --workspace . semantic-refresh --limit 100
+python -B scripts/learning.py --workspace . search "How did we investigate similar import failures?"
+```
+
+`semantic-status` reads index coverage only. `semantic-refresh` explicitly embeds active knowledge, up to 100 entries per invocation and 16 per batch by default. Repeat incremental refresh while `pending` remains. Revisions, revocation and model configuration changes prevent stale vectors from representing new knowledge. If a model is replaced under the same name, use `semantic-refresh --rebuild`, then refresh pending entries.
+
+Queries use RRF to combine bounded lexical and cosine candidates. Match information includes `method`, `semantic_score`, `semantic_rank` and `fusion_method`. Similarity does not prove correctness. Automatic injection retains exact filters, active revision checks, source health and match thresholds. With semantic retrieval enabled, automatic results must cover exact error codes, versions, paths and C++/C# identifiers; provider fallback retains this check. Knowledge cannot issue execution permission. Existing condition and summary budgets apply.
+
+Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates; `scan_truncated` signals the bound. This is a bounded linear scan without a full-corpus ANN guarantee. Embeddings add local computation and initial latency; speed improvements require measurement.
+
+## Knowledge browser
+
+```sh
+python -B scripts/learning.py --workspace . browser --open
+```
+
+Use existing `--home` / `ALP_HOME` settings and a registered workspace; `--project-id ID` selects an existing project explicitly. The default port is random; `--port N` fixes it. The command prints the local URL and temporary access code. `--open` passes the code in a URL fragment that the page immediately clears; it stays in page memory only. Keep the terminal running and use `Ctrl+C` to stop.
+
+Search knowledge by text, category and state; inspect paginated content and conditions, revisions, revocation, source health, event timelines and administrator work. Browser search uses no embeddings. APIs stay within the selected project and read SQLite snapshots. Content pages retain the selected revision. An empty knowledge base shows an empty view.
+
+The server binds to `127.0.0.1` and validates the access code, Host and Origin. The page has no publication, revocation, task execution or administrator launch actions. It creates no projects, migrates no databases and records no model exposures. Older schemas require an explicit runtime upgrade first. This is a temporary local viewer; cross-device sharing needs a separate synchronization and service design.
+
+## Real-task paired evaluation
+
+Evaluation is separate from the live knowledge database. Freeze prompts, datasets and acceptance criteria, fixing model version/parameters, environment and knowledge snapshot before comparing `no_memory` and `with_memory`. Each task requires at least two repeats with seeded alternating execution order.
+
+The repository includes an [executable synthetic example](examples/evaluation/task-spec.synthetic.json):
+
+```sh
+python -B scripts/learning.py evaluation-protocol --spec examples/evaluation/task-spec.synthetic.json --output ../eval-protocol.json
+python -B scripts/learning.py evaluation-run --protocol ../eval-protocol.json --adapter examples/evaluation/adapter.synthetic.json --output ../eval-results.jsonl --timeout-seconds 30
+python -B scripts/learning.py evaluation-report --protocol ../eval-protocol.json --records ../eval-results.jsonl --output ../eval-report.json
+```
+
+The example uses `python` from PATH; replace adapter `argv[0]` with your actual Python path if needed. It is marked `synthetic_template`, validates the execution chain only, and reports unknown tokens as `null`. Outputs must not already exist.
+
+For real evaluation, provide a `real_protocol` spec and `real_adapter` configuration. `argv` is the explicit command; `argv_path_indices` identifies file arguments resolved relative to the adapter file. `knowledge_snapshot_path` must match the frozen protocol's SHA-256. `evaluation-run` launches the adapter and may incur its model costs. The plugin chooses no model and schedules no evaluations automatically. The adapter prepares the dataset, runs the same prompt and acceptance checks from stdin conditions, and returns observation JSON on stdout. Compatible external JSONL records can also be imported.
+
+Each run receives independent workspace, `ALP_HOME`, `CODEX_HOME` and user/SDK data directories. No-memory receives no snapshot; with-memory gets a private copy. The adapter supplies actual model integration, dataset reset and disabling of other memory sources. Input isolation is not an OS sandbox. Fingerprints check declarations for consistency, not execution authenticity.
+
+Reports include passed/failed/unknown acceptance, total task elapsed time, retrieval p50/p95 and hit observations, plus `worker`, `admin`, `retrieval` and `model_other` usage. Failed and timed-out attempts remain; a zero exit code never implies acceptance. Unknown or partial usage is not zero. Costs require one currency and `scope="all_calls"`; the adapter allocates knowledge-building overhead to administrator usage and costs. Missing pairs, conflicting conditions, synthetic records or missing acceptance/usage disable relevant full-design comparisons. Paired subsets are descriptive. Reports do not infer causation, significance or net savings.
 
 ## Local operation
 
@@ -445,7 +529,7 @@ Stable certification binds content, sources and counterexample state. Changes re
 
 ## Optional Hindsight integration
 
-Local SQLite full-text retrieval is the default. Hindsight is an optional synchronization target for published knowledge, not a prerequisite for successful local recording, and does not automatically become Codex's built-in library.
+Local SQLite full-text retrieval is the default, with optional local semantic hybrid retrieval. Hindsight is an optional synchronization target for published knowledge, not a prerequisite for successful local recording, and does not automatically become Codex's built-in library.
 
 Before enabling it, configure the URL, Bank and key environment variable and set the corresponding chunks naming strategy on the Hindsight side. The default `strategy` is `alp_chunks`; the target strategy is actually checked before each new client write. The legacy `chunks_strategy_verified` configuration flag is not taken as verification.
 
@@ -519,6 +603,9 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `knowledge-release-prepare`, `knowledge-release-commit`, `knowledge-daily-release` | Prepare, recheck and commit knowledge batches; skip unchanged state |
 | `knowledge-releases`, `knowledge-release`, `knowledge-release-rollback` | Query knowledge manifests, differences and safe rollback |
 | `doctor`, `backup`, `rebuild-index` | On-demand storage checks, online backup and derived index rebuilding |
+| `semantic-status`, `semantic-refresh` | Inspect vector coverage and explicitly refresh or rebuild |
+| `browser` | Start a temporary local read-only knowledge viewer |
+| `evaluation-protocol`, `evaluation-run`, `evaluation-report` | Freeze paired experiments, run explicit adapters, import and summarize observations |
 | `search`, `read` | Search and read published knowledge |
 | `admin-once`, `admin-batch` | Single review and short background batches subject to several budgets |
 | `reviews`, `admin-retry` | Query persistent receipts and explicitly permit one review after a failed or unknown call |
@@ -527,7 +614,15 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `serve` | Start an MCP service with a specified role |
 | `install` | Create a separate installation copy for later enablement |
 
-## 0.11.1 validation status (2026-10-11)
+## 0.12.0 validation status (2026-10-11)
+
+On Windows with Python 3.12.14, **all 736 offline regression tests passed**, with no failures, errors or skips, in 166.081 seconds. The 87 additions comprise 30 semantic retrieval tests, 19 browser tests, 26 task evaluation tests and 12 integration tests. Coverage includes damaged vectors and rebuilding, revisions/revocation, exact identifiers, source health, concurrent refresh, provider fallback, cross-process cooldown, stale pending results, read-only access/project isolation, and incomplete or failed evaluations with full-cost boundaries. Wheel and exported copies include the three new modules; existing installation, MCP, Hook and eight-module checks continue to pass.
+
+Seventy-nine Python files passed Python 3.10 syntax checks; actual Python 3.10 and other operating systems were not run this round. Temporary databases and a fake local embedding service exercised retrieval. Actual Edge interactions covered connection, content, conditions, timelines, administrator work and disconnect with no page runtime errors. The CLI synthetic example completed protocol creation, four isolated runs, JSONL import and reporting without creating a live Runtime data directory; synthetic inputs remained ineligible for real comparisons.
+
+No actual embedding/paid model, live host Hook, administrator or remote service was enabled, and user plugin configuration was unchanged. No real-task net token, time or quality gains have been measured. Current additions and the published 0.11.1 CI evidence are reported separately.
+
+## 0.11.1 historical validation status (2026-10-11)
 
 The full offline suite passed 649 tests with no failures, errors or skips in 128.382 seconds, adding 9 tool-name protection regressions to the 640 tests in 0.11.0. Coverage includes an initially missing name, Post-only observations, later missing names, legacy NULL ledgers, convergence of replay with two complete historical names, three legacy event key/digest formats, small budgets, source invalidation, idempotency and late callbacks across account boundaries. Independent review reconfirmed that historical conflicts cannot support a new tool_success candidate. The original ten review fixes, eight modules, CLI/MCP, installation export and Windows encoding checks continue to pass, covering frozen path roots, scheduler/synchronization account races, complete conditions pagination, long queries, recovery linking, business digests, conservative accounting and schema10 → 11 rollback. Checks use temporary SQLite databases, in-memory reviewers and controlled processes, not live models or services.
 
@@ -535,7 +630,7 @@ The local environment was Windows, Python 3.12.14 and Codex CLI 0.152.1. Native 
 
 Example configuration matches runtime defaults. Static checks of original skill header fields and required content passed. The auxiliary `quick_validate.py` did not run successfully because the current interpreter lacks PyYAML; the user's environment was not changed to address it.
 
-Persistent semantic clustering, dedicated professional/pattern validation, all-day service wakeups, ordinary task usage and monetary billing integration are not yet implemented. Stable maturity, publication, scheduling and effect observations follow the explicit rules above.
+Persistent semantic clustering, dedicated professional/pattern validation, all-day wakeups and automatic ordinary task usage/billing integration are not yet implemented. Paired evaluation in 0.12.0 collects task usage and cost observations through an explicit adapter. Stable maturity, publication, scheduling and effect observations follow the rules above.
 
 Live desktop Hook trust, automatic account event wiring, parent/child MCP connection lifecycle and project workflows still require host acceptance. Current tests do not modify the FPS project, perform login switches, enable live models or change the current user's plugin configuration.
 
