@@ -4,19 +4,53 @@
 
 0.10.0 完善第八模块的持久调度、全局准入预算、调用用量账本和知识采用回执，保留前七模块契约。数据库首次打开时将第八模块表在同一事务升级到版本 10，保留记录和知识 ID；不补造旧知识采用或历史用量。全文索引版本为 4，内部发布协议为 7，不能将新旧运行文件混用；旧运行端不能打开版本 10 数据库。常见凭证脱敏不能保证抹除已经存在的副本。
 
-## 首版流程
+## 完整流程与八个模块
 
 ```text
-用户当前任务 → 有限前置检索 → 普通 Agent 工作
-                             ↓
-可观察事件、交付结果与问题反馈 → 本地持久记录 → 管理员提出候选
-                                          ↓
-                         人工发布入口校验 → 已发布知识
+用户当前任务
+    ↓
+插件入口核身份 → 当前任务与执行规则 → 本地检索、摘要注入与压缩恢复
+                                         ↓
+                                  普通 Agent 执行任务
+                                         ↓
+                            Hook 记录事件、证据与实际结果
+                                         ↓
+                            案例及问题增量 → 管理员审核
+                                               ↓
+                                      候选知识／治理建议
+                                               ↓
+                                   受信入口校验并发布知识
+                                               ↓
+                             修订、来源、反例与成熟度治理
+                                               ↓
+                            正式知识批次 → 后续任务检索
+
+后台调度、预算账本与效果观察贯穿审核、发布和知识采用流程。
+管理员模型调用、自动正式批次及可选远端分发均须分别启用。
 ```
+
+| 模块 | 职责与边界 | 关键源码／资源 |
+|---|---|---|
+| 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出固定运行副本，核对发布内容及角色权限 | [install.py](agent_learning/install.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
+| 2. 任务与执行控制 | 保存任务合同与版本，绑定父子 Agent，核对受信许可、状态、动作和余额；知识不能签发权限 | [task_control.py](agent_learning/task_control.py)、[execution.py](agent_learning/execution.py)、[assignments.py](agent_learning/assignments.py) |
+| 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；维护当前有效内容的全文投影及一致读取 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py) |
+| 4. 检索与上下文管理 | 有限召回与匹配筛选、摘要／分页预算、展示台账、失效通知、压缩恢复和失败补查 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py) |
+| 5. 事件、证据与案例采集 | 记录可观察事件与工具结果，处理幂等、冲突、迟到回调和用户反馈，形成可追溯的问题增量 | [event_capture.py](agent_learning/event_capture.py)、[case_store.py](agent_learning/case_store.py)、[runtime.py](agent_learning/runtime.py) |
+| 6. 管理员知识治理 | 组织有限审核包，增量排队、调用及回执，提出候选和治理建议；管理员 MCP 不发布知识 | [review_packet.py](agent_learning/review_packet.py)、[admin.py](agent_learning/admin.py)、[admin_queue.py](agent_learning/admin_queue.py)、[admin_lifecycle.py](agent_learning/admin_lifecycle.py)、[admin_decisions.py](agent_learning/admin_decisions.py)、[admin_governance.py](agent_learning/admin_governance.py) |
+| 7. 知识发布与版本治理 | 通过受信入口发布、更新、撤销、恢复和晋升；保存批次清单、安全回退与可选分发状态 | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py)、[publication_state.py](agent_learning/publication_state.py)、[knowledge_releases.py](agent_learning/knowledge_releases.py)、[knowledge_sync.py](agent_learning/knowledge_sync.py)、[hindsight.py](agent_learning/hindsight.py) |
+| 8. 后台调度、预算与效果评估 | 持久待办与有限续跑，全局调用／上报用量准入，记录知识展示和声明采用；不推断阅读或因果 | [scheduler.py](agent_learning/scheduler.py)、[admin_usage.py](agent_learning/admin_usage.py)、[learning_evaluation.py](agent_learning/learning_evaluation.py) |
+
+[runtime.py](agent_learning/runtime.py) 组合各模块，统一项目、会话、账户边界与数据库事务。模块是职责划分，共用版本和数据契约；独立文件不代表独立部署服务。
 
 普通续聊不要求完成整条学习流水线。管理员只处理新增或变化的问题，复用已有案例和证据；工作任务交付不等待后台整理完成。
 
 本项目记录消息、工具事件和实际结果，不能读取或保存模型内部思考。知识来源不是新任务授权，历史知识也不能替代当前环境、实时预算、租约和用户验收。
+
+## 项目入口与目录
+
+整合后的开发项目为 `D:\Projects\agents-learning`，保留插件版本 0.10.0 及已有 Git 历史。原 `D:\Projects\agent-learning-plugin` 保留为整合前快照，后续开发以本目录为入口。
+
+开发仓库保存源码、配置示例、技能和检查代码；`install` 生成的导出目录与固定运行副本用于安装。实际知识库位于独立的数据目录（默认位置及覆盖方式见下节），不随开发项目复制，也不写入仓库。现有安装入口不会因开发目录改变而自动切换；更新运行副本须重新导出，并由宿主审阅对应入口。
 
 ## 本地运行
 
@@ -69,8 +103,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" serve --role adm
 
 | 身份 | MCP 工具 |
 |---|---|
-| 普通 Agent | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`learning_status` |
-| 管理员 | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate`、`review_list`、`propose_governance` |
+| 普通 Agent（7 个） | `knowledge_search`、`knowledge_read`、`session_context`、`task_update`、`case_feedback`、`knowledge_use`、`learning_status` |
+| 管理员（12 个） | 上述工具，以及 `problem_list`、`review_packet`、`submit_candidate`、`review_list`、`propose_governance` |
 
 MCP 不暴露发布或撤销工具。角色由启动入口指定，工具参数不能提升角色。技能位于 [learning-worker](skills/learning-worker/SKILL.md) 和 [learning-admin](skills/learning-admin/SKILL.md)。
 
