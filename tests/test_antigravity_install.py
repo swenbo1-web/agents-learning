@@ -1,16 +1,20 @@
 """双宿主导出和覆盖更新的隔离保护回归，不加载用户插件或知识库。"""
 import base64
+from contextlib import redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from agent_learning.cli import main
 from agent_learning.install import install, _hook_commands
 from agent_learning.install_update import INSTALL_MANIFEST, inspect_installation, snapshot
 from agent_learning.release import validate_release_root
@@ -182,6 +186,93 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertEqual(result["home"], str(default))
         self.assertFalse(default.exists())
         self.assertTrue((target / "plugin.json").is_file())
+
+    def test_default_cli_layout_exports_without_creating_knowledge_or_config(self):
+        profile = self.root / "isolated user"
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("ALP_") and key != "LOCALAPPDATA"}
+        if os.name == "nt":
+            environment["LOCALAPPDATA"] = str(self.root / "local app data")
+            home = self.root / "local app data/AgentLearning"
+        else:
+            home = profile / ".local/share/agent-learning"
+        target = self.workspace / ".agents/plugins/agent-learning"
+        output = io.StringIO()
+        with patch.dict(os.environ, environment, clear=True), patch.object(Path, "home", return_value=profile), \
+                redirect_stdout(output):
+            status = main(["--workspace", str(self.workspace), "install", str(target),
+                           "--host", "antigravity", "--hook-mode", "observe"])
+        self.assertEqual(status, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["home"], str(home))
+        self.assertEqual(Path(result["runtime_directory"]).parent, home / "runtime-releases")
+        self.assertEqual(inspect_installation(target, _hook_commands)["target_host"], "antigravity")
+        self.assertFalse((home / "runtime.sqlite3").exists())
+        self.assertFalse((home / "config.json").exists())
+        arguments = read_json(target / "mcp_config.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertEqual(arguments[arguments.index("--home") + 1], str(home))
+
+    def test_reserved_runtime_directory_preserves_existing_data_during_export_and_upgrade(self):
+        self.home.mkdir()
+        database = self.home / "runtime.sqlite3"
+        settings = self.home / "config.json"
+        database.write_bytes(b"opaque existing database; must not be opened")
+        settings.write_bytes(b"opaque user configuration; must not be parsed")
+        first = install(self.target, runtime_store=self.home / "runtime-releases", host="antigravity",
+                        workspace=self.workspace, home=self.home)
+        updated = install(self.target, host="antigravity", upgrade=True)
+        self.assertEqual(updated["home"], str(self.home))
+        self.assertEqual(updated["runtime_directory"], first["runtime_directory"])
+        self.assertEqual(database.read_bytes(), b"opaque existing database; must not be opened")
+        self.assertEqual(settings.read_bytes(), b"opaque user configuration; must not be parsed")
+
+    def test_pinned_default_release_can_reexport_and_migrate_store_without_rebinding_data(self):
+        store = self.home / "runtime-releases"
+        first = install(self.target, runtime_store=store, host="antigravity",
+                        workspace=self.workspace, home=self.home)
+        runtime = Path(first["runtime_directory"])
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("ALP_")}
+        environment.update(PYTHONDONTWRITEBYTECODE="1", CODEX_HOME=str(self.root / "isolated codex"))
+        for destination, next_store in ((self.root / "second export", store),
+                                        (self.root / "migrated export", self.store)):
+            command = [sys.executable, "-B", str(runtime / "scripts/learning.py"),
+                       "--workspace", str(self.workspace), "--home", str(self.home),
+                       "install", str(destination), "--host", "antigravity",
+                       "--runtime-store", str(next_store)]
+            response = subprocess.run(command, cwd=self.root, env=environment,
+                                      capture_output=True, timeout=15)
+            self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+            result = json.loads(response.stdout.decode("utf-8"))
+            self.assertEqual(result["release_id"], first["release_id"])
+            self.assertEqual(result["home"], str(self.home))
+            self.assertEqual(Path(result["runtime_directory"]).parent, next_store)
+        self.assertEqual(len(list(store.iterdir())), 1)
+        for invalid_home in (runtime, runtime / "knowledge"):
+            destination = self.root / "rejected export"
+            response = subprocess.run([sys.executable, "-B", str(runtime / "scripts/learning.py"),
+                "--workspace", str(self.workspace), "--home", str(invalid_home), "install", str(destination),
+                "--host", "antigravity", "--runtime-store", str(store)], cwd=self.root,
+                env=environment, capture_output=True, timeout=15)
+            self.assertEqual(response.returncode, 1)
+            self.assertFalse(destination.exists())
+        self.assertFalse((self.home / "runtime.sqlite3").exists())
+        self.assertFalse((self.home / "config.json").exists())
+        validate_release_root(runtime)
+
+    def test_default_layout_exception_does_not_allow_other_overlapping_paths(self):
+        cases = [(self.home, self.home),
+                 (self.home / "runtime-releases/knowledge", self.home / "runtime-releases"),
+                 (self.home, self.home / "other runtime directory"),
+                 (self.root, self.root / "runtime-releases"),
+                 (self.target / "knowledge", self.store),
+                 (Path(__file__).resolve().parents[1], self.store)]
+        for home, store in cases:
+            with self.subTest(home=home, store=store), self.assertRaises(ContractError):
+                install(self.target, runtime_store=store, host="antigravity",
+                        workspace=self.workspace, home=home)
+            self.assertFalse(self.target.exists())
+            self.assertFalse(store.exists())
+        self.assertFalse(list(self.root.glob(".alp-backup-*")))
 
     def test_invalid_bindings_do_not_publish_a_plugin_or_create_knowledge_data(self):
         cases = [dict(host="other"), dict(host="antigravity"),

@@ -262,8 +262,18 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
     if host == "antigravity":
+        # 默认 home 是数据容器，runtime-releases 是其中唯一保留的运行副本目录。
+        # 数据本身仍不能落入运行副本、源码或导出目录。
+        reserved_store = home / "runtime-releases"
+        source_in_reserved_store = (source_release and source.parent == reserved_store
+                                    and source.name == validate_release_root(source)["release_id"])
+        home_source_conflict = any(
+            _overlaps(home, path) and not
+            (source_in_reserved_store and source in (path, *path.parents))
+            for path in protected)
         if (workspace == target or target in workspace.parents or workspace == store or store in workspace.parents
-                or any(_overlaps(home, path) for path in (*protected, target, store))):
+                or _overlaps(home, target) or home_source_conflict
+                or (_overlaps(home, store) and store != reserved_store)):
             raise ContractError("Antigravity bindings must keep project and knowledge data outside export and runtime directories")
     try:
         with installation_lock(target):
