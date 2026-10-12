@@ -894,8 +894,9 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 
 ## 可用性检查（2026-10-12）
 
+- **0.14.2 完整 CI**：[Windows／Linux × Python 3.10／3.12 四组合](https://github.com/swenbo1-web/agents-learning/actions/runs/38265866100)的完整回归与 wheel 构建全部通过，每组发现 915 项；Windows 各跳过 1 项，Linux 各跳过 2 项，无失败或错误。
 - **0.14.1 基线**：[Windows／Linux × Python 3.10／3.12 四组合 CI](https://github.com/swenbo1-web/agents-learning/actions/runs/38158096094)全部通过，每组发现 911 项，含平台跳过项。
-- **0.14.2 安装复核**：79 项相关保护回归中 78 项通过、1 项因 Windows 符号链接权限跳过。新增四项覆盖真实默认 CLI 路径、已有数据库与配置保留、固定副本重新导出和运行目录迁移、危险路径拒绝；全套检查现为 915 项，跨平台结果以对应 GitHub CI 为准。检查使用隔离配置和数据目录。
+- **0.14.2 安装复核**：79 项相关保护回归中 78 项通过、1 项因 Windows 符号链接权限跳过。新增四项覆盖真实默认 CLI 路径、已有数据库与配置保留、固定副本重新导出和运行目录迁移、危险路径拒绝。检查使用隔离配置和数据目录。
 - **验收范围**：未启用真实 Hooks 或付费模型；本机没有 `agy` CLI，真实 Antigravity 加载、权限合成、超时和异步终态仍需宿主验收。
 
 <details>
