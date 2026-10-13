@@ -28,7 +28,7 @@ REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
                      "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
                      "skills/learning-history/agents/openai.yaml")
-DSH_FILES = ("plugin.json", "package.json", "mcp_config.json", "hooks.json", "host/index.mjs", "rules/learning.md",
+DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json", "host/index.mjs", "rules/learning.md",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
              "skills/learning-history/agents/openai.yaml")
 

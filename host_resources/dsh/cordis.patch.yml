@@ -1,0 +1,4 @@
+# DSH bundle layer: mount the Agent Learning host plugin
+- insert:
+    - id: agent-learning
+      name: 'agent-learning'
