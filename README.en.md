@@ -12,14 +12,16 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**Local database by default; administrator model calls, AI summaries, background scheduling, automatic publication and remote services are off.** A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
+**Release scope: the v1.0.0 distribution includes Codex and Antigravity. DSH support is in the `main` source branch and is not included in that distribution.**
+
+**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
 
 ## Core capabilities
 
 | Capability | What you get |
 |---|---|
 | Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
-| Search and progressive reading | Local full-text search, optional semantic matching, and index → details → evidence reading within context budgets |
+| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
 | Optional administrator | Use a configured platform-model or custom executor to propose knowledge candidates; enable work summaries separately |
 | Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
@@ -32,14 +34,14 @@ No real-task net token, speed or quality gains have been established by paired e
 
 ## Before installing
 
-You need **Git**, **Python 3.10+**, and your chosen host with native plugin support. This default source installation requires no `pip install` or model API key. Obtain the source once:
+You need **Git**, **Python 3.10+**, and your chosen host with native plugin support. This default source installation requires no `pip install` or model API key. Obtain the `main` source once:
 
 ```powershell
-git clone --branch v1.0.0 --depth 1 https://github.com/swenbo1-web/agents-learning.git
+git clone --branch main --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
 ```
 
-Already cloned it? Use that directory and skip `git clone`. Run the commands below from the repository. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below.
+Already cloned it? Use that directory, check its version and skip `git clone`. Run the commands below from the repository, installing each host into its own export directory. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below. To pin the stable distribution, replace `main` with `v1.0.0` and use only the Codex or Antigravity instructions.
 
 The [1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) also includes source, wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
 
@@ -72,6 +74,8 @@ Restart the CLI and use the same bound project. The CLI copies the plugin into i
 
 Use a [Codex CLI](https://learn.chatgpt.com/docs/cli) with `codex plugin` commands, under the same operating-system user and `CODEX_HOME` as your desktop app.
 
+These steps use the **default knowledge directory**. If you use `ALP_HOME` or `ALP_CONFIG`, first complete the [custom-directory wiring](#custom-knowledge-directory-in-codex). Setting variables only in the installation terminal does not ensure that Hooks and MCP tools use the same database.
+
 ```powershell
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
 python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
@@ -83,7 +87,7 @@ codex plugin add agent-learning@agent-learning-local
 
 ## Install in DSH (DeepSeek Harness)
 
-Export the DSH plugin bundle (including the Cordis Host event bridge, 8-event Hooks and MCP configuration):
+Use the `main` source; the v1.0.0 distribution does not include DSH. Export the DSH plugin bundle (including the Cordis Host event bridge, 8-event Hooks and MCP configuration):
 
 ```powershell
 $learningProject = "D:\Projects\my-project"
@@ -97,9 +101,11 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 
 Paste this in the new conversation:
 
-> Use learning_status to check my project and host. Pass this turn's Hook context_handle to session_context and confirm context_bound=true. Report a missing handle without guessing.
+> Use learning_status to check my project, host and knowledge data directory. Pass this turn's Hook context_handle to session_context and confirm context_bound=true. Report a missing handle or failed binding without guessing another session.
 
 Success means the expected project/host and `context_bound=true` for the current Hook handle. Tools appearing in the list alone do not confirm Hook integration; an empty knowledge base is normal.
+
+The default knowledge directory is `%LOCALAPPDATA%\AgentLearning` on Windows and `~/.local/share/agent-learning` on macOS / Linux. Hosts share project knowledge on the same machine when they use the same OS user, data directory and project mapping. Antigravity binds the exported project; Codex follows project events, and DSH supports fixed or dynamic project selection. Hooks and MCP must use the same custom directory. See [shared knowledge](#shared-knowledge-upgrades-and-administrators).
 
 ## Open the visual knowledge base
 
@@ -118,7 +124,7 @@ python -B scripts/learning.py --workspace "$learningProject" browser --open
 
 ## macOS / Linux
 
-Clone the source as above, use `python3` for your Python 3.10+ interpreter, and choose **one** host:
+Clone the source as above, use `python3` for your Python 3.10+ interpreter, and select the commands for your host. Install each host separately if using more than one; custom paths require matching Hook and MCP settings.
 
 Antigravity: replace this with an existing project path, then reload it in the IDE.
 
@@ -134,6 +140,13 @@ learning_plugin="$HOME/agent-learning-plugins/codex"
 python3 -B scripts/learning.py install "$learning_plugin" --host codex --hook-mode observe
 codex plugin marketplace add "$learning_plugin"
 codex plugin add agent-learning@agent-learning-local
+```
+
+DSH (`main` source):
+
+```sh
+learning_project="/absolute/path/to/my-project"
+python3 -B scripts/learning.py --workspace "$learning_project" install "$HOME/agent-learning-plugins/dsh" --host dsh --hook-mode observe
 ```
 
 Then restart/reload the host, review its Hook trust settings and use the [installation check](#check-the-installation). Antigravity CLI users additionally install the exported directory with `agy plugin install`.
@@ -209,7 +222,7 @@ The goal is to reduce repeated work and irrelevant context so Agents can use exi
 
 The plugin suits projects that require long-term maintenance, frequent tool use and work handed between conversations or Agents, including software development, troubleshooting, testing, data processing and experimental workflows. Project context, domain experience and tool operation knowledge can be maintained together; each domain still needs its own evidence and acceptance methods.
 
-The repository provides **Codex** and **native Antigravity** profiles using rules, skills, MCP, Hooks and the same runtime core. Antigravity capability differences and host acceptance status are documented below; other Agent environments still require their own adapters.
+The source provides **Codex, Antigravity and DSH** profiles using rules, skills, MCP, Hooks and the same runtime core. The v1.0.0 distribution includes the first two; DSH requires `main`. Check event capabilities and acceptance for each host separately. Antigravity differences are documented below; other Agent environments still require their own adapters.
 
 Storage is local by default, and knowledge is managed by project. Administrator execution, background scheduling, automatic publication and remote services are off by default and may be enabled separately as needed.
 
@@ -429,15 +442,53 @@ Reset pauses the task and invalidates old handles and execution approvals. A lat
 
 The same ALP_HOME/--home and project mapping share knowledge, candidates, sources and governance queues. Conversation identities are namespaced by host. Changing one host's account preserves the other host's worker sessions, while shared governance calls are fenced and unknown usage stays reserved for reconciliation.
 
-If Codex uses its default data directory, omit --home on the Antigravity export to use that default too. For a custom data directory, export Antigravity with --home PATH and configure the Codex host process with that same ALP_HOME. Trusted CLI reset and account-change commands must use the same directory too. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
+Default installations can share the same default directory. For a custom directory, export Antigravity or DSH with explicit `--home PATH` and follow the [Codex wiring](#custom-knowledge-directory-in-codex) for both its host and MCP process. Browser, administrator and trusted CLI commands must use that directory too. If using `ALP_CONFIG`, all relevant processes must select the same configuration file. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
 
 Review cases manually through a separate administrator interface, or explicitly enable the Codex or Antigravity CLI knowledge reviewer for the corresponding host. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-1.0.0 uses database schema **15**, internal publication protocol **15**, and work index **1**. Knowledge full-text index **4** and optional semantic index **1** are unchanged. Back up the external database before upgrading. Update and reload every Codex and Antigravity fixed runtime sharing it; older runtimes cannot open schema 15.
+1.0.0 uses database schema **15**, internal publication protocol **15**, and work index **1**. Knowledge full-text index **4** and optional semantic index **1** are unchanged. Back up the external database before upgrading. Update and reload every host's fixed runtime sharing it; older runtimes cannot open schema 15.
 
-Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
+Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
 Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation accessing it to 1.0.0, and reload the hosts. Updating only Antigravity leaves older Codex runtimes unable to open schema 15.
+
+### Custom knowledge directory in Codex
+
+<details>
+<summary>Expand if using a custom ALP_HOME or ALP_CONFIG</summary>
+
+**Codex exports currently do not bind `--home` or automatically forward `ALP_HOME` / `ALP_CONFIG` to MCP.** Default-directory installations need no configuration below. Custom directories require both Hooks and the tool process to use the same path. [Official Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp)
+
+1. Set `ALP_HOME` in the environment that launches Codex. Windows PowerShell example, replacing the path:
+
+   ```powershell
+   $learningHome = "D:\AgentLearning"
+   [Environment]::SetEnvironmentVariable("ALP_HOME", $learningHome, "User")
+   $env:ALP_HOME = $learningHome
+   ```
+
+   On macOS / Linux, set the same variable in the environment that launches the host. An `export` in one terminal does not change a running desktop process. Configure `ALP_CONFIG` the same way if using a separate configuration file.
+
+2. After export, merge the following into your actual `CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Set `command` to `python` from the export's `runtime-release.json`, and the script path to `scripts/learning.py` under its `runtime_directory`. Edit existing matching entries instead of duplicating them; preserve other settings. Replace all three example paths:
+
+   ```toml
+   [plugins."agent-learning@agent-learning-local".mcp_servers.agent_learning]
+   enabled = false
+
+   [mcp_servers.agent_learning]
+   command = 'C:/path/to/python.exe'
+   args = ['D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker']
+
+   [mcp_servers.agent_learning.env]
+   ALP_HOME = 'D:/AgentLearning'
+   # Add the matching ALP_CONFIG path only if using a separate configuration file.
+   ```
+
+   This replaces the bundled MCP entry with an explicitly configured tool entry; the plugin and Hooks remain enabled. Keep knowledge data outside the source, export and fixed runtime copy. Do not edit managed export files.
+
+3. Fully quit and restart Codex, open a new project conversation, and run the [connection check](#check-the-installation). After upgrades, update interpreter/script paths from the new receipt and reload; retain the knowledge directory.
+
+</details>
 
 ### Installation contract and MCP entry
 
@@ -559,6 +610,8 @@ A unique notification ID provides deduplication; without one, each call represen
 | No `python`, `codex` or `agy` command | Check PATH and the required host version; Antigravity IDE loading does not require `agy` |
 | Plugin absent in Codex desktop | Check the OS user, `CODEX_HOME`, registered source and selected source; restart |
 | Knowledge tools present but no current handle | Check plugin enablement and Hook trust, then verify in a new project conversation |
+| Missing knowledge or failed binding with a custom directory | Match `ALP_HOME` and any `ALP_CONFIG` for Hooks and MCP; complete the [Codex wiring](#custom-knowledge-directory-in-codex), restart and open a new conversation |
+| DSH export is not recognized | Use the `main` source; the v1.0.0 distribution contains only Codex and Antigravity |
 | MCP or Hook entry cannot start | Check that the export receipt's interpreter and `runtime_directory` still exist |
 | Existing export directory is rejected | Use the explicit upgrade command; exports for different hosts cannot overwrite each other |
 | Old runtime after an update | Reinstall copied Antigravity CLI plugins, reload/restart the host and review changed Hooks |
@@ -586,7 +639,7 @@ python -B scripts/learning.py --home build/local/demo-data --workspace . status
 python -B scripts/learning.py --home build/local/demo-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex steps](#install-in-codex-desktop-and-cli) or [Antigravity steps](#install-in-antigravity-native-plugin); both use the 1.0.0 source or wheel. See [work history](#working-observations-file-context-and-progressive-reading), [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow your host's installation steps above: Codex and Antigravity can use the v1.0.0 source or wheel; DSH requires `main`. See [work history](#working-observations-file-context-and-progressive-reading), [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## Working observations, file context and progressive reading
 

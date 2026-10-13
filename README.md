@@ -6,7 +6,9 @@
 
 **为 Codex、Antigravity 和 DSH (DeepSeek Harness) 提供项目记忆与可视化知识库。**
 
-自动记录工作结果，检索已有经验，让 Agent 在新对话中继续利用项目知识。需要时再启用管理员整理；你可以在本机浏览器中查看知识、来源、修订和审核待办。
+在受支持事件中记录工具结果和公开工作说明，自动检索相关知识、注入有限摘要，让 Agent 在新对话中继续利用项目经验。需要时再启用管理员整理；你可以在本机浏览器中查看正式知识、来源、修订和审核待办。
+
+**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH 适配位于 `main` 源码中，尚未包含在该发行包内。**
 
 [Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
@@ -18,28 +20,28 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 |---|---|
 | **项目记忆与文件历史** | 跨对话查阅项目知识、工作尝试和文件关联；提示来源及文件状态变化 |
 | **自动记录与错误补查** | 记录可观察的工具结果和公开说明；遇错后在受支持事件中补查经验 |
-| **检索与渐进读取** | 本地全文检索，可选语义混合检索；先看有限索引，再读摘要与证据 |
+| **检索、注入与渐进读取** | 本地全文检索，可选语义混合检索；自动提供有限摘要，Agent 按适用条件判断，再按需读取正文与证据 |
 | **知识库可视化** | 在本机浏览器搜索、筛选正式知识，查看正文、来源、修订、事件时间线和管理员待办 |
 | **已有项目历史吸收** | 用户主动导入项目文档、源码和选定的对话历史，保留来源与覆盖报告 |
 | **可选管理员整理** | 选择宿主执行器及模型，增量整理知识候选或工作摘要，复用调用预算 |
 | **知识维护与审核** | 保存适用条件、限制和证据；支持反例反馈、修订、晋升与撤销 |
 | **任务保护与效果评估** | 可选执行范围保护；管理上下文和审核预算，对照评估有／无记忆任务 |
-| **共享与安装维护** | 同机、同项目共享知识，切换登录账户保留项目知识；分别安装双平台，保留配置升级，可选 GitHub 更新提醒 |
+| **共享与安装维护** | 同机、同数据目录、同项目共享知识，切换登录账户保留项目知识；按宿主分别安装，保留配置升级，可选 GitHub 更新提醒 |
 
-**默认本地运行，工作记录和检索不额外调用模型。** 管理员、AI 摘要、语义模型、后台调度、自动发布和更新检查均需另行开启。历史吸收需用户主动启动；跨设备知识同步尚未提供。
+**默认工作记录与全文检索由本地程序执行，不额外调用生成模型；被宿主纳入模型输入的知识仍占上下文和输入 token。** 管理员、AI 摘要、语义模型、后台调度、自动发布和更新检查均需另行开启。历史吸收需用户主动启动；跨设备知识同步尚未提供。实际 token、耗时与质量收益需通过任务对照评估确认。
 
 ## 快速开始
 
 需要 **Git、Python 3.10+** 和支持插件的宿主。默认安装无需 `pip install` 或额外模型 API Key。
 
-在终端获取源码，只需执行一次；已有源码时直接进入该目录：
+在终端获取 `main` 源码，只需执行一次；已有源码时进入该目录并核对版本：
 
 ```powershell
-git clone --branch v1.0.0 --depth 1 https://github.com/swenbo1-web/agents-learning.git
+git clone --branch main --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
 ```
 
-下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；同时使用两者时分别安装。
+下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；使用多个宿主时分别安装。需要固定稳定版时，可将克隆命令的 `main` 改为 `v1.0.0`，该版本仅使用下方 Codex／Antigravity 步骤。
 
 ## 在 Antigravity 中安装（原生插件）
 
@@ -70,6 +72,8 @@ CLI 会复制插件；安装后重新启动 CLI。以后更新导出目录时，
 
 需要支持 `codex plugin` 的 [Codex CLI](https://learn.chatgpt.com/docs/cli)，使用与桌面端相同的系统用户及 `CODEX_HOME`。
 
+以下使用**默认知识目录**。若已设置 `ALP_HOME` 或 `ALP_CONFIG`，请先完成[自定义目录接线](#codex-自定义知识目录)，仅在安装终端设置变量不足以让 MCP 工具与 Hooks 共库。
+
 ```powershell
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
 python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
@@ -81,7 +85,7 @@ codex plugin add agent-learning@agent-learning-local
 
 ## 在 DSH 中安装（DeepSeek Harness）
 
-支持动态工作区或绑定指定项目导出 DSH 插件 Bundle（含 Cordis Host 事件桥接、8 事件 Hook 与 MCP 配置）：
+使用 `main` 源码；v1.0.0 发行包不包含 DSH。支持动态工作区或绑定指定项目导出 DSH 插件 Bundle（含 Cordis Host 事件桥接、8 事件 Hook 与 MCP 配置）：
 
 ```powershell
 $learningProject = "D:\Projects\my-project"
@@ -95,11 +99,11 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 
 在宿主的新对话中发送：
 
-> 检查 Agent Learning：用 learning_status 确认当前项目，再用本轮 Hook 提供的 context_handle 调用 session_context，确认 context_bound=true。
+> 检查 Agent Learning：用 learning_status 确认当前项目、宿主和知识数据目录，再用本轮 Hook 提供的 context_handle 调用 session_context，确认 context_bound=true。没有句柄或绑定失败时报告原因，不猜测其他会话。
 
 通过后说明你的任务目标，即可开始使用。初始知识库为空是正常现象；**仅出现 MCP 工具，不代表 Hooks 已接通**。
 
-两套快速安装使用相同的默认数据目录；同一设备、同一系统用户、同一项目下可以共用知识。Antigravity 绑定导出时的项目；Codex 按当前项目事件接入。自定义 `ALP_HOME` 时也必须保持两端一致，详见[共用知识](#共用知识升级与管理员)。
+默认知识目录在 Windows 为 `%LOCALAPPDATA%\AgentLearning`，在 macOS／Linux 为 `~/.local/share/agent-learning`。同一设备、同一系统用户、同一数据目录、同一项目下可以共用知识。Antigravity 绑定导出时的项目；Codex 按当前项目事件接入，DSH 可固定或动态选择项目。自定义目录时，Hooks 与 MCP 必须一致，详见[共用知识](#共用知识升级与管理员)。
 
 安装目录已存在时，请使用[覆盖更新](#覆盖更新已有安装)。无法连接时先看[常见问题](#常见问题)。macOS／Linux 命令见[其他系统](#macoslinux-安装)。
 
@@ -155,6 +159,8 @@ python -B scripts/learning.py --workspace "$learningProject" browser --open
 | 能直接安装 GitHub 仓库吗？ | 先运行本机导出命令；源码里的入口是模板，导出会绑定本机解释器与固定运行路径 |
 | 已有导出目录，再安装时报错 | 使用对应宿主的 `--upgrade`；不要删除知识目录或跨宿主覆盖 |
 | 有知识工具，没有本轮句柄 | 检查插件启用与 Hook 信任，重新加载并开新对话；仅能查询知识不代表 Hook 已连接 |
+| 自定义目录后知识查不到或句柄绑定失败 | 核对 Hooks 与 MCP 的 `ALP_HOME`，以及自定义 `ALP_CONFIG`；完成[Codex 自定义目录接线](#codex-自定义知识目录)后重启并开新对话 |
+| DSH 安装不被识别 | 确认使用 `main` 源码；v1.0.0 发行包只有 Codex／Antigravity |
 | Codex 桌面端看不到插件 | 核对同一系统用户、`CODEX_HOME` 和插件源，重启后检查 `codex plugin list --json` |
 | 云端 Codex 对话也会触发吗？ | 这些 Hooks 面向本地编排的桌面端／CLI；云端编排的对话即使在本地执行工具，也不能据此获得本地 Hook 接入 |
 | 两个设备可以直接共用数据库吗？ | 当前 SQLite 共库限同一台机器；跨设备同步仍需单独设计 |
@@ -172,7 +178,7 @@ python -B scripts/learning.py --home build/local/demo-data --workspace . status
 python -B scripts/learning.py --home build/local/demo-data --workspace . browser --open
 ```
 
-第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按[Codex 安装步骤](#在-codex-中安装桌面端与-cli)或[Antigravity 安装步骤](#在-antigravity-中安装原生插件)接入对应宿主，两者均使用 1.0.0 源码或相同版本的 wheel。查看[工作历史](#工作观察文件关联与渐进读取)、[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
+第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按上方对应宿主的步骤接入：Codex／Antigravity 可使用 v1.0.0 源码或 wheel，DSH 使用 `main` 源码。查看[工作历史](#工作观察文件关联与渐进读取)、[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
 
 </details>
 
@@ -203,7 +209,7 @@ python -B scripts/learning.py --home build/local/demo-data --workspace . browser
 
 适合需要长期维护、频繁使用工具，并由多个对话或多个 Agent 接力完成的项目，例如软件开发、故障排查、测试验证、数据处理和实验流程。项目上下文、专业经验和工具操作知识可以共同维护，各领域的有效性仍需要自己的证据与验收方法。
 
-目前提供 **Codex** 与 **Antigravity 原生插件**两种接入，通过规则、技能、MCP、Hook 和同一运行核心协同工作。Antigravity 的宿主验收状态与能力差异见[宿主差异与证据边界](#宿主差异与证据边界)；其他 Agent 环境仍需要各自的宿主适配。
+目前源码提供 **Codex、Antigravity 与 DSH** 三种接入，通过规则、技能、MCP、Hook 和同一运行核心协同工作。v1.0.0 发行包包含前两种；DSH 使用 `main`。宿主事件能力与验收范围分别核对，Antigravity 差异见[宿主差异与证据边界](#宿主差异与证据边界)；其他 Agent 环境仍需要各自的宿主适配。
 
 本地存储优先，知识按项目管理。管理员、后台调度、自动发布和远端服务默认关闭，可按需要分别启用。
 
@@ -354,7 +360,7 @@ flowchart LR
 
 ### macOS／Linux 安装
 
-用 `python3` 和实际绝对路径替换 Windows 示例。以下仍在源码仓库目录执行；两个宿主任选对应代码块。
+用 `python3` 和实际绝对路径替换 Windows 示例。以下仍在源码仓库目录执行，按宿主选择对应代码块；自定义目录时也需核对 Hooks 与 MCP 的接线。
 
 Antigravity：
 
@@ -370,6 +376,13 @@ learning_plugin="$HOME/agent-learning-plugins/codex"
 python3 -B scripts/learning.py install "$learning_plugin" --host codex --hook-mode observe
 codex plugin marketplace add "$learning_plugin"
 codex plugin add agent-learning@agent-learning-local
+```
+
+DSH（`main` 源码）：
+
+```sh
+learning_project="/absolute/path/to/my-project"
+python3 -B scripts/learning.py --workspace "$learning_project" install "$HOME/agent-learning-plugins/dsh" --host dsh --hook-mode observe
 ```
 
 导出后仍需按上方步骤重新加载宿主、审阅 Hook 信任并检查新会话。可选 Python 包入口：`python -B -m pip install .` 后，把 `scripts/learning.py` 替换为 `-m agent_learning.cli`。不要移动或删除已绑定的 Python 解释器、导出目录和固定运行副本；其他机器请重新导出。
@@ -419,17 +432,55 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigr
 
 0.14.1 修正原生事件身份：模型名称仅作诊断；真实输入变化参与冲突判定，事件正文继续脱敏。如果同一会话已有 0.14.0 回执，升级后先用上方 `antigravity-session-reset` 入口重置该会话，再恢复任务并重新批准执行。旧摘要无法可靠反推真实输入，因此不自动重放旧事件；知识和来源记录继续保留。
 
-两个宿主使用同一 `ALP_HOME`／`--home`，且工作区映射到同一项目时，共用知识、候选、来源和治理队列；不复制一套知识算法或默认启动第二个管理员。会话 ID 加宿主命名空间；一个宿主换号不使另一个宿主的 worker 失效，但会让共享治理执行器的旧调用失效，保留未知用量等待核对。
+多个宿主使用同一 `ALP_HOME`／`--home`，且工作区映射到同一项目时，共用知识、候选、来源和治理队列；不复制一套知识算法或默认启动第二个管理员。会话 ID 加宿主命名空间；一个宿主换号不使另一个宿主的 worker 失效，但会让共享治理执行器的旧调用失效，保留未知用量等待核对。
 
-Codex 使用默认数据目录时，Antigravity 导出省略 `--home` 即可选用相同默认位置；自定义 `--home` 时，Codex 宿主进程也需要配置同一路径的 `ALP_HOME`；后续手动命令也应使用该目录。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
+默认目录相同时可共库；自定义目录时，Antigravity／DSH 使用显式 `--home PATH` 导出，Codex 按[自定义目录接线](#codex-自定义知识目录)配置宿主与 MCP。后续浏览、管理员和手动命令也使用该目录。若使用 `ALP_CONFIG`，相关进程也必须选择同一配置文件。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
 
 可用单独的管理员接口人工整理案例，或在对应宿主显式启用 Codex／Antigravity CLI 自动知识审核。native admin skill 只是操作说明，默认 MCP 仍是 worker；具体开启方法见[管理员执行器](#可选管理员执行器)。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
 
-1.0.0 数据库 schema **15**、内部发布协议 **15**，工作索引 **1**；知识全文索引 **4**、可选语义索引 **1** 保持不变。升级前备份外部知识数据库；所有访问同一数据库的 Codex／Antigravity 固定运行副本均需更新并重载，旧运行端不能打开 schema 15。
+1.0.0 数据库 schema **15**、内部发布协议 **15**，工作索引 **1**；知识全文索引 **4**、可选语义索引 **1** 保持不变。升级前备份外部知识数据库；所有访问同一数据库的宿主固定运行副本均需更新并重载，旧运行端不能打开 schema 15。
 
-升级时保持 `--host antigravity --upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。两个宿主可复用同一固定运行 release，但只能分别更新各自的安装目录。
+Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。Codex 自定义 MCP 入口需按下节同步新运行路径。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。多个宿主可复用同一固定运行 release，但需分别更新各自的安装目录。
 
 与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到 1.0.0，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 15 不兼容而被拒绝。
+
+### Codex 自定义知识目录
+
+<details>
+<summary>使用 D 盘知识库或自定义 ALP_HOME／ALP_CONFIG 时展开</summary>
+
+**当前 Codex 安装导出不自动绑定 `--home`，也不自动向 MCP 转发 `ALP_HOME`／`ALP_CONFIG`。** 默认目录安装无需下面的配置；自定义目录需把 Hooks 和工具进程都接到同一路径。[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp)
+
+1. 为启动 Codex 的宿主环境设置 `ALP_HOME`。Windows PowerShell 示例（替换为你的实际路径）：
+
+   ```powershell
+   $learningHome = "D:\AgentLearning"
+   [Environment]::SetEnvironmentVariable("ALP_HOME", $learningHome, "User")
+   $env:ALP_HOME = $learningHome
+   ```
+
+   macOS／Linux 需在启动宿主的环境中设置同一变量；仅在一个终端 `export` 不会修改已运行的桌面进程。若使用 `ALP_CONFIG`，也以同样方式配置它。
+
+2. 导出安装后，在实际 `CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）合并下面配置。`command` 使用导出目录 `runtime-release.json` 的 `python`；脚本使用其中 `runtime_directory` 下的 `scripts/learning.py`。已有同名条目时修改原条目，保留其他设置。示例中的三处路径都需替换：
+
+   ```toml
+   [plugins."agent-learning@agent-learning-local".mcp_servers.agent_learning]
+   enabled = false
+
+   [mcp_servers.agent_learning]
+   command = 'C:/path/to/python.exe'
+   args = ['D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker']
+
+   [mcp_servers.agent_learning.env]
+   ALP_HOME = 'D:/AgentLearning'
+   # 使用独立配置文件时再加入同一路径的 ALP_CONFIG。
+   ```
+
+   这会用显式配置的工具入口替代插件内置入口；插件及 Hooks 继续启用。知识目录放在源码、导出和固定运行副本之外，不修改导出的受管理文件。
+
+3. 完全退出并重新启动 Codex，在目标项目新开对话，执行上方[连接检查](#安装是否成功)。升级后按新安装回执同步解释器与脚本路径，再重载；知识目录保持原值。
+
+</details>
 
 ### 安装契约与 MCP 入口
 
