@@ -156,8 +156,8 @@ python -B scripts/learning.py --workspace "$learningProject" browser --open
 
 ```sh
 python -B scripts/learning.py --help
-python -B scripts/learning.py --home ../agents-learning-data --workspace . status
-python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
+python -B scripts/learning.py --home build/local/demo-data --workspace . status
+python -B scripts/learning.py --home build/local/demo-data --workspace . browser --open
 ```
 
 第一次 `status` 登记项目并创建独立数据库，初始知识为空；浏览器只读取已经存在的项目。按[Codex 安装步骤](#在-codex-中安装桌面端与-cli)或[Antigravity 安装步骤](#在-antigravity-中安装原生插件)接入对应宿主，两者均使用 1.0.0 源码或相同版本的 wheel。查看[工作历史](#工作观察文件关联与渐进读取)、[语义混合检索](#语义混合检索)、[知识浏览界面](#知识浏览界面)、[真实任务对照评估](#真实任务对照评估)或[完整架构](#完整架构)。
@@ -656,6 +656,8 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 开发仓库保存源码、配置示例、技能和检查代码；`install` 生成的导出目录与固定运行副本用于安装。实际知识库位于独立的数据目录（默认位置及覆盖方式见下节），不随开发项目复制，也不写入仓库。现有安装入口不会因开发目录改变而自动切换；更新运行副本须重新导出，并由宿主审阅对应入口。
 
+本项目开发生成物统一保存在仓库内：临时源码、验收与演示数据用 `build/local/`，发布包用 `dist/`。二者均受 Git 忽略，且不作为历史知识吸收来源；不再创建仓库外的旧版本开发副本。安装验收须按 [AGENTS.md](AGENTS.md) 使用隔离源码及兄弟输出目录，保留安装器的路径保护。此约定针对插件开发产物，用户实际知识库与宿主安装位置仍按各自配置选择。
+
 ## 语义混合检索
 
 默认使用 SQLite 全文索引，不需要嵌入服务。需要补充同义表述和不同用词的经验时，可以配置本机已运行的 Ollama 与已安装的本地嵌入模型：
@@ -697,9 +699,10 @@ python -B scripts/learning.py --workspace . browser --open
 仓库提供[可执行测试示例](examples/evaluation/task-spec.synthetic.json)：
 
 ```sh
-python -B scripts/learning.py evaluation-protocol --spec examples/evaluation/task-spec.synthetic.json --output ../eval-protocol.json
-python -B scripts/learning.py evaluation-run --protocol ../eval-protocol.json --adapter examples/evaluation/adapter.synthetic.json --output ../eval-results.jsonl --timeout-seconds 30
-python -B scripts/learning.py evaluation-report --protocol ../eval-protocol.json --records ../eval-results.jsonl --output ../eval-report.json
+python -B -c "from pathlib import Path; Path('build/local/evaluation').mkdir(parents=True, exist_ok=True)"
+python -B scripts/learning.py evaluation-protocol --spec examples/evaluation/task-spec.synthetic.json --output build/local/evaluation/protocol.json
+python -B scripts/learning.py evaluation-run --protocol build/local/evaluation/protocol.json --adapter examples/evaluation/adapter.synthetic.json --output build/local/evaluation/results.jsonl --timeout-seconds 30
+python -B scripts/learning.py evaluation-report --protocol build/local/evaluation/protocol.json --records build/local/evaluation/results.jsonl --output build/local/evaluation/report.json
 ```
 
 示例执行器使用 PATH 中的 `python`；按环境可把 adapter 的 `argv[0]` 改为实际 Python 路径。示例标记 `synthetic_template`，只验证执行链，不产生真实对照结论，未知 token 保持 `null`。输出文件必须不存在。
