@@ -1,13 +1,13 @@
 {
   "name": "agent-learning",
-  "version": "0.16.0",
-  "description": "Retain project experience with explicit historical ingestion, bounded retrieval, governed knowledge, update notices and paired task evaluation.",
+  "version": "1.0.0",
+  "description": "Project memory with automatic work observations, file history, progressive reading, governed knowledge and optional host-model administration.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Learning",
     "shortDescription": "让 Agent 记住项目经验，查阅有依据的知识",
-    "longDescription": "在受支持的任务事件中查阅经验、记录工具结果，由管理员整理候选并经受信入口发布。支持本地全文与可选语义检索、只读知识浏览和成对任务评估；知识保留条件、来源与修订。"
+    "longDescription": "支持 Codex 与 Antigravity：自动索引可观察的工作结果，关联文件历史，按索引、详情、证据渐进读取。复用管理员与调用预算整理摘要和知识候选，正式知识经受信入口发布；本地检索、历史吸收、只读浏览和任务评估均保留来源与修订。"
   }
 }

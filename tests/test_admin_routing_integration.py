@@ -219,7 +219,7 @@ class AdminRoutingIntegrationTests(unittest.TestCase):
             self.r.db.execute("PRAGMA user_version=13")
         self.r.close()
         upgraded = self.runtime()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 14)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 15)
         for table, count in before.items():
             self.assertEqual(upgraded.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], count, table)
         self.assertEqual(upgraded.read(self.p, knowledge["knowledge_id"])["content"], "review include directories")

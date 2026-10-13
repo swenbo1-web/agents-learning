@@ -198,6 +198,20 @@ def parser():
     search.add_argument("query")
     search.add_argument("--filters", help="分类、知识用途、工具、版本、错误码、环境、验证方式的精确筛选JSON对象")
     sub.add_parser("read").add_argument("knowledge_id")
+    work_search = sub.add_parser("work-search", help="检索本项目已观察的工作历史索引，不扫描文件或调用模型")
+    work_search.add_argument("query", nargs="?", default="")
+    work_search.add_argument("--file-path")
+    work_search.add_argument("--limit", type=int, default=5)
+    work_search.add_argument("--max-chars", type=int, default=3000)
+    work_read = sub.add_parser("work-read", help="分页读取已保存的工作摘要或可见证据投影，不恢复截断原文")
+    work_read.add_argument("memory_id")
+    work_read.add_argument("--expected-revision", type=int)
+    work_read.add_argument("--offset", type=int, default=0)
+    work_read.add_argument("--max-chars", type=int, default=6000)
+    work_read.add_argument("--section", choices=["summary", "evidence"], default="summary")
+    work_rebuild = sub.add_parser("work-rebuild", help="显式为已有事件及工作摘要有界重建索引；不扫描项目或宿主对话，不调用模型")
+    work_rebuild.add_argument("--cursor", help="沿用前页next_cursor")
+    work_rebuild.add_argument("--limit", type=int, default=100)
     admin = sub.add_parser("admin-once")
     admin.add_argument("--problem")
     batch = sub.add_parser("admin-batch", help="按案例数、调用数与时长运行有限审核批次")
@@ -267,8 +281,8 @@ def main(argv=None):
             return 1
     runtime = None
     try:
-        if args.command == "admin-configure" and not args.workspace:
-            raise ContractError("admin-configure requires an explicit --workspace")
+        if args.command in {"admin-configure", "work-rebuild"} and not args.workspace:
+            raise ContractError(f"{args.command} requires an explicit --workspace")
         if args.command.startswith("history-"):
             if not args.workspace:
                 raise ContractError("history commands require an explicit --workspace; installation cwd is not a project choice")
@@ -356,7 +370,7 @@ def main(argv=None):
             handle = args.context_handle
             if handle is None and args.host == "codex":
                 handle = os.environ.get("ALP_CONTEXT_HANDLE")
-            Server(runtime, project, args.role, context_handle=handle).serve()
+            Server(runtime, project, args.role, context_handle=handle, workspace=args.workspace).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
         elif args.command == "history-prepare":
@@ -435,6 +449,16 @@ def main(argv=None):
         elif args.command == "search": result = runtime.search(project, args.query,
                                                 filters=json.loads(args.filters) if args.filters is not None else None)
         elif args.command == "read": result = runtime.read(project, args.knowledge_id)
+        elif args.command == "work-search": result = runtime.work_search(
+            project, args.query, file_path=args.file_path, workspace=args.workspace,
+            limit=args.limit, max_chars=args.max_chars)
+        elif args.command == "work-read":
+            if args.offset and args.expected_revision is None:
+                raise ContractError("expected_revision is required to continue a section page")
+            result = runtime.work_read(project, args.memory_id, expected_revision=args.expected_revision,
+                                       offset=args.offset, max_chars=args.max_chars, section=args.section)
+        elif args.command == "work-rebuild": result = runtime.work_rebuild(
+            project, args.workspace, cursor=args.cursor, limit=args.limit)
         elif args.command == "admin-once": result = admin_once(runtime, project, args.problem)
         elif args.command == "admin-batch": result = admin_batch(runtime, project, dispatch_token=args.dispatch_token)
         elif args.command == "admin-configure":

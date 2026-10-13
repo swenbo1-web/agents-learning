@@ -3,6 +3,15 @@
   "event_max_chars": 6000,
   "enforce_task_policy": false,
   "capture_deliveries": true,
+  "work_memory": {
+    "enabled": true,
+    "automatic_context": true,
+    "max_context_chars": 600,
+    "max_items": 3,
+    "summary_enabled": false,
+    "summary_min_events": 2,
+    "summary_max_events": 12
+  },
   "allowed_tools": [],
   "software_updates": {
     "enabled": false,

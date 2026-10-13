@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -90,7 +91,11 @@ def _fingerprint(packet):
             seen.add(identity)
     task = packet.get("task") or {}
     problem = packet["problem"]
-    return digest({"summary": clean(problem.get("summary", "")),
+    summary = clean(problem.get("summary", ""))
+    if packet.get("purpose") == "work_summary":
+        # 阶段请求的传输摘要不是新增工作；变更write-version不能绕过未知调用阻止。
+        summary = re.sub(r" \[[a-f0-9]{16}\]$", "", summary)
+    return digest({"summary": summary,
                    "category": problem.get("category", "unknown"),
                    "goal": clean(task.get("goal", "")), "scope": clean(task.get("scope", {})),
                    "events": events, "evidence_truncated": bool(packet.get("evidence_truncated")),
@@ -215,6 +220,9 @@ def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None):
     if provider_plan:
         usage["executor"] = {key: provider_plan.get(key) for key in
                              ("provider", "model", "model_source", "model_mode", "host", "host_scope", "policy_version", "executor_signature")}
+    summary = runtime.db.execute("SELECT source_digest FROM work_summary_links WHERE call_id=?", (call_id,)).fetchone()
+    if summary:
+        usage.update(purpose="work_summary", work_source_digest=summary["source_digest"])
     current = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()
     if state in UNKNOWN_STATES or (current and current[0] in UNKNOWN_STATES):
         usage["call_outcome_unknown"] = True
@@ -254,7 +262,10 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     preflight_signature = scan_signature(runtime, project, include_candidates=False)
     if history_job_id is not None:
         runtime.history_guard(project, problem_id, history_job_id, require_review=True, expected_epoch=epoch)
-    query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature, history_job_id=history_job_id)
+    summary_settings = runtime.config.get("work_memory", {})
+    summary_enabled = summary_settings.get("summary_enabled", False) and summary_settings.get("enabled", True)
+    query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature, history_job_id=history_job_id,
+                                summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
     raw_query, raw_args = query, args
     if history_job_id is None:
         query, args = executor_query(runtime, project, query, args)
@@ -264,7 +275,8 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     if not rows:
         if history_job_id is None and runtime.db.execute(raw_query + "LIMIT 1", (project, *raw_args)).fetchone():
             return {"status": "executor_not_ready", "reason": "administrator_current_model_unavailable", "scanned_count": 0}
-        query, args = eligible_query(signature, None, include_cached=True, history_job_id=history_job_id)
+        query, args = eligible_query(signature, None, include_cached=True, history_job_id=history_job_id,
+                                    summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
         blocked = runtime.db.execute(query + "AND EXISTS(SELECT 1 FROM admin_preflights f WHERE "
                                      "f.project=p.project AND f.problem=p.id AND f.revision=p.revision "
                                      "AND f.signature=? AND f.task_updated IS t.updated) ORDER BY p.created,p.id LIMIT 10",
@@ -274,6 +286,12 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                     "reason": "material needs a complete packet or a larger input budget; no invocation reserved"} if blocked else {})}
     for selected in rows:
         scanned += 1
+        summary_context = runtime.work_summary_select(project, selected["id"])
+        if summary_context and summary_context.get("eligible") is False:
+            if problem_id is not None:
+                return {"status": "needs_evidence", "problem_id": selected["id"],
+                        "purpose": "work_summary", "reason": summary_context["reason"], "scanned_count": scanned}
+            continue
         source_conversation = None if history_job_id is not None else selected["conversation"]
         try:
             provider_plan = runtime.resolve_admin_executor(project, source_conversation, require_enabled=history_job_id is None)
@@ -285,11 +303,20 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             routing_skipped.append({"problem_id": selected["id"], "reason": availability["reason"]})
             continue
         review_cfg = _review_configuration(cfg, provider_plan)
+        if summary_context:
+            review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
         packet = runtime.review_packet(project, selected["id"])
+        if summary_context:
+            packet["purpose"] = "work_summary"
         instruction = review_instruction(packet)
+        if summary_context:
+            from .work_summaries import SUMMARY_PREFIX
+            instruction = SUMMARY_PREFIX + instruction
         evidence = _fingerprint(packet)
         review = review_signature(packet, review_cfg, evidence)
-        reason = ("packet exceeds configured input limit; no invocation reserved" if packet["incomplete"]
+        reason = ("work summary source is projected or incomplete; no invocation reserved"
+                  if summary_context and packet.get("evidence_truncated") else
+                  "packet exceeds configured input limit; no invocation reserved" if packet["incomplete"]
                   else "input exceeds configured limit; no invocation reserved"
                   if len(instruction) > cfg["max_input_chars"] else None)
         if reason:
@@ -346,12 +373,15 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         if claim["status"] != "reserved":
             return dict(claim, scanned_count=scanned)
         runtime.record_admin_execution(project, claim["call_id"], provider_plan, require_enabled=history_job_id is None)
+        if summary_context:
+            runtime.db.execute("UPDATE work_summary_links SET call_id=?,updated=? WHERE project=? AND problem_id=? AND state='pending'",
+                               (claim["call_id"], time.time(), project, selected["id"]))
         if history_job_id is not None:
             runtime.history_reserve_call(project, history_job_id, selected["id"], claim["call_id"], epoch)
         return {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
                 "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id,
-                "provider_plan": provider_plan, **claim}
+                "provider_plan": provider_plan, "summary_context": summary_context, **claim}
     return {"status": "executor_not_ready" if routing_skipped else "needs_evidence" if skipped else "scan_complete", "scanned_count": scanned,
             **({"reason": routing_skipped[0]["reason"], "routing_skipped": routing_skipped[:10]} if routing_skipped else {}),
             **({"problem_id": skipped[0], "skipped_problem_ids": skipped,
@@ -378,17 +408,30 @@ def _accept_response(runtime, project, reserved, response):
     if reserved.get("history_job_id"):
         runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
                               require_review=True, expected_epoch=reserved["host_epoch"])
+    summary_context = runtime.work_summary_guard(project, packet["problem"]["id"])
+    if bool(summary_context) != bool(reserved.get("summary_context")):
+        raise ContractError("administrator review purpose changed")
+    if summary_context and summary_context["source_digest"] != reserved["summary_context"]["source_digest"]:
+        raise ContractError("work summary source identity changed")
     revision = runtime.db.execute("SELECT revision FROM problems WHERE project=? AND id=?",
                                   (project, packet["problem"]["id"])).fetchone()
     if not revision or revision[0] != packet["problem"]["revision"]:
         raise ContractError("reviewed problem changed")
     current_packet = runtime.review_packet(project, packet["problem"]["id"])
+    if summary_context:
+        current_packet["purpose"] = "work_summary"
     review_cfg = _review_configuration(runtime.admin_effective_config(project), reserved["provider_plan"])
+    if summary_context:
+        review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
     if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
         raise ContractError("review evidence or comparison context changed")
     result = {"status": response["decision"], "reason": clean(response["reason"])[:1000], "call_id": call_id,
               "problem_id": packet["problem"]["id"], "missing_evidence": missing}
+    if summary_context:
+        result["purpose"] = "work_summary"
     body, proposal = response["candidate"], response.get("proposal")
+    if summary_context and (proposal is not None or response["decision"] == "governance"):
+        raise ContractError("work summary cannot propose knowledge governance")
     if response["decision"] == "candidate":
         validate(body, CANDIDATE)
         if body["problem_id"] != packet["problem"]["id"] or body["problem_revision"] != packet["problem"]["revision"]:
@@ -397,8 +440,11 @@ def _accept_response(runtime, project, reserved, response):
             raise ContractError("candidate references evidence outside the review packet")
         if packet.get("evidence_truncated"):
             body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
-        result.update(runtime.submit_candidate(project, expected_epoch=reserved["host_epoch"], **body))
-        proposal = proposal or {"action": "publish", "knowledge_id": None, "expected_revision": None}
+        if summary_context:
+            result.update(runtime.work_summary_accept(project, packet["problem"]["id"], body, call_id))
+        else:
+            result.update(runtime.submit_candidate(project, expected_epoch=reserved["host_epoch"], **body))
+            proposal = proposal or {"action": "publish", "knowledge_id": None, "expected_revision": None}
     elif body is not None:
         raise ContractError("non-candidate response must use candidate=null")
     if proposal is not None:
@@ -420,7 +466,8 @@ def _accept_response(runtime, project, reserved, response):
                                         reason=result["reason"], evidence_refs=refs, expected_epoch=reserved["host_epoch"]))
     elif response["decision"] == "governance":
         raise ContractError("governance decision requires a proposal")
-    if response["decision"] == "candidate" and runtime.admin_effective_config(project)["auto_publish"] and not reserved.get("history_job_id"):
+    if (response["decision"] == "candidate" and runtime.admin_effective_config(project)["auto_publish"]
+            and not reserved.get("history_job_id") and not summary_context):
         reason = ("evidence truncated" if packet.get("evidence_truncated") else
                   "requires trusted tool-success evidence" if body["validation_level"] != "tool_success" else
                   "requires operation solution" if body["category"] != "operation" or body.get("knowledge_kind", "solution") != "solution" else
@@ -434,6 +481,9 @@ def _accept_response(runtime, project, reserved, response):
     result["status"] = response["decision"]
     persist_receipt(runtime, project, packet, reserved["evidence_signature"], reserved["review_signature"],
                     call_id, dict(response, **result, decision=response["decision"]))
+    if summary_context and response["decision"] == "candidate":
+        runtime.db.execute("UPDATE review_states SET state='work_summary_ready' WHERE project=? AND problem=? AND revision=?",
+                           (project, packet["problem"]["id"], packet["problem"]["revision"]))
     from .admin_queue import scan_signature
     remember_check(runtime, project, reserved["selected"], scan_signature(runtime, project))
     # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
@@ -443,6 +493,9 @@ def _accept_response(runtime, project, reserved, response):
     if reserved.get("history_job_id"):
         runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
                               require_review=True, expected_epoch=reserved["host_epoch"])
+    if summary_context:
+        runtime.work_summary_guard(project, packet["problem"]["id"],
+                                   accepted_call_id=call_id if response["decision"] == "candidate" else None)
     return result
 
 
@@ -493,6 +546,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             with runtime.transaction():
                 runtime.assert_admin_executor_snapshot(project, provider_plan, provider_plan.get("conversation"),
                                                        require_enabled=_history_job_id is None)
+                if reserved.get("summary_context"):
+                    runtime.work_summary_guard(project, reserved["packet"]["problem"]["id"])
             if _history_job_id is not None:
                 with runtime.transaction():
                     runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)

@@ -1,4 +1,4 @@
-"""本地 JSON-RPC stdio MCP；worker 不暴露原始记录、后台凭证或发布入口。"""
+"""本地 JSON-RPC stdio MCP；工作资料有界且脱敏，不暴露后台凭证或发布入口。"""
 from __future__ import annotations
 
 import json
@@ -48,6 +48,18 @@ WORKER_TOOLS = [
         "expected_revision": {"type": "integer", "minimum": 1},
         "section": {"type": "string", "enum": ["content", "applicability", "limitations"]},
         "offset": {"type": "integer", "minimum": 0}}, ["knowledge_id"])),
+    ("work_memory_search", "检索本项目已观察的工作历史索引；不是正式解法或执行授权。可按目标文件筛选，默认3000个JSON正文字符，不读取项目文件。", schema({
+        "query": {"type": "string", "maxLength": 8000},
+        "file_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": r"\S"},
+        "context_handle": NONEMPTY,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}})),
+    ("work_memory_read", "绑定当前会话后，分页读取工作观察摘要或已保存的可见证据投影。续页必须保持section和expected_revision；不会恢复截断原文。", schema({
+        "memory_id": NONEMPTY, "context_handle": NONEMPTY,
+        "expected_revision": {"type": "integer", "minimum": 1},
+        "offset": {"type": "integer", "minimum": 0},
+        "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
+        "section": {"type": "string", "enum": ["summary", "evidence"]}}, ["memory_id"])),
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
         "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "goal": NONEMPTY,
@@ -155,13 +167,15 @@ class Server:
     MAX_MESSAGE_BYTES = 2 * 1024 * 1024
     SUPPORTED_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
-    def __init__(self, runtime, project, role="worker", context_handle=None):
+    def __init__(self, runtime, project, role="worker", context_handle=None, workspace=None):
         if role not in {"worker", "admin"}:
             raise ContractError("invalid server role")
         self.runtime, self.project = runtime, project
         self.role = role
         self.per_request_context = runtime.host == "antigravity" and context_handle is None
         self.context_handle = context_handle
+        # 仅受信启动入口可以提供工作区；模型参数不能选择任意外部checkout。
+        self.workspace = workspace
         self.epoch = runtime.session_epoch()
         self.governance_epoch = runtime.host_epoch()
         self.state, self.protocol_version = "new", None
@@ -193,6 +207,38 @@ class Server:
             raise ProtocolError(-32602, "unknown tool")
         validate(args, self.tools[name][1])
         p, r = self.project, self.runtime
+        if name in {"work_memory_search", "work_memory_read"}:
+            handle = self._handle(args)
+            access = r.access_context(p, handle, expected_epoch=self.epoch) if handle is not None else None
+            if name == "work_memory_search":
+                result = r.work_search(p, args.get("query", ""), file_path=args.get("file_path"),
+                                       workspace=self.workspace, limit=args.get("limit", 5),
+                                       max_chars=args.get("max_chars", 3000))
+                items = result["items"]
+            else:
+                if access is None:
+                    raise ContractError("work_memory_read requires a verified context_handle")
+                if args.get("offset", 0) and "expected_revision" not in args:
+                    raise ContractError("expected_revision is required to continue a section page")
+                result = r.work_read(p, args["memory_id"], expected_revision=args.get("expected_revision"),
+                                     offset=args.get("offset", 0), max_chars=args.get("max_chars", 6000),
+                                     section=args.get("section", "summary"))
+                items = [result]
+            if access is not None:
+                with r.transaction():
+                    r.access_context(p, handle, expected_epoch=self.epoch)
+                    task = r._retrieval_task(p, access["conversation_id"], access["agent_id"], handle)
+                    task_state = r._work_task_state(p, access["conversation_id"], access["agent_id"], handle, task)
+                    table, where, key = r._ensure_context(p, access["conversation_id"], access["agent_id"])
+                    context_epoch = r.db.execute(f"SELECT epoch FROM {table} WHERE {where}", key).fetchone()[0]
+                    r.work_record_exposure(p, access["conversation_id"], items, agent_id=access["agent_id"],
+                                           task_state=task_state, context_epoch=context_epoch, method="mcp",
+                                           context_handle=handle, expected_epoch=self.epoch)
+                self._bind(handle)
+            else:
+                # 未绑定查询只返回项目公开索引，不能为猜测的会话登记展示。
+                r.assert_session_epoch(self.epoch)
+            return result
         if name in {"knowledge_search", "knowledge_read"}:
             handle = self._handle(args)
             if handle is not None:

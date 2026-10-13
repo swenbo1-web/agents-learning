@@ -25,6 +25,9 @@ from .case_store import CaseStoreMixin
 from .history_import import HistoryImportMixin
 from .admin_routing import (AdminRoutingMixin, ROUTING_DEFAULTS, install_admin_routing,
                             validate_admin_routing_config)
+from .work_memory import (WorkMemoryMixin, WORK_MEMORY_DEFAULTS, install_work_memory,
+                          validate_work_memory_config)
+from .work_summaries import WorkSummaryMixin, install_work_summaries
 from .event_capture import (CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict,
                             business_evidence_digest, projected_evidence)
 from .review_packet import ReviewPacketMixin
@@ -52,6 +55,7 @@ DEFAULTS = {
     "scheduler": SCHEDULER_DEFAULTS,
     "retrieval": {"semantic": SEMANTIC_DEFAULTS},
     "software_updates": SOFTWARE_UPDATE_DEFAULTS,
+    "work_memory": WORK_MEMORY_DEFAULTS,
     "hindsight": {"enabled": False, "url": "http://127.0.0.1:8888", "bank_id": "",
                   "api_key_env": "HINDSIGHT_API_KEY", "strategy": "alp_chunks",
                   "timeout_seconds": 10},
@@ -209,7 +213,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
               KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
               KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin, HistoryImportMixin,
-              AdminRoutingMixin):
+              AdminRoutingMixin, WorkMemoryMixin, WorkSummaryMixin):
     def __init__(self, home=None, config=None, *, host="codex", host_instance="default"):
         if host not in {"codex", "antigravity"}:
             raise ContractError("unsupported host")
@@ -245,6 +249,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self.config[key].update(value)
             else:
                 self.config[key] = value
+        self.config["work_memory"] = validate_work_memory_config(self.config["work_memory"])
         self.config["admin"] = validate_admin_routing_config(self.config["admin"])
         for key in ("injection_max_chars", "event_max_chars"):
             if not isinstance(self.config[key], int) or not 128 <= self.config[key] <= 100000:
@@ -269,7 +274,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(15)):
+        if version not in set(range(16)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -301,7 +306,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 from .history_import import install_storage as install_history_storage
                 install_history_storage(self)
                 install_admin_routing(self)
-                self.db.execute("PRAGMA user_version=14")
+                install_work_memory(self)
+                install_work_summaries(self)
+                self.db.execute("PRAGMA user_version=15")
         except BaseException:
             self.db.close()
             raise
@@ -705,6 +712,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
                 "history_import": self.history_status(project),
+                "work_memory": self.work_memory_status(project),
                 "learning_effects": self.learning_effects(project),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
                 "knowledge_release_head": self._release_head(project),
@@ -837,7 +845,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             decision = binding["decision"] if binding else "unobserved"
             if kind == "PreToolUse":
                 recovery_tools = {"mcp__agent_learning__" + name for name in (
-                    "knowledge_search", "knowledge_read", "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
+                    "knowledge_search", "knowledge_read", "work_memory_search", "work_memory_read",
+                    "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
                 if self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
                     verdict = self.check_execution(project, conversation, task, raw, assignment)
                     denied, deny_reason = verdict["decision"] == "denied", verdict["reason"]
@@ -932,6 +941,11 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self._execution_fence(project, conversation, "context_cleared", pause=True)
             if kind == "Stop" and not agent_id and fresh:
                 self._capture_delivery(project, conversation, task, event, raw)
+            if fresh:
+                self._work_capture_safely(project, event["id"], raw["cwd"], raw=raw,
+                                          summarize=kind == "Stop" and not agent_id,
+                                          conversation=conversation,
+                                          native_context_hint=_adapter_event_key is not None)
         schedule_warning = None
         update_notice_event = (fresh and not agent_id and self.config["software_updates"]["enabled"]
                               and (kind == "UserPromptSubmit" or kind == "SessionStart"
@@ -961,7 +975,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
         if kind == "PreToolUse" and context_delivery:
-            text = self._context(project, conversation, agent_id=agent_id, expected_epoch=epoch, tool_only=True)
+            text = self._context(project, conversation, agent_id=agent_id, expected_epoch=epoch, tool_only=True,
+                                 workspace=raw["cwd"], raw=raw)
             if text:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
                         text}}
@@ -971,7 +986,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         "Agent Learning: 子 Agent 身份未知，未分配写入句柄；继承当前任务边界，可按项目检索知识，不猜测会话归属。"}}
             query = raw.get("prompt", "")
             text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
-                                 agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"])
+                                 agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"],
+                                 workspace=raw["cwd"], raw=raw)
             if text:
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
@@ -1054,6 +1070,24 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 except (OSError, ValueError, TypeError):
                     pass
             return output
+
+    def _work_capture_safely(self, project, event_id, workspace, *, raw=None, summarize=False, conversation=None,
+                              native_context_hint=False):
+        """派生功能故障不回滚已记录的任务、事件或执行决定。"""
+        if not self.db.in_transaction:
+            raise ContractError("work capture requires an existing event transaction")
+        self.db.execute("SAVEPOINT work_capture_extension")
+        try:
+            self._work_capture_event(project, event_id, workspace, raw=raw,
+                                     native_context_hint=native_context_hint)
+            if summarize and conversation:
+                self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            self.db.execute("ROLLBACK TO work_capture_extension")
+            self.db.execute("RELEASE work_capture_extension")
+            self._metric(project, "work_memory_capture_failed")
+        else:
+            self.db.execute("RELEASE work_capture_extension")
 
     def _launch_background(self, workspace, command, arguments):
         import subprocess

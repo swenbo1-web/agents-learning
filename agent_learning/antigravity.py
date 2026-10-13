@@ -18,7 +18,8 @@ EVENTS = {"PreInvocation", "PreToolUse", "PostToolUse", "Stop"}
 MODES = {"observe", "enforce"}
 PATH_FIELDS = ("Cwd", "AbsolutePath", "TargetFile", "DirectoryPath", "SearchDirectory", "SearchPath")
 RECOVERY_TOOLS = {"mcp__agent_learning__" + name for name in (
-    "knowledge_search", "knowledge_read", "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
+    "knowledge_search", "knowledge_read", "work_memory_search", "work_memory_read",
+    "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
 
 
 def install_storage(runtime):
@@ -284,12 +285,15 @@ class AntigravityAdapter:
         with self.runtime.transaction():
             phase_guard()
             task = self.runtime.task(project, conversation)
-            self.runtime._event(project, conversation, "AntigravityStop", observed,
+            event, fresh = self.runtime._event(project, conversation, "AntigravityStop", observed,
                                 event_id=["antigravity", event_key],
                                 task_id=task["id"] if task else None,
                                 task_revision=task["revision"] if task else None)
             if observed["fullyIdle"]:
                 self.runtime._execution_fence(project, conversation, "antigravity_execution_stopped")
+            if fresh:
+                self.runtime._work_capture_safely(project, event["id"], str(self.workspace), raw=observed,
+                                                  summarize=observed["fullyIdle"], conversation=conversation)
             # 后置签名也必须在相同快照内取得，不能接纳提交后出现的新任务。
             return {"decision": "stop"}, self._task_signature(project, conversation)
 
@@ -410,7 +414,8 @@ class AntigravityAdapter:
                                  "ORDER BY created LIMIT 1", (project, conversation, epoch)).fetchone()
             outcome = {}
             text = r._context(project, conversation, query=fault["query"] if fault else "", context_handle=access["context_handle"],
-                              expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard, _outcome=outcome)
+                              expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard, _outcome=outcome,
+                              workspace=str(self.workspace), raw=raw)
             if fault:
                 with r.transaction():
                     phase_guard()

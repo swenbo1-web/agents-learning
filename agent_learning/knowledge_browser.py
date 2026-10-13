@@ -69,8 +69,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14}:
-        raise ContractError("browser requires database schema 11 or 12; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15}:
+        raise ContractError("browser requires database schema 11..15; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -447,7 +447,7 @@ CSS = """*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#192735;
 JAVASCRIPT = r"""'use strict';
 const $=id=>document.getElementById(id);
 const state={token:'',connectionEpoch:0,view:'knowledge',offset:0,next:null,detail:null,section:'content',fieldOffset:0,fieldNext:null,pages:{},busy:false};
-const labels={active:'有效',revoked:'已撤销',historical:'历史修订',valid:'有效来源',missing:'来源缺失',conflicted:'来源冲突',denied:'操作被拒绝',candidate:'待晋升',stable:'稳定',reported:'陈述证据',tool_success:'工具成功证据',operation:'操作',professional:'专业',project:'项目',mixed:'混合',unknown:'未分类',pending:'待处理',candidate_ready:'候选就绪',awaiting_evidence:'等待证据',proposal_ready:'治理建议就绪',skipped:'已跳过',solution:'解法',fact:'事实',pattern:'方法'};
+const labels={active:'有效',revoked:'已撤销',historical:'历史修订',valid:'有效来源',missing:'来源缺失',conflicted:'来源冲突',denied:'操作被拒绝',candidate:'待晋升',stable:'稳定',reported:'陈述证据',tool_success:'工具成功证据',operation:'操作',professional:'专业',project:'项目',mixed:'混合',unknown:'未分类',pending:'待处理',candidate_ready:'候选就绪',work_summary_ready:'工作摘要就绪',awaiting_evidence:'等待证据',proposal_ready:'治理建议就绪',skipped:'已跳过',solution:'解法',fact:'事实',pattern:'方法'};
 const label=x=>labels[x]||x||'未知';
 const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;if(tag==='button')e.disabled=state.busy;return e;};
 const stamp=x=>x?new Date(x*1000).toLocaleString():'';

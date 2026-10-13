@@ -18,5 +18,6 @@ Review historical cases only after the user's explicit archival run. Do not scan
 - Respect configured usage, time and concurrency budgets. Duplicate evidence reuses existing decisions. Failed or unknown administrator calls do not become successful review and cannot be retried under a fresh identity to reset usage.
 - Automatic review is off by default. Only a trusted user-configured project/host policy may enable the native Antigravity CLI or choose an explicit provider and model. Do not enable it through this skill, invent CLI flags, copy credentials or silently change models. A missing or ambiguous current model leaves review pending.
 - Ordinary workers do not wait for review. Do not execute project tasks, modify host configuration or publish knowledge from this administrator skill.
+- For `purpose=work_summary`, follow the bounded work-summary instruction: project/reported content and null proposal. Retain source coverage and unknown acceptance; summaries share the existing administrator budget and never publish knowledge or invoke governance.
 
 See the exported [project README](../../README.md) for executor setup and governance boundaries.

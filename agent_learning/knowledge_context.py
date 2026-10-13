@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 
 
@@ -141,6 +142,16 @@ class KnowledgeContextMixin:
     def _task_key(task):
         return (task["id"], task["revision"], task.get("write_version")) if task else (None, None, None)
 
+    def _work_task_state(self, project, conversation, agent_id, context_handle, task):
+        """工作索引的去重范围包括固定派发身份，不能猜同名子 Agent 的边界。"""
+        state = ({"id": task["id"], "revision": task["revision"],
+                  "write_version": task.get("write_version")} if task else None)
+        if agent_id:
+            assignment = self.assignment_context(project, conversation, agent_id, context_handle)
+            if assignment:
+                state = dict(state or {}, assignment_id=assignment["id"])
+        return state
+
     @staticmethod
     def _retrieval_filters(task):
         from .runtime import METADATA_KEYS, knowledge_filters
@@ -175,7 +186,8 @@ class KnowledgeContextMixin:
             "ORDER BY created DESC LIMIT 32)", (*key, *key))
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
-                 expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None, _outcome=None):
+                 expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None, _outcome=None,
+                 workspace=None, raw=None):
         if delivery not in {"persistent", "ephemeral"}:
             from .runtime import ContractError
             raise ContractError("unsupported context delivery")
@@ -194,6 +206,7 @@ class KnowledgeContextMixin:
             table, where, key = self._ensure_context(project, conversation, agent_id)
             initial = dict(self.db.execute(f"SELECT * FROM {table} WHERE {where}", key).fetchone())
             task = self._retrieval_task(project, conversation, agent_id, context_handle)
+            task_state = self._work_task_state(project, conversation, agent_id, context_handle, task)
             manifest = dict(self.db.execute("SELECT generation,revocation_epoch,source_epoch FROM projects WHERE id=?", (project,)).fetchone())
             fault = self.db.execute("SELECT * FROM context_faults WHERE project=? AND conversation=? AND agent=? "
                 "AND state IN ('pending','ready') AND task_id IS ? AND task_revision IS ? "
@@ -278,6 +291,27 @@ class KnowledgeContextMixin:
                     continue
                 items.append(item)
                 seen.add(ident)
+        work_settings = self.config.get("work_memory", {})
+        work_items = []
+        work_context_failed = False
+        work_context_epoch = initial["epoch"] + int(compact)
+        if (work_settings.get("enabled", True) and work_settings.get("automatic_context", True)
+                and work_settings.get("max_context_chars", 600)):
+            # 文件触发独立于故障队列；工作历史只给索引，不能转成解法或执行许可。
+            # 在写事务外召回，最终只登记完整进入共享预算的卡片。
+            work_query = ("" if tool_only or (self.host == "antigravity" and delivery == "ephemeral"
+                                              and not query.strip()) else effective)
+            try:
+                work_items = self.work_context_items(
+                    project, conversation, query=work_query[-8000:], workspace=workspace, raw=raw,
+                    agent_id=agent_id, limit=work_settings.get("max_items", 3),
+                    task_state=task_state, delivery=delivery, compact=compact,
+                    context_epoch=work_context_epoch, file_only=tool_only)
+            except ContractError:
+                # 身份与任务契约失败仍必须由主上下文拒绝，不能当作派生索引故障。
+                raise
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                work_context_failed = True
         with self.transaction():
             self.assert_session_epoch(epoch)
             if _phase_guard:
@@ -370,6 +404,78 @@ class KnowledgeContextMixin:
             new_delivered = [item for item in delivered
                              if f"{item['knowledge_id']}@{item['revision']}" not in json.loads(row[0])]
             self._record_exposure(project, conversation, agent_id, delivered, injected=True)
+            work_delivered = []
+            if work_items:
+                work_line_start = len(lines)
+                self.db.execute("SAVEPOINT optional_work_context")
+                try:
+                    work_header = "工作历史索引（非正式解法/执行授权；详情用 work_memory_read）："
+                    # 正式知识、完整失效提醒及任务边界已优先分配预算。工作历史只能使用
+                    # 剩余空间，并共享 injection_max_chars，不额外叠加一个注入预算。
+                    work_budget = min(remaining(), work_settings.get("max_context_chars", 600))
+                    work_used = 0
+                    for work_item in self.work_validate_items(project, work_items, workspace=workspace):
+                        card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
+                                "source_version": work_item.get("source_version", 0),
+                                "title": clip(work_item.get("title", ""), 70),
+                                "summary": clip(work_item.get("summary", ""), 100),
+                                "state": work_item.get("state", "reported"),
+                                "validation_level": work_item.get("validation_level", "reported"),
+                                "read_required": True}
+                        if work_item.get("task_binding_known") is False:
+                            card["task_binding_known"] = False
+                        if work_item.get("task_affinity") == "context_only":
+                            card["task_affinity"] = "context_only"
+                        if work_item.get("source_changed"):
+                            card["source_changed"] = True
+                        if work_item.get("file_state_changed"):
+                            card["file_state_changed"] = True
+                            card["file_version_changed"] = True
+                        files = work_item.get("files", [])
+                        if files:
+                            if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
+                                card["file_version_changed"] = True
+                            card["files"] = [{"path": clip(file.get("relative_path", ""), 100),
+                                              "relation": file.get("relation", "observed_target"),
+                                              "version_changed": file.get("version_changed", "unknown")}
+                                             for file in files[:2] if isinstance(file, dict)]
+                        note = "[工作历史] " + encode(card)
+                        prefix_cost = len(work_header) + 1 if not work_delivered else 0
+                        cost = len(note) + 1 + prefix_cost
+                        if cost > work_budget - work_used:
+                            # 保留准确身份及状态；不能把截断的卡记为已经展示。
+                            card.pop("files", None)
+                            card.pop("summary", None)
+                            card["title"] = clip(card["title"], 40)
+                            note = "[工作历史] " + encode(card)
+                            cost = len(note) + 1 + prefix_cost
+                        if cost > work_budget - work_used:
+                            continue
+                        if not work_delivered:
+                            lines.append(work_header)
+                        lines.append(note)
+                        work_used += cost
+                        work_delivered.append(work_item)
+                    if work_delivered:
+                        self.work_record_exposure(
+                            project, conversation, work_delivered, agent_id=agent_id, delivery=delivery,
+                            task_state=task_state, compact=compact, context_epoch=work_context_epoch,
+                            method="hook", context_handle=context_handle, expected_epoch=epoch)
+                        self._metric(project, "work_indices_delivered", len(work_delivered))
+                except ContractError:
+                    self.db.execute("ROLLBACK TO optional_work_context")
+                    self.db.execute("RELEASE optional_work_context")
+                    raise
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    self.db.execute("ROLLBACK TO optional_work_context")
+                    self.db.execute("RELEASE optional_work_context")
+                    del lines[work_line_start:]
+                    work_delivered = []
+                    work_context_failed = True
+                else:
+                    self.db.execute("RELEASE optional_work_context")
+            if work_context_failed:
+                self._metric(project, "work_context_failed")
             if new_delivered:
                 self._metric(project, "knowledge_injected", len(new_delivered))
             if delivered and delivery == "ephemeral":
@@ -402,5 +508,6 @@ class KnowledgeContextMixin:
                 # 有效卡时保留待办，不能把生成句柄误记为已交付解决经验。
                 _outcome.update(searched=should_search, cooling=cooling,
                                 retryable=retryable, delivered_cards=len(delivered),
-                                delivery_pending=bool(eligible and not delivered))
+                                delivery_pending=bool(eligible and not delivered),
+                                delivered_work_indices=len(work_delivered))
             return "\n".join(lines)

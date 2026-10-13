@@ -29,7 +29,7 @@ class PackageTests(unittest.TestCase):
             for name in ("agent_learning", "scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources"):
                 shutil.copytree(source_root / name, source / name,
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-            for name in ("pyproject.toml", "README.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
+            for name in ("pyproject.toml", "README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
                 shutil.copy2(source_root / name, source / name)
             wheel_directory = base / "wheels"
             wheel_directory.mkdir()
@@ -44,9 +44,11 @@ class PackageTests(unittest.TestCase):
             wheels = list(wheel_directory.glob("*.whl"))
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
-                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import"):
+                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import",
+                               "work_memory", "work_files", "work_summaries"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/README.en.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/agents/openai.yaml", wheel.namelist())

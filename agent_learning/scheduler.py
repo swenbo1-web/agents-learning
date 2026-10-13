@@ -107,7 +107,10 @@ class SchedulerMixin:
         if active is not None or dispatch:
             return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
         query, args = eligible_query(scan_signature(self, project),
-                                     preflight_signature=scan_signature(self, project, include_candidates=False))
+                                     preflight_signature=scan_signature(self, project, include_candidates=False),
+                                     summary_enabled=(self.config["work_memory"]["enabled"]
+                                                      and self.config["work_memory"]["summary_enabled"]),
+                                     summary_host_scope=self._session_scope())
         eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
         if not eligible:
             unknown = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND retry_allowed=0 "

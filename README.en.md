@@ -6,27 +6,27 @@
 
 **Project memory for Codex and Antigravity: find useful experience, keep its evidence, and reuse it in the next conversation.**
 
-Python **3.10+** · SQLite · [MIT](LICENSE) · Current source **0.16.0**
+Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
-[Antigravity installation](#install-in-antigravity-native-plugin) · [Codex installation](#install-in-codex-desktop-and-cli) · [How it works](#how-it-works) · [Architecture](#complete-architecture) · [Installation reference](#installation-and-maintenance-reference)
+[Antigravity installation](#install-in-antigravity-native-plugin) · [Codex installation](#install-in-codex-desktop-and-cli) · [How it works](#how-it-works) · [Work history](#working-observations-file-context-and-progressive-reading) · [Architecture](#complete-architecture) · [Installation reference](#installation-and-maintenance-reference)
 
-agents-learning records observable tool events and retrieves relevant project knowledge through supported host Hooks and MCP tools. Each knowledge item retains its conditions, limitations, sources and revision. Workers focus on the current task; an optional administrator organizes evidence into candidates.
+agents-learning records observable tool events and public work notes, then retrieves project knowledge and working history through supported host Hooks and MCP tools. Start with a small index and read the relevant details and evidence when needed. Published knowledge retains its conditions, limitations, sources and revision. Workers focus on the current task; an optional administrator organizes evidence.
 
-**The knowledge database is local by default. Administrator model calls, background scheduling, automatic publication and remote services are off by default.** A new knowledge base starts empty; recorded experience becomes reusable knowledge after review and publication.
+**The database is local by default. Administrator model calls, AI work summaries, background scheduling, automatic publication and remote services are off by default.** A new knowledge base starts empty. Working observations can be found before knowledge review; published solutions use the separate review and publication process.
 
 ## Before installing
 
 You need **Git**, **Python 3.10+**, and your chosen host with native plugin support. This default source installation requires no `pip install` or model API key. Obtain the source once:
 
 ```powershell
-git clone https://github.com/swenbo1-web/agents-learning.git
+git clone --branch v1.0.0 --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
 python --version
 ```
 
 Already cloned it? Use that directory and skip `git clone`. Run the commands below from the repository. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below.
 
-**Use current `main` source for these instructions. [Published downloads are still 0.13.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) and do not include Antigravity.** If both hosts access an existing database, update all its runtimes together; see [shared knowledge and upgrades](#shared-knowledge-upgrades-and-administrators).
+**Use [the 1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0), including its source, wheel and checksums, or clone the tag above.** The [0.13.0 prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) remains a historical version. If both hosts access an existing database, update all its runtimes together; see [shared knowledge and upgrades](#shared-knowledge-upgrades-and-administrators).
 
 ## Install in Antigravity (native plugin)
 
@@ -105,8 +105,8 @@ Then restart/reload the host, review its Hook trust settings and use the [instal
 
 ## How it works
 
-1. **Retrieve.** Register the task goal. At supported events, the plugin retrieves relevant knowledge and supplies bounded summaries; the Agent can read details as needed.
-2. **Work and observe.** The Agent completes the task while Hooks record tool observations. Errors queue a follow-up search for the next supported event.
+1. **Retrieve.** Register the task goal. At supported events, the plugin supplies relevant knowledge cards and small working-history indices; read details by revision and section as needed.
+2. **Work and observe.** The Agent completes the task while Hooks build observations for file changes, failures, verification and public work notes. Ordinary reads help file associations without a model call per read. Errors queue follow-up retrieval.
 3. **Organize when enabled.** An administrator receives a bounded evidence packet and proposes knowledge candidates or governance changes.
 4. **Publish and reuse.** A trusted operator or explicitly enabled publication policy admits eligible knowledge. Later tasks retrieve its conditions, evidence and current revision.
 
@@ -116,6 +116,9 @@ Knowledge is reference material; it does not grant execution permission. Tool co
 
 | Capability | What it does |
 |---|---|
+| **Searchable working history** | Find modifications, attempts, verification and public notes before they become published knowledge |
+| **File context** | Retrieve history for explicit file targets, retaining checkout, relation and observed version boundaries |
+| **Progressive reading** | Start with bounded indices; expand summaries and saved visible evidence by revision and section |
 | Project memory with evidence | Retains conditions, limitations, revisions and source links across conversations |
 | Historical project ingestion | Explicitly selects documents, source and conversations, retaining source versions for bounded review and separate publication |
 | Bounded retrieval | Returns previews first, with details on demand; local full-text search is the default and local semantic retrieval is optional |
@@ -207,6 +210,10 @@ flowchart TD
     Guard -->|"Denied"| Capture
     Result --> Capture["Collection, redaction, idempotency and conflict detection"]
     Capture --> Cases[("Cases, problem increments and evidence")]
+    Capture --> Work[("Working observations and file associations")]
+    Work --> Retrieve
+    Work -.-> Summary["Separately enabled incremental work summaries"]
+    Summary -.-> Work
     Worker --> Feedback["Short domain feedback or user corrections"]
     Feedback --> Cases
     Capture --> Fault["Pending failure follow-up retrieval"]
@@ -233,9 +240,9 @@ The main task, knowledge retrieval and experience organization proceed independe
 | Participant | Responsibilities | Permissions and handoff |
 |---|---|---|
 | User / trusted local operator | Define tasks, set execution rules, enable optional capabilities, publish and govern knowledge | Use explicit entry points for each operation; the user reviews host Hook trust |
-| Worker Agent | Analyze and deliver the task, query knowledge, provide necessary feedback and adoption declarations | 7 MCP tools; bound to the current session/assignment; knowledge cannot add execution permission |
+| Worker Agent | Analyze and deliver the task, query knowledge and work history, provide necessary feedback and adoption declarations | 9 MCP tools; bound to the current session/assignment; references cannot add execution permission |
 | Plugin runtime | Check identity and versions, retrieve, collect, persist and check integrated execution boundaries | Uses deterministic program rules and accesses observable events and results only |
-| Administrator Agent / executor | Propose candidates and governance based on evidence and existing knowledge | 12 administrator MCP tools, with no publication/revocation tools; automatic calls are off by default |
+| Administrator Agent / executor | Propose candidates and governance suggestions; optionally organize work summaries | 14 administrator MCP tools, with no publication/revocation tools; automatic calls are off by default |
 | Optional scheduler | Advance persistent review, knowledge batch and state distribution work | Bounded batches, time and call budgets; participates only when enabled |
 
 Rules and skills provide collaboration conventions. Runtime and Hooks with execution protection enabled check task state, authorized actions and resource scope for integrated calls. Protection covers plugin entry points; arbitrary local Shell and database access still depend on host and operating system permissions.
@@ -258,7 +265,7 @@ flowchart LR
     DB -.-> Remote["Optional derived distribution target"]
 ```
 
-Development source, exported plugins, fixed runtime copies and live databases are maintained separately. Exported Hooks and MCP point to the same fixed copy; its release manifest records the version, internal protocol and file digests. SQLite stores events, tasks, knowledge and receipts. Full-text indexes and remote copies are derived capabilities; current Runtime retrieval uses active local knowledge.
+Development source, exported plugins, fixed runtime copies and live databases are maintained separately. Exported Hooks and MCP point to the same fixed copy; its manifest records version, protocol and file digests. SQLite stores events, tasks, working observations, published knowledge and receipts. Knowledge and work indices are maintained separately, remote copies are derived capabilities, and Runtime uses local reference material.
 
 The same project and data directory can retain knowledge across login accounts. After an account change is confirmed, a host adapter or operator sends a boundary notification to invalidate old connections, handles and administrator writebacks. Desktop account change notifications still require explicit wiring.
 
@@ -269,9 +276,9 @@ The same project and data directory can retain knowledge across login accounts. 
 | 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export and upgrade fixed runtimes, check software versions, contents and role permissions | [install.py](agent_learning/install.py), [install_update.py](agent_learning/install_update.py), [software_updates.py](agent_learning/software_updates.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
 | 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
 | 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
-| 4. Retrieval and context management | Bounded hybrid recall and filtering, summary/page budgets, exposure tracking, notices, restoration, failure follow-up and read-only browsing | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
-| 5. Event, evidence and case collection | Record observable events and results; explicitly selected historical jobs retain versioned sources and isolated cases with coverage and idempotency | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [history_sources.py](agent_learning/history_sources.py), [history_import.py](agent_learning/history_import.py), [runtime.py](agent_learning/runtime.py) |
-| 6. Administrator knowledge governance | Organize bounded review packets, select executors and models by project and host, and retain queues, calls and receipts; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_routing.py](agent_learning/admin_routing.py), [admin_providers.py](agent_learning/admin_providers.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
+| 4. Retrieval and context management | Search published knowledge and work indices separately; share context budgets, page details, track exposure, notify changes, restore and follow up failures | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [work_memory.py](agent_learning/work_memory.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
+| 5. Event, evidence and case collection | Record observable events, project working observations and file relations; explicitly selected historical jobs retain versioned sources and isolated cases | [event_capture.py](agent_learning/event_capture.py), [work_memory.py](agent_learning/work_memory.py), [work_files.py](agent_learning/work_files.py), [case_store.py](agent_learning/case_store.py), [history_sources.py](agent_learning/history_sources.py), [history_import.py](agent_learning/history_import.py), [runtime.py](agent_learning/runtime.py) |
+| 6. Administrator knowledge governance | Bounded review packets, model routing, calls and receipts; optional work summaries reuse executors and budgets separately from candidates and governance | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [work_summaries.py](agent_learning/work_summaries.py), [admin_routing.py](agent_learning/admin_routing.py), [admin_providers.py](agent_learning/admin_providers.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
 | 7. Knowledge publication and version governance | Publish, update, revoke, restore and promote through trusted entry points; save batch manifests, safe rollback and optional distribution state | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py), [publication_state.py](agent_learning/publication_state.py), [knowledge_releases.py](agent_learning/knowledge_releases.py), [knowledge_sync.py](agent_learning/knowledge_sync.py), [hindsight.py](agent_learning/hindsight.py) |
 | 8. Background scheduling, budgets and effect evaluation | Persistent work, call budgets, exposure/adoption observations and independent paired task evaluation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py), [task_evaluation.py](agent_learning/task_evaluation.py) |
 
@@ -287,9 +294,9 @@ The same project and data directory can retain knowledge across login accounts. 
 
 **3. Knowledge storage and indexing.** SQLite stores published content, revisions, evidence sources and action receipts. Categories cover project, domain, operation and mixed problems; kinds distinguish facts, specific solutions and reusable methods. The full-text index projects active knowledge only. Content and sources are read from the same database snapshot.
 
-**4. Retrieval and context management.** Queries use the current question and explicit task filters; bounded recall is followed by match and source-state checks. Automatic injection defaults to at most three cards totaling 2400 characters. Complete conditions that do not fit produce `read_required`. Manual search returns bounded previews; content and conditions are paginated against a revision. Exposure ledgers track changes, and compaction restoration prioritizes new matches for the current question before adding valid historical summaries.
+**4. Retrieval and context management.** Queries use the current question and explicit task filters; bounded recall checks matches and source state. The default shared budget is 2400 characters: up to three published knowledge cards have priority, while up to three working-history indices use at most 600 of the remaining characters. Incomplete conditions produce `read_required`. Knowledge sections and working summaries/evidence have separate revision-bound pages. Exposure ledgers track changes; compaction prioritizes current matches before restoring relevant history.
 
-**5. Event, evidence and case collection.** Tool pre/post events, delivery declarations and short feedback create problem increments. Identical callbacks are deduplicated; contradictory inputs or tool names retain conflicts; late callbacks follow their original task and host boundaries. Tool success, protocol completion and statements remain separate, and none automatically establishes user acceptance. Failures register bounded follow-up retrieval without directly calling an administrator model.
+**5. Event, evidence and case collection.** Tool events, public delivery notes and feedback create problem increments. Valuable visible events also become working observations with file associations; ordinary reads only assist those associations. Duplicate callbacks are deduplicated, conflicts retained, and late callbacks follow original boundaries. Tool success, completion and statements remain separate from user acceptance. Deterministic indexing makes no model calls.
 
 **6. Administrator knowledge governance.** New or changed problems enter the review queue. The administrator receives a bounded review packet, compares existing knowledge and candidates, and proposes suggestions with applicable conditions, limitations and evidence references. Receipts record calls, results and retry states. When enabled, narrowly scoped automatic publication accepts only new operational solutions with complete tool success evidence. Domain knowledge, methodologies and governance changes continue through their corresponding trusted entry points.
 
@@ -304,6 +311,7 @@ The same project and data directory can retain knowledge across login accounts. 
 | Project and session identity | Project scope, `context_handle`, Agent identity, `host_epoch` | Establish query/write ownership and invalidate old connections after account changes |
 | Task and assignment | `task_id`, `revision`, `write_version`, `execution_epoch`, goal and scope | Distinguish contract, state and execution changes so old task writebacks cannot enter a new task |
 | Events and operations | Event references, tool call identifiers, input digests, results, task snapshots and conflict state | Support traceable evidence, idempotent callbacks and source health checks |
+| Working observations and file relations | `memory_id`, revision, source version, checkout, relative path, relation and visible coverage | Find unpublished work while keeping file hints, summaries and execution ownership separate |
 | Problems and cases | Problem ID/revision, event references, domain feedback and potential recovery links | Organize scattered observations into reviewable problem increments |
 | Candidates and knowledge | Title, content, category, kind, applicability, limitations, evidence level and metadata | Make retrieval and adoption conditional, with sources available for rechecking |
 | Revisions and governance state | Knowledge ID/revision, active state, maturity, source version, action and batch receipts | Distinguish content changes, source changes, publication state and historical operations |
@@ -313,14 +321,14 @@ Candidate metadata may include `tool`, `tool_version`, `error_code`, `environmen
 
 ### How automation reduces missed steps
 
-This table describes the Codex event chain. Antigravity uses a separate adapter; see [host differences](#3-host-differences-and-evidence).
+This table describes the Codex event chain. Antigravity uses a separate adapter; see [host differences](#host-differences-and-evidence).
 
 | Trigger | Plugin action | Boundary |
 |---|---|---|
 | `SessionStart` / `UserPromptSubmit` | Bind identity, retrieve relevant knowledge, restore tasks and notices | Insufficient matches are not injected; short continuations may reuse an unchanged query plan |
 | `SubagentStart` | Create an independent identity and assignment, then query knowledge for that task | Requires a reliable Agent ID; independent MCP connection lifecycle depends on host wiring |
-| `PreToolUse` | Check covered execution rules and send bounded invalidation notices and follow-up retrieval results | Observation mode is the default; rule-based rejection requires explicit protection enablement |
-| `PostToolUse` | Save results, update operation/source state and register failure follow-up retrieval | Protocol completion and unrelated commands do not establish a resolved problem |
+| `PreToolUse` | Check covered rules, send invalidation/failure follow-ups and small indices for explicit file targets | Observation mode is the default; file references grant no permissions and arbitrary shell targets are not guessed |
+| `PostToolUse` | Save results/source state, build observations and file associations, queue failure retrieval | Completion is separate from problem resolution; indexing calls no model by default |
 | MCP queries and feedback | Record knowledge actually returned to a bound session; supplement problems and adoption declarations | Unbound queries do not guess a session; exposure does not mean the model read it |
 | Background wakeups at `Stop` / `SessionStart` | Advance incremental review, batches and distribution when configuration permits | Bounded execution; unchanged work is skipped; wakeup with no running host is not guaranteed |
 | Knowledge revision, revocation or source changes | Save version changes and notify exposed sessions through later supported events | Complete notices that do not fit wait for later delivery; internal model content cannot be deleted |
@@ -406,11 +414,11 @@ If Codex uses its default data directory, omit --home on the Antigravity export 
 
 Review cases manually through a separate administrator interface, or explicitly enable the Codex or Antigravity CLI knowledge reviewer for the corresponding host. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-0.16.0 uses database schema **14** and internal publication protocol **14**. Back up the external knowledge database before upgrading. Update and reload every Codex and Antigravity fixed runtime sharing that database; older runtimes cannot open schema 14.
+1.0.0 uses database schema **15**, internal publication protocol **15**, and work index **1**. Knowledge full-text index **4** and optional semantic index **1** are unchanged. Back up the external database before upgrading. Update and reload every Codex and Antigravity fixed runtime sharing it; older runtimes cannot open schema 15.
 
 Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
 
-Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation accessing it to 0.16.0, and reload the hosts. Updating only Antigravity leaves older Codex runtimes unable to open schema 14.
+Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation accessing it to 1.0.0, and reload the hosts. Updating only Antigravity leaves older Codex runtimes unable to open schema 15.
 
 ### Installation contract and MCP entry
 
@@ -462,7 +470,7 @@ To opt in, add this section to your configuration:
 "software_updates": {
   "enabled": true,
   "repository": "swenbo1-web/agents-learning",
-  "channel": "prerelease",
+  "channel": "stable",
   "interval_seconds": 86400,
   "timeout_seconds": 3
 }
@@ -494,8 +502,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" serve --role adm
 
 | Role | MCP tools |
 |---|---|
-| Worker Agent (7 tools) | `knowledge_search`, `knowledge_read`, `session_context`, `task_update`, `case_feedback`, `knowledge_use`, `learning_status` |
-| Administrator (12 tools) | The tools above, plus `problem_list`, `review_packet`, `submit_candidate`, `review_list`, `propose_governance` |
+| Worker Agent (9 tools) | `knowledge_search`, `knowledge_read`, `work_memory_search`, `work_memory_read`, `session_context`, `task_update`, `case_feedback`, `knowledge_use`, `learning_status` |
+| Administrator (14 tools) | The tools above, plus `problem_list`, `review_packet`, `submit_candidate`, `review_list`, `propose_governance` |
 
 MCP exposes no publication or revocation tools. The startup entry point determines the role; tool arguments cannot elevate it. Skills are available in [learning-worker](skills/learning-worker/SKILL.md) and [learning-admin](skills/learning-admin/SKILL.md).
 
@@ -559,7 +567,70 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . statu
 python -B scripts/learning.py --home ../agents-learning-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex installation steps](#install-in-codex-desktop-and-cli) or [native Antigravity steps](#install-in-antigravity-native-plugin). Antigravity needs the current source or a locally built package of the same version; published 0.13.0 downloads do not include it. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex steps](#install-in-codex-desktop-and-cli) or [Antigravity steps](#install-in-antigravity-native-plugin); both use the 1.0.0 source or wheel. See [work history](#working-observations-file-context-and-progressive-reading), [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+
+## Working observations, file context and progressive reading
+
+**Find past work before deciding whether it should become published knowledge.** Deterministic indexing is enabled by default for file modifications, tool failures, verification, public work notes and user corrections. Ordinary reads help file relations without a model call for each read. Observations, candidates and published knowledge are separate records; tool success does not establish domain correctness or user acceptance.
+
+### Index, details, visible evidence
+
+| Entry | Response | Boundary |
+|---|---|---|
+| `work_memory_search` | Title, bounded summary, ID/revision, source state and file relations | Default 3000 JSON body characters; unbound calls query project indices without guessing a conversation |
+| `work_memory_read` | Paginated `summary` or `evidence` | MCP needs a verified `context_handle`; continuation keeps `expected_revision`, section and offset |
+| Automatic context | Small relevant work or explicit file-target indices | Shares the knowledge budget; exposure does not establish reading, adoption or permission |
+
+Complete invalidation notices, task boundaries and relevant published knowledge have priority. The default total remains **2400 characters**. Work indices use **at most 600 remaining characters and three items** within that total. `read_required` points to details when needed. Codex deduplicates against task, subagent assignment, context epoch and source state, and restores after compaction. Antigravity renders its ephemeral indices again in later invocations.
+
+Trusted local CLI queries are available too. Run these from the source directory with your actual project and the returned memory ID/revision:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" work-search "import error"
+python -B scripts/learning.py --workspace "D:\Projects\my-project" work-search --file-path "src/example.py" --max-chars 3000
+python -B scripts/learning.py --workspace "D:\Projects\my-project" work-read MEMORY_ID --section summary
+python -B scripts/learning.py --workspace "D:\Projects\my-project" work-read MEMORY_ID --section evidence --expected-revision 1 --max-chars 6000
+```
+
+For Antigravity add `--host antigravity` before the subcommand and retain the installation's data home. Continue pages with the returned `next_offset` and actual revision. Source and file-state changes remain pending until a later context has room. Evidence is the saved, sanitized visible projection: truncated originals cannot be reconstructed, and internal model reasoning is not read.
+
+### File identity and host timing
+
+File identity includes project, checkout and normalized relative path. Read targets, write targets and other explicit relations are distinct. Structured tool arguments, `apply_patch` file headers and a limited set of single-file read commands are supported; arbitrary shell commands do not establish complete file coverage. Paths respect actual cwd/subdirectories, and directory links cannot expand the workspace boundary.
+
+Codex can supply indices at `PreToolUse` when target arguments are explicit. Antigravity saves targets after fresh tool events and can inject their history in a later `PreInvocation`. These hints carry **`task_affinity=context_only`**: they constrain context retrieval without upgrading an unassigned operation into task execution evidence. Task changes, account changes and native resets invalidate old hints. Injection before the first read is not guaranteed.
+
+Observed file stat/version clues retain uncertainty: **mtime is not a content hash**. Changes since the last exposure are reported, including returns to an earlier observed state. File changes do not directly revoke related general knowledge.
+
+### Defaults and optional AI work summaries
+
+Merge these defaults into your external configuration as needed. Administrators, automatic publication and background scheduling remain off:
+
+```json
+{
+  "work_memory": {
+    "enabled": true,
+    "automatic_context": true,
+    "max_context_chars": 600,
+    "max_items": 3,
+    "summary_enabled": false,
+    "summary_min_events": 2,
+    "summary_max_events": 12
+  }
+}
+```
+
+`automatic_context=false` disables work-index injection while retaining manual queries. AI work summaries require both `summary_enabled` and an enabled [administrator executor](#optional-administrator-executor) for the project/host. Installation alone makes no model call. By default, at least two valuable new records are required, with at most twelve per batch. Summaries reuse existing executors, budgets and call receipts; unknown calls are not automatically retried.
+
+AI summaries are marked `model_reported` and describe visible attempts, results, public notes and unresolved questions. They create no knowledge candidates or governance actions. Published solutions still use the separate review/publication workflow.
+
+### Rebuild indices from already saved records
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" work-rebuild --limit 100
+```
+
+This explicit, paginated operation rebuilds existing tool/public-message observations and saved administrator work-summary indices in phases. It returns `scanned`, `indexed` and `next_cursor`; pass the cursor unchanged with `--cursor` for the next page. Older event cursors remain compatible. An explicit workspace is required, and old events with unknown checkout identity are skipped. It scans no project files or unselected conversation directories, calls no models and restores no historical permissions. Materials from before installation use the separately invoked historical ingestion below.
 
 ## Absorb history from an existing project
 
@@ -596,6 +667,10 @@ Immutable sanitized source versions, locations and receipts live in the independ
 `--confirm` expresses an explicit operation choice, not independent human authentication. Unrestricted shell/database access still depends on host and OS permissions. Updating the plugin does not authorize historical reading.
 
 ## Current version and compatibility
+
+**1.0.0 is the first stable release.** Searchable working observations, file associations, progressive reading and optional administrator work summaries extend the existing eight modules while retaining separate knowledge review and governance. Database schema **15**, publication protocol **15**, work index **1**; knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage records; unknown old events do not become complete histories automatically. Update and reload every shared-database installation. Export backups do not replace external database backups.
+
+The following entries describe changes and release status at the time of each historical version:
 
 0.16.0 adds automatic knowledge reviewers for both host CLIs, project/host enablement policies, current-model observations and immutable execution plans. Database schema advances to **14** and internal publication protocol to **14**; full-text index **4** and semantic index **1** are unchanged. Model calls and automatic publication remain off by default. Knowledge review does not establish product acceptance. Update and reload every installation sharing the database. Historical sources, published knowledge and conservative usage records remain. Updated source does not imply a new GitHub Release.
 
@@ -999,6 +1074,8 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `browser` | Start a temporary local read-only knowledge viewer |
 | `evaluation-protocol`, `evaluation-run`, `evaluation-report` | Freeze paired experiments, run explicit adapters, import and summarize observations |
 | `search`, `read` | Search and read published knowledge |
+| `work-search`, `work-read` | Search bounded work indices and read summaries or visible evidence by revision and page |
+| `work-rebuild` | Explicit, bounded rebuild from saved events and summaries; requires workspace, scans no project files |
 | `admin-once`, `admin-batch` | Single review and short background batches subject to several budgets |
 | `admin-configure`, `admin-status` | Explicit project/host review policy or inspection of executor/model readiness and recent calls |
 | `reviews`, `admin-retry` | Query persistent receipts and explicitly permit one review after a failed or unknown call |
@@ -1007,6 +1084,16 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## 1.0.0 checks (2026-10-13)
+
+The complete isolated Windows/Python 3.12.14 suite discovered **1194 checks: 1191 passed, 3 platform-dependent skips, no failures or errors**, in 284.893 seconds, with `ResourceWarning` treated as an error. **109 Python files** passed Python 3.10 syntax parsing.
+
+Offline regression covers wheel resources for both profiles, fixed-runtime entries, MCP/Hook wiring and installation upgrades. Schema 14→15 preserves existing knowledge, tasks and review records. Failure-isolation regressions retain authoritative records, knowledge notifications and execution denials when derived capture, work context or summary queuing fails.
+
+GitHub runs Windows/Linux × Python 3.10/3.12 CI; see the actual [check records](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml). This local run enabled no live Hooks, actual models, persistent services, user configuration changes or live knowledge-database writes.
+
+New acceptance coverage includes observations, previews, identity-bound paging, shared budgets, source/file changes, compaction, subagent boundaries, Antigravity file hints, administrator summaries and migration compatibility. Live host loading, model calls and authentication require separate acceptance. Offline results establish no token, latency or quality gains.
 
 ## 0.16.0 checks (2026-10-13)
 
@@ -1047,7 +1134,7 @@ The first Linux CI run exposed a diagnostic difference: a file in a parent path 
 
 A later Windows CI run exposed an old pagination fixture whose supposedly equal events had timestamps of different precision. A subsequent complete event can be slightly larger than the first; the runtime correctly reports `pagination_blocked` and `required_chars`. Equal-event timestamps are now fixed, and a new regression verifies lossless continuation after increasing the budget as instructed. All 13 review-packet checks passed; the complete suite now contains 911 checks. The pagination algorithm and evidence budget are unchanged.
 
-Checks used temporary data directories, fake services and isolated entries, without enabling live host Hooks, calling paid models or changing user plugin configuration. Actual Python 3.10 and Linux results are reported by GitHub CI. Live Antigravity permission composition, timeouts and asynchronous terminal states still need host acceptance. Downloadable release assets remain at 0.13.0; install the dual-host capabilities from current source.
+Checks used temporary data directories, fake services and isolated entries, without enabling live host Hooks, calling paid models or changing user plugin configuration. Actual Python 3.10 and Linux results are reported by that version's GitHub CI. Live Antigravity permission composition, timeouts and asynchronous terminal states still need host acceptance. At that historical validation, downloads were at 0.13.0 and dual-host capabilities were installed from source.
 
 ## 0.14.0 dual host validation (2026-10-12)
 
@@ -1095,7 +1182,7 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 
 The project uses the [MIT license](LICENSE). Source, wheel, exported plugin and fixed runtime copies retain the same license file.
 
-Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The [0.13.0 public prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) provides a source ZIP, portable wheel and SHA256SUMS; 0.11.1 was the initial public prerelease. A local plugin directory generated by `install` contains absolute interpreter and fixed runtime paths; other machines should export using their own paths. CI runs isolated offline checks only and enables no live Hooks, models, background services or Hindsight.
+Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The [1.0.0 first stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) provides source, wheel and checksums. [0.13.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) and the initial 0.11.1 remain historical prereleases. An exported local plugin contains absolute interpreter and fixed-runtime paths; each machine should export using its own paths. CI runs isolated offline checks and enables no live Hooks, models, background services or Hindsight.
 
 Subsequent documentation updates are published on repository `main`; the Chinese version is [README.md](README.md) and the English version is this file. The prerelease tag and assets correspond to their original release commit. Use the repository documentation for language navigation and the latest architecture description.
 
@@ -1105,4 +1192,4 @@ Use [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) f
 
 Contributions can improve the Chinese/English documentation, reproduce installation or platform issues, add retrieval cases or provide real paired task evaluations. Read [AGENTS.md](AGENTS.md) before changing code, run relevant offline checks with temporary data directories, and describe the changes, verification and compatibility impact in your pull request. Real evaluations should report task acceptance and full usage across workers, administrator and retrieval. Token, latency and quality improvements have not yet been established by sufficient data.
 
-If the project is useful to you, Star it or share the [English introduction](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md) and [public prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0).
+If the project is useful to you, Star it or share the [English introduction](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md) and [first stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0).

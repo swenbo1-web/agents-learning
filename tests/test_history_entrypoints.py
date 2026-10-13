@@ -84,11 +84,11 @@ class HistoryEntryTests(unittest.TestCase):
     def test_cached_update_choices_do_not_open_database_or_start_ingestion(self):
         from agent_learning import software_updates as updates
         from tests.test_software_updates import release
-        with patch.object(updates, "_fetch", return_value=(200, {}, [release("0.20.0", body="新增项目历史吸收")])):
+        with patch.object(updates, "_fetch", return_value=(200, {}, [release("99.0.0", body="新增项目历史吸收")])):
             code, state = self.invoke(["update-check", "--force"])
         self.assertEqual(code, 0, state)
         self.assertTrue(state["update_available"])
-        for args in (["update-notice"], ["update-choice", "snooze"], ["update-choice", "ignore", "--version", "0.20.0"],
+        for args in (["update-notice"], ["update-choice", "snooze"], ["update-choice", "ignore", "--version", "99.0.0"],
                      ["update-choice", "reset"]):
             with patch.object(updates, "_fetch", side_effect=AssertionError("cached choice must not use network")):
                 code, result = self.invoke(args)
@@ -185,7 +185,7 @@ class HistoryEntryTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='partial_history_migration'").fetchone())
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='history_jobs'").fetchone())
         with closing(Runtime(self.home, config={})) as runtime:
-            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 14)
+            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 15)
             self.assertEqual(runtime.project(self.workspace), project)
 
     def test_both_exports_contain_explicit_history_skill_and_fixed_cli(self):

@@ -51,7 +51,7 @@ class Module8IntegrationTests(unittest.TestCase):
         self.assertFalse(self.r.config["scheduler"]["enabled"])
         self.assertFalse(self.r.config["scheduler"]["auto_release"])
         self.assertFalse(self.r.config["scheduler"]["sync_enabled"])
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 15)
 
     def test_schema9_upgrade_and_reopen_preserve_knowledge(self):
         knowledge = self.publish()
@@ -63,7 +63,7 @@ class Module8IntegrationTests(unittest.TestCase):
         self.r.close()
         for _ in range(2):
             with contextlib.closing(Runtime(self.home)) as upgraded:
-                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 14)
+                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 15)
                 self.assertEqual(upgraded.read(self.p, knowledge["knowledge_id"])["revision"], knowledge["revision"])
 
     def test_module8_migration_failure_rolls_back_and_allows_retry(self):
@@ -83,13 +83,13 @@ class Module8IntegrationTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_call_budgets'").fetchone())
         with contextlib.closing(Runtime(self.home)) as upgraded:
             self.assertEqual(upgraded.read(self.p, knowledge["knowledge_id"])["revision"], 1)
-            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 14)
+            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 15)
 
     def test_mcp_exposure_then_adoption_is_small_and_idempotent(self):
         knowledge = self.publish()
         server = Server(self.r, self.p, context_handle=self.handle)
-        self.assertEqual(len(server.tools), 7)
-        self.assertEqual(len(Server(self.r, self.p, role="admin").tools), 12)
+        self.assertEqual(len(server.tools), 9)
+        self.assertEqual(len(Server(self.r, self.p, role="admin").tools), 14)
         with self.assertRaises(ContractError):
             server.call("knowledge_use", self.use_args(knowledge))
         server.call("knowledge_read", {"knowledge_id": knowledge["knowledge_id"]})

@@ -328,10 +328,10 @@ class AuditEvidenceTests(unittest.TestCase):
         self.assertEqual(rows[full["id"]]["business_digest"], full["business_digest"])
         self.assertIsNone(rows[clipped["id"]]["business_digest"])
         self.assertEqual(rows[clipped["id"]]["capture_digest"], clipped["capture_digest"])
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 15)
         self.r.close()
         self.r = Runtime(self.home, config={})
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 15)
 
     def test_schema11_migration_rolls_back_on_digest_failure(self):
         self.r.record_event(self.p, "chat", "Feedback", {"summary": "Full observation"})
@@ -343,7 +343,7 @@ class AuditEvidenceTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertNotIn("business_digest", {row[1] for row in db.execute("PRAGMA table_info(events)")})
         self.r = Runtime(self.home, config={})
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 15)
 
 
 if __name__ == "__main__":

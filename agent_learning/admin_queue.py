@@ -53,12 +53,14 @@ def scan_signature(runtime, project, *, include_candidates=True):
         "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
         (project, scope, runtime.session_epoch()))]
     return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
+                   "work_summary_policy": runtime.config["work_memory"],
                    "host_scope": scope, "packet_format": PACKET_FORMAT,
                    "instructions": REVIEW_PREFIX, "knowledge_changes": list(row) if row else None,
                    "candidate_changes": (candidates[0] if candidates else 0) if include_candidates else None})
 
 
-def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None):
+def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None,
+                   summary_enabled=False, summary_host_scope=None):
     sql = ("SELECT p.*,t.updated AS source_task_updated FROM problems p LEFT JOIN task_snapshots t "
            "ON t.project=p.project AND t.id=p.task_id AND t.revision=p.task_revision "
            "WHERE p.project=? AND p.status='pending' AND (? IS NULL OR p.id=?) "
@@ -69,6 +71,12 @@ def eligible_query(signature, problem_id=None, *, include_cached=False, prefligh
            "AND c.revision=p.revision AND c.retry_allowed=0 AND c.state NOT IN ('not_started','deduplicated') "
            "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) ")
     args = (problem_id, problem_id)
+    if summary_enabled and summary_host_scope:
+        sql += ("AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.project=p.project AND w.problem_id=p.id "
+                "AND (w.state!='pending' OR w.host_scope!=?)) ")
+        args += (summary_host_scope,)
+    else:
+        sql += "AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.project=p.project AND w.problem_id=p.id) "
     if history_job_id is None:
         sql += "AND NOT EXISTS(SELECT 1 FROM history_case_links h WHERE h.project=p.project AND h.problem_id=p.id) "
     else:
@@ -147,7 +155,10 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         if dispatched + budget["global_active_calls"] >= budget["max_concurrent_calls"]:
             return None
         query, args = eligible_query(scan_signature(runtime, project),
-                                     preflight_signature=scan_signature(runtime, project, include_candidates=False))
+                                     preflight_signature=scan_signature(runtime, project, include_candidates=False),
+                                     summary_enabled=(runtime.config["work_memory"]["enabled"]
+                                                      and runtime.config["work_memory"]["summary_enabled"]),
+                                     summary_host_scope=runtime._session_scope())
         if not ready_executor(runtime, project, query, args):
             return None
         token = str(uuid.uuid4())
