@@ -320,7 +320,7 @@ export function apply(ctx) {
     if (!agentId) return {};
     const existing = sessionMeta.get(agentId);
     if (existing && existing.cwd) return existing;
-    const sessionQuery = ctx.sessionQuery || ctx.get?.("sessionQuery");
+    const sessionQuery = typeof ctx.get === "function" ? ctx.get("sessionQuery") : undefined;
     if (sessionQuery && typeof sessionQuery.observeSession === "function") {
       try {
         const obs = await sessionQuery.observeSession(agentId, { projectionMode: "none" });
