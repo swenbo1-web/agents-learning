@@ -948,13 +948,16 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 # Antigravity
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
+# DSH（main 源码）
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-status
 ```
 
 `admin-status` 不调用模型，显示生效策略、准备状态、等待原因和近期调用；加 `--conversation "原生会话ID"` 可核对指定根会话。自定义安装的数据目录须继续传原来的 `--home PATH`；宿主实例不同须保持对应 `--host-instance`。关闭时把配置命令的 `--enabled on` 改为 `off`。
 
 | 模型模式 | 选择依据 | 不可用时 |
 |---|---|---|
-| `current` | Codex Hook 的 `model` 或 Antigravity 的 `modelName`，仅使用同项目、同宿主、同实例、同轮次的根会话观察 | 没有观察、模型歧义或执行器不属于观察宿主时不调用，不猜模型 |
+| `current` | Codex Hook 的 `model`、Antigravity 的 `modelName` 或 DSH 的 `requestContext/model`，仅使用同项目、同宿主、同实例、同轮次的根会话观察 | 没有观察、模型歧义或执行器不属于观察宿主时不调用，不猜模型 |
 | `fixed` | 用户明确提供 `--model MODEL_ID` | 该平台不能使用此模型时失败，不静默换模型 |
 | `default` | 独立 CLI 自身的默认选择 | 不承诺等于桌面当前模型或用户配置默认；Codex 审核跳过用户配置 |
 
@@ -970,7 +973,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
 ```
 
-Antigravity 将上方 `--host codex` 改为 `--host antigravity`。可用 `admin-once --problem ID` 限定问题。历史整理仍须独立的 `history-run --confirm --allow-review`，开启日常审核不会启动历史吸收。
+Antigravity 将上方 `--host codex` 改为 `--host antigravity`，DSH 改为 `--host dsh`。可用 `admin-once --problem ID` 限定问题。历史整理仍须独立的 `history-run --confirm --allow-review`，开启日常审核不会启动历史吸收。
 
 两种执行器在临时目录接收有限审核包，以结构化输出返回候选，并设置 `ALP_DISABLED=1` 避免插件递归。Codex 跳过用户配置和 execpolicy 规则，关闭支持的 Hooks、应用、插件、命令及多 Agent 能力，使用只读沙箱；只读不等于全部工具为零。Antigravity 使用空工具 Agent，确认 `init.tools=[]` 和 `permission_mode=request-review` 后才发送审核材料；严格核对终态，丢弃 thinking 和中途文本流。
 
@@ -1124,7 +1127,7 @@ v1.0.0 的 [Windows／Linux × Python 3.10／3.12 四组 CI](https://github.com/
 
 ### DSH (DeepSeek Harness) 宿主适配与 1.0.0 功能复核
 
-本轮新增 DSH (`--host dsh`) 宿主适配后，Windows 完整隔离回归发现 **1207 项：1203 通过、4 项平台相关跳过，零失败与错误**，耗时 292.822 秒；`ResourceWarning` 作为错误检查。**113 个 Python 文件**通过 Python 3.10 语法解析，DSH Host 桥接入口通过 Node.js ESM 语法检查。
+本轮新增 DSH (`--host dsh`) 宿主适配后，Windows 完整隔离回归发现 **1207 项：1203 通过、4 项平台相关跳过，零失败与错误**，耗时 292.822 秒；`ResourceWarning` 作为错误检查。**114 个 Python 文件**通过 Python 3.10 语法解析，DSH Host 桥接入口通过 Node.js ESM 语法检查。
 
 新增保护覆盖 DSH Bundle／Hook／MCP 导出与覆盖升级、三宿主共用固定运行副本与跨宿主覆盖拒绝、DSH 1.0.0 工作观察（`file_change`、`tool_failure`、`user_correction`、`public_summary`）、`pwsh` 退出码与后台任务状态识别、孤儿 `PostToolUse` 文件历史提示（`task_affinity=context_only`）与 `dsh-session-reset`、DSH 管理员模型路由（`current`／`fixed`／`default`）与增量工作摘要（`work_summaries`）、以及 `dsh-session-jsonl` 历史吸收与 `ReasoningBlock` 剔除。检查均在 `build/local/` 隔离目录完成，未启用真实宿主 Hooks、调用付费模型或修改用户配置。
 

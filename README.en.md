@@ -316,7 +316,7 @@ The same project and data directory can retain knowledge across login accounts. 
 
 [runtime.py](agent_learning/runtime.py) combines the eight modules, unifying project, session, account boundaries and database transactions. The modules share versions and data contracts within the same runtime.
 
-[host_sessions.py](agent_learning/host_sessions.py) defines host session boundaries, [antigravity.py](agent_learning/antigravity.py) adapts native events, and [host_resources/antigravity](host_resources/antigravity/) holds the native profile. Both exports use the same knowledge, retrieval and governance core.
+[host_sessions.py](agent_learning/host_sessions.py) defines host session boundaries, [antigravity.py](agent_learning/antigravity.py) and [dsh.py](agent_learning/dsh.py) adapt native events, and [host_resources/antigravity](host_resources/antigravity/) and [host_resources/dsh](host_resources/dsh/) hold the native profiles. All three exports use the same knowledge, retrieval and governance core.
 
 ### How each module works
 
@@ -996,13 +996,16 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 # Antigravity
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
+# DSH (main source)
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-status
 ```
 
 `admin-status` makes no model call. It reports the effective policy, readiness, waiting reason and recent calls. Add `--conversation "NATIVE_CONVERSATION_ID"` to check a specific root conversation. Retain the installation's custom `--home PATH` and any corresponding `--host-instance`. To disable reviews, change `--enabled on` to `off` in the configuration command.
 
 | Model mode | Selection | When unavailable |
 |---|---|---|
-| `current` | Codex Hook `model` or Antigravity `modelName`, from root observations in the same project, host, instance and epoch | Missing observations, ambiguity or a provider from another host prevent the call; no guessed fallback |
+| `current` | Codex Hook `model`, Antigravity `modelName` or DSH `requestContext/model`, from root observations in the same project, host, instance and epoch | Missing observations, ambiguity or a provider from another host prevent the call; no guessed fallback |
 | `fixed` | Explicit `--model MODEL_ID` | A model unavailable on that platform fails without silent substitution |
 | `default` | The independent CLI's default selection | It need not match the desktop selection or user-configured default; Codex review skips user config |
 
@@ -1018,7 +1021,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
 ```
 
-For Antigravity, replace `--host codex` with `--host antigravity`. Use `admin-once --problem ID` to select a problem. Historical review still requires its separate `history-run --confirm --allow-review`; enabling everyday review never starts historical ingestion.
+For Antigravity, replace `--host codex` with `--host antigravity` (or `--host dsh` for DSH). Use `admin-once --problem ID` to select a problem. Historical review still requires its separate `history-run --confirm --allow-review`; enabling everyday review never starts historical ingestion.
 
 Both executors receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams.
 
@@ -1157,8 +1160,8 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |
 | `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
 | `serve` | Start an MCP service with a specified role |
-| `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
-| `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+| `install` | Select `--host codex\|antigravity\|dsh`; `--upgrade` validates the same host profile and retains a full backup |
+| `antigravity-session-reset`, `dsh-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
 
 ## 1.0.0 checks (2026-10-13)
 
@@ -1169,6 +1172,12 @@ Offline regression covers wheel resources for both profiles, fixed-runtime entri
 The v1.0.0 [Windows/Linux × Python 3.10/3.12 CI](https://github.com/swenbo1-web/agents-learning/actions/runs/38414895022) passed all four jobs. Each ran 1194 checks and built a wheel; Windows skipped one check per job, Linux two. This local run enabled no live Hooks, actual models, persistent services, user configuration changes or live knowledge-database writes.
 
 New acceptance coverage includes observations, previews, identity-bound paging, shared budgets, source/file changes, compaction, subagent boundaries, Antigravity file hints, administrator summaries and migration compatibility. Live host loading, model calls and authentication require separate acceptance. Offline results establish no token, latency or quality gains.
+
+### DSH (DeepSeek Harness) host adapter and 1.0.0 review
+
+With the DSH (`--host dsh`) adapter added on `main`, the complete isolated Windows suite discovered **1207 checks: 1203 passed, 4 platform-dependent skips, no failures or errors**, in 292.822 seconds, with `ResourceWarning` treated as an error. **114 Python files** passed Python 3.10 syntax parsing, and the DSH Host bridge entry passed Node.js ESM syntax checking.
+
+Added regression coverage includes DSH Bundle/Hook/MCP exports and upgrades, shared fixed-runtime releases across all three hosts, cross-host overwrite rejection, DSH 1.0.0 working observations (`file_change`, `tool_failure`, `user_correction`, `public_summary`), `pwsh` exit-code and background-job recognition, orphan `PostToolUse` file hints (`task_affinity=context_only`) and `dsh-session-reset`, DSH administrator model routing (`current`/`fixed`/`default`) and incremental work summaries (`work_summaries`), plus `dsh-session-jsonl` historical ingestion with `ReasoningBlock` exclusion. All checks ran in isolated `build/local/` directories without modifying live user configuration.
 
 ### Introduction and usability review
 
