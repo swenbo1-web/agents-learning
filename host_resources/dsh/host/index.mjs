@@ -243,6 +243,67 @@ const WORKER_TOOL_SPECS = [
     },
     readOnly: true,
   },
+  {
+    name: "learning_history",
+    description:
+      "DSH 原生项目历史知识吸收与查询工具。action='status'|'jobs'|'sources'|'cases' 为只读查询；当用户明确要求为当前项目吸收历史知识时，传 action='auto'（一键扫描并归档）或 'prepare'/'run' 并设置 confirm=true；用户选择跳过时传 action='skip'。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "jobs", "prepare", "run", "auto", "sources", "cases", "pause", "cancel", "skip"],
+          description: "执行动作：auto（一键准备并归档）、prepare（仅扫描冻结）、run（归档指定批次）、status（查看状态）、sources/cases（分页查看）、skip（跳过首次吸收）、pause/cancel。",
+        },
+        confirm: {
+          type: "boolean",
+          description: "当 action 为 auto / prepare / run 时必须显式设为 true（需用户明确要求吸收项目历史）。",
+        },
+        job_id: {
+          type: "string",
+          description: "历史批次 ID（run/sources/cases/pause/cancel 时使用；auto 可省略）。",
+        },
+        allow_review: {
+          type: "boolean",
+          description: "仅在用户明确允许调用管理员模型整理历史时设为 true；默认 false 仅归档。",
+        },
+        max_calls: {
+          type: "integer",
+          description: "allow_review=true 时的最大模型调用次数（默认 2）。",
+        },
+        max_seconds: {
+          type: "integer",
+          description: "单次运行最大秒数（默认 180）。",
+        },
+        section: {
+          type: "string",
+          enum: ["sources", "pending", "skipped"],
+          description: "action='sources' 时的分页分组。",
+        },
+        offset: {
+          type: "integer",
+          description: "sources/cases 分页起始偏移（默认 0）。",
+        },
+        limit: {
+          type: "integer",
+          description: "jobs/sources/cases 每页返回条数（默认 20）。",
+        },
+        conversation_files: {
+          type: "array",
+          items: { type: "string" },
+          description: "用户额外指定导入的对话记录 JSON/JSONL 文件路径列表。",
+        },
+        artifact_dirs: {
+          type: "array",
+          items: { type: "string" },
+          description: "用户额外指定导入的产物目录路径列表。",
+        },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    readOnly: false,
+  },
 ];
 
 export const name = "agent-learning";
@@ -387,7 +448,7 @@ export function apply(ctx) {
       inputPayload,
       workspace,
       exec?.signal,
-      15000,
+      60000,
     );
     if (code !== 0 || !stdout.trim()) {
       throw new Error(`Agent Learning tool ${toolName} failed: ${(stderr || stdout).trim()}`);
@@ -397,6 +458,45 @@ export function apply(ctx) {
       throw new Error(parsed.error || `Agent Learning tool ${toolName} rejected call`);
     }
     return parsed.result;
+  }
+
+  async function invokeSlashCommand(commandName, invocation) {
+    const receipt = loadRuntimeReceipt();
+    const agentId = invocation?.agent?.id;
+    const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
+    const workspace = meta.cwd || receipt.workspace || process.cwd();
+    const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
+    const inputPayload = JSON.stringify({
+      home: receipt.home || null,
+      workspace,
+      slash_command: commandName,
+      raw_input: invocation?.rawInput || "",
+    });
+    const { code, stdout, stderr } = await runPythonProcess(
+      receipt.python,
+      ["-B", toolScript],
+      inputPayload,
+      workspace,
+      invocation?.signal,
+      120000,
+    );
+    if (code !== 0 || !stdout.trim()) {
+      return {
+        kind: "error",
+        text: `Agent Learning /${commandName} 执行失败：${(stderr || stdout).trim()}`,
+      };
+    }
+    const parsed = JSON.parse(stdout.trim());
+    if (!parsed.ok) {
+      return {
+        kind: "error",
+        text: `Agent Learning /${commandName} 拒绝：${parsed.error || "unknown error"}`,
+      };
+    }
+    return {
+      kind: "success",
+      text: parsed.result?.text || JSON.stringify(parsed.result, null, 2),
+    };
   }
 
   function makeToolDefinition(spec) {
@@ -472,6 +572,38 @@ export function apply(ctx) {
             content,
             source: "bundled",
             resourceBase: { kind: "directory", path: dirname(skillPath) },
+          });
+          if (typeof dispose === "function") {
+            activeDisposers.push(dispose);
+          }
+        } catch {}
+      }
+    });
+    ctx.inject(["commands"], (scope) => {
+      for (const cmd of [
+        {
+          name: "learning-history",
+          description: "一键吸收当前项目历史文档与源码，或查看/跳过历史吸收状态",
+          hint: "[auto | prepare | run [job_id] | status | skip | pause <job_id> | cancel <job_id>]",
+        },
+        {
+          name: "learning-status",
+          description: "查看当前项目的 Agent Learning 知识库、1.0.0 工作历史与吸收状态",
+          hint: "",
+        },
+        {
+          name: "learning-admin",
+          description: "配置或触发当前项目的 DSH 管理员知识审核与工作摘要整理",
+          hint: "[status | on [current|fixed|default] [model_id] | off | once | batch]",
+        },
+      ]) {
+        try {
+          const dispose = scope.commands.register({
+            name: cmd.name,
+            description: cmd.description,
+            input: cmd.hint ? { hint: cmd.hint } : undefined,
+            recordInput: true,
+            handler: (invocation) => invokeSlashCommand(cmd.name, invocation),
           });
           if (typeof dispose === "function") {
             activeDisposers.push(dispose);

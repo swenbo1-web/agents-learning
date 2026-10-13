@@ -27,6 +27,7 @@ PATH_FIELDS = (
 _BASE_RECOVERY_NAMES = (
     "knowledge_search", "knowledge_read", "work_memory_search", "work_memory_read",
     "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status",
+    "learning_history",
 )
 RECOVERY_TOOLS = frozenset({
     *_BASE_RECOVERY_NAMES,
@@ -454,6 +455,25 @@ class DshAdapter:
                         "UPDATE dsh_faults SET state='queried' WHERE project=? AND conversation=? AND signature=?",
                         (project, conversation, fault["signature"]),
                     )
+            if event == "SessionStart" and normalized.get("source") == "startup":
+                try:
+                    hist = r.history_status(project)
+                    if hist.get("onboarding", {}).get("state") == "unoffered":
+                        notice = (
+                            "Agent Learning: 当前项目尚未执行首次历史知识吸收（onboarding=unoffered）。"
+                            "可在 DSH 输入 /learning-history 一键吸收，或明确要求调用 "
+                            "learning_history(action=\"auto\", confirm=true) 吸收项目历史，或调用 learning_history(action=\"skip\") 跳过。"
+                        )
+                        result = dict(result)
+                        result["history_onboarding"] = {
+                            "state": "unoffered",
+                            "tool": "learning_history",
+                            "slash_command": "/learning-history",
+                            "choices": ["auto", "prepare", "skip"],
+                        }
+                        result["systemMessage"] = "\n".join(filter(None, (result.get("systemMessage"), notice)))
+                except Exception:
+                    pass
         if event == "PreToolUse":
             denial = result.get("hookSpecificOutput", {})
             if denial.get("permissionDecision") == "deny":

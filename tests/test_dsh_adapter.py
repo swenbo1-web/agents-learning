@@ -449,6 +449,65 @@ class DshAdapterAndV1FeaturesTests(unittest.TestCase):
         self.assertEqual(reset_payload["conversation_id"], "dsh:default:orphan-dsh-chat")
         self.assertTrue(reset_payload["rebind_required"])
 
+    def test_dsh_native_learning_history_tool_and_slash_commands(self):
+        # 1. 首次 SessionStart(startup) 应返回 history_onboarding 提示（onboarding=unoffered）
+        start = self.adapter.handle("SessionStart", {"sessionId": "dsh-onboard-1", "source": "startup"})
+        self.assertEqual(start.get("history_onboarding", {}).get("state"), "unoffered")
+        self.assertIn("/learning-history", start.get("systemMessage", ""))
+
+        tool_script = Path(__file__).resolve().parents[1] / "hooks/dsh_tool.py"
+        env = dict(__import__("os").environ, PYTHONDONTWRITEBYTECODE="1")
+
+        def run_tool(payload):
+            proc = subprocess.run(
+                [sys.executable, "-B", str(tool_script)],
+                input=json.dumps(payload).encode("utf-8"),
+                capture_output=True, env=env, timeout=15,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+            return json.loads(proc.stdout.decode("utf-8"))
+
+        # 2. 未传 confirm=True 时拒绝执行 prepare / auto / run
+        denied = run_tool({
+            "home": str(self.home),
+            "workspace": str(self.workspace),
+            "tool": "learning_history",
+            "args": {"action": "auto"},
+        })
+        self.assertFalse(denied["ok"])
+        self.assertIn("confirm=true", denied["error"])
+
+        # 3. 传入 confirm=True 时一键完成 auto (prepare + run)
+        auto_res = run_tool({
+            "home": str(self.home),
+            "workspace": str(self.workspace),
+            "tool": "learning_history",
+            "args": {"action": "auto", "confirm": True},
+        })
+        self.assertTrue(auto_res["ok"], auto_res)
+        self.assertEqual(auto_res["result"]["mode"], "auto_prepare_and_run")
+        self.assertEqual(auto_res["result"]["job"]["state"], "materialized")
+        self.assertEqual(auto_res["result"]["onboarding"]["state"], "started")
+
+        # 4. 吸收完成后，再次 SessionStart(startup) 不再提示 unoffered
+        start_after = self.adapter.handle("SessionStart", {"sessionId": "dsh-onboard-2", "source": "startup"})
+        self.assertNotIn("history_onboarding", start_after)
+
+        # 5. 测试 /learning-status、/learning-history status、/learning-admin status 斜杠命令
+        for cmd, raw_in in (
+            ("learning-status", "/learning-status"),
+            ("learning-history", "/learning-history status"),
+            ("learning-admin", "/learning-admin status"),
+        ):
+            cmd_res = run_tool({
+                "home": str(self.home),
+                "workspace": str(self.workspace),
+                "slash_command": cmd,
+                "raw_input": raw_in,
+            })
+            self.assertTrue(cmd_res["ok"], cmd_res)
+            self.assertIn("###", cmd_res["result"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
