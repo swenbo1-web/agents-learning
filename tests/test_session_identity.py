@@ -133,7 +133,8 @@ class SessionIdentityTests(unittest.TestCase):
 
     def test_admin_launch_failure_does_not_claim_event_loss(self):
         self.r.feedback(self.p, "chat", "待审核错误")
-        self.r.config["admin"]["enabled"] = True
+        # 模拟的是后台派发失败；执行器预检使用已知解释器，不能依赖宿主 CLI。
+        self.r.config["admin"].update(enabled=True, command=[sys.executable])
         with patch.object(self.r, "_launch_admin", side_effect=OSError("private details")):
             result = self.hook("Stop")
         self.assertIn("event_recorded; admin_schedule_failed", result["systemMessage"])
