@@ -4,15 +4,31 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**Project memory for Codex and Antigravity: find useful experience, keep its evidence, and reuse it in the next conversation.**
+**Project memory and a visual knowledge browser for Codex and Antigravity.**
 
 Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
-[Antigravity installation](#install-in-antigravity-native-plugin) · [Codex installation](#install-in-codex-desktop-and-cli) · [How it works](#how-it-works) · [Work history](#working-observations-file-context-and-progressive-reading) · [Architecture](#complete-architecture) · [Installation reference](#installation-and-maintenance-reference)
+[Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [Visual knowledge base](#open-the-visual-knowledge-base) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
 
-agents-learning records observable tool events and public work notes, then retrieves project knowledge and working history through supported host Hooks and MCP tools. Start with a small index and read the relevant details and evidence when needed. Published knowledge retains its conditions, limitations, sources and revision. Workers focus on the current task; an optional administrator organizes evidence.
+Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**The database is local by default. Administrator model calls, AI work summaries, background scheduling, automatic publication and remote services are off by default.** A new knowledge base starts empty. Working observations can be found before knowledge review; published solutions use the separate review and publication process.
+**Local database by default; administrator model calls, AI summaries, background scheduling, automatic publication and remote services are off.** A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
+
+## Core capabilities
+
+| Capability | What you get |
+|---|---|
+| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
+| Search and progressive reading | Local full-text search, optional semantic matching, and index → details → evidence reading within context budgets |
+| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
+| Optional administrator | Use a configured platform-model or custom executor to propose knowledge candidates; enable work summaries separately |
+| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
+| Visual knowledge browser | Locally search/filter knowledge and inspect sources, revisions, event timelines and administrator work; read-only |
+| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
+| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
+| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
+
+No real-task net token, speed or quality gains have been established by paired evaluation.
 
 ## Before installing
 
@@ -21,16 +37,15 @@ You need **Git**, **Python 3.10+**, and your chosen host with native plugin supp
 ```powershell
 git clone --branch v1.0.0 --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
-python --version
 ```
 
 Already cloned it? Use that directory and skip `git clone`. Run the commands below from the repository. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below.
 
-**Use [the 1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0), including its source, wheel and checksums, or clone the tag above.** The [0.13.0 prerelease](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) remains a historical version. If both hosts access an existing database, update all its runtimes together; see [shared knowledge and upgrades](#shared-knowledge-upgrades-and-administrators).
+The [1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) also includes source, wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
 
 ## Install in Antigravity (native plugin)
 
-**1. Export into your project's plugin directory.** Replace only `D:\Projects\my-project` with an existing project's absolute path:
+Replace `D:\Projects\my-project` with your **existing project's absolute path**:
 
 ```powershell
 $learningProject = "D:\Projects\my-project"
@@ -38,9 +53,7 @@ $learningPlugin = Join-Path $learningProject ".agents/plugins/agent-learning"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host antigravity --hook-mode observe
 ```
 
-**2. Reload that project in Antigravity IDE / 2.0.** Check that its plugin panel enables Agent Learning's MCP, rules, skills and Hooks. IDE project loading does **not** require the `agy` CLI. This export is bound to that project. [Official plugin guide](https://antigravity.google/docs/plugins/)
-
-**3. Start a new project conversation** and run the [installation check](#check-the-installation).
+**Reload the project in Antigravity IDE / 2.0 → enable the plugin components → start a new conversation.** The IDE loads this project's export without the `agy` CLI. [Official plugin guide](https://antigravity.google/docs/plugins/)
 
 <details>
 <summary>Using Antigravity CLI instead?</summary>
@@ -49,7 +62,6 @@ After exporting, run:
 
 ```powershell
 agy plugin install "$learningPlugin"
-agy plugin list
 ```
 
 Restart the CLI and use the same bound project. The CLI copies the plugin into its own directory; after upgrades, repeat `agy plugin install` and restart. Do not install the repository root directly: its entries are templates, and export renders this machine's paths.
@@ -58,7 +70,7 @@ Restart the CLI and use the same bound project. The CLI copies the plugin into i
 
 ## Install in Codex (desktop and CLI)
 
-**1. Export and register the local plugin.** You need a Codex CLI with `codex plugin` commands, under the same operating system user and `CODEX_HOME` as your desktop app. [Get the Codex CLI](https://learn.chatgpt.com/docs/cli).
+Use a [Codex CLI](https://learn.chatgpt.com/docs/cli) with `codex plugin` commands, under the same operating-system user and `CODEX_HOME` as your desktop app.
 
 ```powershell
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
@@ -67,19 +79,30 @@ codex plugin marketplace add "$learningPlugin"
 codex plugin add agent-learning@agent-learning-local
 ```
 
-**2. Restart Codex.** Confirm **Agent Learning** from the `agent-learning-local` source is enabled. Review and trust its Hooks when prompted. In an interactive CLI session, `/plugins` and `/hooks` show plugin and Hook state; they are not PowerShell commands. [Official plugin guide](https://developers.openai.com/plugins/build/plugins) · [Hook trust](https://learn.chatgpt.com/docs/hooks)
-
-**3. Start a new conversation in your project** and run the check below. For CLI, enter that project before launching `codex`.
+**Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 ## Check the installation
 
 Paste this in the new conversation:
 
-> Use Agent Learning's learning_status to confirm the current project and host. Pass the context_handle supplied by this turn's Hook explicitly to session_context, check that context_bound is true, then register my current task goal with task_update. If no handle was supplied, report the missing integration without guessing.
+> Use learning_status to check my project and host. Pass this turn's Hook context_handle to session_context and confirm context_bound=true. Report a missing handle without guessing.
 
-Success means the expected `project_id` and host, a real current Hook handle, and `context_bound=true`. Antigravity's default host scope is `antigravity:default`; its stateful MCP requests must always carry the current handle explicitly.
+Success means the expected project/host and `context_bound=true` for the current Hook handle. Tools appearing in the list alone do not confirm Hook integration; an empty knowledge base is normal.
 
-**Tools appearing in the list alone do not confirm Hook integration. An empty knowledge base is normal.** Both quick installs use the same default local data directory; sharing also requires the same project mapping. Custom data paths are covered in the [installation reference](#installation-and-maintenance-reference).
+## Open the visual knowledge base
+
+From the source repository, use the same project and data directory as the installed plugin:
+
+```powershell
+$learningProject = "D:\Projects\my-project"
+python -B scripts/learning.py --workspace "$learningProject" status
+python -B scripts/learning.py --workspace "$learningProject" browser --open
+```
+
+`status` registers the workspace; `browser --open` opens its **local read-only** knowledge view. If installation uses a custom `ALP_HOME` / `--home`, use that same setting here. Keep the terminal running; stop with `Ctrl+C`. [Browser details](#knowledge-browser)
+
+<details>
+<summary>macOS / Linux installation commands</summary>
 
 ## macOS / Linux
 
@@ -103,6 +126,8 @@ codex plugin add agent-learning@agent-learning-local
 
 Then restart/reload the host, review its Hook trust settings and use the [installation check](#check-the-installation). Antigravity CLI users additionally install the exported directory with `agy plugin install`.
 
+</details>
+
 ## How it works
 
 1. **Retrieve.** Register the task goal. At supported events, the plugin supplies relevant knowledge cards and small working-history indices; read details by revision and section as needed.
@@ -111,24 +136,6 @@ Then restart/reload the host, review its Hook trust settings and use the [instal
 4. **Publish and reuse.** A trusted operator or explicitly enabled publication policy admits eligible knowledge. Later tasks retrieve its conditions, evidence and current revision.
 
 Knowledge is reference material; it does not grant execution permission. Tool completion, observed success and user acceptance remain separate.
-
-## Core capabilities
-
-| Capability | What it does |
-|---|---|
-| **Searchable working history** | Find modifications, attempts, verification and public notes before they become published knowledge |
-| **File context** | Retrieve history for explicit file targets, retaining checkout, relation and observed version boundaries |
-| **Progressive reading** | Start with bounded indices; expand summaries and saved visible evidence by revision and section |
-| Project memory with evidence | Retains conditions, limitations, revisions and source links across conversations |
-| Historical project ingestion | Explicitly selects documents, source and conversations, retaining source versions for bounded review and separate publication |
-| Bounded retrieval | Returns previews first, with details on demand; local full-text search is the default and local semantic retrieval is optional |
-| Host integration | Exports separate Codex and Antigravity profiles backed by one core; handles their event and session differences |
-| Knowledge browser | Provides a local read-only view of knowledge, revisions, sources and administrator work |
-| Governed learning | Collects events separately from optional administrator review, with explicit role, budget and publication controls |
-| Maintainable installation | Retains external knowledge/configuration, validates upgrades and optionally checks GitHub Releases |
-| Feature update notices | Optional cross-host Release checks with bounded notes, snooze and ignore decisions |
-
-No real-task net token, speed or quality gains have been established by paired evaluations. The project includes [evaluation tools](#real-task-paired-evaluation) to measure them.
 
 ## 84-second demo
 
@@ -1091,9 +1098,18 @@ The complete isolated Windows/Python 3.12.14 suite discovered **1194 checks: 119
 
 Offline regression covers wheel resources for both profiles, fixed-runtime entries, MCP/Hook wiring and installation upgrades. Schema 14→15 preserves existing knowledge, tasks and review records. Failure-isolation regressions retain authoritative records, knowledge notifications and execution denials when derived capture, work context or summary queuing fails.
 
-GitHub runs Windows/Linux × Python 3.10/3.12 CI; see the actual [check records](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml). This local run enabled no live Hooks, actual models, persistent services, user configuration changes or live knowledge-database writes.
+The v1.0.0 [Windows/Linux × Python 3.10/3.12 CI](https://github.com/swenbo1-web/agents-learning/actions/runs/38414895022) passed all four jobs. Each ran 1194 checks and built a wheel; Windows skipped one check per job, Linux two. This local run enabled no live Hooks, actual models, persistent services, user configuration changes or live knowledge-database writes.
 
 New acceptance coverage includes observations, previews, identity-bound paging, shared budgets, source/file changes, compaction, subagent boundaries, Antigravity file hints, administrator summaries and migration compatibility. Live host loading, model calls and authentication require separate acceptance. Offline results establish no token, latency or quality gains.
+
+### Introduction and usability review
+
+The current isolated review ran 82 checks: 81 passed, one skipped for Windows symlink permissions, no failures. Four additional CLI smoke checks passed. Coverage included the knowledge browser, both installation protocols, wheels, fixed MCP/Hook entries and upgrades. After the documentation and display metadata changes, another 52 packaging/installation/upgrade checks ran: 51 passed, one skipped, no failures. Both READMEs passed anchor, code-fence and disclosure-tag checks.
+
+This update changes documentation and display metadata only. Runtime logic, storage and feature switches are unchanged. Live host callbacks and model use were not exercised in this review.
+
+<details>
+<summary>Historical validation records: 0.16.0–0.11.1</summary>
 
 ## 0.16.0 checks (2026-10-13)
 
@@ -1118,9 +1134,6 @@ All four [Windows / Linux × Python 3.10 / 3.12 CI combinations](https://github.
 Focused Antigravity/Codex installation and integration checks discovered **79 checks: 78 passed, one skipped, no failures or errors**. The skip requires Windows privileges to create a real symbolic link. This run includes four new regressions for the default data/runtime layout, preservation of existing database/configuration during export and upgrade, re-export of a fixed release with a separate runtime store, and rejection of other overlapping paths.
 
 Checks used temporary data directories and isolated entries. They enabled no live host Hooks, called no models and changed no user plugin configuration or real knowledge database. Live Antigravity loading, permission composition, timeout behavior and asynchronous terminal states still require host acceptance. The [published four-job CI with 911 checks](https://github.com/swenbo1-web/agents-learning/actions/runs/38158096094) belongs to the 0.14.1 baseline, detailed below.
-
-<details>
-<summary>Historical validation records: 0.14.1–0.11.1</summary>
 
 ## 0.14.1 review and validation (2026-10-12)
 

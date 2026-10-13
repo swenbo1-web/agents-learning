@@ -1,4 +1,4 @@
 {
   "name": "agent-learning",
-  "description": "Project knowledge with explicit historical ingestion, bounded retrieval, observable evidence, governed learning and update notices for Antigravity."
+  "description": "Local project memory with automatic work history, file context, progressive retrieval, a read-only visual knowledge browser, historical ingestion and optional administrator review."
 }

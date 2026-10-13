@@ -4,33 +4,46 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**为 Codex 和 Antigravity 保存项目经验，让下一次任务查到有来源的解决方法。**
+**为 Codex 和 Antigravity 提供项目记忆与可视化知识库。**
 
-Agent 可以跨对话检索项目知识和工作历史：先看相关索引，再按需读取经过与证据。插件自动记录可观察的工具结果和公开说明，管理员按需整理。正式知识带有适用条件、来源和修订，过时或错误的经验可以更新、撤销。
+自动记录工作结果，检索已有经验，让 Agent 在新对话中继续利用项目知识。需要时再启用管理员整理；你可以在本机浏览器中查看知识、来源、修订和审核待办。
 
-[Antigravity 安装](#在-antigravity-中安装原生插件) · [Codex 安装](#在-codex-中安装桌面端与-cli) · [工作方式](#工作方式) · [核心能力](#核心能力) · [使用指南](#使用与配置) · [完整架构](#完整架构)
+[Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
-Python **3.10+** · 本地 SQLite · [MIT](LICENSE)
+Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0)
 
-> **第一正式版 1.0.0**：[下载与校验文件](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0)。下面按 `v1.0.0` 标签安装，两种宿主共用同一源码，分别导出。旧 [0.13.0 测试版](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)保留为历史版本。
+## 核心能力
+
+| 功能 | 可以做什么 |
+|---|---|
+| **项目记忆与文件历史** | 跨对话查阅项目知识、工作尝试和文件关联；提示来源及文件状态变化 |
+| **自动记录与错误补查** | 记录可观察的工具结果和公开说明；遇错后在受支持事件中补查经验 |
+| **检索与渐进读取** | 本地全文检索，可选语义混合检索；先看有限索引，再读摘要与证据 |
+| **知识库可视化** | 在本机浏览器搜索、筛选正式知识，查看正文、来源、修订、事件时间线和管理员待办 |
+| **已有项目历史吸收** | 用户主动导入项目文档、源码和选定的对话历史，保留来源与覆盖报告 |
+| **可选管理员整理** | 选择宿主执行器及模型，增量整理知识候选或工作摘要，复用调用预算 |
+| **知识维护与审核** | 保存适用条件、限制和证据；支持反例反馈、修订、晋升与撤销 |
+| **任务保护与效果评估** | 可选执行范围保护；管理上下文和审核预算，对照评估有／无记忆任务 |
+| **共享与安装维护** | 同机、同项目共享知识，切换登录账户保留项目知识；分别安装双平台，保留配置升级，可选 GitHub 更新提醒 |
+
+**默认本地运行，工作记录和检索不额外调用模型。** 管理员、AI 摘要、语义模型、后台调度、自动发布和更新检查均需另行开启。历史吸收需用户主动启动；跨设备知识同步尚未提供。
 
 ## 快速开始
 
-需要 **Git、Python 3.10+**，以及支持插件与 Hooks 的对应宿主。首次安装不需要模型 API Key 或 `pip install`。
+需要 **Git、Python 3.10+** 和支持插件的宿主。默认安装无需 `pip install` 或额外模型 API Key。
 
 在终端获取源码，只需执行一次；已有源码时直接进入该目录：
 
 ```powershell
 git clone --branch v1.0.0 --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
-python --version
 ```
 
 下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；同时使用两者时分别安装。
 
 ## 在 Antigravity 中安装（原生插件）
 
-**1. 导出到你的项目。** 把第一行替换为已有项目的绝对路径，执行三行命令：
+将第一行改为你的**已有项目绝对路径**：
 
 ```powershell
 $learningProject = "D:\Projects\my-project"
@@ -38,18 +51,15 @@ $learningPlugin = Join-Path $learningProject ".agents/plugins/agent-learning"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host antigravity --hook-mode observe
 ```
 
-**2. 重新加载项目。** 在支持原生插件的 Antigravity IDE／2.0 中打开该项目，重新加载并确认 **Agent Learning** 的 MCP、Rules、Skills 和 Hooks 已启用。IDE 安装不需要 `agy` 命令。[官方插件说明](https://antigravity.google/docs/plugins/)
-
-**3. 开启新对话。** 按[下方检查方法](#安装是否成功)确认连接，并告诉 Agent 当前任务目标。
+**在支持原生插件的 Antigravity IDE／2.0 中重载该项目 → 确认插件组件启用 → 开启新对话。** IDE 安装无需 `agy`。[官方插件说明](https://antigravity.google/docs/plugins/)
 
 <details>
-<summary>使用 Antigravity CLI？在导出后再执行这两行</summary>
+<summary>Antigravity CLI 用户：再执行一步</summary>
 
 需要支持 `agy plugin` 的 CLI。在同一终端继续执行：
 
 ```powershell
 agy plugin install "$learningPlugin"
-agy plugin list
 ```
 
 CLI 会复制插件；安装后重新启动 CLI。以后更新导出目录时，需要重新运行 `agy plugin install`，再重新加载。[宿主差异和升级说明](#安装与维护参考)
@@ -58,9 +68,7 @@ CLI 会复制插件；安装后重新启动 CLI。以后更新导出目录时，
 
 ## 在 Codex 中安装（桌面端与 CLI）
 
-适用于**本地 Codex 桌面端／CLI**。需要可用的 `codex plugin` 命令；没有 CLI 时先按[官方说明](https://learn.chatgpt.com/docs/cli)安装。请使用与桌面端相同的系统用户及 `CODEX_HOME`。
-
-**1. 导出并安装。** 下面会在你的用户目录中生成独立的插件目录：
+需要支持 `codex plugin` 的 [Codex CLI](https://learn.chatgpt.com/docs/cli)，使用与桌面端相同的系统用户及 `CODEX_HOME`。
 
 ```powershell
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
@@ -69,60 +77,39 @@ codex plugin marketplace add "$learningPlugin"
 codex plugin add agent-learning@agent-learning-local
 ```
 
-**2. 重启并信任 Hooks。** 重启桌面端，在目标项目新建对话，按提示审阅并信任插件 Hooks。CLI 用户进入项目运行 `codex`，可在交互界面用 `/plugins` 和 `/hooks` 检查。安装、启用和信任 Hooks 是不同步骤。[官方插件说明](https://developers.openai.com/plugins/build/plugins) · [Hook 信任说明](https://learn.chatgpt.com/docs/hooks)
-
-**3. 确认连接。** 按下方检查方法确认本轮会话已接入。可选安装诊断：
-
-```powershell
-codex plugin list --json
-```
+**重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 ## 安装是否成功
 
 在宿主的新对话中发送：
 
-> 检查 Agent Learning 是否已连接到当前项目：调用 learning_status，并用本轮 Hook 给出的 context_handle 调用 session_context。确认项目正确、context_bound=true，再登记我的当前任务目标；缺少句柄时请说明，不要猜会话。
+> 检查 Agent Learning：用 learning_status 确认当前项目，再用本轮 Hook 提供的 context_handle 调用 session_context，确认 context_bound=true。
 
-成功标准：插件已启用、项目正确，且 `session_context` 返回 **`context_bound=true`**。知识库刚开始为空是正常的；**管理员模型调用、自动发布和后台调度默认关闭**。
+通过后说明你的任务目标，即可开始使用。初始知识库为空是正常现象；**仅出现 MCP 工具，不代表 Hooks 已接通**。
 
 两套快速安装使用相同的默认数据目录；同一设备、同一系统用户、同一项目下可以共用知识。Antigravity 绑定导出时的项目；Codex 按当前项目事件接入。自定义 `ALP_HOME` 时也必须保持两端一致，详见[共用知识](#共用知识升级与管理员)。
 
 安装目录已存在时，请使用[覆盖更新](#覆盖更新已有安装)。无法连接时先看[常见问题](#常见问题)。macOS／Linux 命令见[其他系统](#macoslinux-安装)。
 
-## 工作方式
+## 打开可视化知识库
 
-```text
-当前任务 → 正式知识＋工作历史索引 → 按需读详情 → Agent 执行
-                                                   ↓
-下一次任务 ← 工作观察与文件关联 ← 自动记录工具结果与公开说明
-     ↑                                 ↓
-  正式知识 ← 校验发布 ← 按需启用管理员整理候选
+在源码目录执行，将项目路径换成你的实际路径：
+
+```powershell
+$learningProject = "D:\Projects\my-project"
+python -B scripts/learning.py --workspace "$learningProject" status
+python -B scripts/learning.py --workspace "$learningProject" browser --open
 ```
 
-1. **先查经验。** 受支持的宿主事件提供相关知识卡与少量工作历史索引；详情按修订、分段读取。
-2. **专注任务。** Agent 结合当前目标和环境分析，插件为文件修改、工具失败、验证及公开工作说明建立工作观察；普通读取不逐次调用模型归纳。
-3. **遇错补查。** 工具失败进入有限补查队列，在后续受支持事件中检索已有解法。
-4. **整理并复用。** 启用管理员后，基于证据比较、去重并提出候选；经发布入口校验的知识供后续任务查询。
+`status` 登记项目；已有项目可只执行 `browser`。若安装时自定义 `ALP_HOME`／`--home`，这里使用同一数据目录。保持终端运行，关闭时按 `Ctrl+C`。
 
-持续学习通过知识的积累与复用实现。插件不读取模型内部思考，也不自动把每次操作变成可靠结论。两种宿主的触发能力见[宿主差异](#宿主差异与证据边界)。
+界面仅在本机提供**正式知识、来源和审核待办的只读查看**；工作历史通过 MCP／CLI 查询。完整功能见[知识浏览界面](#知识浏览界面)。
 
-## 核心能力
+## 工作方式
 
-| 能力 | 对项目有什么帮助 |
-|---|---|
-| **跨对话的项目知识** | 保留事实、操作经验和解法；更换对话后继续查阅 |
-| **可查的工作历史** | 尚未成为正式知识的修改、尝试、验证及公开说明，也能通过有来源的索引找到 |
-| **文件关联上下文** | 访问明确目标文件时，检索相关历史并标明 checkout、关系与版本观察 |
-| **渐进读取** | 先展示有限索引，按需展开摘要与可见证据，保留修订和截断边界 |
-| **已有项目历史吸收** | 用户主动选择项目文档、源码及对话，按来源版本归档、有限整理并审核发布 |
-| **有界检索与摘要** | 默认本地全文检索，先给有限预览，再按需展开；可选语义混合检索 |
-| **有来源、可修订的知识** | 查看适用条件、限制、证据和修订；处理反例、更新及撤销 |
-| **自动记录、分工整理** | Hook 记录工具事件，管理员按需增量审核，普通 Agent 无需逐次写复盘 |
-| **本机只读浏览器** | 搜索知识，查看修订、来源事件和管理员待办 |
-| **预算与任务评估** | 控制注入和审核预算；对“无记忆／有记忆”任务进行成对评估 |
-| **功能更新提醒** | 两宿主可选检查 Release，显示新增说明，支持稍后提醒与忽略本版 |
+**检索经验 → 完成任务 → 记录观察 → 按需整理与审核 → 下次复用。**
 
-默认本地运行，无额外模型调用。语义模型、管理员执行器、后台调度和远端服务均按需配置。目前尚无真实任务数据支持 token、耗时或质量收益比例。
+普通 Agent 专注当前任务，插件记录可观察的事件；管理员与正式知识发布分别配置。知识是参考资料，工具成功不等于用户验收。触发时序见[宿主差异](#宿主差异与证据边界)，效果通过[真实任务对照评估](#真实任务对照评估)检验。
 
 ## 84 秒演示
 
@@ -1065,9 +1052,18 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 
 本轮离线回归覆盖 wheel 双平台资源、固定运行入口、MCP／Hook 接线与覆盖升级。schema 14→15 升级保持已有知识、任务和审核记录；派生采集／上下文／摘要排队失败的保护回归确认原记录、正式知识提醒与执行拒绝保持有效。
 
-GitHub 执行 Windows／Linux × Python 3.10／3.12 四组 CI，实际状态见[检查记录](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)。本机未启用真实 Hooks、调用真实模型、启动常驻服务或修改用户配置／知识数据库。
+v1.0.0 的 [Windows／Linux × Python 3.10／3.12 四组 CI](https://github.com/swenbo1-web/agents-learning/actions/runs/38414895022) 全部通过，每组执行 1194 项检查并构建 wheel；Windows 每组跳过 1 项，Linux 每组跳过 2 项。本机未启用真实 Hooks、调用真实模型、启动常驻服务或修改用户配置／知识数据库。
 
 新增验收覆盖工作观察、轻索引、身份绑定分页、共享注入预算、来源及文件变化、压缩恢复、子 Agent 边界、Antigravity 文件提示、管理员摘要与迁移兼容。真实宿主加载、模型调用及认证需要独立验收；离线结果不证明 token、耗时或质量收益。
+
+### 简介与可用性复核
+
+本次 82 项隔离专项检查：81 通过、1 项因 Windows 符号链接权限跳过，无失败；另有 4 个 CLI 烟测通过。覆盖知识浏览器、双平台安装协议、wheel、固定 MCP／Hook 入口和覆盖升级。说明与插件简介更新后，再复核 52 项打包／安装／升级检查：51 通过、1 项跳过，无失败。中英文链接锚点、代码围栏和折叠标签检查通过。
+
+此次仅更新说明与展示元数据，运行逻辑、数据结构及功能开关不变。真实宿主回调与模型体验未在本轮执行。
+
+<details>
+<summary>历史版本与验收记录（0.16.0 及更早）</summary>
 
 ## 0.16.0 检查状态（2026-10-13）
 
@@ -1146,6 +1142,8 @@ Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、�
 持久语义聚类、professional/pattern 专门验证、全天服务唤醒、普通任务用量与货币账单自动接入仍未实现；0.12.0 的成对评估通过显式执行器上报任务用量与费用观测。当前 Stable、发布、调度和效果观察使用上述明确规则。
 
 真实桌面 Hook 信任、账户事件自动接线、父子 MCP 连接生命周期和项目主流程仍待宿主验收。当前测试不修改 FPS 项目、不执行登录切换、不启用真实模型，也不改当前用户插件配置。
+
+</details>
 
 </details>
 

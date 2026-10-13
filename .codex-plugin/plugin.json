@@ -1,13 +1,13 @@
 {
   "name": "agent-learning",
   "version": "1.0.0",
-  "description": "Project memory with automatic work observations, file history, progressive reading, governed knowledge and optional host-model administration.",
+  "description": "Project memory and a visual knowledge browser for Codex and Antigravity, with automatic work history, progressive retrieval and optional administrator review.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Learning",
-    "shortDescription": "让 Agent 记住项目经验，查阅有依据的知识",
-    "longDescription": "支持 Codex 与 Antigravity：自动索引可观察的工作结果，关联文件历史，按索引、详情、证据渐进读取。复用管理员与调用预算整理摘要和知识候选，正式知识经受信入口发布；本地检索、历史吸收、只读浏览和任务评估均保留来源与修订。"
+    "shortDescription": "项目记忆与可视化知识库：记录、检索、复用经验",
+    "longDescription": "支持 Codex 与 Antigravity。自动记录工作结果、关联文件历史，按索引、摘要、证据渐进检索；本机可视化查看正式知识、来源、修订与审核待办。支持用户主动历史吸收、可选管理员整理、知识审核维护、预算与任务评估，以及保留配置升级和更新提醒。默认本地运行，管理员模型调用单独开启。"
   }
 }
