@@ -22,6 +22,7 @@ from .knowledge_index import KnowledgeIndexMixin
 from .knowledge_context import KnowledgeContextMixin
 from .context_storage import ContextStorageMixin
 from .case_store import CaseStoreMixin
+from .history_import import HistoryImportMixin
 from .event_capture import (CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict,
                             business_evidence_digest, projected_evidence)
 from .review_packet import ReviewPacketMixin
@@ -76,8 +77,14 @@ def clean(value):
         return [clean(v) for v in value]
     if isinstance(value, str):
         value = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [REDACTED]", value)
-        value = re.sub(r"(?i)((?:api[_-]?key|password|secret|access_token)\s*[=:]\s*)[^\s,;]+",
-                       r"\1[REDACTED]", value)
+        def redact_assignment(match):
+            # 已脱敏 URL 的公开 query/fragment 不应被后续采集再次吞掉。
+            # 仅完整的脱敏标记（或标记后 URL 分隔符）可原样通过。
+            if re.match(r"\[REDACTED\](?:[&#]|$)", match[2]):
+                return match[0]
+            return match[1] + "[REDACTED]"
+        value = re.sub(r"(?i)((?:api[_-]?key|password|secret|access_token)\s*[=:]\s*)([^\s,;]+)",
+                       redact_assignment, value)
     return value
 
 
@@ -199,7 +206,7 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
               KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
-              KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin):
+              KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin, HistoryImportMixin):
     def __init__(self, home=None, config=None, *, host="codex", host_instance="default"):
         if host not in {"codex", "antigravity"}:
             raise ContractError("unsupported host")
@@ -258,7 +265,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(13)):
+        if version not in set(range(14)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -287,7 +294,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self._install_host_storage()
                 from .antigravity import install_storage
                 install_storage(self)
-                self.db.execute("PRAGMA user_version=12")
+                from .history_import import install_storage as install_history_storage
+                install_history_storage(self)
+                self.db.execute("PRAGMA user_version=13")
         except BaseException:
             self.db.close()
             raise
@@ -617,6 +626,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         ident = identity[:32]
         with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
+            self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
             previous = self.db.execute("SELECT c.id,c.status,c.body FROM candidate_identity i JOIN candidates c "
                                        "ON i.project=c.project AND i.candidate_id=c.id WHERE i.project=? AND i.fingerprint=?",
                                        (project, identity)).fetchone()
@@ -635,6 +645,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         return {"candidate_id": ident, "status": "candidate"}
 
     def _validate_sources(self, project, body):
+        # 证据有效性与历史任务准入分别核对；已正式知识的恢复不依赖导入任务继续活动。
         problem = self.db.execute("SELECT * FROM problems WHERE project=? AND id=?", (project, body["problem_id"])).fetchone()
         if not problem:
             raise ContractError("unknown problem")
@@ -687,6 +698,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_enabled": bool(self.config["admin"]["enabled"]),
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
+                "history_import": self.history_status(project),
                 "learning_effects": self.learning_effects(project),
                 "hindsight_enabled": bool(self.config["hindsight"]["enabled"]),
                 "knowledge_release_head": self._release_head(project),
@@ -909,9 +921,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             if kind == "Stop" and not agent_id and fresh:
                 self._capture_delivery(project, conversation, task, event, raw)
         schedule_warning = None
-        if (fresh and kind == "SessionStart" and not agent_id
-                and raw.get("source") in {None, "startup", "resume"}
-                and self.config["software_updates"]["enabled"]):
+        update_notice_event = (fresh and not agent_id and self.config["software_updates"]["enabled"]
+                              and (kind == "UserPromptSubmit" or kind == "SessionStart"
+                                   and raw.get("source") in {None, "startup", "resume"}))
+        if update_notice_event and kind == "SessionStart":
             schedule_warning = self._schedule_software_update(raw["cwd"])
         if fresh and kind in {"Stop", "SessionStart"} and self.config["scheduler"]["enabled"]:
             token = None
@@ -951,7 +964,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
                     result["systemMessage"] = schedule_warning
-                return result
+                return self._attach_software_update_notice(result) if update_notice_event else result
         if kind == "Stop" and fresh and self.config["admin"]["enabled"] and not self.config["scheduler"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
             token = None
@@ -973,7 +986,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 except sqlite3.Error:
                     pass
                 return {"systemMessage": "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"}
-        return {"systemMessage": schedule_warning} if schedule_warning else {}
+        result = {"systemMessage": schedule_warning} if schedule_warning else {}
+        return self._attach_software_update_notice(result) if update_notice_event else result
 
     def _launch_admin(self, workspace, dispatch_token=None):
         self._launch_background(workspace, "admin-batch",
@@ -984,17 +998,13 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
 
     def _schedule_software_update(self, workspace):
         """Hook 只读缓存及预留一次派发，网络检查在独立短进程中执行。"""
-        from .software_updates import reserve_automatic_check, cancel_reserved_check, update_status
+        from .software_updates import reserve_automatic_check, cancel_reserved_check
         settings = self.config["software_updates"]
         token = None
         try:
-            cached = update_status(self.home, settings)
             token = reserve_automatic_check(self.home, settings)
             if token:
                 self._launch_background(workspace, "update-check", ["--reservation", token])
-            if cached["state"] == "update_available":
-                return (f"Agent Learning: 插件新版本 {cached['latest']} 可用（当前 {cached['current']}）；"
-                        "运行 update-status 查看，安装后需重启 Codex。")
         except (OSError, ValueError, TypeError):
             if token:
                 try:
@@ -1003,6 +1013,35 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     pass
             return "Agent Learning: 后台版本检查未确认启动；当前任务继续，稍后可运行 update-check。"
         return None
+
+    def _attach_software_update_notice(self, output, *, host="codex"):
+        """Attach a complete notice outside the project knowledge character budget.
+
+        A delivery receipt means this output was assembled, not that the user read
+        or approved it. Native adapters must store their replay output beforehand.
+        """
+        from .software_updates import update_notice, confirm_update_notice, cancel_update_notice
+        settings, notice = self.config["software_updates"], None
+        try:
+            notice = update_notice(self.home, settings, host=host)
+            if not notice:
+                return output
+            result = dict(output)
+            if host == "codex":
+                result["systemMessage"] = "\n".join(filter(None, (result.get("systemMessage"), notice["message"])))
+            else:
+                result["injectSteps"] = [*result.get("injectSteps", []), {"ephemeralMessage": notice["message"]}]
+            if not confirm_update_notice(self.home, settings, notice["token"]):
+                cancel_update_notice(self.home, settings, notice["token"])
+                return output
+            return result
+        except (OSError, ValueError, TypeError):
+            if notice:
+                try:
+                    cancel_update_notice(self.home, settings, notice["token"])
+                except (OSError, ValueError, TypeError):
+                    pass
+            return output
 
     def _launch_background(self, workspace, command, arguments):
         import subprocess

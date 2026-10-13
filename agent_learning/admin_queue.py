@@ -52,7 +52,7 @@ def scan_signature(runtime, project, *, include_candidates=True):
                    "candidate_changes": (candidates[0] if candidates else 0) if include_candidates else None})
 
 
-def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None):
+def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None):
     sql = ("SELECT p.*,t.updated AS source_task_updated FROM problems p LEFT JOIN task_snapshots t "
            "ON t.project=p.project AND t.id=p.task_id AND t.revision=p.task_revision "
            "WHERE p.project=? AND p.status='pending' AND (? IS NULL OR p.id=?) "
@@ -63,6 +63,11 @@ def eligible_query(signature, problem_id=None, *, include_cached=False, prefligh
            "AND c.revision=p.revision AND c.retry_allowed=0 AND c.state NOT IN ('not_started','deduplicated') "
            "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) ")
     args = (problem_id, problem_id)
+    if history_job_id is None:
+        sql += "AND NOT EXISTS(SELECT 1 FROM history_case_links h WHERE h.project=p.project AND h.problem_id=p.id) "
+    else:
+        sql += "AND EXISTS(SELECT 1 FROM history_case_links h WHERE h.project=p.project AND h.problem_id=p.id AND h.job_id=?) "
+        args += (history_job_id,)
     if problem_id is None and not include_cached:
         for table in ("admin_preflights", "admin_review_checks"):
             sql += ("AND NOT EXISTS(SELECT 1 FROM " + table + " f WHERE f.project=p.project AND f.problem=p.id "

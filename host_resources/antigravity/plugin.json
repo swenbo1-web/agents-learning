@@ -1,4 +1,4 @@
 {
   "name": "agent-learning",
-  "description": "Project knowledge with bounded retrieval, observable tool evidence and governed learning for Antigravity."
+  "description": "Project knowledge with explicit historical ingestion, bounded retrieval, observable evidence, governed learning and update notices for Antigravity."
 }

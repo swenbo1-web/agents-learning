@@ -6,7 +6,7 @@
 
 **Project memory for Codex and Antigravity: find useful experience, keep its evidence, and reuse it in the next conversation.**
 
-Python **3.10+** · SQLite · [MIT](LICENSE) · Current source **0.14.2**
+Python **3.10+** · SQLite · [MIT](LICENSE) · Current source **0.15.0**
 
 [Antigravity installation](#install-in-antigravity-native-plugin) · [Codex installation](#install-in-codex-desktop-and-cli) · [How it works](#how-it-works) · [Architecture](#complete-architecture) · [Installation reference](#installation-and-maintenance-reference)
 
@@ -117,11 +117,13 @@ Knowledge is reference material; it does not grant execution permission. Tool co
 | Capability | What it does |
 |---|---|
 | Project memory with evidence | Retains conditions, limitations, revisions and source links across conversations |
+| Historical project ingestion | Explicitly selects documents, source and conversations, retaining source versions for bounded review and separate publication |
 | Bounded retrieval | Returns previews first, with details on demand; local full-text search is the default and local semantic retrieval is optional |
 | Host integration | Exports separate Codex and Antigravity profiles backed by one core; handles their event and session differences |
 | Knowledge browser | Provides a local read-only view of knowledge, revisions, sources and administrator work |
 | Governed learning | Collects events separately from optional administrator review, with explicit role, budget and publication controls |
 | Maintainable installation | Retains external knowledge/configuration, validates upgrades and optionally checks GitHub Releases |
+| Feature update notices | Optional cross-host Release checks with bounded notes, snooze and ignore decisions |
 
 No real-task net token, speed or quality gains have been established by paired evaluations. The project includes [evaluation tools](#real-task-paired-evaluation) to measure them.
 
@@ -145,6 +147,7 @@ Use it for a real project task: register the goal, search existing knowledge, re
 | Add semantic matching | [Semantic hybrid retrieval](#semantic-hybrid-retrieval) |
 | Enable an administrator | [Optional administrator executor](#optional-administrator-executor) |
 | Update the plugin | [Update an existing installation](#update-an-existing-installation) |
+| Absorb an existing project's documents and history | [Explicit historical ingestion](#absorb-history-from-an-existing-project) |
 | Understand the design | [Complete architecture](#complete-architecture) |
 
 ## Common questions
@@ -267,7 +270,7 @@ The same project and data directory can retain knowledge across login accounts. 
 | 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
 | 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. Retrieval and context management | Bounded hybrid recall and filtering, summary/page budgets, exposure tracking, notices, restoration, failure follow-up and read-only browsing | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
-| 5. Event, evidence and case collection | Record observable events and tool results; handle idempotency, conflicts, late callbacks and user feedback; form traceable problem increments | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [runtime.py](agent_learning/runtime.py) |
+| 5. Event, evidence and case collection | Record observable events and results; explicitly selected historical jobs retain versioned sources and isolated cases with coverage and idempotency | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [history_sources.py](agent_learning/history_sources.py), [history_import.py](agent_learning/history_import.py), [runtime.py](agent_learning/runtime.py) |
 | 6. Administrator knowledge governance | Organize bounded review packets, incremental queues, calls and receipts; propose candidates and governance; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
 | 7. Knowledge publication and version governance | Publish, update, revoke, restore and promote through trusted entry points; save batch manifests, safe rollback and optional distribution state | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py), [publication_state.py](agent_learning/publication_state.py), [knowledge_releases.py](agent_learning/knowledge_releases.py), [knowledge_sync.py](agent_learning/knowledge_sync.py), [hindsight.py](agent_learning/hindsight.py) |
 | 8. Background scheduling, budgets and effect evaluation | Persistent work, call budgets, exposure/adoption observations and independent paired task evaluation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py), [task_evaluation.py](agent_learning/task_evaluation.py) |
@@ -463,7 +466,18 @@ To opt in, add this section to your configuration:
 }
 ```
 
-Codex root `SessionStart(startup/resume)` events reserve a check outside the event transaction and dispatch a separate short process. Antigravity has no equivalent callback wired for automatic version checks; use the explicit CLI commands above. Compaction, clear and subagent events do not dispatch it. Checks default to a daily interval; conversations share a cache, short lease and process lock per data directory/repository/channel. An available update is announced on a later startup/resume; inspect all check states through `update-status` or `status`. Knowledge injection does not wait for the network. Failures back off, responses are bounded, and ETag/304 is supported. The timeout controls sockets and response reads, not a strict process deadline for operating system DNS.
+Codex root `SessionStart(startup/resume)` events dispatch a separate short process; later startup/resume or fresh user-prompt events read cached notices. Antigravity fresh `PreInvocation` events check local intervals and notification state and dispatch bounded background checks. Compaction, clear and subagent events do not dispatch them. Conversations share network caches and locks; checks default to a daily interval. Knowledge injection does not wait for network requests. Failures back off, responses are bounded and ETag/304 is supported. The timeout controls sockets and response reads, not a strict process deadline for operating system DNS.
+
+Notices include bounded release titles and notes and ask whether to update. Delivery is deduplicated by version and channel: Codex uses `systemMessage`; Antigravity supplies an `ephemeralMessage` for the agent to relay. The latter is model context, not a native user popup. Delivery does not prove reading or approval. Results from an initial background check appear at a later supported event; the plugin does not notify while the host is closed.
+
+```powershell
+python -B scripts/learning.py update-notice
+python -B scripts/learning.py update-choice snooze --snooze-seconds 86400
+python -B scripts/learning.py update-choice ignore --version 0.16.0
+python -B scripts/learning.py update-choice reset
+```
+
+Use an actual cached new version; `0.16.0` is only an example. Snooze/ignore decisions are shared across hosts for that exact version. These commands do not install code, start historical ingestion or initialize the knowledge database. Automatic checks remain disabled by default; users who never enabled them cannot be remotely forced to receive notices.
 
 The `prerelease` channel includes previews; `stable` excludes them. Only eligible semantic versions in the latest 20 Releases are compared. Commits, ordinary tags and unpublished development versions are not updates; `ahead` means the local version exceeds the published version found. Checks use the official GitHub API without reading login tokens, downloading/executing code or replacing an installation. Apply new code with the explicit upgrade command above. [GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 
@@ -545,7 +559,43 @@ python -B scripts/learning.py --home ../agents-learning-data --workspace . brows
 
 The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow the [Codex installation steps](#install-in-codex-desktop-and-cli) or [native Antigravity steps](#install-in-antigravity-native-plugin). Antigravity needs the current source or a locally built package of the same version; published 0.13.0 downloads do not include it. See [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
+## Absorb history from an existing project
+
+Installation receipts offer an optional start/later entry without scanning. Explicitly invoke `$learning-history` or use the local operator CLI. Every historical command requires `--workspace`; reading and processing also require `--confirm`. Worker and administrator MCP interfaces do not expose start/approval tools.
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm
+# Replace JOB_ID with the prepare receipt. Default execution archives reported cases without a model.
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-status --job-id JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-sources JOB_ID --section pending
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cases JOB_ID --limit 20
+```
+
+For Antigravity add global `--host antigravity` and retain the installation's data home. Project documents, agent summaries, source, configuration and uncommitted text are included. Supported text is read in full and segmented; documents receive priority. Default limits are 2000 files, 2 MiB per file, 32 MiB total and 16384 chunks, shared by extra sources. Credentials, dependencies, builds, caches and plugin copies are excluded; binaries and unknown formats are reported as unparsed. Reading coverage, actual review and publication are separate states.
+
+Select extra sources with repeatable `--conversation-file PATH` and `--artifact-dir DIR`. Standard messages JSON/JSONL and recognized public native records use versioned parsers; unknown structures stay pending. Transcript paths cannot guarantee every old conversation. Internal reasoning/thinking/analysis is excluded. Historical instructions and code are data, not execution authorization.
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm --conversation-file "D:\Exports\history.json" --artifact-dir "D:\Exports\project-artifacts"
+# Only with explicit permission to use the configured compatible Codex CLI model executor:
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm --allow-review --max-calls 2 --max-seconds 180
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-pause JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cancel JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
+```
+
+Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Antigravity supports manual administration or an explicitly configured compatible Codex CLI executor; there is no native Antigravity model executor. Use `history-cases JOB_ID` to page through exact case IDs for that batch, then review existing packets and propose candidates. This avoids paused old cases crowding the global list. Publication uses its separate trusted entry; historical jobs never auto-publish.
+
+Formal review decisions, cases awaiting decisions, cases with candidates and cases with publication are counted separately. Manual candidate creation does not fabricate a completed-review receipt; candidate and publication progress remain visible. None of these counts prove complete source understanding or problem resolution.
+
+Immutable sanitized source versions, locations and receipts live in the independent data home. Unchanged material reuses archival and valid review receipts. Pausing, cancellation, exhausted budgets, restarts, ordinary continuation and a new budget day do not resume jobs automatically. Explicit `history-run` can continue remaining work; cancelled jobs require a new prepare. Cancellation does not revoke published knowledge. `history-status`/`history-jobs` report coverage, cases, candidates, calls and publication separately.
+
+`--confirm` expresses an explicit operation choice, not independent human authentication. Unrestricted shell/database access still depends on host and OS permissions. Updating the plugin does not authorize historical reading.
+
 ## Current version and compatibility
+
+0.15.0 adds explicit project-wide historical ingestion, versioned sources and isolated jobs shared by both hosts, with manual or bounded administrator review. Cross-host release notices gain bounded notes, snooze/ignore and delivery-channel deduplication. Database schema advances to **13** and internal publication protocol to **13**; full-text index **4** and semantic index **1** are unchanged. Existing knowledge is preserved. Older runtimes cannot open schema 13; installation backups do not replace external database backups. This source update has not created a downloadable Release; checks only recognize actual GitHub Releases.
 
 0.14.2 fixes installation path checks when the default knowledge home contains its reserved `runtime-releases` directory. Only that direct reserved-child relationship is permitted; source, export and other runtime/data overlaps remain protected. Existing knowledge databases and configuration are preserved. A validated fixed release can be re-exported using its current store or a separate external runtime store. Database schema **12**, full-text index **4**, semantic index **1** and internal publication protocol **12** are unchanged. Four protection regressions were added, bringing the suite to 915 checks. Focused and full 0.14.2 results are below; 0.14.1 results remain historical evidence.
 
@@ -893,6 +943,10 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 |---|---|
 | `status` | Read runtime status |
 | `update-check`, `update-status` | Check bounded GitHub Release metadata or read cached version state |
+| `update-notice`, `update-choice` | Read notification state or explicitly snooze, ignore or reset a version notice |
+| `history-prepare`, `history-run` | Explicitly select sources and archive or review a bounded historical job; never auto-publish |
+| `history-status`, `history-jobs`, `history-sources`, `history-cases` | Inspect progress and page through source or case lists without starting ingestion |
+| `history-pause`, `history-cancel`, `history-skip` | Pause, cancel or record the initial later choice |
 | `learning-effects`, `knowledge-use` | Windowed effect observations and short adoption declarations for the exact task |
 | `scheduler-status`, `scheduler-tick`, `scheduler-run` | Persistent work status, bounded single round and bounded continuation |
 | `session-bind` | Trusted local registration of an explicit conversation/subagent, returning a verifiable handle |
@@ -919,6 +973,16 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## 0.15.0 checks (2026-10-13)
+
+The complete local Windows regression run discovered **1028 checks: 1026 passed, two skipped for platform conditions, no failures or errors**. All Python modules passed Python 3.10 syntax parsing. Both host exports/upgrades, fixed entries, wheel and source-distribution resources were checked, and both explicit historical skills passed structural validation.
+
+A representative isolated workflow covered source selection, sanitized snapshots, reported archival, manual administrator candidates, trusted publication and retrieval from the other host. Protection checks cover everyday queue exclusion, pause/cancel/account writeback fences, global and per-run budgets, unknown calls, paginated source/case lists, timestamps, consistent text and locations, redaction marker boundaries, schema 12→13 rollback and Windows long-path installation.
+
+Update notice checks used simulated Releases and isolated caches, covering both channels, initial-result delay, repeated events, choices and concurrency. Check/choice commands do not initialize the knowledge database. Windows resource long paths and a concurrent test Mock leak found in the first full run were fixed; the counts above are from the final complete run.
+
+No real project history, knowledge database or model was used; live user Hooks, login/plugin settings and persistent services were not changed. This version has no online CI or live host notification/native Antigravity model acceptance result yet. The 0.14-series CI below is historical baseline evidence. Delivery is a local source commit; no GitHub Release has been published.
 
 ## 0.14.2 usability checks (2026-10-12)
 

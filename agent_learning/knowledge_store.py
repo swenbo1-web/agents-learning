@@ -147,6 +147,7 @@ class KnowledgeStoreMixin:
             body = clean(json.loads(candidate["body"]))
             body["metadata"] = metadata(body.get("metadata"))
             body.setdefault("knowledge_kind", "solution")
+            self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
             self._validate_sources(project, body)
             version = self.db.execute("SELECT generation FROM projects WHERE id=?", (project,)).fetchone()
             if not version:

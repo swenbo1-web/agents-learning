@@ -25,6 +25,38 @@ def parser():
     updates.add_argument("--force", action="store_true", help="跳过常规检查间隔；仍遵守服务端限流")
     updates.add_argument("--reservation", help=argparse.SUPPRESS)
     sub.add_parser("update-status", help="只查看缓存的插件版本状态，不访问网络或知识数据库")
+    sub.add_parser("update-notice", help="只查看版本提醒状态，不领取通知或访问知识数据库")
+    choice = sub.add_parser("update-choice", help="明确设置稍后提醒、忽略本版或重新提醒；不会执行更新")
+    choice.add_argument("choice", choices=["snooze", "ignore", "reset"])
+    choice.add_argument("--version", help="选择缓存中的准确新版本")
+    choice.add_argument("--snooze-seconds", type=int, default=86400)
+    history = sub.add_parser("history-prepare", help="用户显式选择项目历史，读取支持文本并冻结来源；不调用模型")
+    history.add_argument("--confirm", action="store_true", help="确认读取明确工作区及选择的额外来源")
+    history.add_argument("--conversation-file", action="append", default=[], help="明确选择的对话导出或受支持原生记录")
+    history.add_argument("--artifact-dir", action="append", default=[], help="明确选择的项目外 Agent 产物目录")
+    history.add_argument("--scan-options", help="扫描上限 JSON 文件；省略使用有限默认值")
+    run = sub.add_parser("history-run", help="用户启动或明确续做历史整理；不自动发布知识")
+    run.add_argument("job_id")
+    run.add_argument("--confirm", action="store_true", help="确认本次有限归档或整理")
+    run.add_argument("--allow-review", action="store_true", help="允许已配置管理员执行器调用模型；省略只归档")
+    run.add_argument("--max-calls", type=int, default=2)
+    run.add_argument("--max-seconds", type=int, default=180)
+    state = sub.add_parser("history-status", help="查看来源覆盖、审阅进度和用量，不启动吸收")
+    state.add_argument("--job-id")
+    sub.add_parser("history-jobs", help="列出当前项目的有限历史任务摘要")
+    sources = sub.add_parser("history-sources", help="分页查看完整来源、未解析及排除清单，不读取原始正文")
+    sources.add_argument("job_id")
+    sources.add_argument("--section", choices=["sources", "pending", "skipped"], default="sources")
+    sources.add_argument("--offset", type=int, default=0)
+    sources.add_argument("--limit", type=int, default=20)
+    cases = sub.add_parser("history-cases", help="分页定位当前历史批次的案例，避免被旧案例列表遮挡")
+    cases.add_argument("job_id")
+    cases.add_argument("--offset", type=int, default=0)
+    cases.add_argument("--limit", type=int, default=20)
+    for name in ("history-cancel", "history-pause"):
+        command = sub.add_parser(name, help="停止后续历史整理与回写，保留已发布知识")
+        command.add_argument("job_id")
+    sub.add_parser("history-skip", help="记录该项目暂不吸收历史；以后仍可明确启动")
     browser = sub.add_parser("browser", help="临时启动本机只读知识浏览器，不创建或升级数据库")
     browser.add_argument("--port", type=int, default=0)
     browser.add_argument("--open", action="store_true", help="在默认浏览器打开页面")
@@ -226,15 +258,28 @@ def main(argv=None):
             return 1
     runtime = None
     try:
+        if args.command.startswith("history-"):
+            if not args.workspace:
+                raise ContractError("history commands require an explicit --workspace; installation cwd is not a project choice")
+            if args.command in {"history-prepare", "history-run"} and not args.confirm:
+                raise ContractError("history reading and processing require explicit user selection (--confirm)")
         args.workspace = args.workspace or str(Path.cwd())
-        if args.command in {"update-check", "update-status"}:
-            from .software_updates import load_config, check_updates, update_status
+        if args.command in {"update-check", "update-status", "update-notice", "update-choice"}:
+            from .software_updates import (load_config, check_updates, update_status,
+                                           notification_status, update_notice_choice)
             default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
                             if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
             home = Path(args.home or os.environ.get("ALP_HOME") or default_home).resolve()
             settings = load_config(home)
-            result = (update_status(home, settings) if args.command == "update-status" else
-                      check_updates(home, settings, force=args.force, reservation=args.reservation))
+            if args.command == "update-status":
+                result = update_status(home, settings)
+            elif args.command == "update-notice":
+                result = notification_status(home, settings)
+            elif args.command == "update-choice":
+                result = update_notice_choice(home, settings, args.choice, args.version,
+                                              snooze_seconds=args.snooze_seconds)
+            else:
+                result = check_updates(home, settings, force=args.force, reservation=args.reservation)
             print(encode(result))
             return 0
         if args.command.startswith("evaluation-"):
@@ -303,6 +348,22 @@ def main(argv=None):
             Server(runtime, project, args.role, context_handle=handle).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
+        elif args.command == "history-prepare":
+            options = json.loads(Path(args.scan_options).read_text(encoding="utf-8-sig")) if args.scan_options else None
+            sources = ([{"path": str(Path(path).absolute()), "kind": "conversation"} for path in args.conversation_file]
+                       + [{"path": str(Path(path).absolute()), "kind": "artifacts"} for path in args.artifact_dir])
+            result = runtime.history_prepare(project, args.workspace, extra_sources=sources, scan_options=options)
+        elif args.command == "history-run": result = runtime.history_run(
+            project, args.job_id, allow_review=args.allow_review, max_calls=args.max_calls, max_seconds=args.max_seconds)
+        elif args.command == "history-status": result = runtime.history_status(project, args.job_id)
+        elif args.command == "history-jobs": result = runtime.history_jobs(project)
+        elif args.command == "history-sources": result = runtime.history_source_report(
+            project, args.job_id, section=args.section, offset=args.offset, limit=args.limit)
+        elif args.command == "history-cases": result = runtime.history_cases(
+            project, args.job_id, offset=args.offset, limit=args.limit)
+        elif args.command == "history-cancel": result = runtime.history_cancel(project, args.job_id)
+        elif args.command == "history-pause": result = runtime.history_pause(project, args.job_id)
+        elif args.command == "history-skip": result = runtime.history_skip(project)
         elif args.command == "semantic-status": result = runtime.semantic_status(project)
         elif args.command == "semantic-refresh": result = runtime.semantic_refresh(project, limit=args.limit, rebuild=args.rebuild)
         elif args.command == "learning-effects": result = runtime.learning_effects(project, days=args.days)

@@ -1,0 +1,392 @@
+"""显式、按次批准的历史吸收；不由 Hook 或普通管理员队列唤醒。"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import time
+import uuid
+
+
+ACCESS_STATES = {"materialized", "reviewing", "review_complete"}
+
+
+def install_storage(runtime):
+    from .runtime import ContractError
+    if not runtime.db.in_transaction:
+        raise ContractError("history migration requires an existing write transaction")
+    statements = (
+        "CREATE TABLE IF NOT EXISTS project_onboarding(project TEXT PRIMARY KEY,state TEXT NOT NULL,job_id TEXT,updated REAL NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS history_jobs(id TEXT PRIMARY KEY,project TEXT NOT NULL,workspace TEXT NOT NULL,plan TEXT NOT NULL,signature TEXT NOT NULL,state TEXT NOT NULL,host_epoch INTEGER NOT NULL,review_enabled INTEGER NOT NULL DEFAULT 0,max_calls INTEGER NOT NULL DEFAULT 0,remaining_calls INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL,created REAL NOT NULL,updated REAL NOT NULL,last_result TEXT NOT NULL DEFAULT '{}')",
+        "CREATE INDEX IF NOT EXISTS history_jobs_project ON history_jobs(project,created)",
+        "CREATE TABLE IF NOT EXISTS history_materials(id TEXT PRIMARY KEY,project TEXT NOT NULL,source_key TEXT NOT NULL,content_hash TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,UNIQUE(project,source_key,content_hash))",
+        "CREATE TABLE IF NOT EXISTS history_job_sources(job_id TEXT NOT NULL,material_id TEXT NOT NULL,position INTEGER NOT NULL,materialized INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(job_id,material_id),FOREIGN KEY(job_id) REFERENCES history_jobs(id),FOREIGN KEY(material_id) REFERENCES history_materials(id))",
+        "CREATE TABLE IF NOT EXISTS history_units(id TEXT PRIMARY KEY,project TEXT NOT NULL,material_id TEXT NOT NULL,unit_index INTEGER NOT NULL,body TEXT NOT NULL,problem_id TEXT,UNIQUE(project,material_id,unit_index),FOREIGN KEY(material_id) REFERENCES history_materials(id))",
+        "CREATE TABLE IF NOT EXISTS history_case_links(project TEXT NOT NULL,problem_id TEXT NOT NULL,job_id TEXT NOT NULL,unit_id TEXT NOT NULL,PRIMARY KEY(project,problem_id,job_id),FOREIGN KEY(job_id) REFERENCES history_jobs(id),FOREIGN KEY(unit_id) REFERENCES history_units(id))",
+        "CREATE INDEX IF NOT EXISTS history_cases_job ON history_case_links(project,job_id,problem_id)",
+        "CREATE TABLE IF NOT EXISTS history_call_links(job_id TEXT NOT NULL,call_id TEXT NOT NULL UNIQUE,refunded INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(job_id,call_id),FOREIGN KEY(job_id) REFERENCES history_jobs(id))",
+    )
+    for statement in statements:
+        runtime.db.execute(statement)
+
+
+def _job(runtime, project, job_id):
+    from .runtime import ContractError
+    row = runtime.db.execute("SELECT * FROM history_jobs WHERE project=? AND id=?", (project, job_id)).fetchone()
+    if row is None:
+        raise ContractError("unknown history job")
+    return dict(row)
+
+
+def _summary(runtime, row):
+    plan = json.loads(row["plan"])
+    counts = {}
+    for key, sql in {
+        "sources": "SELECT COUNT(*) FROM history_job_sources WHERE job_id=?",
+        "materialized_sources": "SELECT COUNT(*) FROM history_job_sources WHERE job_id=? AND materialized=1",
+        "cases": "SELECT COUNT(*) FROM history_case_links WHERE job_id=?",
+        "candidates": "SELECT COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=?",
+        "published_candidates": "SELECT COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=? AND c.status='published'",
+        "candidate_cases": "SELECT COUNT(DISTINCT l.problem_id) FROM history_case_links l JOIN candidates c ON c.project=l.project AND c.problem=l.problem_id WHERE l.job_id=?",
+        "published_cases": "SELECT COUNT(DISTINCT l.problem_id) FROM history_case_links l JOIN candidates c ON c.project=l.project AND c.problem=l.problem_id WHERE l.job_id=? AND c.status='published'",
+        "calls": "SELECT COUNT(*) FROM history_call_links WHERE job_id=? AND refunded=0",
+        "reviewed_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project JOIN review_states r ON r.project=p.project AND r.problem=p.id AND r.revision=p.revision WHERE l.job_id=? AND r.state IN ('candidate_ready','proposal_ready','skipped','published')",
+        "review_decision_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project WHERE l.job_id=? AND EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=p.project AND r.problem=p.id AND r.revision=p.revision AND r.decision IN ('candidate','governance','skip','needs_evidence'))",
+        "awaiting_evidence_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project JOIN review_states r ON r.project=p.project AND r.problem=p.id AND r.revision=p.revision WHERE l.job_id=? AND r.state='awaiting_evidence'",
+        "untouched_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project WHERE l.job_id=? AND NOT EXISTS(SELECT 1 FROM candidates c WHERE c.project=p.project AND c.problem=p.id) AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=p.project AND r.problem=p.id AND r.revision=p.revision) AND NOT EXISTS(SELECT 1 FROM admin_calls a WHERE a.project=p.project AND a.problem=p.id AND a.revision=p.revision AND a.state NOT IN ('not_started','deduplicated'))",
+    }.items():
+        counts[key] = runtime.db.execute(sql, (row["id"],)).fetchone()[0]
+    counts["pending_cases"] = max(0, counts["cases"] - counts["reviewed_cases"])
+    counts["completed_review_cases"] = counts["reviewed_cases"]
+    counts["reviewed_cases"] = counts["review_decision_cases"]
+    return {"job_id": row["id"], "state": row["state"], "workspace": row["workspace"], "counts": counts,
+            "coverage": {"incomplete": bool(plan.get("incomplete")), "stats": plan.get("stats", {}),
+                         "skipped_count": plan.get("skipped_count", 0), "pending_count": plan.get("pending_count", 0)},
+            "remaining_calls": row["remaining_calls"], "review_enabled": bool(row["review_enabled"]),
+            "created": row["created"], "updated": row["updated"], "last_result": json.loads(row["last_result"]),
+            "automatic_resume": False, "publication_automatic": False,
+            "run_active": bool(row["owner"] and (row["lease_until"] or 0) > time.time()),
+            "resume_required": row["state"] == "paused" or row["state"] in {"materializing", "reviewing"} and (row["lease_until"] or 0) <= time.time(),
+            "epoch_current": row["host_epoch"] == runtime.host_epoch()}
+
+
+def _unit_groups(source):
+    """相邻片段组合成有限审核单元；单元身份不随执行预算变化。"""
+    from .history_sources import safe_segment_end
+    # 固定分组使已归档资料在配置变化后仍可复用；预算由审核包另行校验。
+    limit = 4000
+    chunks = source.get("chunks") or [{"index": 0, "text": source.get("content", ""), "locator": {}}]
+    group, size = [], 0
+    for chunk in chunks:
+        text = chunk.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        offset, part = 0, 0
+        while offset < len(text):
+            end = safe_segment_end(text, offset, 1500)
+            locator = dict(chunk.get("locator", {}), chunk_index=chunk.get("index"), char_offset=offset,
+                           char_length=end - offset, char_scope="source_chunk")
+            segment = dict(chunk, text=text[offset:end], part=part, locator=locator)
+            if group and (size + len(segment["text"]) > limit or len(group) >= 8):
+                yield group
+                group, size = [], 0
+            group.append(segment)
+            size += len(segment["text"])
+            offset, part = end, part + 1
+    if group:
+        yield group
+
+
+class HistoryImportMixin:
+    def history_prepare(self, project, workspace, extra_sources=None, scan_options=None, expected_epoch=None):
+        from .history_sources import scan_sources
+        from .runtime import ContractError, clean, digest, encode
+        epoch = self.assert_host_epoch(expected_epoch)
+        workspace = str(Path(workspace).absolute())
+        if self.project(workspace) != project:
+            raise ContractError("history workspace belongs to another project")
+        snapshot = scan_sources(workspace, extra_sources=extra_sources, options=scan_options)
+        snapshot = clean(snapshot)
+        workspace = snapshot["workspace"]
+        sources = snapshot.get("sources", [])
+        plan = {key: snapshot.get(key) for key in ("workspace", "options", "stats", "incomplete")}
+        plan.update(extra_sources=clean(extra_sources or []), skipped_count=len(snapshot.get("skipped", [])),
+                    pending_count=len(snapshot.get("pending", [])), skipped=snapshot.get("skipped", []),
+                    pending=snapshot.get("pending", []))
+        signature = digest([project, workspace, plan, [(s["source_key"], s["content_hash"]) for s in sources]])
+        with self.transaction():
+            self.assert_host_epoch(epoch)
+            existing = self.db.execute("SELECT * FROM history_jobs WHERE project=? AND signature=? AND state!='cancelled' ORDER BY created DESC LIMIT 1",
+                                       (project, signature)).fetchone()
+            if existing:
+                return dict(_summary(self, existing), reused=True)
+            ident, now = uuid.uuid4().hex, time.time()
+            self.db.execute("INSERT INTO history_jobs(id,project,workspace,plan,signature,state,host_epoch,created,updated) VALUES(?,?,?,?,?,'prepared',?,?,?)",
+                            (ident, project, workspace, encode(plan), signature, epoch, now, now))
+            for position, source in enumerate(sources):
+                material_id = digest([project, source["source_key"], source["content_hash"]])
+                self.db.execute("INSERT OR IGNORE INTO history_materials VALUES(?,?,?,?,?,?)",
+                                (material_id, project, source["source_key"], source["content_hash"], encode(source), now))
+                self.db.execute("INSERT INTO history_job_sources(job_id,material_id,position) VALUES(?,?,?)", (ident, material_id, position))
+            self.db.execute("INSERT INTO project_onboarding VALUES(?,'prepared',?,?) ON CONFLICT(project) DO UPDATE SET state='prepared',job_id=excluded.job_id,updated=excluded.updated",
+                            (project, ident, now))
+            return _summary(self, _job(self, project, ident))
+
+    def history_status(self, project, job_id=None):
+        row = self.db.execute("SELECT * FROM project_onboarding WHERE project=?", (project,)).fetchone()
+        onboarding = {"state": row["state"], "job_id": row["job_id"]} if row else {"state": "unoffered", "job_id": None}
+        selected = _job(self, project, job_id) if job_id else self.db.execute(
+            "SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT 1", (project,)).fetchone()
+        return {"project_id": project, "onboarding": onboarding, "job": _summary(self, selected) if selected else None,
+                "manual_only": True, "automatic_resume": False}
+
+    def history_jobs(self, project, limit=20):
+        from .runtime import ContractError
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ContractError("history job limit must be 1..100")
+        rows = self.db.execute("SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT ?", (project, limit)).fetchall()
+        return {"items": [_summary(self, row) for row in rows], "limit": limit,
+                "total": self.db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]}
+
+    def history_source_report(self, project, job_id, section="sources", offset=0, limit=20):
+        from .runtime import ContractError
+        if section not in {"sources", "pending", "skipped"}:
+            raise ContractError("history source section must be sources, pending or skipped")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ContractError("history source offset must be nonnegative")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ContractError("history source limit must be 1..100")
+        job = _job(self, project, job_id)
+        if section == "sources":
+            total = self.db.execute("SELECT COUNT(*) FROM history_job_sources WHERE job_id=?", (job_id,)).fetchone()[0]
+            rows = self.db.execute("SELECT m.id,m.body,s.materialized FROM history_job_sources s JOIN history_materials m ON m.id=s.material_id WHERE s.job_id=? ORDER BY s.position LIMIT ? OFFSET ?", (job_id, limit, offset)).fetchall()
+            items = []
+            for row in rows:
+                source = json.loads(row["body"])
+                item = {key: source.get(key) for key in ("source_key", "path", "relative_path", "root", "kind", "coverage", "content_hash", "size_bytes", "parser_version", "metadata")}
+                item.update(material_id=row["id"], materialized=bool(row["materialized"]),
+                            content_chars=len(source.get("content", "")), chunks=len(source.get("chunks", [])))
+                items.append(item)
+        else:
+            records = json.loads(job["plan"]).get(section, [])
+            total, items = len(records), records[offset:offset + limit]
+        return {"job_id": job_id, "section": section, "items": items, "offset": offset, "limit": limit,
+                "total": total, "next_offset": offset + len(items) if offset + len(items) < total else None}
+
+    def history_cases(self, project, job_id, offset=0, limit=20):
+        """按具体任务定位案例；暂停任务可查 ID，但此入口不授予读取审核包的权限。"""
+        from .runtime import ContractError
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ContractError("history case offset must be nonnegative")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ContractError("history case limit must be 1..100")
+        owned = not self.db.in_transaction
+        if owned:
+            self.db.execute("BEGIN")
+        try:
+            job = _job(self, project, job_id)
+            total = self.db.execute("SELECT COUNT(*) FROM history_case_links WHERE project=? AND job_id=?", (project, job_id)).fetchone()[0]
+            rows = self.db.execute(
+                "SELECT p.id,p.revision,p.status,p.summary,u.id AS unit_id,u.unit_index,u.material_id "
+                "FROM history_case_links l JOIN problems p ON p.project=l.project AND p.id=l.problem_id "
+                "JOIN history_units u ON u.id=l.unit_id JOIN history_job_sources s ON s.job_id=l.job_id AND s.material_id=u.material_id "
+                "WHERE l.project=? AND l.job_id=? ORDER BY s.position,u.unit_index,p.id LIMIT ? OFFSET ?",
+                (project, job_id, limit, offset)).fetchall()
+            items = []
+            for row in rows:
+                review = self.db.execute("SELECT state,reason,revision FROM review_states WHERE project=? AND problem=?", (project, row["id"])).fetchone()
+                candidates = self.db.execute("SELECT id,status,json_extract(body,'$.title') AS title,json_extract(body,'$.validation_level') AS validation_level "
+                                             "FROM candidates WHERE project=? AND problem=? ORDER BY created DESC,id LIMIT 3", (project, row["id"])).fetchall()
+                candidate_count = self.db.execute("SELECT COUNT(*) FROM candidates WHERE project=? AND problem=?", (project, row["id"])).fetchone()[0]
+                try:
+                    self.history_guard(project, row["id"], job_id)
+                    allowed = True
+                except ContractError:
+                    allowed = False
+                items.append({"problem_id": row["id"], "revision": row["revision"], "status": row["status"],
+                              "summary": row["summary"][:240], "unit_id": row["unit_id"], "unit_index": row["unit_index"],
+                              "material_id": row["material_id"], "review_allowed": allowed,
+                              "review": {"state": review["state"], "revision": review["revision"], "reason": review["reason"][:240]} if review else None,
+                              "candidate_count": candidate_count,
+                              "candidates": [{"candidate_id": candidate["id"], "status": candidate["status"], "title": (candidate["title"] or "")[:160],
+                                              "validation_level": candidate["validation_level"]} for candidate in candidates]})
+            result = {"job_id": job_id, "job_state": job["state"], "job_updated": job["updated"], "items": items,
+                      "offset": offset, "limit": limit, "total": total,
+                      "next_offset": offset + len(items) if offset + len(items) < total else None}
+            if owned:
+                self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            if owned and self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def history_skip(self, project):
+        with self.transaction():
+            self.db.execute("INSERT INTO project_onboarding VALUES(?,'skipped',NULL,?) ON CONFLICT(project) DO UPDATE SET state='skipped',updated=excluded.updated", (project, time.time()))
+        return self.history_status(project)
+
+    def history_cancel(self, project, job_id, expected_epoch=None):
+        with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            _job(self, project, job_id)
+            self.db.execute("UPDATE history_jobs SET state='cancelled',owner=NULL,lease_until=NULL,review_enabled=0,updated=? WHERE project=? AND id=?",
+                            (time.time(), project, job_id))
+        return self.history_status(project, job_id)
+
+    def history_pause(self, project, job_id, expected_epoch=None):
+        from .runtime import ContractError
+        with self.transaction():
+            self.assert_host_epoch(expected_epoch)
+            row = _job(self, project, job_id)
+            if row["state"] == "cancelled":
+                raise ContractError("cancelled history job cannot be paused")
+            self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=? WHERE project=? AND id=?",
+                            (time.time(), project, job_id))
+        return self.history_status(project, job_id)
+
+    def history_guard(self, project, problem_id, history_job_id=None, *, require_review=False, expected_epoch=None):
+        from .runtime import ContractError
+        links = self.db.execute("SELECT j.* FROM history_case_links l JOIN history_jobs j ON j.id=l.job_id WHERE l.project=? AND l.problem_id=? ORDER BY j.created DESC",
+                                (project, problem_id)).fetchall()
+        if not links:
+            if history_job_id is not None:
+                raise ContractError("case is outside the approved history job")
+            return None
+        epoch = self.assert_host_epoch(expected_epoch)
+        rows = [row for row in links if history_job_id is None or row["id"] == history_job_id]
+        for row in rows:
+            if row["state"] not in ACCESS_STATES or row["host_epoch"] != epoch:
+                continue
+            if row["state"] == "reviewing" and (not row["owner"] or (row["lease_until"] or 0) <= time.time()):
+                continue
+            if require_review and (history_job_id is None or row["state"] != "reviewing" or not row["review_enabled"]
+                                   or not row["owner"] or (row["lease_until"] or 0) <= time.time()):
+                continue
+            return dict(row)
+        raise ContractError("history job is not currently approved; explicitly run or resume it")
+
+    def history_reserve_call(self, project, job_id, problem_id, call_id, expected_epoch):
+        from .runtime import ContractError
+        if not self.db.in_transaction:
+            raise ContractError("history call reservation requires a write transaction")
+        row = self.history_guard(project, problem_id, job_id, require_review=True, expected_epoch=expected_epoch)
+        if row["remaining_calls"] <= 0:
+            raise ContractError("history job call budget exhausted")
+        self.db.execute("UPDATE history_jobs SET remaining_calls=remaining_calls-1,updated=? WHERE project=? AND id=?", (time.time(), project, job_id))
+        self.db.execute("INSERT INTO history_call_links(job_id,call_id) VALUES(?,?)", (job_id, call_id))
+
+    def history_refund_call(self, job_id, call_id):
+        with self._case_transaction():
+            call = self.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()
+            if call and call[0] == "not_started":
+                changed = self.db.execute("UPDATE history_call_links SET refunded=1 WHERE job_id=? AND call_id=? AND refunded=0", (job_id, call_id)).rowcount
+                if changed:
+                    self.db.execute("UPDATE history_jobs SET remaining_calls=MIN(max_calls,remaining_calls+1) WHERE id=?", (job_id,))
+
+    def _history_materialize(self, project, job_id, owner, epoch, deadline):
+        from .runtime import ContractError, digest, encode
+        rows = self.db.execute("SELECT m.* FROM history_materials m JOIN history_job_sources s ON s.material_id=m.id WHERE s.job_id=? AND s.materialized=0 ORDER BY s.position", (job_id,)).fetchall()
+        for material in rows:
+            if time.monotonic() >= deadline:
+                return False
+            source = json.loads(material["body"])
+            for index, group in enumerate(_unit_groups(source)):
+                if time.monotonic() >= deadline:
+                    return False
+                with self.transaction():
+                    self.assert_host_epoch(epoch)
+                    job = _job(self, project, job_id)
+                    if job["owner"] != owner or job["state"] != "materializing" or (job["lease_until"] or 0) <= time.time():
+                        raise ContractError("history run ownership changed")
+                    unit_id = digest([project, material["id"], index])
+                    previous = self.db.execute("SELECT problem_id FROM history_units WHERE id=?", (unit_id,)).fetchone()
+                    if previous and previous[0]:
+                        problem_id = previous[0]
+                    else:
+                        conversation = "history:" + material["id"]
+                        refs = []
+                        for part, chunk in enumerate(group):
+                            payload = {"source": {"source_key": source["source_key"], "path": source["path"], "content_hash": source["content_hash"],
+                                                  "kind": source["kind"], "coverage": source.get("coverage", "unknown"), "parser_version": source.get("parser_version")},
+                                       "locator": chunk.get("locator", {}), "content": chunk["text"], "historical_statement": True,
+                                       "unit_index": index, "content_is_excerpt": True,
+                                       "limitations": "Historical public text; not an observed tool success or current execution authorization."}
+                            if source.get("coverage") != "full":
+                                payload["limitations"] += " Source coverage is partial or unknown; only the supplied public text is available."
+                            event, _ = self._event(project, conversation, "HistoryImport", payload,
+                                                   event_id=["history", unit_id, part], outcome="reported")
+                            refs.append(event["id"])
+                        excerpt = " ".join(" ".join(chunk["text"].split()) for chunk in group)[:400]
+                        problem = self._problem(project, conversation,
+                                                "Historical source " + source.get("relative_path", source["path"]) + " [" + source["content_hash"][:12] + "] unit " + str(index + 1) + ": " + excerpt,
+                                                "project", refs)
+                        problem_id = problem["id"]
+                        self.db.execute("INSERT INTO history_units VALUES(?,?,?,?,?,?)", (unit_id, project, material["id"], index, encode({"parts": len(group)}), problem_id))
+                    self.db.execute("INSERT OR IGNORE INTO history_case_links VALUES(?,?,?,?)", (project, problem_id, job_id, unit_id))
+            with self.transaction():
+                self.assert_host_epoch(epoch)
+                job = _job(self, project, job_id)
+                if job["owner"] != owner or job["state"] != "materializing":
+                    raise ContractError("history run ownership changed")
+                self.db.execute("UPDATE history_job_sources SET materialized=1 WHERE job_id=? AND material_id=?", (job_id, material["id"]))
+        return True
+
+    def history_run(self, project, job_id, allow_review=False, max_calls=2, max_seconds=180, expected_epoch=None):
+        from .admin import admin_once
+        from .runtime import ContractError, encode
+        if not isinstance(allow_review, bool):
+            raise ContractError("allow_review must be a boolean")
+        if isinstance(max_calls, bool) or not isinstance(max_calls, int) or not 0 <= max_calls <= 20:
+            raise ContractError("history max_calls must be 0..20")
+        if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not 1 <= max_seconds <= 600:
+            raise ContractError("history max_seconds must be 1..600")
+        epoch, owner = self.assert_host_epoch(expected_epoch), uuid.uuid4().hex
+        deadline = time.monotonic() + max_seconds
+        with self.transaction():
+            self.assert_host_epoch(epoch)
+            row = _job(self, project, job_id)
+            if row["state"] == "cancelled":
+                raise ContractError("cancelled history job requires a new explicit prepare")
+            if row["owner"] and (row["lease_until"] or 0) > time.time():
+                raise ContractError("history job already has an active run")
+            self.db.execute("UPDATE history_jobs SET state='materializing',host_epoch=?,review_enabled=?,max_calls=?,remaining_calls=?,owner=?,lease_until=?,updated=? WHERE project=? AND id=?",
+                            (epoch, int(allow_review), max_calls, max_calls, owner, time.time() + max_seconds + 30, time.time(), project, job_id))
+        results, state, reason = [], "materialized", "manual_review_available"
+        try:
+            if not self._history_materialize(project, job_id, owner, epoch, deadline):
+                state, reason = "paused", "materialization_time_budget"
+            elif allow_review:
+                with self.transaction():
+                    self.assert_host_epoch(epoch)
+                    row = _job(self, project, job_id)
+                    if row["owner"] != owner or row["state"] != "materializing":
+                        raise ContractError("history run ownership changed")
+                    self.db.execute("UPDATE history_jobs SET state='reviewing' WHERE id=?", (job_id,))
+                problems = self.db.execute("SELECT DISTINCT problem_id FROM history_case_links WHERE project=? AND job_id=? ORDER BY unit_id", (project, job_id)).fetchall()
+                state, reason = "review_complete", "bounded_review_complete"
+                for problem in problems:
+                    if time.monotonic() >= deadline or _job(self, project, job_id)["remaining_calls"] <= 0:
+                        state, reason = "paused", "review_budget_exhausted"
+                        break
+                    result = admin_once(self, project, problem[0], expected_epoch=epoch, _deadline=deadline, _history_job_id=job_id)
+                    results.append({key: result[key] for key in ("status", "call_id", "candidate_id", "proposal_id", "reused") if key in result})
+                    if result["status"] in {"failed", "timeout_unknown", "account_changed_unknown", "orphaned_unknown", "review_required", "waiting_for_review",
+                                             "budget_exhausted", "token_budget_exhausted", "concurrency_limited", "not_started", "batch_time_exhausted"}:
+                        state, reason = "paused", result["status"]
+                        break
+                if state == "review_complete":
+                    counts = _summary(self, _job(self, project, job_id))["counts"]
+                    if counts["pending_cases"]:
+                        state, reason = "materialized", "needs_evidence" if counts["awaiting_evidence_cases"] else "pending_manual_review"
+        except BaseException:
+            with self.transaction():
+                self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=? WHERE project=? AND id=? AND owner=?", (time.time(), project, job_id, owner))
+            raise
+        with self.transaction():
+            # Cancel/epoch changes can race with a completed model; never overwrite the fence.
+            if self.host_epoch() != epoch:
+                state, reason = "paused", "host_epoch_changed"
+            self.db.execute("UPDATE history_jobs SET state=?,owner=NULL,lease_until=NULL,review_enabled=0,updated=?,last_result=? WHERE project=? AND id=? AND owner=?",
+                            (state, time.time(), encode({"reason": reason, "reviews": results[:20]}), project, job_id, owner))
+            self.db.execute("UPDATE project_onboarding SET state='started',updated=? WHERE project=?", (time.time(), project))
+        return self.history_status(project, job_id)

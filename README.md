@@ -12,7 +12,7 @@ Agent 可以跨对话检索项目知识；插件记录可观察的工具结果�
 
 Python **3.10+** · 本地 SQLite · [MIT](LICENSE)
 
-> 以下步骤安装 `main` 的 **0.14.2** 源码。已有 [0.13.0 下载包](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)不包含 Antigravity，请使用下面的源码安装步骤。
+> 以下步骤安装 `main` 的 **0.15.0** 源码。已有 [0.13.0 下载包](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)不包含 Antigravity 和历史吸收，请使用下面的源码安装步骤。
 
 ## 快速开始
 
@@ -109,11 +109,13 @@ codex plugin list --json
 | 能力 | 对项目有什么帮助 |
 |---|---|
 | **跨对话的项目知识** | 保留事实、操作经验和解法；更换对话后继续查阅 |
+| **已有项目历史吸收** | 用户主动选择项目文档、源码及对话，按来源版本归档、有限整理并审核发布 |
 | **有界检索与摘要** | 默认本地全文检索，先给有限预览，再按需展开；可选语义混合检索 |
 | **有来源、可修订的知识** | 查看适用条件、限制、证据和修订；处理反例、更新及撤销 |
 | **自动记录、分工整理** | Hook 记录工具事件，管理员按需增量审核，普通 Agent 无需逐次写复盘 |
 | **本机只读浏览器** | 搜索知识，查看修订、来源事件和管理员待办 |
 | **预算与任务评估** | 控制注入和审核预算；对“无记忆／有记忆”任务进行成对评估 |
+| **功能更新提醒** | 两宿主可选检查 Release，显示新增说明，支持稍后提醒与忽略本版 |
 
 默认本地运行，无额外模型调用。语义模型、管理员执行器、后台调度和远端服务均按需配置。目前尚无真实任务数据支持 token、耗时或质量收益比例。
 
@@ -135,6 +137,7 @@ codex plugin list --json
 | 查找经验、展开正文 | [语义混合检索](#语义混合检索)、[手动处理问题](#手动处理一个问题) |
 | 打开可视化知识库 | [知识浏览器](#知识浏览界面) |
 | 更新插件、处理宿主差异 | [安装与维护参考](#安装与维护参考) |
+| 为已有项目吸收文档与历史 | [用户主动历史吸收](#为已有项目吸收历史) |
 | 启用管理员整理 | [管理员执行器](#可选管理员执行器) |
 | 设置工具执行边界 | [任务范围与执行保护](#任务范围与执行保护) |
 | 评估实际收益 | [真实任务对照评估](#真实任务对照评估) |
@@ -278,7 +281,7 @@ flowchart LR
 | 2. 任务与执行控制 | 保存任务合同与版本，绑定父子 Agent，核对受信许可、状态、动作和余额；知识不能签发权限 | [task_control.py](agent_learning/task_control.py)、[execution.py](agent_learning/execution.py)、[assignments.py](agent_learning/assignments.py) |
 | 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；全文与可选向量均为可重建派生索引 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py)、[semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. 检索与上下文管理 | 有限混合召回与筛选、摘要／分页预算、展示台账、失效通知、压缩恢复、失败补查与只读浏览 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py)、[knowledge_browser.py](agent_learning/knowledge_browser.py) |
-| 5. 事件、证据与案例采集 | 记录可观察事件与工具结果，处理幂等、冲突、迟到回调和用户反馈，形成可追溯的问题增量 | [event_capture.py](agent_learning/event_capture.py)、[case_store.py](agent_learning/case_store.py)、[runtime.py](agent_learning/runtime.py) |
+| 5. 事件、证据与案例采集 | 记录可观察事件与工具结果；用户专用历史吸收保存版本化来源和独立案例，处理幂等、冲突与覆盖 | [event_capture.py](agent_learning/event_capture.py)、[case_store.py](agent_learning/case_store.py)、[history_sources.py](agent_learning/history_sources.py)、[history_import.py](agent_learning/history_import.py)、[runtime.py](agent_learning/runtime.py) |
 | 6. 管理员知识治理 | 组织有限审核包，增量排队、调用及回执，提出候选和治理建议；管理员 MCP 不发布知识 | [review_packet.py](agent_learning/review_packet.py)、[admin.py](agent_learning/admin.py)、[admin_queue.py](agent_learning/admin_queue.py)、[admin_lifecycle.py](agent_learning/admin_lifecycle.py)、[admin_decisions.py](agent_learning/admin_decisions.py)、[admin_governance.py](agent_learning/admin_governance.py) |
 | 7. 知识发布与版本治理 | 通过受信入口发布、更新、撤销、恢复和晋升；保存批次清单、安全回退与可选分发状态 | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py)、[publication_state.py](agent_learning/publication_state.py)、[knowledge_releases.py](agent_learning/knowledge_releases.py)、[knowledge_sync.py](agent_learning/knowledge_sync.py)、[hindsight.py](agent_learning/hindsight.py) |
 | 8. 后台调度、预算与效果评估 | 持久待办、调用预算、知识展示与采用记录，以及独立的成对任务评估 | [scheduler.py](agent_learning/scheduler.py)、[admin_usage.py](agent_learning/admin_usage.py)、[learning_evaluation.py](agent_learning/learning_evaluation.py)、[task_evaluation.py](agent_learning/task_evaluation.py) |
@@ -470,9 +473,18 @@ python -B scripts/learning.py update-status
 }
 ```
 
-Codex 主会话 `SessionStart(startup/resume)` 在事件事务外预留检查，由独立短进程访问 GitHub；压缩、清空和子 Agent 不派发检查。默认每天按间隔检查，同一数据目录按仓库和通道共用缓存、短租约与进程锁，避免多个对话重复请求。检测到新版本后，在后续 `startup/resume` 提醒；完整检查状态通过 `update-status`／`status` 查看，不阻塞当前知识注入。失败会退避，响应大小受限，支持 ETag/304；超时约束 socket 与响应读取，操作系统 DNS 不属于严格进程总时长限制。
+Codex 主会话 `SessionStart(startup/resume)` 在事件事务外预留检查，由独立短进程访问 GitHub；后续启动／恢复及用户提示事件读取缓存提醒。压缩、清空和子 Agent 不派发检查。Antigravity 的新鲜 `PreInvocation` 在本地检查间隔及通知台账，后台网络请求使用独立短进程。默认每天按间隔检查，同一数据目录按仓库和通道共用缓存、短租约与进程锁，知识注入不等待网络。失败会退避，响应大小受限，支持 ETag/304；超时约束 socket 与响应读取，操作系统 DNS 不属于严格进程总时长限制。
 
-Antigravity 当前没有接入等价的自动版本检查回调；可使用上方显式 CLI 查询。
+提醒包含有界发布标题／说明，并询问是否更新。同版本提醒按交付渠道去重：Codex 使用 `systemMessage`；Antigravity 使用独立 `ephemeralMessage` 提供给 Agent 转述，不能称为原生弹窗或用户已经阅读。原生重复事件不重放旧更新提示。首次检查完成后的结果在下一受支持事件显示，关闭宿主时不会主动通知。
+
+```powershell
+python -B scripts/learning.py update-notice
+python -B scripts/learning.py update-choice snooze --snooze-seconds 86400
+python -B scripts/learning.py update-choice ignore --version 0.16.0
+python -B scripts/learning.py update-choice reset
+```
+
+`update-notice` 只读通知状态，暂缓和忽略按准确版本跨宿主共用；`reset` 明确允许再次提醒。指定版本应是实际缓存的新版，上方版本号仅示例。`update-choice` 不下载、安装、开启历史吸收或初始化知识数据库。自动检查仍默认关闭；未开启检查的旧用户不会被远程强制提醒。
 
 `prerelease` 通道包含测试版，`stable` 排除测试版。仅比较最近 20 条 Release 中的合格语义版本；不把提交、普通标签或尚未发布的开发版本当成更新。`ahead` 表示本地版本比检查到的发布版本新。检查只连接官方 GitHub API，不读登录令牌、不下载或执行代码、不自动替换安装；新版通过上面的显式覆盖命令安装。[GitHub Release API](https://docs.github.com/en/rest/releases/releases)
 
@@ -516,7 +528,44 @@ python scripts/learning.py account-changed --notification-id "unique-login-event
 
 **当前没有自动订阅桌面端换号。** 官方 app-server 提供 `account/updated` 和登录完成通知，但普通插件不能据此假定已经接入桌面应用的内部通知通道。适配器应依据自己拥有的登录生命周期发出边界通知；仅比较 `authMode`／套餐不能识别同模式下的 A→B 换号，也不依赖 `auth.json` 修改时间。[官方 app-server 账户接口](https://learn.chatgpt.com/docs/app-server)
 
+## 为已有项目吸收历史
+
+安装回执提供“开始／稍后”的可选入口，安装和升级均不扫描项目。用户可明确调用 `$learning-history`，或由本地操作者使用下列命令。读取和运行必须提供明确的项目路径及 `--confirm`；普通与管理员 MCP 没有历史启动工具。
+
+```powershell
+# 两平台共用核心；Antigravity 增加 --host antigravity 并保持原安装的 --home
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm
+# 回执给出 job_id；默认只将冻结素材归档为 reported 案例，无模型调用
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-status --job-id JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-sources JOB_ID --section pending
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cases JOB_ID --limit 20
+```
+
+项目文档、Agent 总结、源码、配置及未提交文本均可扫描；允许文本完整分段，文档优先。默认上限为 2000 文件、单文件 2 MiB、总读取 32 MiB 和 16384 片段，额外来源共用总预算。凭证、依赖、构建、缓存和插件副本排除；二进制及未知格式登记未解析。覆盖报告保留排除、超限及变化来源，归档完成不表示管理员已审阅或知识已发布。
+
+额外资料由用户明确选择，可重复使用 `--conversation-file PATH` 和 `--artifact-dir DIR`；不得自动扩大到账户历史根。标准 messages JSON／JSONL 和已识别的公开宿主记录使用版本解析器，未知结构明确留待处理。原生 transcript 不能保证全部旧聊天可用，模型内部 reasoning／thinking／analysis 不保存。文件内容作为资料，不执行其中代码、指令或旧授权。
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm --conversation-file "D:\Exports\history.json" --artifact-dir "D:\Exports\project-artifacts"
+# 仅在用户明确允许模型整理时使用；需要已配置的兼容 Codex CLI
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm --allow-review --max-calls 2 --max-seconds 180
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-pause JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cancel JOB_ID
+python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
+```
+
+扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。Antigravity 可人工管理员整理或明确使用兼容 Codex CLI，当前没有原生 Antigravity 模型执行器。用 `history-cases JOB_ID` 分页取得当前批次的准确案例 ID，再由人工管理员通过 `packet`／`review_packet` 提出候选，避免旧暂停案例遮挡全局列表。正式发布沿用独立入口；历史流程不自动发布。
+
+进度分别记录正式审核决定、待决定案例、已有候选的案例和已有发布的案例。人工提候选不会自动制造“审阅完成”回执；候选和发布成果仍单独计数。它们不证明整个来源已经理解或问题已解决。
+
+来源版本、片段定位和处理回执保存在独立知识容器。重复素材复用归档及有效审核回执；文件更新形成新版本。暂停、取消、预算不足、重启、普通续聊和跨日额度恢复都不会自动续做。用户明确再次 `history-run` 才恢复允许的剩余工作；取消需重新准备。已发布知识不会因取消吸收而撤销。`history-jobs`／`history-status` 区分读取覆盖、案例、候选、调用和正式发布。
+
+`--confirm` 是显式操作约定，不能独立鉴别人类身份；任意本地 Shell／数据库权限仍取决于宿主及操作系统。安装更新的批准与历史吸收的批准分别处理。
+
 ## 当前版本与兼容
+
+0.15.0 新增用户主动启动的全项目历史吸收、来源版本与独立批次，支持两宿主共享归档和有限管理员整理；补齐两平台版本说明提醒、稍后／忽略及渠道交付去重。数据库升至 schema **13**，内部发布协议 **13**；全文索引 **4**、语义索引 **1** 不变。迁移保留现有知识，旧运行端不能打开 schema 13；安装备份仍不代替外部数据库备份。源码变化尚未发布新下载 Release，用户版本检查只认实际 GitHub Release。
 
 0.14.2 修复 Antigravity 默认安装时知识容器与 `runtime-releases` 的路径冲突，支持从已校验的默认固定副本再次导出或迁移运行目录。数据库 schema 12、全文索引 4、语义索引 1、内部发布协议 12 均保持不变。已有安装按原宿主覆盖升级；默认数据目录与已有知识不迁移。公开下载仍为 0.13.0。
 
@@ -865,6 +914,10 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 |---|---|
 | `status` | 读取运行状态 |
 | `update-check`、`update-status` | 有界检查 GitHub Release，或只读缓存版本状态 |
+| `update-notice`、`update-choice` | 查看版本提醒状态，或明确暂缓、忽略、重置提醒 |
+| `history-prepare`、`history-run` | 用户显式选择来源并有限归档／整理；不自动发布 |
+| `history-status`、`history-jobs`、`history-sources`、`history-cases` | 查看来源覆盖、进度、消耗及分页来源／案例清单，不启动吸收 |
+| `history-pause`、`history-cancel`、`history-skip` | 暂停、取消或记录首次稍后选择 |
 | `learning-effects`、`knowledge-use` | 时间窗效果观察及准确任务下的简短采用声明 |
 | `scheduler-status`、`scheduler-tick`、`scheduler-run` | 持久待办状态、有界单轮和有界续跑 |
 | `session-bind` | 受信本地入口登记明确会话／子 Agent，返回可验证句柄 |
@@ -891,6 +944,16 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | `--host codex\|antigravity` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
 | `antigravity-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
+
+## 0.15.0 检查状态（2026-10-13）
+
+Windows 本地完整隔离回归发现 **1028 项：1026 通过、2 项因平台条件跳过，零失败或错误**。全部 Python 模块通过 Python 3.10 语法解析。两平台导出／覆盖升级、固定副本入口、wheel 与源码分发资源已核对，新增显式历史技能均通过结构校验。
+
+代表性试用覆盖：明确选择项目及额外来源→冻结脱敏版本→归档 reported 案例→人工管理员候选→受信发布→另一宿主检索。保护检查覆盖日常队列排除、暂停／取消／换号回写、全局及单次预算、未知调用不自动重试、来源／案例分页、时间戳、正文及定位一致性、脱敏标记分段、schema 12→13 迁移回滚和 Windows 长路径安装。
+
+更新提醒检查使用模拟 Release 和隔离缓存，验证两个渠道、首次结果延迟、重复事件、通知选择及并发；软件检查和选择命令不初始化知识数据库。首次完整回归发现的 Windows 资源长路径及并发测试 Mock 污染已修复，以上为修复后的完整结果。
+
+检查未使用真实项目历史、知识数据库或模型，未启用用户真实 Hooks、修改登录／插件配置或启动常驻服务。当前没有本版本线上 CI、真实宿主通知展示或原生 Antigravity 管理员模型验收结果；下方 0.14 系列 CI 是历史基线。本次交付为本地源码提交，尚未发布 GitHub Release。
 
 ## 可用性检查（2026-10-12）
 

@@ -224,7 +224,7 @@ def _settings(cfg):
     return list(command), cfg["timeout_seconds"]
 
 
-def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch):
+def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch, history_job_id=None):
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
     from .admin_queue import eligible_query, remember_check, scan_signature
@@ -233,12 +233,14 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     recover_calls(runtime, project)
     signature = scan_signature(runtime, project)
     preflight_signature = scan_signature(runtime, project, include_candidates=False)
-    query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature)
+    if history_job_id is not None:
+        runtime.history_guard(project, problem_id, history_job_id, require_review=True, expected_epoch=epoch)
+    query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature, history_job_id=history_job_id)
     rows = runtime.db.execute(query + "ORDER BY p.created,p.id LIMIT ?",
                               (project, *args, 1 if problem_id is not None else scan_limit)).fetchall()
     skipped, scanned = [], 0
     if not rows:
-        query, args = eligible_query(signature, None, include_cached=True)
+        query, args = eligible_query(signature, None, include_cached=True, history_job_id=history_job_id)
         blocked = runtime.db.execute(query + "AND EXISTS(SELECT 1 FROM admin_preflights f WHERE "
                                      "f.project=p.project AND f.problem=p.id AND f.revision=p.revision "
                                      "AND f.signature=? AND f.task_updated IS t.updated) ORDER BY p.created,p.id LIMIT 10",
@@ -308,9 +310,11 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         claim = claim_call(runtime, project, selected["id"], selected["revision"], review, epoch, timeout)
         if claim["status"] != "reserved":
             return dict(claim, scanned_count=scanned)
+        if history_job_id is not None:
+            runtime.history_reserve_call(project, history_job_id, selected["id"], claim["call_id"], epoch)
         return {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
-                "scanned_count": scanned, "skipped_problem_ids": skipped, **claim}
+                "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id, **claim}
     return {"status": "needs_evidence" if skipped else "scan_complete", "scanned_count": scanned,
             **({"problem_id": skipped[0], "skipped_problem_ids": skipped,
                 "reason": "bounded scan blocked; no invocation reserved"} if skipped else {})}
@@ -331,6 +335,9 @@ def _accept_response(runtime, project, reserved, response):
     if not isinstance(missing, list) or len(missing) > 8 or not all(isinstance(v, str) and len(v) <= 1000 for v in missing):
         raise ContractError("invalid missing evidence requirements")
     validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+    if reserved.get("history_job_id"):
+        runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
+                              require_review=True, expected_epoch=reserved["host_epoch"])
     revision = runtime.db.execute("SELECT revision FROM problems WHERE project=? AND id=?",
                                   (project, packet["problem"]["id"])).fetchone()
     if not revision or revision[0] != packet["problem"]["revision"]:
@@ -372,7 +379,7 @@ def _accept_response(runtime, project, reserved, response):
                                         reason=result["reason"], evidence_refs=refs, expected_epoch=reserved["host_epoch"]))
     elif response["decision"] == "governance":
         raise ContractError("governance decision requires a proposal")
-    if response["decision"] == "candidate" and runtime.config["admin"]["auto_publish"]:
+    if response["decision"] == "candidate" and runtime.config["admin"]["auto_publish"] and not reserved.get("history_job_id"):
         reason = ("evidence truncated" if packet.get("evidence_truncated") else
                   "requires trusted tool-success evidence" if body["validation_level"] != "tool_success" else
                   "requires operation solution" if body["category"] != "operation" or body.get("knowledge_kind", "solution") != "solution" else
@@ -390,15 +397,20 @@ def _accept_response(runtime, project, reserved, response):
     remember_check(runtime, project, reserved["selected"], scan_signature(runtime, project))
     # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
     validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+    if reserved.get("history_job_id"):
+        runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
+                              require_review=True, expected_epoch=reserved["host_epoch"])
     return result
 
 
-def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10):
+def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10, _history_job_id=None):
     from .admin_lifecycle import mark_launch_intent, mark_started
     epoch = runtime.assert_host_epoch(expected_epoch)
     cfg = runtime.config["admin"]
-    if not cfg["enabled"]:
+    if not cfg["enabled"] and _history_job_id is None:
         return {"status": "disabled", "scanned_count": 0}
+    if _history_job_id is not None:
+        runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
     command, timeout = _settings(cfg)
     if cfg["max_calls_per_day"] == 0:
         return {"status": "budget_exhausted", "scanned_count": 0}
@@ -408,7 +420,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             return {"status": "batch_time_exhausted", "scanned_count": 0}
         timeout = min(timeout, remaining)
     with runtime.transaction():
-        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch)
+        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch, _history_job_id)
     if reserved["status"] != "reserved":
         return reserved
     call_id, process, started_at = reserved["call_id"], None, time.monotonic()
@@ -432,6 +444,9 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 return {"status": "batch_time_exhausted", "call_id": call_id, "usage": usage, **context}
             timeout = min(timeout, remaining)
         with log_path.open("wb") as log:
+            if _history_job_id is not None:
+                with runtime.transaction():
+                    runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
             mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             try:
                 process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log, stderr=log, env=env, cwd=directory,
@@ -470,6 +485,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             process.wait(timeout=5)
         if temporary is not None:
             temporary.cleanup()
+        if _history_job_id is not None:
+            runtime.history_refund_call(_history_job_id, call_id)
 
 
 def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _deadline=None):

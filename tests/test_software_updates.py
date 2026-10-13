@@ -240,11 +240,12 @@ class SoftwareUpdateTests(unittest.TestCase):
                 result, _ = self.check(payload, force=True)
                 self.assertEqual(result["error_reason"], "invalid_response")
 
-    def test_cache_omits_prose_assets_and_author_material(self):
-        self.check([release(body="private-prose", assets=[{"token": "private-assets"}],
+    def test_cache_keeps_bounded_release_summary_but_omits_assets_and_author_material(self):
+        result, _ = self.check([release(body="新增项目历史吸收", assets=[{"token": "private-assets"}],
                             author={"token": "private-author"})])
         _, cache_path, _, _ = updates._paths(self.home, self.config)
         self.assertNotIn("private", cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["release_notes"], "新增项目历史吸收")
         self.assertEqual(list(self.home.glob("*.sqlite3")), [])
         self.assertEqual(list(self.home.glob("*.tmp")), [])
 

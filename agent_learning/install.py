@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 from . import __version__
-from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release_root
+from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release_root, filesystem_path
 from .runtime import ContractError
 from .install_update import (installation_lock, inspect_installation, preserve_extra_files,
                              safe_path, switch_installation, write_installation_manifest,
@@ -22,10 +22,12 @@ from .install_update import (installation_lock, inspect_installation, preserve_e
 RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
 RESOURCE_FILES = ("README.md", "LICENSE", "config.example.json", ".mcp.json")
 REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "hooks/hooks.json",
-                  "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
+                  "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
+                  "skills/learning-history/agents/openai.yaml",
                   ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json")
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
-                     "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md")
+                     "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
+                     "skills/learning-history/agents/openai.yaml")
 
 
 def _resource_root():
@@ -44,6 +46,7 @@ def _resource_root():
 
 
 def _validate_antigravity_resources(root):
+    root = filesystem_path(root)
     for name in ANTIGRAVITY_FILES:
         if not root.joinpath(name).is_file():
             raise ContractError("Antigravity plugin resource is missing: " + name)
@@ -76,12 +79,13 @@ def _validate_antigravity_resources(root):
                     raise ContractError("Antigravity plugin Hook handler contract is invalid")
     if not isinstance(json.loads(root.joinpath("mcp_config.json").read_text(encoding="utf-8")), dict):
         raise ContractError("Antigravity plugin MCP resource is invalid")
-    for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md"):
+    for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md"):
         if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
             raise ContractError("Antigravity plugin skill resource is invalid: " + name)
 
 
 def _validate_resources(root, host="codex", *, bundle=False):
+    root = filesystem_path(root)
     try:
         if host == "antigravity" and not bundle:
             _validate_antigravity_resources(root)
@@ -107,7 +111,7 @@ def _validate_resources(root, host="codex", *, bundle=False):
         for name in (".mcp.json", ".agents/plugins/marketplace.json", "config.example.json"):
             if not isinstance(json.loads(root.joinpath(name).read_text(encoding="utf-8")), dict):
                 raise ContractError("plugin JSON resource is invalid: " + name)
-        for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md"):
+        for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md"):
             if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
                 raise ContractError("plugin skill resource is invalid: " + name)
         if bundle:
@@ -121,6 +125,7 @@ def _validate_resources(root, host="codex", *, bundle=False):
 
 
 def _copy_resource(source, target):
+    source, target = filesystem_path(source), filesystem_path(target)
     if source.is_dir():
         target.mkdir(parents=True, exist_ok=True)
         for child in source.iterdir():
@@ -132,7 +137,7 @@ def _copy_resource(source, target):
 
 
 def _copy_payload(source, package, target):
-    shutil.copytree(package, target / "agent_learning",
+    shutil.copytree(filesystem_path(package), filesystem_path(target / "agent_learning"),
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "_plugin_resources"))
     for name in (*RESOURCE_DIRS, *RESOURCE_FILES):
         _copy_resource(source.joinpath(name), target / name)
@@ -342,6 +347,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if host == "antigravity":
         result.update(workspace=str(workspace), home=str(home),
                       next_step="在Antigravity中加载此原生插件目录，核对MCP与Hooks已启用；固定项目安装不要全局用于其他项目。")
+    result["history_import"] = {"available": True, "automatic": False,
+                                "choices": ["history-prepare", "history-skip"],
+                                "workspace_required": True,
+                                "next_step": "首次接入项目可明确选择吸收或稍后；安装和升级均不会读取历史或调用模型。"}
     if previous is not None:
         result.update({"previous_release_id": previous["release"]["release_id"], "backup_directory": str(backup),
                        "preserved_extra_files": previous["extra_files"], "knowledge_and_config": "external_untouched",

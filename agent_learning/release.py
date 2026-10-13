@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
 from . import __version__
 
 
-PROTOCOL_VERSION = "12"
+PROTOCOL_VERSION = "13"
 MANIFEST_NAME = "release.json"
 RELEASE_DIRECTORY = re.compile(r"^\d+\.\d+\.\d+-[0-9a-f]{64}$")
 
@@ -22,7 +23,21 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
+def filesystem_path(value):
+    """文件操作使用 Windows 长路径；发布身份与回执仍使用普通绝对路径。"""
+    path = Path(value)
+    if os.name != "nt":
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 def _files(root):
+    root = filesystem_path(root)
     return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(root.rglob("*"))
             if path.is_file() and path != root / MANIFEST_NAME and path.suffix != ".pyc"
@@ -40,7 +55,7 @@ def validate_release_root(root):
     """逐文件核对固定发布副本；不会输出材料内容或异常详情。"""
     root = Path(root).resolve()
     try:
-        manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
+        manifest = json.loads(filesystem_path(root / MANIFEST_NAME).read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ReleaseError("release manifest is invalid")
         expected = manifest_for(root)

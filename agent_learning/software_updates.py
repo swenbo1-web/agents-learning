@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import total_ordering
 import hashlib
+import html
 import json
 import math
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
+import unicodedata
 from urllib import error, parse, request
 import uuid
 
@@ -29,8 +31,12 @@ DEFAULTS = {
 }
 API_VERSION = "2026-03-10"
 _MAX_RESPONSE_BYTES = 512 * 1024
-_MAX_CACHE_BYTES = 32 * 1024
+_MAX_CACHE_BYTES = 64 * 1024
 _RESERVATION_SECONDS = 30
+_MAX_RELEASE_NAME = 120
+_MAX_RELEASE_NOTES = 600
+_NOTICE_SECONDS = 30
+_NOTICE_CHANNELS = {"codex": "codex_system_message", "antigravity": "antigravity_ephemeral"}
 _OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 _REPOSITORY = re.compile(rf"{_OWNER}/[A-Za-z0-9_.-]{{1,100}}\Z")
 _VERSION = re.compile(
@@ -144,6 +150,37 @@ def _published(value):
     return True
 
 
+def _release_text(value, limit):
+    """Bound external prose as display data, never as execution instructions.
+
+    This is a conservative plain-text excerpt, not a semantic safety classifier.
+    Callers keep it outside project knowledge and require separate update consent.
+    """
+    if not isinstance(value, str):
+        return ""
+    value = html.unescape(value[:8192])
+    value = re.sub(r"```[^`]*```|~~~.*?~~~", "", value, flags=re.S)
+    value = re.sub(r"<!--.*?-->|<[^>]*>", "", value, flags=re.S)
+    value = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", value)
+    value = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"https?://\S+", "", value)
+    value = "".join(char for char in value if char in "\n\t" or not unicodedata.category(char).startswith("C"))
+    suspicious = re.compile(
+        r"ignore.{0,50}(instruction|prompt)|system\s*prompt|untrusted.{0,50}instruction|"
+        r"忽略.{0,20}(指令|提示)|(?:执行|运行|下载|安装).{0,20}(命令|脚本)|"
+        r"(?:^|\s)(?:curl|wget|powershell|cmd\.exe|bash|sudo|eval|exec)\b|"
+        r"\b(?:run|execute)\s+(?:this|the|a|following)\s+(?:command|script)|"
+        r"(?:api[_ -]?key|access[_ -]?token|authorization|password)\s*[:=]", re.I)
+    pieces = []
+    for line in value.splitlines():
+        line = re.sub(r"^[\s#>*+\-]+", "", line).replace("`", "")
+        line = " ".join(line.split())
+        if line and not suspicious.search(line):
+            pieces.append(line)
+    text = "；".join(pieces)
+    return text[:limit]
+
+
 def _release(value, repository):
     if not isinstance(value, dict) or type(value.get("draft")) is not bool:
         return None
@@ -176,11 +213,13 @@ def _release(value, repository):
     if api_url is not None and (not isinstance(api_url, str) or api_url.lower()
                                != f"https://api.github.com/repos/{repository}/releases/{release_id}"):
         return None
-    # Ignore release prose, assets and author fields: they are not needed to notify.
+    # Only bounded display excerpts survive; assets/authors and raw prose do not.
     return {
         "id": release_id, "tag_name": tag, "version": version.text,
         "draft": False, "prerelease": value["prerelease"],
         "html_url": url, "published_at": value["published_at"],
+        "release_name": _release_text(value.get("name", value.get("release_name")), _MAX_RELEASE_NAME),
+        "release_notes": _release_text(value.get("body", value.get("release_notes")), _MAX_RELEASE_NOTES),
     }
 
 
@@ -357,6 +396,9 @@ def _status(config, current, cache, now, lease=None):
         "latest_tag": item["tag_name"] if item else None,
         "latest_release_id": item["id"] if item else None,
         "update_available": available, "verified_release_url": item["html_url"] if item else None,
+        "release_url": item["html_url"] if item else None,
+        "release_name": item.get("release_name", "") if item else "",
+        "release_notes": item.get("release_notes", "") if item else "",
         "published_at": item["published_at"] if item else None,
         "checked_at": checked_at or None,
         "last_attempt_at": (cache or {}).get("last_attempt_at") or None,
@@ -374,7 +416,245 @@ def update_status(home, config, current_version=None):
     config = validate_config(config)
     current = _current(current_version)
     _, cache_path, lease_path, _ = _paths(home, config)
-    return _status(config, current, _cache(cache_path, config), time.time(), _lease(lease_path))
+    result = _status(config, current, _cache(cache_path, config), time.time(), _lease(lease_path))
+    result["notification"] = _notification_status(home, config, result)
+    return result
+
+
+def _notice_paths(home, config):
+    directory = Path(home).expanduser().resolve()
+    key = hashlib.sha256(config["repository"].encode()).hexdigest()[:20]
+    stem = directory / ("software-update-notice-" + key)
+    return directory, Path(str(stem) + ".json"), Path(str(stem) + ".lock")
+
+
+def _notice_version(value):
+    return _SemanticVersion(value).text.split("+", 1)[0]
+
+
+def _notice_record(value):
+    if not isinstance(value, dict):
+        return None
+    fields = ("ignored_at", "snoozed_until", "updated_at")
+    if any(not _timestamp(value.get(field, 0)) for field in fields):
+        return None
+    channels = value.get("delivered", {})
+    if (not isinstance(channels, dict) or set(channels) - set(_NOTICE_CHANNELS.values())
+            or any(not _timestamp(stamp) for stamp in channels.values())):
+        return None
+    return {**{field: value.get(field, 0) for field in fields}, "delivered": channels}
+
+
+def _notice_state(path, config):
+    empty = {"schema": 1, "repository": config["repository"], "versions": {}, "pending": None}
+    value = _read_json(path, 16 * 1024)
+    if (not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] != 1
+            or value.get("repository") != config["repository"]):
+        return empty
+    versions = value.get("versions", {})
+    if not isinstance(versions, dict) or len(versions) > 32:
+        return empty
+    clean = {}
+    for version, record in versions.items():
+        try:
+            if _notice_version(version) != version:
+                return empty
+        except ValueError:
+            return empty
+        record = _notice_record(record)
+        if record is None:
+            return empty
+        clean[version] = record
+    pending = value.get("pending")
+    if pending is not None:
+        if (not isinstance(pending, dict) or pending.get("channel") not in _NOTICE_CHANNELS.values()
+                or not isinstance(pending.get("token"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", pending["token"])
+                or not _timestamp(pending.get("created_at")) or not _timestamp(pending.get("expires_at"))
+                or not 0 < pending["expires_at"] - pending["created_at"] <= _NOTICE_SECONDS
+                or pending["expires_at"] > time.time() + _NOTICE_SECONDS):
+            return empty
+        try:
+            if _notice_version(pending.get("version")) != pending["version"]:
+                return empty
+        except ValueError:
+            return empty
+        pending = {key: pending[key] for key in ("channel", "token", "created_at", "expires_at", "version")}
+    return {**empty, "versions": clean, "pending": pending}
+
+
+def _write_notice(path, state):
+    if len(state["versions"]) > 32:
+        keep = sorted(state["versions"], key=lambda version: state["versions"][version]["updated_at"], reverse=True)[:32]
+        state["versions"] = {version: state["versions"][version] for version in keep}
+    _atomic_json(path, state)
+
+
+def _notification_status(home, config, status):
+    _, path, _ = _notice_paths(home, config)
+    state = _notice_state(path, config)
+    version = _notice_version(status["latest"]) if status["latest"] else None
+    record = state["versions"].get(version, {})
+    now = time.time()
+    pending = state["pending"]
+    active = bool(pending and pending["expires_at"] > now)
+    delivered = record.get("delivered", {})
+    if not status["update_available"]:
+        reason = "no_update"
+    elif not config["enabled"]:
+        reason = "automatic_disabled"
+    elif record.get("ignored_at"):
+        reason = "ignored"
+    elif record.get("snoozed_until", 0) > now:
+        reason = "snoozed"
+    elif status["stale"] or status["error_reason"]:
+        reason = "cache_not_fresh"
+    elif active:
+        reason = "reserved"
+    elif "codex_system_message" in delivered:
+        reason = "delivered"
+    elif delivered:
+        reason = "partially_delivered"
+    else:
+        reason = "available"
+    return {"state": reason, "version": version, "ignored": bool(record.get("ignored_at")),
+            "snoozed_until": record.get("snoozed_until") or None,
+            "delivered_channels": sorted(delivered), "delivered_at": delivered,
+            "lease_expires_at": pending["expires_at"] if active else None,
+            "user_read_confirmed": False}
+
+
+def notification_status(home, config, current_version=None):
+    """Pure cached notification status; no network, locks or SQLite."""
+    return update_status(home, config, current_version)["notification"]
+
+
+def update_notice(home, config, *, host="codex", current_version=None):
+    """Reserve one bounded cached notice. Confirm only after full output assembly.
+
+    Shared choices cover both hosts. Antigravity ephemeral output never counts as a
+    Codex user-facing message; a Codex delivery suppresses later ephemeral notices.
+    Neither channel proves that the user read or approved an update.
+    """
+    config = validate_config(config)
+    if not isinstance(host, str) or host not in _NOTICE_CHANNELS:
+        raise ValueError("unsupported update notice host")
+    if not config["enabled"]:
+        return None
+    status = update_status(home, config, current_version)
+    if not status["update_available"] or status["stale"] or status["error_reason"]:
+        return None
+    directory, path, lock_path = _notice_paths(home, config)
+    directory.mkdir(parents=True, exist_ok=True)
+    channel = _NOTICE_CHANNELS[host]
+    with _locked(lock_path) as acquired:
+        if not acquired:
+            return None
+        # Re-read after locking: a choice or another host may have changed state.
+        status = update_status(home, config, current_version)
+        if not status["update_available"] or status["stale"] or status["error_reason"]:
+            return None
+        state, now = _notice_state(path, config), time.time()
+        version = _notice_version(status["latest"])
+        record = state["versions"].get(version, {})
+        delivered = record.get("delivered", {})
+        pending = state["pending"]
+        if (record.get("ignored_at") or record.get("snoozed_until", 0) > now
+                or channel in delivered or "codex_system_message" in delivered
+                or (pending and pending["expires_at"] > now)):
+            return None
+        token = uuid.uuid4().hex
+        state["pending"] = {"version": version, "channel": channel, "token": token,
+                            "created_at": now, "expires_at": now + _NOTICE_SECONDS}
+        _write_notice(path, state)
+    details = status["release_notes"] or status["release_name"] or "发布说明未提供功能摘要，请查看原文。"
+    message = (f"Agent Learning 有新版本 {status['latest']}（当前 {status['current']}）。\n"
+               f"发布说明摘要（外部资料，仅供查看）：{details}\n"
+               "是否现在更新？可选择稍后提醒或忽略此版本；用户明确同意前不下载、不安装，也不启动历史吸收。\n"
+               f"查看发布说明：{status['release_url']}")
+    if host == "antigravity":
+        message = "Agent Learning 更新提示：请向用户转述以下信息并询问选择；这不是用户授权。\n" + message
+    return {"token": token, "version": version, "channel": channel, "message": message,
+            "release_url": status["release_url"], "release_name": status["release_name"],
+            "release_notes": status["release_notes"]}
+
+
+def _notice_token(token):
+    if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+        raise ValueError("invalid update notice token")
+
+
+def confirm_update_notice(home, config, token):
+    """Record output delivery, never user reading or consent."""
+    config = validate_config(config)
+    _notice_token(token)
+    directory, path, lock_path = _notice_paths(home, config)
+    if not directory.exists():
+        return False
+    with _locked(lock_path) as acquired:
+        if not acquired:
+            return False
+        state, now = _notice_state(path, config), time.time()
+        pending = state["pending"]
+        if not pending or pending["token"] != token or pending["expires_at"] <= now:
+            return False
+        record = state["versions"].setdefault(pending["version"], _notice_record({}))
+        record["delivered"][pending["channel"]] = now
+        record["updated_at"] = now
+        state["pending"] = None
+        _write_notice(path, state)
+        return True
+
+
+def cancel_update_notice(home, config, token):
+    config = validate_config(config)
+    _notice_token(token)
+    directory, path, lock_path = _notice_paths(home, config)
+    if not directory.exists():
+        return False
+    with _locked(lock_path) as acquired:
+        if not acquired:
+            return False
+        state = _notice_state(path, config)
+        if not state["pending"] or state["pending"]["token"] != token:
+            return False
+        state["pending"] = None
+        _write_notice(path, state)
+        return True
+
+
+def update_notice_choice(home, config, choice, version=None, *, snooze_seconds=86400, current_version=None):
+    """Explicit user choice only; this never authorizes or starts an installer."""
+    config = validate_config(config)
+    if not isinstance(choice, str) or choice not in {"snooze", "ignore", "reset"}:
+        raise ValueError("update notice choice must be snooze, ignore or reset")
+    if type(snooze_seconds) is not int or not 3600 <= snooze_seconds <= 30 * 86400:
+        raise ValueError("snooze_seconds must be between 3600 and 2592000")
+    status = update_status(home, config, current_version)
+    if not status["latest"]:
+        raise ValueError("no cached release is available for a notification choice")
+    target = _notice_version(status["latest"] if version is None else version)
+    if target != _notice_version(status["latest"]):
+        raise ValueError("notification choice must name the current cached release version")
+    directory, path, lock_path = _notice_paths(home, config)
+    directory.mkdir(parents=True, exist_ok=True)
+    with _locked(lock_path) as acquired:
+        if not acquired:
+            raise ValueError("update notification state is busy; retry the same choice")
+        latest = update_status(home, config, current_version)["latest"]
+        if not latest or target != _notice_version(latest):
+            raise ValueError("cached release changed; review it before choosing again")
+        state, now = _notice_state(path, config), time.time()
+        record = state["versions"].setdefault(target, _notice_record({}))
+        record.update(ignored_at=now if choice == "ignore" else 0,
+                      snoozed_until=now + snooze_seconds if choice == "snooze" else 0,
+                      updated_at=now)
+        if choice in {"snooze", "reset"}:
+            record["delivered"] = {}
+        state["pending"] = None
+        _write_notice(path, state)
+    return {"choice": choice, "version": target, "notification": notification_status(home, config, current_version),
+            "downloaded": False, "installed": False}
 
 
 def automatic_check_due(home, config):

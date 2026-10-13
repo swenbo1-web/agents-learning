@@ -44,12 +44,15 @@ class PackageTests(unittest.TestCase):
             wheels = list(wheel_directory.glob("*.whl"))
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
-                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates"):
+                for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/skills/learning-history/SKILL.md", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/skills/learning-history/agents/openai.yaml", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/rules/learning.md", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/skills/learning-history/SKILL.md", wheel.namelist())
                 self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
                 licenses = [name for name in wheel.namelist() if ".dist-info/" in name and name.endswith("/LICENSE")]
                 self.assertTrue(licenses, "wheel must retain its distribution license")
@@ -101,7 +104,7 @@ class PackageTests(unittest.TestCase):
                              "skills/learning-admin/SKILL.md", ".codex-plugin/plugin.json",
                              ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json", "LICENSE"):
                 self.assertTrue((exported / relative).is_file(), relative)
-            for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates"):
+            for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import"):
                 self.assertTrue((exported / "agent_learning" / f"{module}.py").is_file(), module)
             self.assertEqual((exported / "LICENSE").read_bytes(), (source_root / "LICENSE").read_bytes())
             manifest = json.loads((exported / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))

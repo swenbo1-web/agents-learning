@@ -470,6 +470,14 @@ class AntigravityAdapter:
                          (encode(output), project, conversation, event_key))
         if event == "Stop" and observed["fullyIdle"]:
             self._schedule(project, governance_epoch, phase_guard)
+        if event == "PreInvocation" and r.config["software_updates"]["enabled"]:
+            # Keep update prose out of the persisted native replay receipt. A new
+            # safe event can deliver a newly cached version; replaying this event
+            # repeats only its project knowledge output, never an old update ask.
+            warning = r._schedule_software_update(str(self.workspace))
+            if warning:
+                output = {**output, "injectSteps": [*output.get("injectSteps", []), {"ephemeralMessage": warning}]}
+            output = r._attach_software_update_notice(output, host="antigravity")
         return output
 
 

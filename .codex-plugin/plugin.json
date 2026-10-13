@@ -1,7 +1,7 @@
 {
   "name": "agent-learning",
-  "version": "0.14.2",
-  "description": "Retain project experience with bounded retrieval, evidence-based knowledge governance, a local browser and paired task evaluation.",
+  "version": "0.15.0",
+  "description": "Retain project experience with explicit historical ingestion, bounded retrieval, governed knowledge, update notices and paired task evaluation.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",

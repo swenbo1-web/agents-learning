@@ -12,7 +12,7 @@ import stat
 import uuid
 
 from .runtime import ContractError
-from .release import PROTOCOL_VERSION
+from .release import PROTOCOL_VERSION, filesystem_path
 
 
 INSTALL_MANIFEST = "installation-manifest.json"
@@ -28,7 +28,10 @@ def _canonical(value):
 
 def _linked(path):
     try:
-        info = path.lstat()
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            info = filesystem_path(path).lstat()
     except FileNotFoundError:
         return False
     return (stat.S_ISLNK(info.st_mode)
@@ -54,14 +57,14 @@ def safe_path(value):
 
 def _hash_file(path):
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with filesystem_path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
 
 def snapshot(root):
-    root = safe_path(root)
+    root = filesystem_path(safe_path(root))
     if not root.is_dir():
         raise ContractError("installation destination must be an existing directory")
     info = root.stat()
@@ -84,7 +87,7 @@ def snapshot(root):
 
 def _json(path):
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(filesystem_path(path).read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError
         return value

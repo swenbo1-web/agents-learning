@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_learning.cli import main
+from agent_learning.antigravity import AntigravityAdapter
 from agent_learning.install import install
 from agent_learning.mcp import Server
 from agent_learning.runtime import ContractError, Runtime
@@ -64,7 +65,7 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertFalse(runtime.config["admin"]["enabled"])
         self.assertFalse(runtime.config["scheduler"]["enabled"])
         self.assertFalse(runtime.config["hindsight"]["enabled"])
-        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 12)
+        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 13)
 
     def test_invalid_update_config_rejected_before_database_open(self):
         for supplied in ([], {"enabled": "yes"}, {"repository": "https://example.org/code"},
@@ -187,6 +188,114 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertIn("99.0.0", result["systemMessage"])
         self.assertNotIn("99.0.0", result["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("untrusted release", json.dumps(result))
+
+    def cache_release(self, runtime, **fields):
+        with patch.object(updates, "_fetch", return_value=(200, {}, [{**self.release(), **fields}])):
+            return updates.check_updates(self.home, runtime.config["software_updates"], force=True)
+
+    def test_update_ask_is_once_per_version_across_codex_conversations(self):
+        runtime = self.runtime({"software_updates": {"enabled": True}, "injection_max_chars": 128})
+        self.cache_release(runtime, body="新增项目历史吸收与双宿主支持")
+        with patch.object(runtime, "_launch_background") as launch:
+            first = self.hook(runtime)
+            second = self.hook(runtime, session_id="another-chat")
+        launch.assert_not_called()
+        self.assertIn("是否现在更新", first["systemMessage"])
+        self.assertIn("历史吸收", first["systemMessage"])
+        self.assertNotIn("systemMessage", second)
+        self.assertLessEqual(len(first["hookSpecificOutput"]["additionalContext"]), 128)
+        self.assertEqual(updates.notification_status(self.home, runtime.config["software_updates"])["state"], "delivered")
+
+    def test_finished_background_result_can_notify_on_next_user_prompt(self):
+        runtime = self.runtime({"software_updates": {"enabled": True}})
+        with patch.object(runtime, "_launch_background") as launch:
+            initial = self.hook(runtime)
+        self.assertNotIn("systemMessage", initial)
+        token = launch.call_args.args[2][1]
+        with patch.object(updates, "_fetch", return_value=(200, {}, [self.release()])):
+            updates.check_updates(self.home, runtime.config["software_updates"], reservation=token)
+        with patch.object(runtime, "_launch_background") as launch:
+            result = runtime.handle_hook({"hook_event_name": "UserPromptSubmit", "session_id": "chat",
+                                          "cwd": str(self.work), "prompt": "继续"})
+        launch.assert_not_called()
+        self.assertIn("99.0.0", result["systemMessage"])
+
+    def test_context_failure_does_not_claim_or_consume_update_notice(self):
+        runtime = self.runtime({"software_updates": {"enabled": True}})
+        self.cache_release(runtime)
+        with patch.object(runtime, "_context", side_effect=ContractError("context failed")):
+            with self.assertRaises(ContractError):
+                self.hook(runtime)
+        state = updates.notification_status(self.home, runtime.config["software_updates"])
+        self.assertEqual(state["state"], "available")
+        self.assertEqual(state["delivered_channels"], [])
+
+    def test_delivery_state_write_failure_does_not_break_task_and_can_retry(self):
+        runtime = self.runtime({"software_updates": {"enabled": True}})
+        self.cache_release(runtime)
+        with patch.object(updates, "confirm_update_notice", side_effect=OSError("not writable")):
+            first = self.hook(runtime)
+        self.assertIn("additionalContext", first["hookSpecificOutput"])
+        self.assertNotIn("systemMessage", first)
+        self.assertEqual(updates.notification_status(self.home, runtime.config["software_updates"])["state"], "available")
+        second = self.hook(runtime, session_id="retry-chat")
+        self.assertIn("99.0.0", second["systemMessage"])
+
+    def ag_runtime(self, enabled=True):
+        runtime = Runtime(self.home, config={"software_updates": {"enabled": enabled}}, host="antigravity")
+        self.addCleanup(runtime.close)
+        return runtime, AntigravityAdapter(runtime, self.work)
+
+    def ag_invocation(self, adapter, number=0):
+        return adapter.handle("PreInvocation", {"conversationId": "ag-chat", "workspacePaths": [str(self.work)],
+            "modelName": "fixture", "transcriptPath": "not-read.jsonl", "invocationNum": number,
+            "initialNumSteps": number})
+
+    def test_antigravity_defaults_do_not_check_or_deliver_updates(self):
+        runtime, adapter = self.ag_runtime(False)
+        with patch.object(runtime, "_launch_background") as launch, \
+             patch.object(updates, "reserve_automatic_check") as reserve:
+            output = self.ag_invocation(adapter)
+        launch.assert_not_called()
+        reserve.assert_not_called()
+        self.assertNotIn("更新提示", json.dumps(output, ensure_ascii=False))
+
+    def test_antigravity_checks_in_background_with_local_shared_reservation(self):
+        runtime, adapter = self.ag_runtime()
+        with patch.object(runtime, "_launch_background") as launch:
+            launch.side_effect = lambda *args: self.assertFalse(runtime.db.in_transaction)
+            self.ag_invocation(adapter, 0)
+            self.ag_invocation(adapter, 1)
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args[1], "update-check")
+
+    def test_antigravity_ephemeral_ask_is_not_saved_or_replayed_as_user_notice(self):
+        runtime, adapter = self.ag_runtime()
+        self.cache_release(runtime, body="新增历史知识吸收")
+        with patch.object(runtime, "_launch_background") as launch:
+            first = self.ag_invocation(adapter)
+            replay = self.ag_invocation(adapter)
+            later = self.ag_invocation(adapter, 1)
+        launch.assert_not_called()
+        self.assertNotIn("systemMessage", first)
+        self.assertIn("是否现在更新", first["injectSteps"][-1]["ephemeralMessage"])
+        self.assertIn("请向用户转述", first["injectSteps"][-1]["ephemeralMessage"])
+        self.assertNotIn("99.0.0", json.dumps(replay))
+        self.assertNotIn("99.0.0", json.dumps(later))
+        for row in runtime.db.execute("SELECT output FROM antigravity_receipts"):
+            self.assertNotIn("99.0.0", row["output"])
+        codex = self.runtime({"software_updates": {"enabled": True}})
+        result = self.hook(codex)
+        self.assertIn("99.0.0", result["systemMessage"])
+
+    def test_antigravity_notice_failure_retries_on_a_new_safe_event(self):
+        runtime, adapter = self.ag_runtime()
+        self.cache_release(runtime)
+        with patch.object(updates, "confirm_update_notice", side_effect=OSError("cannot confirm")):
+            first = self.ag_invocation(adapter)
+        self.assertNotIn("99.0.0", json.dumps(first))
+        later = self.ag_invocation(adapter, 1)
+        self.assertIn("99.0.0", later["injectSteps"][-1]["ephemeralMessage"])
 
     def test_runtime_and_mcp_status_only_read_update_cache(self):
         runtime = self.runtime()

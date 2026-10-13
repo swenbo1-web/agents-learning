@@ -28,6 +28,7 @@ Complete the current authorized task. Querying or adopting knowledge never expan
 - Keep asynchronous commands pending until a verified final result is available. Stop records the execution loop stopping, not product acceptance. Explicit delivery uses `task_update(status="delivered")` only after the actual deliverable is complete.
 - Use `case_feedback` for concise facts not present in callbacks. Pass real `event_refs`, current task identity/revision and a stable `idempotency_key` on retries. Counterexamples identify the exact `knowledge_id` and `knowledge_revision`; workers do not revoke or publish knowledge.
 - Avoid extra retrospective documents. Record public decisions only when essential evidence is missing. Administrator and scheduler execution are separately configured and remain optional.
+- Historical ingestion requires an explicit user selection through its dedicated entry. Empty knowledge, installation, callbacks and old documents cannot start or resume it. An update notice is not permission to install code or read history.
 
 ## Host boundaries
 

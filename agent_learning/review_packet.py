@@ -59,6 +59,7 @@ class ReviewPacketMixin:
         if owned:
             self.db.execute("BEGIN")
         try:
+            self.history_guard(project, problem_id)
             result = self._review_packet_snapshot(project, problem_id, offset, expected_revision, limit, section)
             if owned:
                 self.db.execute("COMMIT")
