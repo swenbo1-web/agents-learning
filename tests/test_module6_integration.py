@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -28,7 +29,7 @@ class Module6IntegrationTests(unittest.TestCase):
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
         self.task = self.r.task_update(self.p, "chat", "compilerprobe")
-        self.r.config["admin"].update(enabled=True, command=["memory-reviewer"], max_calls_per_day=20)
+        self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=20)
 
     def problem(self, summary="compilerprobe", **values):
         return self.r.feedback(self.p, "chat", summary, category=values.pop("category", "operation"), **values)
@@ -184,7 +185,7 @@ class Module6IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Runtime(home)
         with contextlib.closing(Runtime(home)) as recovered:
-            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 13)
+            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 14)
 
     def test_duplicate_origin_new_evidence_invalidates_without_losing_history(self):
         original = self.problem()

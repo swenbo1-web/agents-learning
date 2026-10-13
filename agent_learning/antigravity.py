@@ -88,6 +88,7 @@ def reset_session(runtime, workspace, native_conversation):
     conversation = runtime.host_conversation(native_conversation)
     with runtime.transaction():
         runtime.bind_session(project, conversation)
+        runtime.admin_observe_model(project, conversation, active=False)
         runtime.db.execute("INSERT OR IGNORE INTO antigravity_trajectories(project,conversation) VALUES(?,?)", (project, conversation))
         runtime.db.execute("UPDATE antigravity_trajectories SET generation=generation+1,reset_generation=generation+1,"
                            "last_invocation=-1,last_steps=-1,max_step=-1,ambiguous=0 WHERE project=? AND conversation=?", (project, conversation))
@@ -222,6 +223,7 @@ class AntigravityAdapter:
                 row["generation"] += 1
                 row["ambiguous"] = 1
                 self.runtime._execution_fence(project, conversation, "antigravity_trajectory_ambiguous")
+                self.runtime.admin_observe_model(project, conversation, active=False)
             self.runtime.db.execute("UPDATE antigravity_trajectories SET generation=?,ambiguous=?,last_invocation=?,last_steps=? "
                                     "WHERE project=? AND conversation=?",
                                     (row["generation"], row["ambiguous"], invocation, steps, project, conversation))
@@ -299,10 +301,10 @@ class AntigravityAdapter:
                     token = r.claim_scheduler_worker(expected_epoch=governance_epoch, _phase_guard=phase_guard)
                     if token:
                         r._launch_scheduler(str(self.workspace), token)
-            elif r.config["admin"]["enabled"]:
+            elif r.admin_policy(project)["enabled"]:
                 from .admin import _settings
                 from .admin_queue import claim_dispatch
-                _settings(r.config["admin"])
+                _settings(r.admin_effective_config(project))
                 token = claim_dispatch(r, project, expected_epoch=governance_epoch, _phase_guard=phase_guard)
                 if token:
                     r._launch_admin(str(self.workspace), token)
@@ -389,6 +391,11 @@ class AntigravityAdapter:
                 r.db.execute("INSERT INTO antigravity_receipts(project,conversation,event_key,kind,host_epoch,generation,raw_digest,task_signature,created) "
                              "VALUES(?,?,?,?,?,?,?,?,?)", (project, conversation, event_key, event, epoch,
                                                            trajectory["generation"], raw_digest, task_signature, time.time()))
+                if event in {"PreInvocation", "Stop"} and not trajectory["ambiguous"]:
+                    try:
+                        r.admin_observe_model(project, conversation, raw.get("modelName"), expected_epoch=epoch)
+                    except ContractError:
+                        r._metric(project, "admin_model_observation_rejected")
             operation, conflict, stale = (None, False, False)
             if event in {"PreToolUse", "PostToolUse"}:
                 operation, conflict, stale = self._step(project, conversation, observed, trajectory, epoch)

@@ -1,5 +1,6 @@
 """历史吸收的真实隔离 SQLite、权限与模型回执检查，不调用外部模型。"""
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,7 +27,7 @@ class HistoryImportTests(unittest.TestCase):
         self.r = Runtime(self.home, config={})
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
-        self.r.config["admin"].update(command=["fake-reviewer"], timeout_seconds=10)
+        self.r.config["admin"].update(command=[sys.executable], timeout_seconds=10)
 
     def prepare(self, **kwargs):
         return self.r.history_prepare(self.p, self.workspace, **kwargs)["job_id"]

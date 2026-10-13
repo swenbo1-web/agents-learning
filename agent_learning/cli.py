@@ -202,6 +202,15 @@ def parser():
     admin.add_argument("--problem")
     batch = sub.add_parser("admin-batch", help="按案例数、调用数与时长运行有限审核批次")
     batch.add_argument("--dispatch-token", help="由本地Hook预留的后台派发身份")
+    configure = sub.add_parser("admin-configure", help="明确开启或关闭当前项目/宿主的自动知识审核；不自动发布")
+    configure.add_argument("--enabled", choices=["on", "off"], required=True)
+    configure.add_argument("--provider", choices=["host", "codex", "antigravity"], help="首次默认 host，后续省略保留")
+    configure.add_argument("--model-mode", choices=["current", "default", "fixed"], help="首次默认 current，后续省略保留")
+    configure.add_argument("--model", help="fixed 模式的模型标识")
+    configure.add_argument("--command-file", help="可选 JSON 可执行参数数组，不包含令牌或模型选项")
+    configure.add_argument("--expected-policy-version", type=int)
+    admin_status = sub.add_parser("admin-status", help="检查当前项目/宿主审核设置与预算，不调用模型")
+    admin_status.add_argument("--conversation", help="可选宿主原生会话ID，用于核对当前模型")
     retry = sub.add_parser("admin-retry", help="核对失败或未知调用后明确允许一次再审，原额度记录保留")
     retry.add_argument("call_id")
     retry.add_argument("--reason", required=True)
@@ -258,6 +267,8 @@ def main(argv=None):
             return 1
     runtime = None
     try:
+        if args.command == "admin-configure" and not args.workspace:
+            raise ContractError("admin-configure requires an explicit --workspace")
         if args.command.startswith("history-"):
             if not args.workspace:
                 raise ContractError("history commands require an explicit --workspace; installation cwd is not a project choice")
@@ -330,7 +341,7 @@ def main(argv=None):
             print(encode(AntigravityAdapter(runtime, args.workspace, args.hook_mode).handle(
                 args.event, json.loads(data.decode("utf-8-sig")))))
             return 0
-        if hasattr(args, "conversation"):
+        if getattr(args, "conversation", None) is not None:
             args.conversation = runtime.host_conversation(args.conversation)
         if args.command == "account-changed":
             print(encode(runtime.account_changed(notification_id=args.notification_id)))
@@ -426,6 +437,18 @@ def main(argv=None):
         elif args.command == "read": result = runtime.read(project, args.knowledge_id)
         elif args.command == "admin-once": result = admin_once(runtime, project, args.problem)
         elif args.command == "admin-batch": result = admin_batch(runtime, project, dispatch_token=args.dispatch_token)
+        elif args.command == "admin-configure":
+            command = json.loads(Path(args.command_file).read_text(encoding="utf-8-sig")) if args.command_file else None
+            policy = runtime.admin_policy(project)
+            provider = args.provider or (policy["provider"] if policy["policy_version"] else "host")
+            mode = args.model_mode or (policy["model_mode"] if policy["policy_version"] else "current")
+            model = args.model if args.model is not None else policy["model"] if mode == policy["model_mode"] else ""
+            result = runtime.admin_configure(project, args.enabled == "on", provider, mode, model, command,
+                                             expected_policy_version=(args.expected_policy_version if args.expected_policy_version is not None
+                                                                      else policy["policy_version"]))
+        elif args.command == "admin-status":
+            from .admin_usage import admin_budget_status
+            result = {**runtime.admin_routing_status(project, args.conversation), "budget": admin_budget_status(runtime)}
         elif args.command == "admin-retry":
             from .admin_lifecycle import retry_call
             result = retry_call(runtime, project, args.call_id, args.reason)

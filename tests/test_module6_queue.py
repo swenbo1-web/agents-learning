@@ -2,6 +2,7 @@
 from pathlib import Path
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -66,7 +67,7 @@ class Module6QueueTests(unittest.TestCase):
         self.configure(self.r)
 
     def configure(self, runtime, **values):
-        runtime.config["admin"].update(enabled=True, command=["memory-reviewer"], max_calls_per_day=100,
+        runtime.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=100,
                                        max_input_chars=16000, timeout_seconds=10, max_cases_per_batch=20,
                                        max_calls_per_batch=2, max_batch_seconds=30, auto_publish=False)
         runtime.config["admin"].update(values)

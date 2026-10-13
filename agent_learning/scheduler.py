@@ -87,7 +87,7 @@ class SchedulerMixin:
         self.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?", (now, epoch))
 
     def _scheduler_admin_state(self, project, cfg):
-        from .admin_queue import eligible_query, scan_signature
+        from .admin_queue import eligible_query, scan_signature, ready_executor
         from .admin_usage import admin_budget_status
         from .runtime import digest
         signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
@@ -98,7 +98,7 @@ class SchedulerMixin:
                                                              "WHERE project=? GROUP BY state", (project,))],
             "retries": list(self.db.execute("SELECT COUNT(*),MAX(finished),COALESCE(SUM(retry_allowed),0) "
                                               "FROM admin_calls WHERE project=?", (project,)).fetchone())})
-        if not cfg["enabled"] or not self.config["admin"]["enabled"]:
+        if not cfg["enabled"] or not self.admin_policy(project)["enabled"]:
             return signature, "disabled", None, "admin_disabled"
         now = time.time()
         active = self.db.execute("SELECT MIN(lease_until) FROM admin_calls WHERE project=? AND state "
@@ -118,6 +118,8 @@ class SchedulerMixin:
                 "WHERE s.project=? AND p.status='pending' AND s.revision=p.revision AND s.state='awaiting_evidence' LIMIT 1", (project,)).fetchone()
             reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
             return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
+        if not ready_executor(self, project, query, args):
+            return signature, "waiting", None, "executor_not_ready"
         budget = admin_budget_status(self)
         admission = budget["admission_status"]
         if admission != "available":

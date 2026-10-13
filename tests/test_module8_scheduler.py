@@ -1,6 +1,7 @@
 """持久调度与派发边界；真实 SQLite、内存任务，无模型或网络调用。"""
 from pathlib import Path
 import tempfile
+import sys
 import time
 import unittest
 from unittest.mock import patch
@@ -25,7 +26,7 @@ class Module8SchedulerTests(unittest.TestCase):
             self.r._migrate_scheduler_storage()
         self.p = self.r.project(self.workspace)
         self.r.config["scheduler"] = {**SCHEDULER_DEFAULTS, "enabled": True, "poll_seconds": 1}
-        self.r.config["admin"].update(enabled=True, command=["memory-only"], max_calls_per_day=100)
+        self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=100)
         self.r.task_update(self.p, "chat", "scheduler test")
 
     def problem(self, summary="independent compiler error", project=None):

@@ -165,7 +165,7 @@ class AntigravityProtocolTests(unittest.TestCase):
             db.execute("PRAGMA user_version=11")
         upgraded = Runtime(self.ag.home, config={})
         try:
-            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 13)
+            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 14)
             self.assertEqual(upgraded.read(self.project, item["knowledge_id"])["revision"], 1)
             self.assertEqual(upgraded.access_context(self.project, handle)["conversation_id"], "legacy-reader")
         finally:

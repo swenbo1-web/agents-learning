@@ -1,6 +1,7 @@
 """第八模块准入、计量和决定提交边界；临时 SQLite 与内存执行器。"""
 from pathlib import Path
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -25,7 +26,7 @@ class Module8BudgetTests(unittest.TestCase):
         self.r = Runtime(self.home)
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
-        self.r.config["admin"].update(enabled=True, command=["memory-reviewer"], max_calls_per_day=10,
+        self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=10,
                                        max_concurrent_calls=1, token_reservation_per_call=4000,
                                        max_reported_tokens_per_day=None)
         with self.r.transaction():

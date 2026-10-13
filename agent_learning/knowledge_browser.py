@@ -69,7 +69,7 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13}:
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14}:
         raise ContractError("browser requires database schema 11 or 12; run an explicit upgrade first")
 
 

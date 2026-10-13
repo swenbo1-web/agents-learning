@@ -12,7 +12,7 @@ Agent 可以跨对话检索项目知识；插件记录可观察的工具结果�
 
 Python **3.10+** · 本地 SQLite · [MIT](LICENSE)
 
-> 以下步骤安装 `main` 的 **0.15.0** 源码。已有 [0.13.0 下载包](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)不包含 Antigravity 和历史吸收，请使用下面的源码安装步骤。
+> 以下步骤安装 `main` 的 **0.16.0** 源码。已有 [0.13.0 下载包](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0)不包含 Antigravity、历史吸收和双平台自动知识审核，请使用下面的源码安装步骤。
 
 ## 快速开始
 
@@ -282,7 +282,7 @@ flowchart LR
 | 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；全文与可选向量均为可重建派生索引 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py)、[semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. 检索与上下文管理 | 有限混合召回与筛选、摘要／分页预算、展示台账、失效通知、压缩恢复、失败补查与只读浏览 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py)、[knowledge_browser.py](agent_learning/knowledge_browser.py) |
 | 5. 事件、证据与案例采集 | 记录可观察事件与工具结果；用户专用历史吸收保存版本化来源和独立案例，处理幂等、冲突与覆盖 | [event_capture.py](agent_learning/event_capture.py)、[case_store.py](agent_learning/case_store.py)、[history_sources.py](agent_learning/history_sources.py)、[history_import.py](agent_learning/history_import.py)、[runtime.py](agent_learning/runtime.py) |
-| 6. 管理员知识治理 | 组织有限审核包，增量排队、调用及回执，提出候选和治理建议；管理员 MCP 不发布知识 | [review_packet.py](agent_learning/review_packet.py)、[admin.py](agent_learning/admin.py)、[admin_queue.py](agent_learning/admin_queue.py)、[admin_lifecycle.py](agent_learning/admin_lifecycle.py)、[admin_decisions.py](agent_learning/admin_decisions.py)、[admin_governance.py](agent_learning/admin_governance.py) |
+| 6. 管理员知识治理 | 组织有限审核包，按项目与宿主选择执行器和模型，增量排队、调用及回执；管理员 MCP 不发布知识 | [review_packet.py](agent_learning/review_packet.py)、[admin.py](agent_learning/admin.py)、[admin_routing.py](agent_learning/admin_routing.py)、[admin_providers.py](agent_learning/admin_providers.py)、[admin_queue.py](agent_learning/admin_queue.py)、[admin_lifecycle.py](agent_learning/admin_lifecycle.py)、[admin_decisions.py](agent_learning/admin_decisions.py)、[admin_governance.py](agent_learning/admin_governance.py) |
 | 7. 知识发布与版本治理 | 通过受信入口发布、更新、撤销、恢复和晋升；保存批次清单、安全回退与可选分发状态 | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py)、[publication_state.py](agent_learning/publication_state.py)、[knowledge_releases.py](agent_learning/knowledge_releases.py)、[knowledge_sync.py](agent_learning/knowledge_sync.py)、[hindsight.py](agent_learning/hindsight.py) |
 | 8. 后台调度、预算与效果评估 | 持久待办、调用预算、知识展示与采用记录，以及独立的成对任务评估 | [scheduler.py](agent_learning/scheduler.py)、[admin_usage.py](agent_learning/admin_usage.py)、[learning_evaluation.py](agent_learning/learning_evaluation.py)、[task_evaluation.py](agent_learning/task_evaluation.py) |
 
@@ -375,7 +375,7 @@ codex plugin add agent-learning@agent-learning-local
 | 工具保护 | 已接入的执行规则与受信许可 | 默认 observe 无前置 Hook；enforce 检查通过返回 `ask`，拒绝返回 `deny` |
 | 停止 | 按已上报任务与公开交付消息处理 | `Stop` 记录停止；`fullyIdle=false` 不结束后台任务，true 也不代表用户验收 |
 | 压缩、子 Agent、登录变化 | 使用受支持事件及显式入口 | 不伪造等价事件；编号歧义需受信重置，换号使用显式 CLI 通知 |
-| 管理员 | 可选 Codex CLI 执行器与单独 admin 接口 | 复用治理队列；未实现 Antigravity 自动模型执行器，默认仍无模型调用 |
+| 管理员 | 可选 Codex CLI 审核执行器与单独 admin 接口 | 可选 Antigravity CLI 审核执行器，复用治理队列及预算；两平台自动调用默认关闭 |
 
 原生事件按[官方 Hooks 契约](https://antigravity.google/docs/hooks)处理。没有最终退出码、输出和后台终态时，不生成 `tool_success`，不能据此满足要求该等级的自动发布；简短反馈维持 `reported` 等级。默认观察模式的孤儿 Post 事件没有可信前置任务归属，案例保持未关联，仅将错误用于补查。PreInvocation 的重复摘要仍占模型上下文，缓存减少的是重复检索，不代表已测得 token 净节省。
 
@@ -413,11 +413,13 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigr
 
 Codex 使用默认数据目录时，Antigravity 导出省略 `--home` 即可选用相同默认位置；自定义 `--home` 时，Codex 宿主进程也需要配置同一路径的 `ALP_HOME`；后续手动命令也应使用该目录。安装导出目前绑定默认宿主实例，其他实例身份仅供受信 Runtime 命令使用。
 
-可用单独的管理员接口人工整理 Antigravity 案例，也可显式配置现有兼容执行器。native admin skill 只是操作说明，默认 MCP 仍是 worker。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
+可用单独的管理员接口人工整理案例，或在对应宿主显式启用 Codex／Antigravity CLI 自动知识审核。native admin skill 只是操作说明，默认 MCP 仍是 worker；具体开启方法见[管理员执行器](#可选管理员执行器)。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
+
+0.16.0 数据库 schema **14**、内部发布协议 **14**。升级前备份外部知识数据库；所有访问同一数据库的 Codex／Antigravity 固定运行副本均需更新并重载，旧运行端不能打开 schema 14。
 
 升级时保持 `--host antigravity --upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。两个宿主可复用同一固定运行 release，但只能分别更新各自的安装目录。
 
-与已有 0.13 安装共用数据时，先停止相关运行端、按需备份数据库，并把所有访问同一知识库的安装都更新到 0.14，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 不兼容而被拒绝。
+与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到 0.16.0，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 14 不兼容而被拒绝。
 
 ### 安装契约与 MCP 入口
 
@@ -548,14 +550,14 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cas
 
 ```powershell
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm --conversation-file "D:\Exports\history.json" --artifact-dir "D:\Exports\project-artifacts"
-# 仅在用户明确允许模型整理时使用；需要已配置的兼容 Codex CLI
+# 仅在用户明确允许模型整理时使用；需已配置并认证的对应 CLI 执行器
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm --allow-review --max-calls 2 --max-seconds 180
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-pause JOB_ID
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cancel JOB_ID
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
 ```
 
-扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。Antigravity 可人工管理员整理或明确使用兼容 Codex CLI，当前没有原生 Antigravity 模型执行器。用 `history-cases JOB_ID` 分页取得当前批次的准确案例 ID，再由人工管理员通过 `packet`／`review_packet` 提出候选，避免旧暂停案例遮挡全局列表。正式发布沿用独立入口；历史流程不自动发布。
+扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。两平台都支持自己的 CLI 审核执行器或人工管理员。执行器选择与模型模式见[管理员执行器](#可选管理员执行器)；历史批次没有明确源会话，`current` 必须取得同项目、同宿主下唯一有效的活跃根模型标识，有不同模型或没有观察时停止，需用户选择 `fixed` 或 `default`。用 `history-cases JOB_ID` 分页取得准确案例 ID，再通过 `packet`／`review_packet` 提出候选。正式发布沿用独立入口；历史流程不自动发布。
 
 进度分别记录正式审核决定、待决定案例、已有候选的案例和已有发布的案例。人工提候选不会自动制造“审阅完成”回执；候选和发布成果仍单独计数。它们不证明整个来源已经理解或问题已解决。
 
@@ -564,6 +566,8 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 `--confirm` 是显式操作约定，不能独立鉴别人类身份；任意本地 Shell／数据库权限仍取决于宿主及操作系统。安装更新的批准与历史吸收的批准分别处理。
 
 ## 当前版本与兼容
+
+0.16.0 增加双平台自动知识审核执行器、项目／宿主启用策略、当前模型观察和不可变调用计划。数据库升至 schema **14**，内部发布协议 **14**；全文索引 **4**、语义索引 **1** 不变。自动调用及自动发布仍默认关闭；这项审核整理知识，不代表业务产品已经验收。共享数据库的所有安装须更新至 0.16.0 并重载。历史材料、正式知识及保守用量记录保留；新源码不等于已发布 GitHub Release。
 
 0.15.0 新增用户主动启动的全项目历史吸收、来源版本与独立批次，支持两宿主共享归档和有限管理员整理；补齐两平台版本说明提醒、稍后／忽略及渠道交付去重。数据库升至 schema **13**，内部发布协议 **13**；全文索引 **4**、语义索引 **1** 不变。迁移保留现有知识，旧运行端不能打开 schema 13；安装备份仍不代替外部数据库备份。源码变化尚未发布新下载 Release，用户版本检查只认实际 GitHub Release。
 
@@ -802,23 +806,52 @@ python scripts/learning.py --workspace "D:\Projects\my-project" execution-approv
 
 ## 可选管理员执行器
 
-默认 `admin.enabled` 和 `admin.auto_publish` 都为 `false`。未启用执行器时，可用管理员技能人工整理候选。
+**默认关闭，用户自行开启。** 管理员自动审核知识来源、条件和候选，不替用户验收产品或执行项目任务。它是独立 CLI 进程，不需要长期保留一个管理员聊天；人工整理仍可使用独立管理员 MCP。
 
-需要自动提出候选时，配置可信的 Codex CLI 路径并启用 `admin.enabled`。未启用调度时，`Stop` Hook 先持久预留派发位置，再启动一个独立后台 `admin-batch` 短批次，不等待模型完成。没有可审增量、已有派发或审核在途、额度耗尽时不启动。启用 `scheduler.enabled` 后由下述持久调度安排有界续跑。也可以手动运行：
+按你使用的宿主选择一组命令，显式指定目标项目。`--provider host` 使用该宿主的 CLI；首次设置默认模型模式为 `current`，后续省略路由参数会保留已有模型和命令：
 
 ```powershell
-python scripts/learning.py --workspace "D:\Projects\my-project" admin-once
-python scripts/learning.py --workspace "D:\Projects\my-project" admin-batch
-python scripts/learning.py --workspace "D:\Projects\my-project" reviews --problem CASE_ID
+# Codex
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-status
+# Antigravity
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
 ```
 
-可用 `admin-once --problem ID` 限定问题。执行器在隔离临时目录使用只读沙箱、临时会话和结构化输出，并设置 `ALP_DISABLED=1` 避免学习递归。自动提出候选不等于自动发布；默认仍由受信操作者发布。
+`admin-status` 不调用模型，显示生效策略、准备状态、等待原因和近期调用；加 `--conversation "原生会话ID"` 可核对指定根会话。自定义安装的数据目录须继续传原来的 `--home PATH`；宿主实例不同须保持对应 `--host-instance`。关闭时把配置命令的 `--enabled on` 改为 `off`。
+
+| 模型模式 | 选择依据 | 不可用时 |
+|---|---|---|
+| `current` | Codex Hook 的 `model` 或 Antigravity 的 `modelName`，仅使用同项目、同宿主、同实例、同轮次的根会话观察 | 没有观察、模型歧义或执行器不属于观察宿主时不调用，不猜模型 |
+| `fixed` | 用户明确提供 `--model MODEL_ID` | 该平台不能使用此模型时失败，不静默换模型 |
+| `default` | 独立 CLI 自身的默认选择 | 不承诺等于桌面当前模型或用户配置默认；Codex 审核跳过用户配置 |
+
+多个根会话使用不同模型时，后台必须能确定准确源会话；历史批次只能使用唯一有效模型标识。需固定模型时执行 `admin-configure --enabled on --provider host --model-mode fixed --model "该平台可用的模型ID"`；需 CLI 默认选择时使用 `--model-mode default`。以上命令均保留显式项目及宿主参数。
+
+本机对应 CLI 需要已有有效认证；图形界面登录不等于 CLI 已认证，插件不读取、复制或修改凭证，不自动登录。调用使用该 CLI 的账户，额度及费用由平台决定。自定义 CLI 路径可通过 `--command-file FILE` 提供可信 JSON 参数数组，不放令牌或模型选项。[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
+
+启用后，Codex `Stop` 或 Antigravity 的 `fullyIdle=true` 停止事件按策略预留派发，启动独立有限 `admin-batch`，普通任务不等待模型。没有可审增量、模型来源无法确认、审核在途或额度耗尽时不调用；启用调度后按持久待办续跑。手动命令同样带目标项目及宿主：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-once
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-batch
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
+```
+
+Antigravity 将上方 `--host codex` 改为 `--host antigravity`。可用 `admin-once --problem ID` 限定问题。历史整理仍须独立的 `history-run --confirm --allow-review`，开启日常审核不会启动历史吸收。
+
+两种执行器在临时目录接收有限审核包，以结构化输出返回候选，并设置 `ALP_DISABLED=1` 避免插件递归。Codex 跳过用户配置和 execpolicy 规则，关闭支持的 Hooks、应用、插件、命令及多 Agent 能力，使用只读沙箱；只读不等于全部工具为零。Antigravity 使用空工具 Agent，确认 `init.tools=[]` 和 `permission_mode=request-review` 后才发送审核材料；严格核对终态，丢弃 thinking 和中途文本流。
+
+Antigravity CLI 仍可能加载受信全局 Hooks、规则或插件；空工具初始化不能证明这些组件没有执行。管理员参数不提供完整操作系统隔离。需要更严格的运行边界时使用独立受控环境；真实 `agy` 加载及模型调用仍待验收。
+
+`admin.auto_publish` 默认为 `false`，配置管理员不会改变它。审核通过只产生候选或治理建议；正式发布沿用独立受信入口。
 
 审核快照与调用预留在同一事务完成，模型调用在事务外执行。同一项目的模型预留在事务内互斥，全局并发默认为 1。调用持久经历 reserved → launch_intent → started → 终态，启动意图在创建进程前提交；超时、换号或启动窗口崩溃按未知保留额度。判断全局预算之前安全回收全部项目的过期预留，严格启动意图前的记录或明确未启动的进程可以释放；遗留活动记录不能证明未启动，升级后按 orphaned_unknown 处理。不会按进程名称杀其他任务。
 
 审核决定与调用计量分开保存：`reviews` / 管理员 `review_list` 可查看理由、结构化缺证项、候选和提议引用。候选对应 candidate_ready，缺证对应 awaiting_evidence，生成提议对应 proposal_ready；与案例是否恢复、产品是否验收独立。精确复用同时检查业务证据及实际比较知识、候选、反例目标、来源健康和审核策略；失败或未知调用不复用为成功决定。自身证据产生的候选不形成再次审核循环，新相关资料才可能复审。发布或候选变化先唤醒有界比较，实际审核签名不变则不调用模型。
 
-审核结果写入前及最终提交边界，在同一事务重核案例、宿主、租约及实际比较资料；变化则回滚候选、治理提议和决定回执，保留实际调用终态与用量。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
+审核结果写入前及最终提交边界，在同一事务重核案例、宿主、租约、实际比较资料及冻结的执行器／模型策略；调用中改模型、关审核或换号会拒绝旧回写，保留实际终态与用量。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
 
 调度器、批次、单次审核与调用认领贯穿同一个 expected_epoch，并在认领事务内复核；换号前启动的执行器不能在新账户版本下重新认领。并发数、每日上报用量门槛和单次预留的变化只影响准入，不改变同一资料的审核语义签名。长日志去重比较投影前的完整脱敏业务摘要，保留嵌套业务 ID；仅顶层传输身份被排除。完整可见事件不重复发送摘要，旧截短事件缺少摘要时不能跨事件推定相同。
 
@@ -832,7 +865,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" reviews --proble
 
 即使开启 `auto_publish`，也仅限无截短、具备真实工具成功证据的 operation/solution 新知识。已有知识治理、反例、professional、pattern 和未验证事实仍交受信入口处理；工具成功不证明专业结论正确。
 
-`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；Windows活动句柄导致轮换失败时记录延迟并继续派发。单次审核日志受超时约束，不是磁盘写入硬上限。当前清理只保证直属审核进程，CLI自行启动的后代进程仍需宿主级约束。
+`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；Windows活动句柄导致轮换失败时记录延迟并继续派发。Antigravity 协议流设总读取、单事件和结构化结果上限，超限拒绝；Codex 单次日志仍受超时约束，不是磁盘写入硬上限。清理保证直属审核进程，CLI 自行启动的后代进程仍需宿主级约束。
 
 是否降低消耗，需要结合实际调用和任务结果衡量。
 
@@ -938,12 +971,19 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `evaluation-protocol`、`evaluation-run`、`evaluation-report` | 冻结成对实验、运行显式执行器、导入并汇总观测 |
 | `search`、`read` | 查询和读取正式知识 |
 | `admin-once`、`admin-batch` | 单次审核、受多项预算限制的后台短批次 |
+| `admin-configure`、`admin-status` | 显式设置当前项目／宿主审核策略，或只读检查执行器、模型准备状态及近期调用 |
 | `reviews`、`admin-retry` | 查询持久回执、明确允许一次失败或未知调用再审 |
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
 | `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | `--host codex\|antigravity` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
 | `antigravity-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
+
+## 0.16.0 检查状态（2026-10-13）
+
+Windows、Python 3.12.14 下完整隔离回归发现 **1109 项：1107 通过、2 项因平台条件跳过，零失败或错误**，运行 267.923 秒；将 ResourceWarning 视为错误运行。99 个 Python 文件通过 Python 3.10 语法解析，wheel 与源码分发包包含新增管理员模块及两宿主资源，固定副本入口、覆盖升级与 MCP／Hook 链检查通过。
+
+新增保护覆盖项目／宿主策略、模型来源与账户轮次、同模型跨会话去重、未知调用不被模型切换绕过、策略变化拒绝回写、历史单次审核、缺 CLI 零预留、后台宿主实例、AG 初始化前不发送资料、唯一终态及累计用量、轨迹重置后旧模型失效，以及未就绪调度不空转。检查仅使用临时数据和假执行器，没有开启真实管理员、Hooks、付费模型或修改用户配置。真实 Codex／Antigravity 模型调用、认证和 Antigravity 宿主加载仍需另行验收；语法解析不替代实际 Python 3.10 和其他系统运行。
 
 ## 0.15.0 检查状态（2026-10-13）
 

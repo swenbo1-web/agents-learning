@@ -60,6 +60,8 @@ class AdminOptimizationTests(unittest.TestCase):
         self.runtime = Runtime(self.home)
         self.project = self.runtime.project(self.workspace)
         self.runtime.task_update(self.project, "chat-a", "Review tools", {"environment": "A"})
+        self.reviewer = Path(self.temp.name) / "isolated-reviewer.py"
+        self.reviewer.write_text(REVIEWER, encoding="utf-8")
         self.configure()
 
     def tearDown(self):
@@ -67,7 +69,7 @@ class AdminOptimizationTests(unittest.TestCase):
         self.temp.cleanup()
 
     def configure(self, mode="candidate", **options):
-        settings = dict(enabled=True, command=[sys.executable, "-c", REVIEWER, mode],
+        settings = dict(enabled=True, command=[sys.executable, str(self.reviewer), mode],
                         max_calls_per_day=5, max_input_chars=16000, timeout_seconds=5, auto_publish=False)
         settings.update(options)
         self.runtime.config["admin"].update(settings)
@@ -182,14 +184,27 @@ class AdminOptimizationTests(unittest.TestCase):
 
     def test_definite_start_failure_is_retryable_and_not_budgeted(self):
         self.problem()
-        self.runtime.config["admin"].update(command=[str(self.home / "missing-executable")], max_calls_per_day=1)
-        first = admin_once(self.runtime, self.project)
+        self.runtime.config["admin"].update(max_calls_per_day=1)
+        # 执行器通过只读可用性检查后，启动仍可能明确失败；保留此边界。
+        with patch("agent_learning.admin.subprocess.Popen", side_effect=FileNotFoundError("controlled launch failure")):
+            first = admin_once(self.runtime, self.project)
         self.assertEqual(first["status"], "not_started")
         self.assertIsNone(self.calls()[0]["started"])
         self.configure()
         self.runtime.config["admin"]["max_calls_per_day"] = 1
         self.assertEqual(admin_once(self.runtime, self.project)["status"], "candidate")
         self.assertEqual(sum(call["started"] is not None for call in self.calls()), 1)
+
+    def test_missing_executable_is_not_ready_without_call_or_budget_reservation(self):
+        self.problem()
+        self.runtime.config["admin"].update(command=[str(self.home / "missing-executable")], max_calls_per_day=1)
+        with patch("agent_learning.admin.subprocess.Popen") as launch:
+            result = admin_once(self.runtime, self.project)
+        launch.assert_not_called()
+        self.assertEqual(result["status"], "executor_not_ready")
+        self.assertNotIn("call_id", result)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM admin_call_budgets").fetchone()[0], 0)
 
     def test_packet_and_reservation_are_atomic_and_model_runs_outside(self):
         problem = self.problem()

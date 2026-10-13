@@ -38,13 +38,15 @@ class Module5PacketTests(unittest.TestCase):
         self.workspace.mkdir()
         self.r = PacketRuntime(self.home)
         self.p = self.r.project(self.workspace)
+        self.reviewer = Path(self.temp.name) / "isolated-packet-reviewer.py"
+        self.reviewer.write_text(_REVIEWER, encoding="utf-8")
 
     def tearDown(self):
         self.r.close()
         self.temp.cleanup()
 
     def configure(self, limit=16000):
-        self.r.config["admin"].update(enabled=True, command=[sys.executable, "-c", _REVIEWER],
+        self.r.config["admin"].update(enabled=True, command=[sys.executable, str(self.reviewer)],
                                        max_calls_per_day=5, max_input_chars=limit, timeout_seconds=5)
 
     def problem(self, summary="A short report", **kwargs):

@@ -47,7 +47,13 @@ def scan_signature(runtime, project, *, include_candidates=True):
     row = runtime.db.execute("SELECT generation,source_epoch FROM projects WHERE id=?", (project,)).fetchone()
     candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
     # 发布变化允许重新比较；真正复审仍由实际比较资料的review_signature判定。
-    return digest({"policy": runtime.config["admin"], "packet_format": PACKET_FORMAT,
+    scope = runtime._session_scope()
+    observations = [list(item) for item in runtime.db.execute(
+        "SELECT conversation,model,active,version FROM admin_model_observations "
+        "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
+        (project, scope, runtime.session_epoch()))]
+    return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
+                   "host_scope": scope, "packet_format": PACKET_FORMAT,
                    "instructions": REVIEW_PREFIX, "knowledge_changes": list(row) if row else None,
                    "candidate_changes": (candidates[0] if candidates else 0) if include_candidates else None})
 
@@ -84,11 +90,38 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
                         selected["source_task_updated"], time.time(), blocked_call))
 
 
+def executor_query(runtime, project, query, args):
+    """current 仅排入有本宿主根模型观察的日常案例，避免异宿主旧案例堵塞。"""
+    policy = runtime.admin_policy(project)
+    if policy["model_mode"] == "current":
+        provider = runtime.host if policy["provider"] == "host" else policy["provider"]
+        if provider != runtime.host:
+            return query + "AND 0 ", args
+        query += ("AND EXISTS(SELECT 1 FROM admin_model_observations m WHERE m.project=p.project "
+                  "AND m.conversation=p.conversation AND m.host_scope=? AND m.session_epoch=? AND m.active=1) ")
+        args += (runtime._session_scope(), runtime.session_epoch())
+    return query, args
+
+
+def ready_executor(runtime, project, query, args):
+    from .admin_providers import executor_availability
+    query, args = executor_query(runtime, project, query, args)
+    for item in runtime.db.execute(query + "ORDER BY p.created,p.id LIMIT 10", (project, *args)).fetchall():
+        try:
+            plan = runtime.resolve_admin_executor(project, item["conversation"])
+            available = executor_availability(plan)["cli_available"]
+        except ValueError:
+            continue
+        if available:
+            return True
+    return False
+
+
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
     from .admin_usage import admin_budget_status
-    if not runtime.config["admin"]["enabled"] or runtime.config["admin"]["max_calls_per_day"] <= 0:
+    if not runtime.admin_policy(project)["enabled"] or runtime.config["admin"]["max_calls_per_day"] <= 0:
         return None
     with runtime.transaction():
         runtime.assert_host_epoch(expected_epoch)
@@ -115,7 +148,7 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
             return None
         query, args = eligible_query(scan_signature(runtime, project),
                                      preflight_signature=scan_signature(runtime, project, include_candidates=False))
-        if not runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():
+        if not ready_executor(runtime, project, query, args):
             return None
         token = str(uuid.uuid4())
         runtime.db.execute("INSERT INTO admin_dispatch VALUES(?,?,?,?,?)",

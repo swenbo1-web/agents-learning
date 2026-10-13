@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -344,7 +345,7 @@ class AntigravityAdapterTests(unittest.TestCase):
         self.assertEqual(self.r.task(self.p, self.c)["execution_epoch"], before)
 
     def test_stop_launch_failure_preserves_observation(self):
-        self.r.config["admin"]["enabled"] = True
+        self.r.config["admin"].update(enabled=True, antigravity_command=[sys.executable])
         self.r.feedback(self.p, self.c, "pending review")
         with patch.object(self.r, "_launch_admin", side_effect=OSError("private credential")):
             self.assertEqual(self.stop(), {"decision": "stop"})

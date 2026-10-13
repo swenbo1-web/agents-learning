@@ -2,6 +2,7 @@
 import contextlib
 import copy
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,7 +27,7 @@ class AdminAuditRegressionTests(unittest.TestCase):
         self.r = Runtime(self.root / "state", config={})
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
-        self.r.config["admin"].update(enabled=True, command=["memory-reviewer"], max_calls_per_day=10,
+        self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=10,
                                       max_concurrent_calls=1, token_reservation_per_call=4000)
         self.r.task_update(self.p, "chat", "Investigate supplied observations")
 

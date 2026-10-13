@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Retain project experience with explicit historical ingestion, bounded retrieval, governed knowledge, update notices and paired task evaluation.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",

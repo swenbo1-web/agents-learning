@@ -185,7 +185,7 @@ class HistoryEntryTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='partial_history_migration'").fetchone())
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='history_jobs'").fetchone())
         with closing(Runtime(self.home, config={})) as runtime:
-            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 13)
+            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 14)
             self.assertEqual(runtime.project(self.workspace), project)
 
     def test_both_exports_contain_explicit_history_skill_and_fixed_cli(self):

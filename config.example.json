@@ -29,7 +29,11 @@
   },
   "admin": {
     "enabled": false,
+    "provider": "host",
+    "model_mode": "default",
+    "model": "",
     "command": ["codex"],
+    "antigravity_command": ["agy"],
     "max_calls_per_day": 5,
     "max_input_chars": 16000,
     "timeout_seconds": 120,

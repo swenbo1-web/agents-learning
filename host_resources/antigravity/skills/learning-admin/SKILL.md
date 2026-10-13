@@ -16,7 +16,7 @@ Review historical cases only after the user's explicit archival run. Do not scan
 - Propose governance with exact target ID and `expected_revision`. Candidate creation or case review does not resolve a counterexample. Publication, revocation, restoration, counterexample dismissal and maturity changes use trusted local entrances.
 - Use bounded pagination with the packet's expected revision. A partial packet cannot support conclusions requiring missing evidence.
 - Respect configured usage, time and concurrency budgets. Duplicate evidence reuses existing decisions. Failed or unknown administrator calls do not become successful review and cannot be retried under a fresh identity to reset usage.
-- Automatic administrator execution currently requires an explicitly configured compatible executor; the Codex CLI adapter is not implicitly converted into an Antigravity model call. Do not invent CLI flags or credentials.
+- Automatic review is off by default. Only a trusted user-configured project/host policy may enable the native Antigravity CLI or choose an explicit provider and model. Do not enable it through this skill, invent CLI flags, copy credentials or silently change models. A missing or ambiguous current model leaves review pending.
 - Ordinary workers do not wait for review. Do not execute project tasks, modify host configuration or publish knowledge from this administrator skill.
 
 See the exported [project README](../../README.md) for executor setup and governance boundaries.

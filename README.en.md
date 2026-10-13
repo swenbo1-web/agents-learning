@@ -6,7 +6,7 @@
 
 **Project memory for Codex and Antigravity: find useful experience, keep its evidence, and reuse it in the next conversation.**
 
-Python **3.10+** · SQLite · [MIT](LICENSE) · Current source **0.15.0**
+Python **3.10+** · SQLite · [MIT](LICENSE) · Current source **0.16.0**
 
 [Antigravity installation](#install-in-antigravity-native-plugin) · [Codex installation](#install-in-codex-desktop-and-cli) · [How it works](#how-it-works) · [Architecture](#complete-architecture) · [Installation reference](#installation-and-maintenance-reference)
 
@@ -271,7 +271,7 @@ The same project and data directory can retain knowledge across login accounts. 
 | 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. Retrieval and context management | Bounded hybrid recall and filtering, summary/page budgets, exposure tracking, notices, restoration, failure follow-up and read-only browsing | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
 | 5. Event, evidence and case collection | Record observable events and results; explicitly selected historical jobs retain versioned sources and isolated cases with coverage and idempotency | [event_capture.py](agent_learning/event_capture.py), [case_store.py](agent_learning/case_store.py), [history_sources.py](agent_learning/history_sources.py), [history_import.py](agent_learning/history_import.py), [runtime.py](agent_learning/runtime.py) |
-| 6. Administrator knowledge governance | Organize bounded review packets, incremental queues, calls and receipts; propose candidates and governance; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
+| 6. Administrator knowledge governance | Organize bounded review packets, select executors and models by project and host, and retain queues, calls and receipts; administrator MCP cannot publish knowledge | [review_packet.py](agent_learning/review_packet.py), [admin.py](agent_learning/admin.py), [admin_routing.py](agent_learning/admin_routing.py), [admin_providers.py](agent_learning/admin_providers.py), [admin_queue.py](agent_learning/admin_queue.py), [admin_lifecycle.py](agent_learning/admin_lifecycle.py), [admin_decisions.py](agent_learning/admin_decisions.py), [admin_governance.py](agent_learning/admin_governance.py) |
 | 7. Knowledge publication and version governance | Publish, update, revoke, restore and promote through trusted entry points; save batch manifests, safe rollback and optional distribution state | [knowledge_lifecycle.py](agent_learning/knowledge_lifecycle.py), [publication_state.py](agent_learning/publication_state.py), [knowledge_releases.py](agent_learning/knowledge_releases.py), [knowledge_sync.py](agent_learning/knowledge_sync.py), [hindsight.py](agent_learning/hindsight.py) |
 | 8. Background scheduling, budgets and effect evaluation | Persistent work, call budgets, exposure/adoption observations and independent paired task evaluation | [scheduler.py](agent_learning/scheduler.py), [admin_usage.py](agent_learning/admin_usage.py), [learning_evaluation.py](agent_learning/learning_evaluation.py), [task_evaluation.py](agent_learning/task_evaluation.py) |
 
@@ -354,7 +354,7 @@ Every Antigravity stateful MCP request must explicitly supply the current Hook h
 | Execution checks | Connected rules and trusted approvals | Observe omits PreToolUse; enforce returns ask on passing checks and deny on rejection |
 | Stop | Registered delivery and public output | Records loop stopping; fullyIdle does not prove user acceptance |
 | Compaction, children, login | Supported events and explicit entry points | No invented equivalent events; ambiguous numbering needs trusted reset |
-| Administrator | Optional Codex CLI executor and separate admin tools | Shared governance queue; no automatic Antigravity model executor yet |
+| Administrator | Optional Codex CLI review executor and separate admin tools | Optional Antigravity CLI review executor sharing governance queues and budgets; automatic calls are off by default on both hosts |
 
 The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). It does not scan transcripts, artifacts or private model reasoning. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
 
@@ -404,11 +404,13 @@ The same ALP_HOME/--home and project mapping share knowledge, candidates, source
 
 If Codex uses its default data directory, omit --home on the Antigravity export to use that default too. For a custom data directory, export Antigravity with --home PATH and configure the Codex host process with that same ALP_HOME. Trusted CLI reset and account-change commands must use the same directory too. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
 
-An explicitly configured admin interface can review Antigravity cases, and the existing compatible executor can process the shared queue. An admin skill is guidance; the default native MCP role remains worker. Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
+Review cases manually through a separate administrator interface, or explicitly enable the Codex or Antigravity CLI knowledge reviewer for the corresponding host. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
+
+0.16.0 uses database schema **14** and internal publication protocol **14**. Back up the external knowledge database before upgrading. Update and reload every Codex and Antigravity fixed runtime sharing that database; older runtimes cannot open schema 14.
 
 Upgrade with --host antigravity --upgrade. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Both hosts can share one fixed runtime release but update their own export directories.
 
-Before sharing a database with existing 0.13 installations, stop the relevant runtimes, back up the database as needed, update all installations accessing it to 0.14, and reload the hosts. Updating only Antigravity leaves old Codex runtimes unable to open the migrated schema.
+Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation accessing it to 0.16.0, and reload the hosts. Updating only Antigravity leaves older Codex runtimes unable to open schema 14.
 
 ### Installation contract and MCP entry
 
@@ -578,14 +580,14 @@ Select extra sources with repeatable `--conversation-file PATH` and `--artifact-
 
 ```powershell
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm --conversation-file "D:\Exports\history.json" --artifact-dir "D:\Exports\project-artifacts"
-# Only with explicit permission to use the configured compatible Codex CLI model executor:
+# Only with explicit permission to use the configured and authenticated CLI reviewer:
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm --allow-review --max-calls 2 --max-seconds 180
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-pause JOB_ID
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-cancel JOB_ID
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
 ```
 
-Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Antigravity supports manual administration or an explicitly configured compatible Codex CLI executor; there is no native Antigravity model executor. Use `history-cases JOB_ID` to page through exact case IDs for that batch, then review existing packets and propose candidates. This avoids paused old cases crowding the global list. Publication uses its separate trusted entry; historical jobs never auto-publish.
+Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Both hosts support their own CLI reviewer or manual administration. See [model selection](#optional-administrator-executor). Historical jobs have no explicit source conversation: `current` needs one unambiguous active root-model identifier for that project and host. Different models or missing observations stop the review until the user chooses `fixed` or `default`. Use `history-cases JOB_ID` to page through exact case IDs and propose candidates from existing packets. Publication uses its separate trusted entry; historical jobs never auto-publish.
 
 Formal review decisions, cases awaiting decisions, cases with candidates and cases with publication are counted separately. Manual candidate creation does not fabricate a completed-review receipt; candidate and publication progress remain visible. None of these counts prove complete source understanding or problem resolution.
 
@@ -594,6 +596,8 @@ Immutable sanitized source versions, locations and receipts live in the independ
 `--confirm` expresses an explicit operation choice, not independent human authentication. Unrestricted shell/database access still depends on host and OS permissions. Updating the plugin does not authorize historical reading.
 
 ## Current version and compatibility
+
+0.16.0 adds automatic knowledge reviewers for both host CLIs, project/host enablement policies, current-model observations and immutable execution plans. Database schema advances to **14** and internal publication protocol to **14**; full-text index **4** and semantic index **1** are unchanged. Model calls and automatic publication remain off by default. Knowledge review does not establish product acceptance. Update and reload every installation sharing the database. Historical sources, published knowledge and conservative usage records remain. Updated source does not imply a new GitHub Release.
 
 0.15.0 adds explicit project-wide historical ingestion, versioned sources and isolated jobs shared by both hosts, with manual or bounded administrator review. Cross-host release notices gain bounded notes, snooze/ignore and delivery-channel deduplication. Database schema advances to **13** and internal publication protocol to **13**; full-text index **4** and semantic index **1** are unchanged. Existing knowledge is preserved. Older runtimes cannot open schema 13; installation backups do not replace external database backups. This source update has not created a downloadable Release; checks only recognize actual GitHub Releases.
 
@@ -831,23 +835,52 @@ Trusted approval also freezes actual path roots in rules, the task and existing 
 
 ## Optional administrator executor
 
-`admin.enabled` and `admin.auto_publish` both default to `false`. When the executor is disabled, the administrator skill can be used to prepare candidates manually.
+**Off by default; users enable it themselves.** The administrator reviews knowledge sources, conditions and candidates. It does not run project tasks or perform product acceptance. Reviews run in separate CLI processes, so no permanent administrator conversation is required. Manual review can still use a separate administrator MCP interface.
 
-To propose candidates automatically, configure a trusted Codex CLI path and enable `admin.enabled`. With scheduling disabled, the `Stop` Hook first reserves a dispatch slot persistently, then starts a separate background `admin-batch` short batch without waiting for the model. It does not start if there is no reviewable increment, dispatch or review is already in flight, or the quota is exhausted. With `scheduler.enabled`, the persistent scheduler described below arranges bounded continuation. Manual commands are also available:
+Choose the commands for your host and specify the target project. `--provider host` selects that host's CLI. The first configuration defaults to `current`; subsequent omitted routing arguments preserve the selected model and command:
 
 ```powershell
-python scripts/learning.py --workspace "D:\Projects\my-project" admin-once
-python scripts/learning.py --workspace "D:\Projects\my-project" admin-batch
-python scripts/learning.py --workspace "D:\Projects\my-project" reviews --problem CASE_ID
+# Codex
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-status
+# Antigravity
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
 ```
 
-Use `admin-once --problem ID` to select a problem. The executor uses an isolated temporary directory, read-only sandbox, temporary session and structured output, setting `ALP_DISABLED=1` to avoid recursive learning. Automatic proposal does not mean automatic publication; publication still defaults to the trusted operator.
+`admin-status` makes no model call. It reports the effective policy, readiness, waiting reason and recent calls. Add `--conversation "NATIVE_CONVERSATION_ID"` to check a specific root conversation. Retain the installation's custom `--home PATH` and any corresponding `--host-instance`. To disable reviews, change `--enabled on` to `off` in the configuration command.
+
+| Model mode | Selection | When unavailable |
+|---|---|---|
+| `current` | Codex Hook `model` or Antigravity `modelName`, from root observations in the same project, host, instance and epoch | Missing observations, ambiguity or a provider from another host prevent the call; no guessed fallback |
+| `fixed` | Explicit `--model MODEL_ID` | A model unavailable on that platform fails without silent substitution |
+| `default` | The independent CLI's default selection | It need not match the desktop selection or user-configured default; Codex review skips user config |
+
+When root conversations use different models, background review must identify its exact source conversation. Historical jobs require an unambiguous active model identifier. To pin a model, use `admin-configure --enabled on --provider host --model-mode fixed --model "AVAILABLE_MODEL_ID"`; for the CLI default, use `--model-mode default`. Keep the explicit workspace and host arguments with either command.
+
+The corresponding CLI must already be authenticated. Desktop login does not establish CLI authentication. The plugin does not read, copy or modify credentials or sign users in. Calls use the CLI account; its platform determines quotas and charges. A trusted custom command can be supplied as a JSON argument array through `--command-file FILE`, without credentials or model flags. [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
+
+Once enabled, Codex `Stop` or Antigravity `fullyIdle=true` stop events reserve dispatch under the policy and start a separate bounded `admin-batch`. Worker delivery does not wait for the model. Missing evidence increments, unresolved model selection, calls already in flight or exhausted budgets prevent calls. An enabled scheduler can continue persistent work. Manual commands also specify the target project and host:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-once
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-batch
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
+```
+
+For Antigravity, replace `--host codex` with `--host antigravity`. Use `admin-once --problem ID` to select a problem. Historical review still requires its separate `history-run --confirm --allow-review`; enabling everyday review never starts historical ingestion.
+
+Both executors receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams.
+
+Antigravity CLI may still load trusted global Hooks, rules or plugins. Empty-tool initialization does not prove that those components did not execute. These CLI options do not provide full OS isolation. Use a separate controlled environment for stronger boundaries. Actual `agy` loading and model calls remain unverified.
+
+`admin.auto_publish` remains `false` by default; administrator configuration does not change it. Successful review produces candidates or governance suggestions. Publication uses its separate trusted entry point.
 
 The review snapshot and call reservation are committed in the same transaction; the model call runs outside it. Model reservations for the same project are mutually exclusive in the transaction, and global concurrency defaults to 1. Calls persist through reserved → launch_intent → started → terminal state. Launch intent is committed before process creation; timeouts, account changes or crashes during the launch window retain the quota as unknown. Before checking global budgets, expired reservations from all projects are safely reclaimed. Records strictly before launch intent, or processes confirmed not to have started, may release their reservation. Legacy active records cannot establish that a process never started and become orphaned_unknown after upgrade. Other tasks are not killed by process name.
 
 Review decisions are stored separately from call accounting. `reviews` and administrator `review_list` show reasons, structured missing evidence, and candidate/proposal references. Candidates correspond to candidate_ready, missing evidence to awaiting_evidence, and proposals to proposal_ready, independent of case recovery or product acceptance. Exact reuse checks business evidence and the actual compared knowledge, candidates, counterexample target, source health and review policy. Failed or unknown calls are not reused as successful decisions. A candidate produced from a case's own evidence does not cause a review loop; new relevant material can trigger review again. Publication or candidate changes first trigger bounded comparison, and no model call occurs if the actual review signature is unchanged.
 
-Before writing review results and at final commit, the same transaction rechecks the case, host, lease and actual comparison material. Changes roll back candidates, governance proposals and decision receipts while retaining the actual call terminal state and usage. After reconciling an unknown call, a trusted entry point can use `admin-retry CALL_ID --reason "Reason confirmed during reconciliation"` to explicitly permit one more review; the original record and quota remain. Repeated approval does not create unlimited retries. Truncated evidence is marked and blocks automatic publication.
+Before writing review results and at final commit, the same transaction rechecks the case, host, lease, comparison material and frozen executor/model policy. Changing the model, disabling review or switching accounts rejects old writeback while preserving the actual terminal state and usage. After reconciling an unknown call, a trusted entry point can use `admin-retry CALL_ID --reason "Reason confirmed during reconciliation"` to explicitly permit one more review; the original record and quota remain. Repeated approval does not create unlimited retries. Truncated evidence is marked and blocks automatic publication.
 
 The scheduler, batch, single review and call claim share the same expected_epoch, rechecked in the claim transaction. An executor started before an account change cannot reclaim work under the new account version. Changes to concurrency, daily reported usage thresholds and per-call reservations affect admission only, not the review's semantic signature for the same material. Long log deduplication compares the complete redacted business digest before projection, preserving nested business IDs and excluding only top-level transport identities. Fully visible events do not resend their digest; old truncated events without digests cannot be inferred identical across events.
 
@@ -861,7 +894,7 @@ Administrator MCP `propose_governance` can only propose publish/update/attach/re
 
 Even when `auto_publish` is enabled, it is limited to new operation/solution knowledge with no truncation and actual tool success evidence. Governance of existing knowledge, counterexamples, professional, pattern and unverified facts still require the trusted entry point. Tool success does not prove a domain conclusion correct.
 
-`max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits a single call's duration. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches. Characters and call counts are not tokens or costs, and the tool does not guarantee a strict token or dollar budget. Pending records remain when disabled or after failure. When background summary logs exceed 1 MiB, the next dispatch rotates them and keeps one old log. If an active Windows handle prevents rotation, the delay is recorded and dispatch continues. Single-review logs are constrained by timeout, not a hard disk-write limit. Cleanup currently guarantees only the direct review process; descendants started by the CLI require host-level constraints.
+`max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits a single call's duration. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches. Characters and call counts are not tokens or costs, and the tool does not guarantee a strict token or dollar budget. Pending records remain when disabled or after failure. When background summary logs exceed 1 MiB, the next dispatch rotates them and keeps one old log. If an active Windows handle prevents rotation, the delay is recorded and dispatch continues. Antigravity streams enforce limits on total reads, event size and structured results, rejecting excess. Codex call logs remain constrained by timeout rather than a hard disk-write limit. Cleanup guarantees the direct review process; CLI descendants need host-level constraints.
 
 Whether usage is reduced must be assessed from actual calls and task outcomes.
 
@@ -967,12 +1000,19 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `evaluation-protocol`, `evaluation-run`, `evaluation-report` | Freeze paired experiments, run explicit adapters, import and summarize observations |
 | `search`, `read` | Search and read published knowledge |
 | `admin-once`, `admin-batch` | Single review and short background batches subject to several budgets |
+| `admin-configure`, `admin-status` | Explicit project/host review policy or inspection of executor/model readiness and recent calls |
 | `reviews`, `admin-retry` | Query persistent receipts and explicitly permit one review after a failed or unknown call |
 | `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |
 | `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## 0.16.0 checks (2026-10-13)
+
+The full isolated Windows/Python 3.12.14 suite discovered **1109 checks: 1107 passed, 2 platform-dependent skips, no failures or errors**, in 267.923 seconds, with ResourceWarning treated as an error. Ninety-nine Python files passed Python 3.10 syntax parsing. Wheel and source-distribution resources include both profiles and the new administrator modules; fixed-runtime entries, upgrades and MCP/Hook integration checks passed.
+
+New coverage includes project/host policies, model observations and login epochs, reuse across conversations with the same model, unknown calls surviving model changes, stale-result rejection, explicit historical review, missing-CLI admission, background host identity, AG initialization before input, unique terminal output and cumulative usage, model invalidation after trajectory resets, and no idle scheduling while unready. Tests used temporary data and fake executors, without enabling real administrators, Hooks or paid models or changing user configuration. Real Codex/Antigravity model calls, authentication and Antigravity host loading require separate acceptance. Syntax parsing does not replace actual Python 3.10 or other operating-system runs.
 
 ## 0.15.0 checks (2026-10-13)
 

@@ -23,6 +23,8 @@ from .knowledge_context import KnowledgeContextMixin
 from .context_storage import ContextStorageMixin
 from .case_store import CaseStoreMixin
 from .history_import import HistoryImportMixin
+from .admin_routing import (AdminRoutingMixin, ROUTING_DEFAULTS, install_admin_routing,
+                            validate_admin_routing_config)
 from .event_capture import (CaseCaptureMixin, prepare_event, tool_outcome, operation_input_conflict,
                             business_evidence_digest, projected_evidence)
 from .review_packet import ReviewPacketMixin
@@ -42,7 +44,7 @@ METADATA_KEYS = {"tool", "tool_version", "error_code", "environment", "verificat
 DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
     "enforce_task_policy": False, "capture_deliveries": True, "allowed_tools": [], "project_aliases": {},
-    "admin": {"enabled": False, "command": ["codex"], "max_calls_per_day": 5,
+    "admin": {**ROUTING_DEFAULTS, "enabled": False, "command": ["codex"], "max_calls_per_day": 5,
               "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False,
               "max_cases_per_batch": 20, "max_calls_per_batch": 2, "max_batch_seconds": 180,
               "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
@@ -206,7 +208,8 @@ CREATE TABLE IF NOT EXISTS execution_policies(project TEXT NOT NULL,conversation
 class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixin, KnowledgeContextMixin,
               ContextStorageMixin, CaseStoreMixin, CaseCaptureMixin, ReviewPacketMixin,
               KnowledgeStoreMixin, KnowledgeIndexMixin, KnowledgeReleaseMixin,
-              KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin, HistoryImportMixin):
+              KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin, HistoryImportMixin,
+              AdminRoutingMixin):
     def __init__(self, home=None, config=None, *, host="codex", host_instance="default"):
         if host not in {"codex", "antigravity"}:
             raise ContractError("unsupported host")
@@ -242,6 +245,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self.config[key].update(value)
             else:
                 self.config[key] = value
+        self.config["admin"] = validate_admin_routing_config(self.config["admin"])
         for key in ("injection_max_chars", "event_max_chars"):
             if not isinstance(self.config[key], int) or not 128 <= self.config[key] <= 100000:
                 raise ContractError(f"invalid {key}")
@@ -265,7 +269,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(14)):
+        if version not in set(range(15)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -296,7 +300,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 install_storage(self)
                 from .history_import import install_storage as install_history_storage
                 install_history_storage(self)
-                self.db.execute("PRAGMA user_version=13")
+                install_admin_routing(self)
+                self.db.execute("PRAGMA user_version=14")
         except BaseException:
             self.db.close()
             raise
@@ -695,7 +700,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
-                "admin_enabled": bool(self.config["admin"]["enabled"]),
+                "admin_enabled": self.admin_policy(project)["enabled"],
+                "admin_routing": self.admin_routing_status(project),
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
                 "history_import": self.history_status(project),
@@ -880,6 +886,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                        agent_id=agent_id, operation_id=operation, outcome=outcome,
                                        task_write_version=task_write_version, execution_epoch=execution_epoch, assignment_id=assignment_id,
                                        capture_digest=capture_digest)
+            if fresh and not agent_id and kind in {"SessionStart", "UserPromptSubmit", "Stop"}:
+                try:
+                    self.admin_observe_model(project, conversation, raw.get("model"), expected_epoch=epoch)
+                except ContractError:
+                    # 宿主诊断字段不合法不能阻断用户任务或推定另一个模型。
+                    self._metric(project, "admin_model_observation_rejected")
             # 重播 Pre 的新拒绝作为独立事件保存，不改写原许可和已观察结果。
             if operation and (kind == "PostToolUse" or kind == "PreToolUse" and not binding):
                 state = "denied" if denied else "started" if kind == "PreToolUse" else outcome
@@ -965,13 +977,13 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if schedule_warning:
                     result["systemMessage"] = schedule_warning
                 return self._attach_software_update_notice(result) if update_notice_event else result
-        if kind == "Stop" and fresh and self.config["admin"]["enabled"] and not self.config["scheduler"]["enabled"]:
+        if kind == "Stop" and fresh and self.admin_policy(project)["enabled"] and not self.config["scheduler"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
             token = None
             try:
                 from .admin import _settings
                 from .admin_queue import claim_dispatch, release_dispatch
-                _settings(self.config["admin"])
+                _settings(self.admin_effective_config(project))
                 token = claim_dispatch(self, project)
                 if token:
                     self._launch_admin(raw["cwd"], token)
@@ -1067,6 +1079,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 pass
         with log_path.open("ab") as log:
             subprocess.Popen([sys.executable, "-B", str(entry),
+                              "--host", self.host, "--host-instance", self.host_instance,
                               "--home", str(self.home), "--workspace",
                               str(workspace), command, *arguments], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, env=env, **options)

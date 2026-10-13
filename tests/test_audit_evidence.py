@@ -3,6 +3,7 @@ import contextlib
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -299,7 +300,7 @@ class AuditEvidenceTests(unittest.TestCase):
                             business_evidence_digest({"tool_input": {"id": "b"}}))
 
     def test_hidden_log_difference_is_reviewed_instead_of_deduplicated(self):
-        self.r.config["admin"].update(enabled=True, command=["memory-reviewer"], max_calls_per_day=100)
+        self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=100)
         packets = []
         for chat, middle in (("first", "cause-a"), ("second", "cause-b")):
             self.r.task_update(self.p, chat, "Review the same tool observation")
@@ -327,10 +328,10 @@ class AuditEvidenceTests(unittest.TestCase):
         self.assertEqual(rows[full["id"]]["business_digest"], full["business_digest"])
         self.assertIsNone(rows[clipped["id"]]["business_digest"])
         self.assertEqual(rows[clipped["id"]]["capture_digest"], clipped["capture_digest"])
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 13)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
         self.r.close()
         self.r = Runtime(self.home, config={})
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 13)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
 
     def test_schema11_migration_rolls_back_on_digest_failure(self):
         self.r.record_event(self.p, "chat", "Feedback", {"summary": "Full observation"})
@@ -342,7 +343,7 @@ class AuditEvidenceTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertNotIn("business_digest", {row[1] for row in db.execute("PRAGMA table_info(events)")})
         self.r = Runtime(self.home, config={})
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 13)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 14)
 
 
 if __name__ == "__main__":
