@@ -9,8 +9,11 @@ import time
 from .host_sessions import host_scope_key
 
 
-ROUTING_DEFAULTS = {"provider": "host", "model_mode": "default", "model": "", "antigravity_command": ["agy"]}
-_PROVIDERS = {"host", "codex", "antigravity"}
+ROUTING_DEFAULTS = {
+    "provider": "host", "model_mode": "default", "model": "",
+    "antigravity_command": ["agy"], "dsh_command": ["dsh"],
+}
+_PROVIDERS = {"host", "codex", "antigravity", "dsh"}
 _MODES = {"default", "current", "fixed"}
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 _MODEL_CREDENTIAL = re.compile(r"(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,})")
@@ -71,6 +74,7 @@ def validate_admin_routing_config(config):
     if result["model_mode"] != "fixed" and result["model"]:
         _error("administrator model override requires fixed mode")
     result["antigravity_command"] = validate_executor_command(result["antigravity_command"])
+    result["dsh_command"] = validate_executor_command(result["dsh_command"])
     if "command" in result:
         result["command"] = validate_executor_command(result["command"])
     if "enabled" in result and not isinstance(result["enabled"], bool):
@@ -78,7 +82,18 @@ def validate_admin_routing_config(config):
     return result
 
 
+def _default_provider_command(config, provider):
+    if provider == "codex":
+        return config.get("command", ["codex"])
+    if provider == "antigravity":
+        return config["antigravity_command"]
+    if provider == "dsh":
+        return config["dsh_command"]
+    _error("unsupported administrator provider")
+
+
 def install_admin_routing(runtime):
+
     """由 Runtime schema 迁移在已有写事务内调用。"""
     if not runtime.db.in_transaction:
         _error("administrator routing storage requires an existing write transaction")
@@ -165,8 +180,7 @@ class AdminRoutingMixin:
                 target = self.host if provider == "host" else provider
                 prior_target = self.host if existing["provider"] == "host" else existing["provider"]
                 selected_command = (existing["command"] if existing["command"] is not None and prior_target == target
-                                    else config.get("command", ["codex"]) if target == "codex"
-                                    else config["antigravity_command"])
+                                    else _default_provider_command(config, target))
                 selected_command = validate_executor_command(selected_command)
             if expected_policy_version is not None and existing["policy_version"] != expected_policy_version:
                 _error("administrator policy changed; reread before configuring")
@@ -229,7 +243,7 @@ class AdminRoutingMixin:
             _error("administrator_disabled: enable the current project and host explicitly")
         provider = self.host if policy["provider"] == "host" else policy["provider"]
         config = validate_admin_routing_config(self.config["admin"])
-        command = policy["command"] or (config.get("command", ["codex"]) if provider == "codex" else config["antigravity_command"])
+        command = policy["command"] or _default_provider_command(config, provider)
         command = validate_executor_command(command)
         session_epoch, governance_epoch = self.session_epoch(), self.host_epoch()
         model, source, observation = "", "provider_cli_default", None
@@ -311,7 +325,7 @@ class AdminRoutingMixin:
             _error("administrator_disabled: enable the current project and host explicitly")
         provider = self.host if policy["provider"] == "host" else policy["provider"]
         configuration = validate_admin_routing_config(self.config["admin"])
-        command = policy["command"] or (configuration.get("command", ["codex"]) if provider == "codex" else configuration["antigravity_command"])
+        command = policy["command"] or _default_provider_command(configuration, provider)
         result = json.loads(_encode(self.config["admin"]))
         result.update(enabled=policy["enabled"], command=validate_executor_command(command), provider=provider,
                       model_mode=policy["model_mode"], model=policy["model"])

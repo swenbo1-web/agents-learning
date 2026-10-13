@@ -17,7 +17,7 @@ def parser():
     p = argparse.ArgumentParser(description="Agent Learning 本地插件运行端")
     p.add_argument("--home", help="持久数据目录（默认ALP_HOME或用户数据目录）")
     p.add_argument("--workspace", help="当前项目目录；Antigravity首次安装必须显式指定")
-    p.add_argument("--host", choices=["codex", "antigravity"], default="codex", help="宿主会话与安装配置")
+    p.add_argument("--host", choices=["codex", "antigravity", "dsh"], default="codex", help="宿主会话与安装配置")
     p.add_argument("--host-instance", default="default", help="受信Runtime命令的宿主实例；安装导出当前固定为default")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
@@ -98,7 +98,7 @@ def parser():
         if name == "scheduler-run":
             scheduled.add_argument("--worker-token", help=argparse.SUPPRESS)
     serve = sub.add_parser("serve")
-    serve.add_argument("--host", choices=["codex", "antigravity"], default=argparse.SUPPRESS)
+    serve.add_argument("--host", choices=["codex", "antigravity", "dsh"], default=argparse.SUPPRESS)
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
     serve.add_argument("--context-handle", help="受信显式绑定句柄；Codex可使用ALP_CONTEXT_HANDLE，Antigravity不继承环境句柄")
     bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
@@ -218,7 +218,7 @@ def parser():
     batch.add_argument("--dispatch-token", help="由本地Hook预留的后台派发身份")
     configure = sub.add_parser("admin-configure", help="明确开启或关闭当前项目/宿主的自动知识审核；不自动发布")
     configure.add_argument("--enabled", choices=["on", "off"], required=True)
-    configure.add_argument("--provider", choices=["host", "codex", "antigravity"], help="首次默认 host，后续省略保留")
+    configure.add_argument("--provider", choices=["host", "codex", "antigravity", "dsh"], help="首次默认 host，后续省略保留")
     configure.add_argument("--model-mode", choices=["current", "default", "fixed"], help="首次默认 current，后续省略保留")
     configure.add_argument("--model", help="fixed 模式的模型标识")
     configure.add_argument("--command-file", help="可选 JSON 可执行参数数组，不包含令牌或模型选项")
@@ -247,7 +247,7 @@ def parser():
     sync_batch.add_argument("--max-items", type=int, default=20)
     sync_batch.add_argument("--max-seconds", type=float, default=30)
     export = sub.add_parser("install")
-    export.add_argument("--host", choices=["codex", "antigravity"], default=argparse.SUPPRESS)
+    export.add_argument("--host", choices=["codex", "antigravity", "dsh"], default=argparse.SUPPRESS)
     export.add_argument("destination")
     export.add_argument("--runtime-store", help="版本化稳定运行目录，不随插件缓存清理")
     export.add_argument("--hook-mode", choices=["observe", "enforce"], help="可信Hook故障策略；省略按配置")
@@ -258,6 +258,14 @@ def parser():
     native_hook.add_argument("--hook-mode", choices=["observe", "enforce"])
     reset = sub.add_parser("antigravity-session-reset", help="受信入口重置无法辨别的原生轨迹；暂停任务并失效旧句柄与许可")
     reset.add_argument("--conversation", required=True, help="原生conversationId，不含宿主前缀")
+    dsh_hook = sub.add_parser("dsh-hook", help="接收DSH原生事件")
+    dsh_hook.add_argument("--event", required=True, choices=[
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+        "Stop", "Interrupt", "SubagentStart", "SubagentStop",
+    ])
+    dsh_hook.add_argument("--hook-mode", choices=["observe", "enforce"])
+    dsh_reset = sub.add_parser("dsh-session-reset", help="受信入口重置指定DSH会话轨迹；暂停任务并失效旧句柄与许可")
+    dsh_reset.add_argument("--conversation", required=True, help="原生DSH sessionId，不含宿主前缀")
     return p
 
 
@@ -274,7 +282,7 @@ def main(argv=None):
             print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode,
                                  upgrade=args.upgrade, expected_release_id=args.expected_release_id,
                                  host=args.host, **({"workspace": args.workspace, "home": args.home}
-                                                   if args.host == "antigravity" else {}))))
+                                                   if args.host in {"antigravity", "dsh"} else {}))))
             return 0
         except (ContractError, OSError) as exc:
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
@@ -342,6 +350,8 @@ def main(argv=None):
             return 0
         if args.command in {"antigravity-hook", "antigravity-session-reset"}:
             args.host = "antigravity"
+        if args.command in {"dsh-hook", "dsh-session-reset"}:
+            args.host = "dsh"
         runtime = Runtime(args.home, host=args.host, host_instance=args.host_instance)
         if args.command == "antigravity-session-reset":
             from .antigravity import reset_session
@@ -353,6 +363,18 @@ def main(argv=None):
             if len(data) > Server.MAX_MESSAGE_BYTES:
                 raise ContractError("hook input exceeds byte limit")
             print(encode(AntigravityAdapter(runtime, args.workspace, args.hook_mode).handle(
+                args.event, json.loads(data.decode("utf-8-sig")))))
+            return 0
+        if args.command == "dsh-session-reset":
+            from .dsh import reset_session as reset_dsh_session
+            print(encode(reset_dsh_session(runtime, args.workspace, args.conversation)))
+            return 0
+        if args.command == "dsh-hook":
+            from .dsh import DshAdapter
+            data = sys.stdin.buffer.read(Server.MAX_MESSAGE_BYTES + 1)
+            if len(data) > Server.MAX_MESSAGE_BYTES:
+                raise ContractError("hook input exceeds byte limit")
+            print(encode(DshAdapter(runtime, args.workspace, args.hook_mode).handle(
                 args.event, json.loads(data.decode("utf-8-sig")))))
             return 0
         if getattr(args, "conversation", None) is not None:

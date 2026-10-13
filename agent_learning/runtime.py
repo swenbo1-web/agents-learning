@@ -215,7 +215,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
               KnowledgeSyncMixin, PublicationStateMixin, SchedulerMixin, LearningEvaluationMixin, HistoryImportMixin,
               AdminRoutingMixin, WorkMemoryMixin, WorkSummaryMixin):
     def __init__(self, home=None, config=None, *, host="codex", host_instance="default"):
-        if host not in {"codex", "antigravity"}:
+        if host not in {"codex", "antigravity", "dsh"}:
             raise ContractError("unsupported host")
         if not isinstance(host_instance, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", host_instance):
             raise ContractError("invalid host instance")
@@ -303,6 +303,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self._install_host_storage()
                 from .antigravity import install_storage
                 install_storage(self)
+                from .dsh import install_storage as install_dsh_storage
+                install_dsh_storage(self)
                 from .history_import import install_storage as install_history_storage
                 install_history_storage(self)
                 install_admin_routing(self)
@@ -470,7 +472,13 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                       if path == k or path.startswith(k.rstrip(os.sep) + os.sep)), None)
         known = self.db.execute("SELECT path,project FROM project_paths ORDER BY length(path) DESC").fetchall()
         registered = next((r for r in known if path == r["path"] or path.startswith(r["path"] + os.sep)), None)
-        git_root = next((p for p in (resolved, *resolved.parents) if (p / ".git").exists()), None)
+        git_root = None
+        for p in (resolved, *resolved.parents):
+            if (p / ".git").exists():
+                git_root = p
+                break
+            if p.name.lower() == "local" and p.parent.name.lower() == "build":
+                break
         root = git_root or resolved
         root_path = os.path.normcase(str(root))
         exact = next((r for r in known if r["path"] == root_path), None)
@@ -844,9 +852,13 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             denied, deny_reason = False, ""
             decision = binding["decision"] if binding else "unobserved"
             if kind == "PreToolUse":
-                recovery_tools = {"mcp__agent_learning__" + name for name in (
+                base_recovery = (
                     "knowledge_search", "knowledge_read", "work_memory_search", "work_memory_read",
-                    "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status")}
+                    "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status",
+                )
+                recovery_tools = {"mcp__agent_learning__" + name for name in base_recovery}
+                if self.host == "dsh":
+                    recovery_tools |= set(base_recovery) | {"agent_learning_" + name for name in base_recovery}
                 if self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
                     verdict = self.check_execution(project, conversation, task, raw, assignment)
                     denied, deny_reason = verdict["decision"] == "denied", verdict["reason"]
@@ -945,7 +957,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self._work_capture_safely(project, event["id"], raw["cwd"], raw=raw,
                                           summarize=kind == "Stop" and not agent_id,
                                           conversation=conversation,
-                                          native_context_hint=_adapter_event_key is not None)
+                                          native_context_hint=_adapter_event_key is not None
+                                          or (self.host == "dsh" and kind == "PostToolUse" and not binding))
         schedule_warning = None
         update_notice_event = (fresh and not agent_id and self.config["software_updates"]["enabled"]
                               and (kind == "UserPromptSubmit" or kind == "SessionStart"
@@ -992,7 +1005,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
                     result["systemMessage"] = schedule_warning
-                return self._attach_software_update_notice(result) if update_notice_event else result
+                return self._attach_software_update_notice(result, host=self.host) if update_notice_event else result
         if kind == "Stop" and fresh and self.admin_policy(project)["enabled"] and not self.config["scheduler"]["enabled"]:
             # Hook只触发独立短批次，模型分析不占用同步Hook，也不依赖Hook生命周期。
             token = None
@@ -1015,7 +1028,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     pass
                 return {"systemMessage": "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"}
         result = {"systemMessage": schedule_warning} if schedule_warning else {}
-        return self._attach_software_update_notice(result) if update_notice_event else result
+        return self._attach_software_update_notice(result, host=self.host) if update_notice_event else result
 
     def _launch_admin(self, workspace, dispatch_token=None):
         self._launch_background(workspace, "admin-batch",
@@ -1055,7 +1068,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             if not notice:
                 return output
             result = dict(output)
-            if host == "codex":
+            if host in {"codex", "dsh"}:
                 result["systemMessage"] = "\n".join(filter(None, (result.get("systemMessage"), notice["message"])))
             else:
                 result["injectSteps"] = [*result.get("injectSteps", []), {"ephemeralMessage": notice["message"]}]

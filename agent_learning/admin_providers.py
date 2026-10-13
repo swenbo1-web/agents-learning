@@ -52,7 +52,7 @@ def build_execution(command, provider, model, directory, schema, output, instruc
     """只构建临时审核进程；用户材料仅通过 stdin 传递。"""
     command = validate_command(command)
     model = validate_model(model)
-    if provider not in {"codex", "antigravity"}:
+    if provider not in {"codex", "antigravity", "dsh"}:
         raise _error("unsupported administrator provider")
     if selection_mode not in {"default", "current", "fixed"}:
         raise _error("invalid administrator model selection")
@@ -73,6 +73,26 @@ def build_execution(command, provider, model, directory, schema, output, instruc
                 args += ["-c", value]
         args.append("-")
         stdin = instruction.encode("utf-8")
+    elif provider == "dsh":
+        preset = directory / ".dsh" / "presets" / "alp-review.json"
+        preset.parent.mkdir(parents=True, exist_ok=True)
+        preset.write_text(json.dumps({
+            "name": "alp-review",
+            "description": "Review only the supplied knowledge evidence without tools.",
+            "tools": [],
+            "mcpServers": [],
+            "skills": [],
+            "plugins": [],
+            "sandbox": "read-only",
+            "approvalPolicy": "never",
+            "subagent": False,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        args = command + ["--input-format", "stream-json", "--output-format", "stream-json", "--json-schema", str(schema),
+                          "--agent", "alp-review", "--print-timeout", str(timeout) + "s"]
+        if model:
+            args += ["--model", model]
+        stdin = (json.dumps({"event": "user", "message": {"content": instruction}}, ensure_ascii=False,
+                            separators=(",", ":")) + "\n").encode("utf-8")
     else:
         agent = directory / ".agents" / "agents" / "alp-review.md"
         agent.parent.mkdir(parents=True, exist_ok=True)
@@ -119,11 +139,11 @@ def _tool_event(event):
     if isinstance(step, dict) and (step.get("step_type") in {"tool", "subagent"}
                                   or step.get("tool_name") or step.get("tool_info") or step.get("subagent_info")):
         return True
-    return kind in {"tool", "tool_call", "tool_use", "tool_result", "subagent", "permission_request"}
+    return kind in {"tool", "tool_call", "tool_use", "tool_result", "tool/call", "tool/result", "subagent", "subagent/start", "permission_request"}
 
 
 def read_response(provider, output, log_path):
-    """Antigravity 只接受唯一 SUCCESS 终态的结构化输出，不拼接中途文本。"""
+    """Antigravity / DSH 只接受唯一 SUCCESS 终态的结构化输出，不拼接中途文本。"""
     if provider == "codex":
         output = Path(output)
         if not output.is_file() or output.stat().st_size > MAX_RESPONSE_BYTES:
@@ -132,7 +152,7 @@ def read_response(provider, output, log_path):
         if not isinstance(value, dict):
             raise _error("administrator response must be an object")
         return value
-    if provider != "antigravity":
+    if provider not in {"antigravity", "dsh"}:
         raise _error("unsupported administrator provider")
     result, initialized, input_sent = None, False, False
     for event in _events(log_path):
@@ -292,7 +312,14 @@ def collect_antigravity_stream(stream, destination, terminate=None, expected_mod
 def _token_values(usage):
     if not isinstance(usage, dict):
         return {}, False
-    aliases = {"cache_read_tokens": "cached_input_tokens", **{key: key for key in _TOKEN_FIELDS}}
+    aliases = {
+        "cache_read_tokens": "cached_input_tokens",
+        "cacheReadTokens": "cached_input_tokens",
+        "inputTokens": "input_tokens",
+        "outputTokens": "output_tokens",
+        "totalTokens": "total_tokens",
+        **{key: key for key in _TOKEN_FIELDS},
+    }
     values, valid = {}, True
     for key, target in aliases.items():
         if key not in usage:
@@ -310,7 +337,7 @@ def _token_values(usage):
     return values, valid
 
 
-def antigravity_usage(log_path, elapsed):
+def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
     """终态 usage 为累计会话值，缓存输入属于输入量；step usage 不重复累加。"""
     totals, complete, terminals, truncated = {}, True, 0, False
     if log_path is not None:
@@ -333,4 +360,8 @@ def antigravity_usage(log_path, elapsed):
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": [totals] if totals else [],
             "token_totals": totals, "reported_turns": int(bool(totals)), "preview_truncated": False,
             "completeness": "complete" if complete and terminals == 1 and totals else "partial" if totals else "unknown",
-            "log_tail_truncated": truncated, "provider": "antigravity", "usage_scope": "single_session_terminal"}
+            "log_tail_truncated": truncated, "provider": provider, "usage_scope": "single_session_terminal"}
+
+
+def dsh_usage(log_path, elapsed):
+    return antigravity_usage(log_path, elapsed, provider="dsh")

@@ -4,11 +4,11 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**为 Codex 和 Antigravity 提供项目记忆与可视化知识库。**
+**为 Codex、Antigravity 和 DSH (DeepSeek Harness) 提供项目记忆与可视化知识库。**
 
 自动记录工作结果，检索已有经验，让 Agent 在新对话中继续利用项目知识。需要时再启用管理员整理；你可以在本机浏览器中查看知识、来源、修订和审核待办。
 
-[Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
+[Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
 Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0)
 
@@ -78,6 +78,18 @@ codex plugin add agent-learning@agent-learning-local
 ```
 
 **重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
+
+## 在 DSH 中安装（DeepSeek Harness）
+
+支持动态工作区或绑定指定项目导出 DSH 插件 Bundle（含 Cordis Host 事件桥接、8 事件 Hook 与 MCP 配置）：
+
+```powershell
+$learningProject = "D:\Projects\my-project"
+$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/dsh"
+python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host dsh --hook-mode observe
+```
+
+**在 DSH 插件管理中安装或启用该本地 Bundle 目录，或挂载导出的 `mcp_config.json` 与 `hooks.json` → 开启新对话。** 覆盖升级使用 `install "$learningPlugin" --host dsh --upgrade`。
 
 ## 安装是否成功
 
@@ -285,7 +297,7 @@ flowchart LR
 
 [runtime.py](agent_learning/runtime.py) 组合八个模块，统一项目、会话、账户边界与数据库事务。模块共用版本和数据契约，在同一运行端协作。
 
-宿主会话边界在 [host_sessions.py](agent_learning/host_sessions.py)，原生事件适配在 [antigravity.py](agent_learning/antigravity.py)；Antigravity 的独立资源位于 [host_resources/antigravity](host_resources/antigravity/)。两种安装 profile 使用同一知识、检索和治理核心。
+宿主会话边界在 [host_sessions.py](agent_learning/host_sessions.py)，原生事件适配在 [antigravity.py](agent_learning/antigravity.py) 与 [dsh.py](agent_learning/dsh.py)；Antigravity 与 DSH 的独立资源分别位于 [host_resources/antigravity](host_resources/antigravity/) 与 [host_resources/dsh](host_resources/dsh/)。三种安装 profile 使用同一知识、检索和治理核心。
 
 ### 各模块怎样运行
 
@@ -1046,8 +1058,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |
 | `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
-| `install` | `--host codex\|antigravity` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
-| `antigravity-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
+| `install` | `--host codex\|antigravity\|dsh` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
+| `antigravity-session-reset`、`dsh-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
 
 ## 1.0.0 检查状态（2026-10-13）
 
@@ -1058,6 +1070,12 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 v1.0.0 的 [Windows／Linux × Python 3.10／3.12 四组 CI](https://github.com/swenbo1-web/agents-learning/actions/runs/38414895022) 全部通过，每组执行 1194 项检查并构建 wheel；Windows 每组跳过 1 项，Linux 每组跳过 2 项。本机未启用真实 Hooks、调用真实模型、启动常驻服务或修改用户配置／知识数据库。
 
 新增验收覆盖工作观察、轻索引、身份绑定分页、共享注入预算、来源及文件变化、压缩恢复、子 Agent 边界、Antigravity 文件提示、管理员摘要与迁移兼容。真实宿主加载、模型调用及认证需要独立验收；离线结果不证明 token、耗时或质量收益。
+
+### DSH (DeepSeek Harness) 宿主适配与 1.0.0 功能复核
+
+本轮新增 DSH (`--host dsh`) 宿主适配后，Windows 完整隔离回归发现 **1207 项：1203 通过、4 项平台相关跳过，零失败与错误**，耗时 292.822 秒；`ResourceWarning` 作为错误检查。**113 个 Python 文件**通过 Python 3.10 语法解析，DSH Host 桥接入口通过 Node.js ESM 语法检查。
+
+新增保护覆盖 DSH Bundle／Hook／MCP 导出与覆盖升级、三宿主共用固定运行副本与跨宿主覆盖拒绝、DSH 1.0.0 工作观察（`file_change`、`tool_failure`、`user_correction`、`public_summary`）、`pwsh` 退出码与后台任务状态识别、孤儿 `PostToolUse` 文件历史提示（`task_affinity=context_only`）与 `dsh-session-reset`、DSH 管理员模型路由（`current`／`fixed`／`default`）与增量工作摘要（`work_summaries`）、以及 `dsh-session-jsonl` 历史吸收与 `ReasoningBlock` 剔除。检查均在 `build/local/` 隔离目录完成，未启用真实宿主 Hooks、调用付费模型或修改用户配置。
 
 ### 简介与可用性复核
 

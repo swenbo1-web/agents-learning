@@ -1,0 +1,147 @@
+"""DSH (DeepSeek Harness) 宿主导出、固定运行副本共用与覆盖升级的隔离保护检查。"""
+import base64
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+from agent_learning.cli import main
+from agent_learning.install import install, _hook_commands
+from agent_learning.install_update import INSTALL_MANIFEST, inspect_installation, snapshot
+from agent_learning.release import validate_release_root
+from agent_learning.runtime import ContractError
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class DshInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="alp-dsh-install-")
+        self.root = Path(self.temp.name).resolve()
+        self.addCleanup(self._cleanup_root)
+        self.workspace = self.root / "dsh 中文 workspace"
+        self.workspace.mkdir()
+        self.home = self.root / "shared knowledge"
+        self.target = self.root / "dsh plugin"
+        self.store = self.root / "fixed releases"
+
+    def _cleanup_root(self):
+        import shutil
+        from agent_learning.release import filesystem_path
+        if self.root.exists() and self.root.name.startswith("alp-dsh-install-"):
+            shutil.rmtree(filesystem_path(self.root), ignore_errors=True)
+        self.temp.cleanup()
+
+    def initial(self, mode=None, bind_workspace=True):
+        return install(
+            self.target,
+            runtime_store=self.store,
+            hook_mode=mode,
+            host="dsh",
+            workspace=self.workspace if bind_workspace else None,
+            home=self.home if bind_workspace else None,
+        )
+
+    def test_dsh_export_creates_bundle_hooks_mcp_and_validates_manifest(self):
+        result = self.initial()
+        self.assertEqual(result["target_host"], "dsh")
+        self.assertEqual(result["hook_mode"], "observe")
+        self.assertFalse(self.home.exists(), "export must not open or create a knowledge database")
+        self.assertFalse((self.target / ".codex-plugin").exists())
+        self.assertTrue((self.target / "plugin.json").is_file())
+        self.assertTrue((self.target / "package.json").is_file())
+        self.assertTrue((self.target / "host/index.mjs").is_file())
+        self.assertTrue((self.target / "rules/learning.md").is_file())
+        self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-admin/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-history/SKILL.md").is_file())
+        plugin = read_json(self.target / "plugin.json")
+        pkg = read_json(self.target / "package.json")
+        self.assertEqual(plugin["name"], "agent-learning")
+        self.assertEqual(pkg["name"], "agent-learning")
+        self.assertIn("dsh", pkg)
+        hooks = read_json(self.target / "hooks.json")["agent-learning"]
+        self.assertEqual(set(hooks), {
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+            "Stop", "Interrupt", "SubagentStart", "SubagentStop",
+        })
+        runtime = Path(result["runtime_directory"])
+        mcp = read_json(self.target / "mcp_config.json")["mcpServers"]["agent_learning"]
+        self.assertEqual(mcp["command"], result["python"])
+        self.assertEqual(mcp["args"], [
+            "-B", str(runtime / "scripts/learning.py"),
+            "--workspace", str(self.workspace), "--home", str(self.home),
+            "serve", "--role", "worker", "--host", "dsh",
+        ])
+        self.assertEqual(read_json(self.target / INSTALL_MANIFEST)["target_host"], "dsh")
+        self.assertEqual(inspect_installation(self.target, _hook_commands)["target_host"], "dsh")
+        validate_release_root(runtime)
+        self.assertTrue((runtime / "host_resources/dsh/plugin.json").is_file())
+        self.assertTrue((runtime / "hooks/dsh_dispatch.py").is_file())
+
+    def test_dsh_export_supports_dynamic_workspace_and_enforce_mode(self):
+        result = self.initial(mode="enforce", bind_workspace=False)
+        self.assertEqual(result["hook_mode"], "enforce")
+        self.assertNotIn("workspace", result)
+        runtime = Path(result["runtime_directory"])
+        mcp = read_json(self.target / "mcp_config.json")["mcpServers"]["agent_learning"]
+        self.assertEqual(mcp["args"], [
+            "-B", str(runtime / "scripts/learning.py"),
+            "serve", "--role", "worker", "--host", "dsh",
+        ])
+        hooks = read_json(self.target / "hooks.json")["agent-learning"]
+        for event, handlers in hooks.items():
+            command, windows = _hook_commands(
+                result["python"], runtime / "hooks/dsh_dispatch.py", event, "enforce", host="dsh"
+            )
+            for entry in handlers:
+                for handler in entry.get("hooks", [entry]):
+                    self.assertEqual(handler["command"], windows if os.name == "nt" else command)
+                    if os.name == "nt":
+                        decoded = base64.b64decode(handler["command"].split()[-1]).decode("utf-16-le")
+                        self.assertIn("'-B'", decoded)
+                        self.assertIn("'--hook-mode' 'enforce'", decoded)
+
+    def test_three_hosts_share_same_fixed_runtime_release_and_reject_cross_host_overwrite(self):
+        dsh_res = self.initial()
+        codex_target = self.root / "codex plugin"
+        ag_target = self.root / "ag plugin"
+        codex_res = install(codex_target, runtime_store=self.store, host="codex")
+        ag_res = install(ag_target, runtime_store=self.store, host="antigravity",
+                         workspace=self.workspace, home=self.home)
+        self.assertEqual(dsh_res["runtime_directory"], codex_res["runtime_directory"])
+        self.assertEqual(dsh_res["runtime_directory"], ag_res["runtime_directory"])
+
+        before_dsh = snapshot(self.target)
+        for wrong_host in ("codex", "antigravity"):
+            with self.assertRaisesRegex(ContractError, "different target host"):
+                install(self.target, upgrade=True, host=wrong_host,
+                        workspace=self.workspace if wrong_host == "antigravity" else None,
+                        home=self.home if wrong_host == "antigravity" else None)
+        self.assertEqual(snapshot(self.target), before_dsh)
+
+        with self.assertRaisesRegex(ContractError, "different target host"):
+            install(codex_target, upgrade=True, host="dsh")
+        with self.assertRaisesRegex(ContractError, "different target host"):
+            install(ag_target, upgrade=True, host="dsh")
+
+    def test_dsh_upgrade_preserves_bindings_extra_files_and_creates_backup(self):
+        self.initial("enforce", bind_workspace=True)
+        (self.target / "notes/custom.txt").parent.mkdir(parents=True, exist_ok=True)
+        (self.target / "notes/custom.txt").write_text("user custom file", encoding="utf-8")
+        updated = install(self.target, upgrade=True, host="dsh")
+        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(updated["target_host"], "dsh")
+        self.assertEqual(updated["hook_mode"], "enforce")
+        self.assertEqual(updated["workspace"], str(self.workspace))
+        self.assertEqual(updated["home"], str(self.home))
+        self.assertEqual(updated["preserved_extra_files"], ["notes/custom.txt"])
+        self.assertEqual((self.target / "notes/custom.txt").read_text(encoding="utf-8"), "user custom file")
+        self.assertTrue(Path(updated["backup_directory"]).is_dir())
+
+
+if __name__ == "__main__":
+    unittest.main()

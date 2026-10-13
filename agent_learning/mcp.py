@@ -172,7 +172,7 @@ class Server:
             raise ContractError("invalid server role")
         self.runtime, self.project = runtime, project
         self.role = role
-        self.per_request_context = runtime.host == "antigravity" and context_handle is None
+        self.per_request_context = runtime.host in {"antigravity", "dsh"} and context_handle is None
         self.context_handle = context_handle
         # 仅受信启动入口可以提供工作区；模型参数不能选择任意外部checkout。
         self.workspace = workspace

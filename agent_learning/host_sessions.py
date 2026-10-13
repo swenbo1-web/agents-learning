@@ -5,16 +5,16 @@ import re
 import time
 
 
-HOSTS = frozenset({"codex", "antigravity"})
+HOSTS = frozenset({"codex", "antigravity", "dsh"})
 _INSTANCE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
-_RESERVED = ("codex:", "antigravity:")
+_RESERVED = ("codex:", "antigravity:", "dsh:")
 
 
 def host_scope_key(host, instance="default"):
     from .runtime import ContractError
 
     if host not in HOSTS or not isinstance(instance, str) or not _INSTANCE.fullmatch(instance):
-        raise ContractError("host must be codex or antigravity and host_instance must be 1..64 letters, digits, '_' or '-'")
+        raise ContractError("host must be codex, antigravity or dsh and host_instance must be 1..64 letters, digits, '_' or '-'")
     return f"{host}:{instance}"
 
 

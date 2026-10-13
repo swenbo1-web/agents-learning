@@ -55,9 +55,15 @@ _SENSITIVE_NAMES = {
     ".netrc", ".npmrc", ".pypirc", "config.json.secret",
 }
 _ROLES = {"unknown", "user", "assistant", "tool", "system", "developer"}
-_INTERNAL_TYPES = {"reasoning", "thinking", "redacted_thinking", "analysis"}
+_INTERNAL_TYPES = {"reasoning", "thinking", "redacted_thinking", "analysis", "reasoning-chunks"}
 _CODEX_RECORDS = {"session_meta", "response_item", "event_msg", "turn_context", "compacted"}
 _AG_RECORDS = {"user", "assistant", "tool", "message", "system", "developer"}
+_DSH_RECORDS = {
+    "session/header", "turn/start", "turn/end", "step/start", "step/end",
+    "user/message", "developer/message", "system/message", "assistant/message",
+    "assistant/attempt", "tool/call", "tool/result", "request/header",
+    "request/context", "session/end-seed",
+}
 _PRIVATE_KEY = re.compile(r"-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY)-----.*?(?:-----END (?:[A-Z0-9 ]*PRIVATE KEY)-----|\Z)", re.S)
 _QUERY_SECRET = re.compile(r"(?i)([?&](?:sid|token|email_token|access_token|refresh_token|api[_-]?key|auth|authorization|password|secret)=)[^&#\s<>\"']+")
 _TOKEN = re.compile(r"\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,})\b")
@@ -456,10 +462,12 @@ def _conversation(text, suffix, chars, max_chunks):
         current = record
         if typed:
             kind = record.get("type")
+            if kind is None and index == 0 and {"version", "id", "isSeeded"} <= set(record):
+                kind = "session/header"
             if not isinstance(kind, str):
                 raise _Skip("unparsed_host_record")
             if kind in _CODEX_RECORDS:
-                if host == "antigravity":
+                if host in {"antigravity", "dsh"}:
                     raise _Skip("unparsed_mixed_host_format")
                 host, format_name = "codex", "codex-public-jsonl"
                 payload = record.get("payload")
@@ -496,8 +504,60 @@ def _conversation(text, suffix, chars, max_chunks):
                     current.update({key: payload[key] for key in ("timestamp", "created_at", "id") if key in payload})
                 else:
                     raise _Skip("unparsed_public_response_item")
+            elif kind in _DSH_RECORDS:
+                if host in {"codex", "antigravity"}:
+                    raise _Skip("unparsed_mixed_host_format")
+                host, format_name = "dsh", "dsh-session-jsonl"
+                if kind == "session/header":
+                    header = record.get("data") if isinstance(record.get("data"), dict) else record
+                    candidate_id = header.get("id")
+                    if isinstance(candidate_id, str) and len(candidate_id) <= 500:
+                        conversation = candidate_id
+                    continue
+                if kind in {"turn/start", "turn/end", "step/start", "step/end", "request/header", "request/context", "session/end-seed"}:
+                    omitted += 1
+                    continue
+                if kind == "assistant/attempt":
+                    excluded += 1
+                    continue
+                data = record.get("data")
+                if not isinstance(data, dict):
+                    raise _Skip("unparsed_host_payload")
+                if kind == "user/message":
+                    current = data
+                elif kind in {"developer/message", "system/message"}:
+                    current = data.get("message")
+                    if not isinstance(current, dict):
+                        raise _Skip("unparsed_host_message")
+                elif kind == "assistant/message":
+                    msg = data.get("message")
+                    if not isinstance(msg, dict) or not isinstance(msg.get("content"), (str, list)):
+                        raise _Skip("unparsed_host_message")
+                    if isinstance(msg["content"], list):
+                        filtered_blocks = []
+                        for blk in msg["content"]:
+                            if isinstance(blk, dict) and blk.get("type") in {"tool-call", "tool-addition", "tool-removal"}:
+                                omitted += 1
+                                continue
+                            filtered_blocks.append(blk)
+                        current = {**msg, "content": filtered_blocks}
+                    else:
+                        current = msg
+                elif kind == "tool/call":
+                    if not isinstance(data.get("name"), str) or not isinstance(data.get("arguments"), str):
+                        raise _Skip("unparsed_public_tool_item")
+                    current = {"role": "assistant", "content": "[tool_call " + data["name"] + "]\n" + data["arguments"]}
+                    if isinstance(data.get("callId"), str):
+                        current["id"] = data["callId"]
+                elif kind == "tool/result":
+                    msg = data.get("message")
+                    if not isinstance(msg, dict) or "content" not in msg:
+                        raise _Skip("unparsed_host_message")
+                    current = {"role": "tool", "content": msg["content"]}
+                    if isinstance(msg.get("toolCallId"), str):
+                        current["id"] = msg["toolCallId"]
             elif kind in _AG_RECORDS:
-                if host == "codex":
+                if host in {"codex", "dsh"}:
                     raise _Skip("unparsed_mixed_host_format")
                 # 只接受明确消息包装，不猜 steps/trajectory 等宿主内部格式。
                 host, format_name = "antigravity", "public-message-jsonl"
@@ -512,6 +572,8 @@ def _conversation(text, suffix, chars, max_chunks):
             else:
                 raise _Skip("unparsed_host_record")
         envelope_time = record.get("timestamp", record.get("created_at")) if typed else None
+        if envelope_time is None and typed and host == "dsh" and isinstance(record.get("time"), (int, float)) and not isinstance(record.get("time"), bool):
+            envelope_time = str(record["time"])
         message, hidden = _message(current, index, envelope_timestamp=envelope_time)
         excluded += hidden
         if message is not None and message["text"]:

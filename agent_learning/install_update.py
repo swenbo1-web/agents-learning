@@ -17,7 +17,7 @@ from .release import PROTOCOL_VERSION, filesystem_path
 
 INSTALL_MANIFEST = "installation-manifest.json"
 INSTALL_SCHEMA = 2
-TARGET_HOSTS = ("codex", "antigravity")
+TARGET_HOSTS = ("codex", "antigravity", "dsh")
 _VERSION = re.compile(r"^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$")
 _PROTOCOL = re.compile(r"^[1-9][0-9]{0,8}$")
 
@@ -96,14 +96,14 @@ def _json(path):
 
 
 def payload_mapping(files, target_host):
-    """固定副本保留两个宿主资源；导出目录仅激活指定宿主的原生入口。"""
+    """固定副本保留各宿主资源；导出目录仅激活指定宿主的原生入口。"""
     if target_host not in TARGET_HOSTS:
-        raise ContractError("target host must be codex or antigravity")
+        raise ContractError("target host must be codex, antigravity or dsh")
     if target_host == "codex":
         return {name: name for name in files}
     result = {name: name for name in files if name.startswith(("agent_learning/", "scripts/", "hooks/"))
               or name in ("README.md", "LICENSE", "config.example.json")}
-    prefix = "host_resources/antigravity/"
+    prefix = f"host_resources/{target_host}/"
     result.update({name[len(prefix):]: name for name in files if name.startswith(prefix)})
     return result
 
@@ -189,11 +189,53 @@ def antigravity_hooks(runtime, python, mode, command_builder, workspace, home):
     return hooks
 
 
+def dsh_hooks(runtime, python, mode, command_builder, workspace=None, home=None):
+    """生成 DSH 原生 Hook 文档，固定绑定本机解释器与 dsh_dispatch.py。"""
+    hooks = _json(runtime / "host_resources/dsh/hooks.json")
+    try:
+        if set(hooks) != {"agent-learning"} or not isinstance(hooks["agent-learning"], dict):
+            raise TypeError
+        definition = hooks["agent-learning"]
+        expected_events = {
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+            "Stop", "Interrupt", "SubagentStart", "SubagentStop",
+        }
+        if set(definition) != expected_events:
+            raise TypeError
+        for event, handlers in definition.items():
+            if not isinstance(handlers, list) or not handlers:
+                raise TypeError
+            command, windows = command_builder(
+                python, runtime / "hooks/dsh_dispatch.py", event, mode,
+                host="dsh", workspace=workspace, home=home,
+            )
+            for item in handlers:
+                if not isinstance(item, dict):
+                    raise TypeError
+                children = item.get("hooks") if event in ("PreToolUse", "PostToolUse") else [item]
+                if not isinstance(children, list) or not children:
+                    raise TypeError
+                for handler in children:
+                    if not isinstance(handler, dict) or handler.get("type") != "command":
+                        raise TypeError
+                    handler["command"] = windows if os.name == "nt" else command
+    except (KeyError, TypeError, AttributeError):
+        raise ContractError("existing fixed runtime DSH Hook contract is invalid") from None
+    return hooks
+
+
 def mcp_document(runtime, python, host="codex", workspace=None, home=None):
     arguments = [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]
     if host == "antigravity":
         arguments = ["-B", str(runtime / "scripts/learning.py"), "--workspace", workspace, "--home", home,
                      "serve", "--role", "worker", "--host", "antigravity"]
+    elif host == "dsh":
+        arguments = ["-B", str(runtime / "scripts/learning.py")]
+        if workspace is not None:
+            arguments.extend(["--workspace", workspace])
+        if home is not None:
+            arguments.extend(["--home", home])
+        arguments.extend(["serve", "--role", "worker", "--host", "dsh"])
     return {"mcpServers": {"agent_learning": {"command": python, "args": arguments}}}
 
 
@@ -227,6 +269,12 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
             raise ContractError("existing Antigravity installation binding is invalid")
         for name in ("workspace", "home"):
             safe_path(receipt[name])
+    elif host == "dsh":
+        for name in ("workspace", "home"):
+            if receipt.get(name) is not None:
+                if not isinstance(receipt[name], str) or not Path(receipt[name]).is_absolute():
+                    raise ContractError("existing DSH installation binding is invalid")
+                safe_path(receipt[name])
     runtime = safe_path(receipt["runtime_directory"])
     if target == runtime or target in runtime.parents or runtime in target.parents:
         raise ContractError("existing installation and fixed runtime must use separate directories")
@@ -242,6 +290,13 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
                 or plugin.get("skills") != "./skills/" or plugin.get("hooks") != "./hooks/hooks.json"
                 or plugin.get("mcpServers") != "./.mcp.json"):
             raise ContractError("existing installation is not a valid agent-learning plugin export")
+    elif host == "dsh":
+        pkg = _json(target / "package.json")
+        if (plugin.get("name") != "agent-learning" or plugin.get("version") != release["version"]
+                or plugin.get("skills") != "./skills/" or plugin.get("hooks") != "./hooks.json"
+                or plugin.get("mcpServers") != "./mcp_config.json" or plugin.get("hostEntry") != "./host/index.mjs"
+                or pkg.get("name") != "agent-learning" or pkg.get("version") != release["version"]):
+            raise ContractError("existing installation is not a valid DSH plugin export")
     elif (set(plugin) != {"name", "description"} or plugin.get("name") != "agent-learning"
           or not isinstance(plugin.get("description"), str)):
         raise ContractError("existing installation is not a valid Antigravity plugin export")
@@ -249,9 +304,14 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
     mcp = mcp_document(runtime, receipt["python"], host, receipt.get("workspace"), receipt.get("home"))
     mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
     hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
-    expected_hooks = (_expected_hook_document(runtime, receipt["python"], receipt["hook_mode"], command_builder)
-                      if host == "codex" else antigravity_hooks(runtime, receipt["python"], receipt["hook_mode"],
-                          command_builder, receipt["workspace"], receipt["home"]))
+    if host == "codex":
+        expected_hooks = _expected_hook_document(runtime, receipt["python"], receipt["hook_mode"], command_builder)
+    elif host == "antigravity":
+        expected_hooks = antigravity_hooks(runtime, receipt["python"], receipt["hook_mode"],
+                                           command_builder, receipt["workspace"], receipt["home"])
+    else:
+        expected_hooks = dsh_hooks(runtime, receipt["python"], receipt["hook_mode"],
+                                   command_builder, receipt.get("workspace"), receipt.get("home"))
     if _json(target / mcp_path) != mcp:
         raise ContractError("existing installation MCP configuration was modified")
     if _json(target / hook_path) != expected_hooks:

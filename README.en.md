@@ -4,11 +4,11 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**Project memory and a visual knowledge browser for Codex and Antigravity.**
+**Project memory and a visual knowledge browser for Codex, Antigravity and DSH (DeepSeek Harness).**
 
 Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
-[Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [Visual knowledge base](#open-the-visual-knowledge-base) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
+[Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [DSH installation](#install-in-dsh-deepseek-harness) · [Visual knowledge base](#open-the-visual-knowledge-base) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
@@ -80,6 +80,18 @@ codex plugin add agent-learning@agent-learning-local
 ```
 
 **Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
+
+## Install in DSH (DeepSeek Harness)
+
+Export the DSH plugin bundle (including the Cordis Host event bridge, 8-event Hooks and MCP configuration):
+
+```powershell
+$learningProject = "D:\Projects\my-project"
+$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/dsh"
+python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host dsh --hook-mode observe
+```
+
+**Load or enable the exported bundle directory in DSH Plugin Manager (or attach `mcp_config.json` and `hooks.json`) → start a new project conversation.** Upgrade an existing DSH export with `install "$learningPlugin" --host dsh --upgrade`.
 
 ## Check the installation
 

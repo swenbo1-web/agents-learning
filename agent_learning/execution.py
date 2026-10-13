@@ -15,7 +15,7 @@ import time
 _ACTIONS = {"read", "write", "execute", "network"}
 _SCOPE_MODES = {"analysis", "read_only", "implementation", "execute"}
 _RULE_KEYS = {"mode", "allowed_tools", "tool_rules", "allowed_paths", "budget", "workspace"}
-_SHELL_TOOLS = {"bash", "shell", "powershell", "cmd", "exec_command", "functions.exec_command", "run_command"}
+_SHELL_TOOLS = {"bash", "shell", "powershell", "pwsh", "cmd", "exec_command", "functions.exec_command", "run_command", "terminal_open", "terminal_signal", "run_code"}
 _SCOPE_ROOTS_KEY = "_scope_path_roots"
 
 

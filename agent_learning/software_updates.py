@@ -36,7 +36,11 @@ _RESERVATION_SECONDS = 30
 _MAX_RELEASE_NAME = 120
 _MAX_RELEASE_NOTES = 600
 _NOTICE_SECONDS = 30
-_NOTICE_CHANNELS = {"codex": "codex_system_message", "antigravity": "antigravity_ephemeral"}
+_NOTICE_CHANNELS = {
+    "codex": "codex_system_message",
+    "antigravity": "antigravity_ephemeral",
+    "dsh": "dsh_system_message",
+}
 _OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 _REPOSITORY = re.compile(rf"{_OWNER}/[A-Za-z0-9_.-]{{1,100}}\Z")
 _VERSION = re.compile(

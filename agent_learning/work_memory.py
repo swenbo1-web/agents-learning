@@ -152,12 +152,13 @@ class WorkMemoryMixin:
             self.db.execute("INSERT OR IGNORE INTO work_file_links VALUES(?,?,?,?,?,?,?)",
                 (project, event_id, link["checkout_key"], link["relative_path"], link["path_key"],
                  link["relation"], _json(link["version"])))
-        # AG observe 模式的 Post 可能没有执行归属。新鲜回调可留下一条检索提示，
+        # AG/DSH observe 模式的 Post 可能没有执行归属。新鲜回调可留下一条检索提示，
         # 当前任务只用于下一次查文件历史，不能补写原事件的 task_id 或升级其证据。
-        if (native_context_hint and self.host == "antigravity" and event["type"] == "PostToolUse"
+        if (native_context_hint and self.host in {"antigravity", "dsh"} and event["type"] == "PostToolUse"
                 and event.get("task_id") is None and event.get("agent") is None and links):
             task = self.task(project, event["conversation"])
-            trajectory = self.db.execute("SELECT generation FROM antigravity_trajectories WHERE project=? AND conversation=?",
+            trajectory_table = "antigravity_trajectories" if self.host == "antigravity" else "dsh_sessions"
+            trajectory = self.db.execute(f"SELECT generation FROM {trajectory_table} WHERE project=? AND conversation=?",
                                          (project, event["conversation"])).fetchone()
             if task and trajectory:
                 for link in links:
@@ -485,8 +486,9 @@ class WorkMemoryMixin:
                 recent = self.db.execute("SELECT l.* FROM work_file_links l JOIN events e ON e.project=l.project AND e.id=l.event_id WHERE l.project=? AND e.conversation=? AND e.agent IS ? AND l.checkout_key=?" + filters + " ORDER BY e.created DESC LIMIT 3",
                                          parameters).fetchall()
                 links = [dict(row) for row in recent]
-                if self.host == "antigravity" and not agent_id:
-                    trajectory = self.db.execute("SELECT generation FROM antigravity_trajectories WHERE project=? AND conversation=?",
+                if self.host in {"antigravity", "dsh"} and not agent_id:
+                    trajectory_table = "antigravity_trajectories" if self.host == "antigravity" else "dsh_sessions"
+                    trajectory = self.db.execute(f"SELECT generation FROM {trajectory_table} WHERE project=? AND conversation=?",
                                                  (project, conversation)).fetchone()
                     if trajectory and isinstance(task_state, dict) and task_state.get("id"):
                         hints = self.db.execute(

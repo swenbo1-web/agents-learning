@@ -16,7 +16,7 @@ from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release
 from .runtime import ContractError
 from .install_update import (installation_lock, inspect_installation, preserve_extra_files,
                              safe_path, switch_installation, write_installation_manifest,
-                             TARGET_HOSTS, antigravity_hooks, mcp_document, payload_mapping)
+                             TARGET_HOSTS, antigravity_hooks, dsh_hooks, mcp_document, payload_mapping)
 
 
 RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
@@ -28,6 +28,9 @@ REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
                      "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
                      "skills/learning-history/agents/openai.yaml")
+DSH_FILES = ("plugin.json", "package.json", "mcp_config.json", "hooks.json", "host/index.mjs", "rules/learning.md",
+             "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
+             "skills/learning-history/agents/openai.yaml")
 
 
 def _resource_root():
@@ -84,6 +87,52 @@ def _validate_antigravity_resources(root):
             raise ContractError("Antigravity plugin skill resource is invalid: " + name)
 
 
+def _validate_dsh_resources(root):
+    root = filesystem_path(root)
+    for name in DSH_FILES:
+        if not root.joinpath(name).is_file():
+            raise ContractError("DSH plugin resource is missing: " + name)
+    manifest = json.loads(root.joinpath("plugin.json").read_text(encoding="utf-8"))
+    pkg = json.loads(root.joinpath("package.json").read_text(encoding="utf-8"))
+    if (not isinstance(manifest, dict) or manifest.get("name") != "agent-learning"
+            or manifest.get("version") != __version__
+            or manifest.get("skills") != "./skills/" or manifest.get("hooks") != "./hooks.json"
+            or manifest.get("mcpServers") != "./mcp_config.json" or manifest.get("hostEntry") != "./host/index.mjs"
+            or not isinstance(pkg, dict) or pkg.get("name") != "agent-learning" or pkg.get("version") != __version__):
+        raise ContractError("DSH plugin manifest is invalid")
+    hooks = json.loads(root.joinpath("hooks.json").read_text(encoding="utf-8"))
+    if (not isinstance(hooks, dict) or set(hooks) != {"agent-learning"}
+            or not isinstance(hooks["agent-learning"], dict)):
+        raise ContractError("DSH plugin Hook resource is invalid")
+    events = hooks["agent-learning"]
+    expected = {
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+        "Stop", "Interrupt", "SubagentStart", "SubagentStop",
+    }
+    if set(events) != expected:
+        raise ContractError("DSH plugin Hook events are invalid")
+    for event, handlers in events.items():
+        if not isinstance(handlers, list) or not handlers:
+            raise ContractError("DSH plugin Hook handlers are invalid")
+        for item in handlers:
+            if not isinstance(item, dict):
+                raise ContractError("DSH plugin Hook handler is invalid")
+            children = item.get("hooks") if event in ("PreToolUse", "PostToolUse") else [item]
+            if not isinstance(children, list) or not children:
+                raise ContractError("DSH plugin Hook handlers are invalid")
+            for handler in children:
+                if (not isinstance(handler, dict) or handler.get("type") != "command"
+                        or not isinstance(handler.get("command"), str) or not handler["command"]
+                        or set(handler) - {"type", "command", "timeout"}
+                        or type(handler.get("timeout")) is not int or not 1 <= handler["timeout"] <= 30):
+                    raise ContractError("DSH plugin Hook handler contract is invalid")
+    if not isinstance(json.loads(root.joinpath("mcp_config.json").read_text(encoding="utf-8")), dict):
+        raise ContractError("DSH plugin MCP resource is invalid")
+    for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md"):
+        if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
+            raise ContractError("DSH plugin skill resource is invalid: " + name)
+
+
 def _validate_resources(root, host="codex", *, bundle=False):
     root = filesystem_path(root)
     try:
@@ -91,6 +140,11 @@ def _validate_resources(root, host="codex", *, bundle=False):
             _validate_antigravity_resources(root)
             if not root.joinpath("hooks/antigravity_dispatch.py").is_file():
                 raise ContractError("Antigravity Hook dispatcher is missing")
+            return
+        if host == "dsh" and not bundle:
+            _validate_dsh_resources(root)
+            if not root.joinpath("hooks/dsh_dispatch.py").is_file():
+                raise ContractError("DSH Hook dispatcher is missing")
             return
         for name in REQUIRED_FILES:
             if not root.joinpath(name).is_file():
@@ -118,6 +172,9 @@ def _validate_resources(root, host="codex", *, bundle=False):
             _validate_antigravity_resources(root.joinpath("host_resources/antigravity"))
             if not root.joinpath("hooks/antigravity_dispatch.py").is_file():
                 raise ContractError("Antigravity Hook dispatcher is missing")
+            _validate_dsh_resources(root.joinpath("host_resources/dsh"))
+            if not root.joinpath("hooks/dsh_dispatch.py").is_file():
+                raise ContractError("DSH Hook dispatcher is missing")
     except ContractError:
         raise
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
@@ -201,6 +258,12 @@ def _hook_commands(python, script_path, event_name, hook_mode, *, host="codex", 
     arguments = [str(script_path), "--event", event_name]
     if host == "antigravity":
         arguments = ["-B", *arguments, "--workspace", workspace, "--home", home]
+    elif host == "dsh":
+        arguments = ["-B", *arguments]
+        if workspace is not None:
+            arguments.extend(["--workspace", workspace])
+        if home is not None:
+            arguments.extend(["--home", home])
     if hook_mode is not None:
         arguments.extend(["--hook-mode", hook_mode])
     command = " ".join(shlex.quote(value) for value in [python, *arguments])
@@ -220,9 +283,9 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if hook_mode not in (None, "observe", "enforce"):
         raise ContractError("hook mode must be observe or enforce")
     if host not in TARGET_HOSTS:
-        raise ContractError("target host must be codex or antigravity")
+        raise ContractError("target host must be codex, antigravity or dsh")
     if host == "codex" and (workspace is not None or home is not None):
-        raise ContractError("fixed workspace and home bindings apply to the Antigravity installation")
+        raise ContractError("fixed workspace and home bindings apply to Antigravity or DSH installations")
     source = _resource_root()
     _validate_resources(source, bundle=True)
     package = Path(__file__).resolve().parent
@@ -240,9 +303,9 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
             hook_mode = previous["receipt"]["hook_mode"]
         if runtime_store is None:
             runtime_store = previous["runtime_directory"].parent
-        if host == "antigravity":
-            workspace = workspace if workspace is not None else previous["receipt"]["workspace"]
-            home = home if home is not None else previous["receipt"]["home"]
+        if host in {"antigravity", "dsh"}:
+            workspace = workspace if workspace is not None else previous["receipt"].get("workspace")
+            home = home if home is not None else previous["receipt"].get("home")
     if host == "antigravity":
         if workspace is None:
             raise ContractError("Antigravity export requires an explicit workspace")
@@ -255,6 +318,16 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         if any(path.exists() and not path.is_dir() for path in (home, *home.parents)):
             raise ContractError("Antigravity knowledge home and its existing parents must be directories")
         hook_mode = hook_mode or "observe"
+    elif host == "dsh":
+        if workspace is not None:
+            workspace = safe_path(workspace)
+            if not workspace.is_dir():
+                raise ContractError("DSH workspace must be an existing directory")
+        if home is not None:
+            home = safe_path(home)
+            if any(path.exists() and not path.is_dir() for path in (home, *home.parents)):
+                raise ContractError("DSH knowledge home and its existing parents must be directories")
+        hook_mode = hook_mode or "observe"
     store = safe_path(runtime_store if runtime_store is not None else _default_store())
     protected = [package]
     source_release = isinstance(source, Path) and (source / MANIFEST_NAME).is_file()
@@ -266,20 +339,27 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                          for path in protected)
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
-    if host == "antigravity":
+    if host in {"antigravity", "dsh"} and (workspace is not None or home is not None):
         # 默认 home 是数据容器，runtime-releases 是其中唯一保留的运行副本目录。
         # 数据本身仍不能落入运行副本、源码或导出目录。
-        reserved_store = home / "runtime-releases"
-        source_in_reserved_store = (source_release and source.parent == reserved_store
-                                    and source.name == validate_release_root(source)["release_id"])
-        home_source_conflict = any(
-            _overlaps(home, path) and not
-            (source_in_reserved_store and source in (path, *path.parents))
-            for path in protected)
-        if (workspace == target or target in workspace.parents or workspace == store or store in workspace.parents
-                or _overlaps(home, target) or home_source_conflict
-                or (_overlaps(home, store) and store != reserved_store)):
-            raise ContractError("Antigravity bindings must keep project and knowledge data outside export and runtime directories")
+        home_source_conflict = False
+        reserved_store = None
+        if home is not None:
+            reserved_store = home / "runtime-releases"
+            source_in_reserved_store = (source_release and source.parent == reserved_store
+                                        and source.name == validate_release_root(source)["release_id"])
+            home_source_conflict = any(
+                _overlaps(home, path) and not
+                (source_in_reserved_store and source in (path, *path.parents))
+                for path in protected)
+        workspace_conflict = workspace is not None and (
+            workspace == target or target in workspace.parents or workspace == store or store in workspace.parents
+        )
+        home_conflict = home is not None and (
+            _overlaps(home, target) or home_source_conflict or (_overlaps(home, store) and store != reserved_store)
+        )
+        if workspace_conflict or home_conflict:
+            raise ContractError("host bindings must keep project and knowledge data outside export and runtime directories")
     try:
         with installation_lock(target):
             if previous is not None:
@@ -308,6 +388,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 if host == "antigravity":
                     hooks = antigravity_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
                                               str(workspace), str(home))
+                elif host == "dsh":
+                    hooks = dsh_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
+                                      str(workspace) if workspace is not None else None,
+                                      str(home) if home is not None else None)
                 else:
                     hooks = json.loads(hook_file.read_text(encoding="utf-8"))
                     for event_name, groups in hooks["hooks"].items():
@@ -324,6 +408,11 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                     "python": sys.executable, "hook_mode": hook_mode, "target_host": host}
                 if host == "antigravity":
                     receipt.update(workspace=str(workspace), home=str(home))
+                elif host == "dsh":
+                    if workspace is not None:
+                        receipt["workspace"] = str(workspace)
+                    if home is not None:
+                        receipt["home"] = str(home)
                 (staging / "runtime-release.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 _validate_resources(staging, host)
                 write_installation_manifest(staging, release["release_id"], host)
@@ -347,6 +436,12 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     if host == "antigravity":
         result.update(workspace=str(workspace), home=str(home),
                       next_step="在Antigravity中加载此原生插件目录，核对MCP与Hooks已启用；固定项目安装不要全局用于其他项目。")
+    elif host == "dsh":
+        if workspace is not None:
+            result["workspace"] = str(workspace)
+        if home is not None:
+            result["home"] = str(home)
+        result["next_step"] = "在DSH (DeepSeek Harness) 中加载此插件Bundle或配置MCP与Hooks入口；保留固定运行目录及解释器。"
     result["history_import"] = {"available": True, "automatic": False,
                                 "choices": ["history-prepare", "history-skip"],
                                 "workspace_required": True,

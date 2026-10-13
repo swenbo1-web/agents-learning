@@ -16,10 +16,13 @@ class HostScopeTests(unittest.TestCase):
         self.workspace.mkdir()
         self.codex = Runtime(self.home, config={})
         self.ag = Runtime(self.home, config={}, host="antigravity")
+        self.dsh = Runtime(self.home, config={}, host="dsh")
         self.project = self.codex.project(self.workspace)
         self.assertEqual(self.project, self.ag.project(self.workspace))
+        self.assertEqual(self.project, self.dsh.project(self.workspace))
 
     def tearDown(self):
+        self.dsh.close()
         self.ag.close()
         self.codex.close()
         self.temp.cleanup()
@@ -34,17 +37,21 @@ class HostScopeTests(unittest.TestCase):
     def test_same_native_conversation_is_isolated_but_project_is_shared(self):
         codex_conversation, codex_access = self.establish(self.codex)
         ag_conversation, ag_access = self.establish(self.ag)
+        dsh_conversation, dsh_access = self.establish(self.dsh)
         self.assertEqual(codex_conversation, "same-chat")
         self.assertEqual(ag_conversation, "antigravity:default:same-chat")
+        self.assertEqual(dsh_conversation, "dsh:default:same-chat")
         self.assertNotEqual(codex_access["context_handle"], ag_access["context_handle"])
-        for runtime, other in ((self.codex, ag_access), (self.ag, codex_access)):
+        self.assertNotEqual(codex_access["context_handle"], dsh_access["context_handle"])
+        self.assertNotEqual(ag_access["context_handle"], dsh_access["context_handle"])
+        for runtime, other in ((self.codex, ag_access), (self.ag, codex_access), (self.dsh, codex_access), (self.codex, dsh_access)):
             with self.assertRaises(ContractError):
                 runtime.access_context(self.project, other["context_handle"])
-        self.assertEqual(self.codex.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 2)
+        self.assertEqual(self.codex.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 3)
 
     def test_reserved_native_namespace_is_rejected(self):
-        for native in ("antigravity:default:chat", "codex:other:chat"):
-            for runtime in (self.codex, self.ag):
+        for native in ("antigravity:default:chat", "codex:other:chat", "dsh:default:chat"):
+            for runtime in (self.codex, self.ag, self.dsh):
                 with self.assertRaises(ContractError):
                     runtime.host_conversation(native)
         for invalid in (None, "", " "):

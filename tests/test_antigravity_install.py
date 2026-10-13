@@ -32,13 +32,20 @@ def write_json(path, value):
 class AntigravityInstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="alp-antigravity-install-")
-        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        self.addCleanup(self._cleanup_root)
         self.workspace = self.root / "project's 中文 workspace"
         self.workspace.mkdir()
         self.home = self.root / "shared knowledge"
         self.target = self.root / "antigravity plugin"
         self.store = self.root / "fixed releases"
+
+    def _cleanup_root(self):
+        import shutil
+        from agent_learning.release import filesystem_path
+        if self.root.exists() and self.root.name.startswith("alp-antigravity-install-"):
+            shutil.rmtree(filesystem_path(self.root), ignore_errors=True)
+        self.temp.cleanup()
 
     def initial(self, mode=None):
         return install(self.target, runtime_store=self.store, hook_mode=mode,

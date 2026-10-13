@@ -1,0 +1,70 @@
+{
+  "agent-learning": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event SessionStart",
+        "timeout": 10
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event UserPromptSubmit",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -B hooks/dsh_dispatch.py --event PreToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -B hooks/dsh_dispatch.py --event PostToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event Stop",
+        "timeout": 10
+      }
+    ],
+    "Interrupt": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event Interrupt",
+        "timeout": 3
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event SubagentStart",
+        "timeout": 10
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": "python -B hooks/dsh_dispatch.py --event SubagentStop",
+        "timeout": 10
+      }
+    ]
+  }
+}

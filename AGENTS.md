@@ -5,7 +5,7 @@
 - 本目录是八模块整合后的开发仓库；先读 `README.md` 的总流程和模块映射，再按当前任务定位源码。
 - 项目显示名称为 `agents-learning`；Python 包名 `agent_learning`、插件名 `agent-learning`、CLI 名 `agent-learning` 保持现有契约。
 - `scripts/learning.py` 是源码入口，`python -m agent_learning.cli` 是包入口；Hook 和 MCP 通过同一固定运行副本接入。
-- 同一仓库维护 Codex 与 Antigravity 两种安装 profile；`install --host` 选择资源，不能跨宿主覆盖安装。项目知识共用，会话与宿主实例分别核对。
+- 同一仓库维护 Codex、Antigravity 与 DSH (DeepSeek Harness) 三种安装 profile；`install --host` 选择资源，不能跨宿主覆盖安装。项目知识共用，会话与宿主实例分别核对。
 - 开发源码、导出插件、固定运行副本与真实知识数据库分别维护。不要直接修改已生成的固定运行副本。
 - 本项目唯一开发目录为 `D:\Projects\agents-learning`。开发生成的临时文件、演示材料、验收副本与日志统一放 `build/local/`，发布包统一放 `dist/`；不得再在项目外创建旧仓库、版本副本或生成工作目录。
 

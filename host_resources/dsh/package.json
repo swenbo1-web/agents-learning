@@ -1,0 +1,29 @@
+{
+  "name": "agent-learning",
+  "version": "1.0.0",
+  "description": "Local-first governed memory and work history plugin for DeepSeek Harness (DSH)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./host/index.mjs",
+    "./host": "./host/index.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "title": {
+        "en": "Agent Learning",
+        "zh-CN": "Agent Learning 项目记忆与知识库"
+      },
+      "description": {
+        "en": "Local project memory, work history, file associations, progressive retrieval, and governed knowledge base.",
+        "zh-CN": "本地优先的项目记忆、工作观察、文件关联、渐进检索与受控知识治理。"
+      },
+      "rows": [
+        {
+          "id": "agent-learning-host",
+          "module": "agent-learning/host"
+        }
+      ]
+    }
+  }
+}

@@ -15,6 +15,8 @@ def checkout_root(workspace):
         try:
             if (current / ".git").exists():
                 return current
+            if current.name.lower() == "local" and current.parent.name.lower() == "build":
+                break
         except OSError:
             break
     return origin
@@ -80,7 +82,7 @@ def file_links_from_payload(tool_name, payload, workspace, *, observe_version=Tr
     """保守解析支持的结构化目标及 apply_patch 标头，返回最多 16 个关系。"""
     name = str(tool_name or "").lower()
     args = payload if isinstance(payload, dict) else {}
-    shell = any(word in name for word in ("bash", "shell", "exec_command", "run_command", "terminal"))
+    shell = any(word in name for word in ("bash", "shell", "pwsh", "powershell", "exec_command", "run_command", "terminal"))
     shell_base = None
     if shell:
         cwd = args.get("cwd", args.get("workdir", args.get("Cwd")))

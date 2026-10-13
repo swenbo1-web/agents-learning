@@ -45,7 +45,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import",
-                               "work_memory", "work_files", "work_summaries"):
+                               "work_memory", "work_files", "work_summaries", "dsh"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/README.en.md", wheel.namelist())
@@ -55,6 +55,10 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/rules/learning.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/skills/learning-history/SKILL.md", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/plugin.json", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/package.json", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/host/index.mjs", wheel.namelist())
+                self.assertIn("agent_learning/_plugin_resources/hooks/dsh_dispatch.py", wheel.namelist())
                 self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
                 licenses = [name for name in wheel.namelist() if ".dist-info/" in name and name.endswith("/LICENSE")]
                 self.assertTrue(licenses, "wheel must retain its distribution license")

@@ -43,6 +43,7 @@
     "model": "",
     "command": ["codex"],
     "antigravity_command": ["agy"],
+    "dsh_command": ["dsh"],
     "max_calls_per_day": 5,
     "max_input_chars": 16000,
     "timeout_seconds": 120,

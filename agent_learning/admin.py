@@ -54,7 +54,7 @@ def _executor_semantics(provider_plan):
 
 def _review_configuration(cfg, provider_plan):
     result = {key: value for key, value in cfg.items() if key not in
-              {"executor", "routing_ready", "routing_reason", "antigravity_command"}}
+              {"executor", "routing_ready", "routing_reason", "antigravity_command", "dsh_command"}}
     result.update(_executor_semantics(provider_plan))
     return result
 
@@ -215,7 +215,8 @@ def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None):
     from .admin_lifecycle import UNKNOWN_STATES, finish_call
     from .admin_providers import antigravity_usage
     elapsed = time.monotonic() - started_at
-    usage = (antigravity_usage(log_path, elapsed) if provider_plan and provider_plan["provider"] == "antigravity"
+    stream_provider = provider_plan["provider"] if provider_plan and provider_plan.get("provider") in {"antigravity", "dsh"} else None
+    usage = (antigravity_usage(log_path, elapsed, provider=stream_provider) if stream_provider
              else _usage(log_path, elapsed))
     if provider_plan:
         usage["executor"] = {key: provider_plan.get(key) for key in
@@ -553,16 +554,17 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                     runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
             mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             try:
+                stream_mode = provider_plan["provider"] in {"antigravity", "dsh"}
                 process = subprocess.Popen(args, stdin=subprocess.PIPE,
-                                           stdout=subprocess.PIPE if provider_plan["provider"] == "antigravity" else log,
-                                           stderr=subprocess.DEVNULL if provider_plan["provider"] == "antigravity" else log, env=env, cwd=directory,
+                                           stdout=subprocess.PIPE if stream_mode else log,
+                                           stderr=subprocess.DEVNULL if stream_mode else log, env=env, cwd=directory,
                                            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
             except OSError:
                 # Popen明确失败才释放未启动额度；崩溃窗口由持久intent按未知恢复。
                 usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **context}
             mark_started(runtime, call_id, reserved["owner"], getattr(process, "pid", None))
-            if provider_plan["provider"] == "antigravity":
+            if stream_mode:
                 stdout_stream, process.stdout = process.stdout, None
                 output_thread, output_state = collect_antigravity_stream(stdout_stream, log_path, process.kill,
                                                                          provider_plan.get("model", ""))
