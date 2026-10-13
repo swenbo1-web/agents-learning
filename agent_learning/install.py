@@ -28,7 +28,8 @@ REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
                      "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
                      "skills/learning-history/agents/openai.yaml")
-DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json", "host/index.mjs", "rules/learning.md",
+DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json",
+             "host/index.mjs", "rules/learning.md",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
              "skills/learning-history/agents/openai.yaml")
 
@@ -143,7 +144,7 @@ def _validate_resources(root, host="codex", *, bundle=False):
             return
         if host == "dsh" and not bundle:
             _validate_dsh_resources(root)
-            if not root.joinpath("hooks/dsh_dispatch.py").is_file():
+            if not root.joinpath("hooks/dsh_dispatch.py").is_file() or not root.joinpath("hooks/dsh_tool.py").is_file():
                 raise ContractError("DSH Hook dispatcher is missing")
             return
         for name in REQUIRED_FILES:
@@ -173,7 +174,7 @@ def _validate_resources(root, host="codex", *, bundle=False):
             if not root.joinpath("hooks/antigravity_dispatch.py").is_file():
                 raise ContractError("Antigravity Hook dispatcher is missing")
             _validate_dsh_resources(root.joinpath("host_resources/dsh"))
-            if not root.joinpath("hooks/dsh_dispatch.py").is_file():
+            if not root.joinpath("hooks/dsh_dispatch.py").is_file() or not root.joinpath("hooks/dsh_tool.py").is_file():
                 raise ContractError("DSH Hook dispatcher is missing")
     except ContractError:
         raise

@@ -7,7 +7,7 @@ const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function loadRuntimeReceipt() {
   const receiptPath = join(PLUGIN_ROOT, "runtime-release.json");
-  return JSON.parse(readFileSync(receiptPath, "utf8"));
+  return JSON.parse(readFileSync(receiptPath, "utf8").replace(/^\uFEFF/, ""));
 }
 
 function extractTextFromBlocks(blocks) {
@@ -246,12 +246,51 @@ const WORKER_TOOL_SPECS = [
 ];
 
 export const name = "agent-learning";
-export const inject = ["tools", "systemPrompt"];
+export const inject = ["tools", "systemPrompt", "agents"];
 
 export function apply(ctx) {
   const sessionContexts = new Map();
   const sessionHandles = new Map();
   const sessionMeta = new Map();
+  const scopedAgentIds = new Set();
+  const activeDisposers = [];
+
+  async function resolveSessionMeta(agentId) {
+    if (!agentId) return {};
+    const existing = sessionMeta.get(agentId);
+    if (existing && existing.cwd) return existing;
+    const sessionQuery = ctx.sessionQuery || ctx.get?.("sessionQuery");
+    if (sessionQuery && typeof sessionQuery.observeSession === "function") {
+      try {
+        const obs = await sessionQuery.observeSession(agentId, { projectionMode: "none" });
+        try {
+          if (obs?.header) {
+            const resolved = {
+              cwd: obs.header.cwd,
+              parentSession: obs.header.parentSession,
+              origin: obs.header.origin,
+            };
+            sessionMeta.set(agentId, resolved);
+            return resolved;
+          }
+        } finally {
+          if (typeof obs?.[Symbol.dispose] === "function") {
+            obs[Symbol.dispose]();
+          }
+        }
+      } catch {}
+    }
+    return existing || {};
+  }
+
+  ctx.effect(() => () => {
+    while (activeDisposers.length > 0) {
+      const dispose = activeDisposers.pop();
+      try {
+        if (typeof dispose === "function") dispose();
+      } catch {}
+    }
+  });
 
   function captureHandleFromText(agentId, text) {
     if (!agentId || typeof text !== "string") return;
@@ -296,41 +335,55 @@ export function apply(ctx) {
     }
   }
 
+  async function ensureSessionBound(agentId, cwd, signal) {
+    if (!agentId || sessionHandles.has(agentId)) {
+      return sessionHandles.get(agentId);
+    }
+    const meta = sessionMeta.get(agentId) || {};
+    const eventKind = meta.origin === "subagent" ? "SubagentStart" : "SessionStart";
+    const result = await dispatchEvent(
+      eventKind,
+      {
+        sessionId: meta.parentSession || agentId,
+        agentId: meta.origin === "subagent" ? agentId : undefined,
+        cwd: cwd || meta.cwd || process.cwd(),
+        source: "resume",
+        requestContext: meta.requestContext,
+      },
+      signal,
+    );
+    const additional = result?.hookSpecificOutput?.additionalContext;
+    if (additional) {
+      sessionContexts.set(agentId, additional);
+      captureHandleFromText(agentId, additional);
+    }
+    return sessionHandles.get(agentId);
+  }
+
   async function invokeMcpTool(toolName, rawArgs, exec) {
     const receipt = loadRuntimeReceipt();
     const agentId = exec?.agent?.id;
-    const meta = (agentId && sessionMeta.get(agentId)) || {};
+    const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
     const workspace = meta.cwd || receipt.workspace || process.cwd();
     const args = { ...(rawArgs || {}) };
-    if (!args.context_handle && agentId && sessionHandles.has(agentId)) {
-      args.context_handle = sessionHandles.get(agentId);
+    if (!args.context_handle && agentId) {
+      const boundHandle = await ensureSessionBound(agentId, workspace, exec?.signal);
+      if (boundHandle) {
+        args.context_handle = boundHandle;
+      }
     }
-    const inlineRunner = [
-      "import json, sys; from pathlib import Path;",
-      "sys.path.insert(0, sys.argv[1]);",
-      "from agent_learning.release import validate_release_root; validate_release_root(Path(sys.argv[1]));",
-      "from agent_learning.runtime import Runtime, encode; from agent_learning.mcp import Server;",
-      "payload = json.loads(sys.stdin.read());",
-      "r = Runtime(home=payload.get('home'), host='dsh');",
-      "try:",
-      "    p = r.project(payload['workspace']);",
-      "    s = Server(r, p, 'worker', workspace=payload['workspace']);",
-      "    res = s.call(payload['tool'], payload['args']);",
-      "    print(encode({'ok': True, 'result': res}));",
-      "except Exception as e:",
-      "    print(encode({'ok': False, 'error': str(e)}));",
-      "finally:",
-      "    r.close()",
-    ].join(" ");
+    const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
     const inputPayload = JSON.stringify({
       home: receipt.home || null,
       workspace,
+      session_id: meta.parentSession || agentId || null,
+      agent_id: meta.origin === "subagent" ? agentId : null,
       tool: toolName,
       args,
     });
     const { code, stdout, stderr } = await runPythonProcess(
       receipt.python,
-      ["-B", "-c", inlineRunner, receipt.runtime_directory],
+      ["-B", toolScript],
       inputPayload,
       workspace,
       exec?.signal,
@@ -346,8 +399,8 @@ export function apply(ctx) {
     return parsed.result;
   }
 
-  for (const spec of WORKER_TOOL_SPECS) {
-    ctx.tools.register({
+  function makeToolDefinition(spec) {
+    return {
       name: spec.name,
       description: spec.description,
       parameters: spec.parameters,
@@ -363,7 +416,35 @@ export function apply(ctx) {
       async execute(args, exec) {
         return invokeMcpTool(spec.name, args, exec);
       },
-    });
+    };
+  }
+
+  function registerToolsForTarget(toolsService) {
+    if (!toolsService || typeof toolsService.register !== "function") return;
+    for (const spec of WORKER_TOOL_SPECS) {
+      try {
+        const dispose = toolsService.register(makeToolDefinition(spec));
+        if (typeof dispose === "function") {
+          activeDisposers.push(dispose);
+        }
+      } catch {}
+    }
+  }
+
+  function ensureAgentScopedTools(agent) {
+    if (!agent?.id || scopedAgentIds.has(agent.id)) return;
+    const scopedTools = agent.ctx?.tools || agent.ctx?.get?.("tools");
+    if (scopedTools && scopedTools !== ctx.tools) {
+      registerToolsForTarget(scopedTools);
+      scopedAgentIds.add(agent.id);
+    }
+  }
+
+  registerToolsForTarget(ctx.tools);
+  if (ctx.agents && typeof ctx.agents.list === "function") {
+    for (const liveAgent of ctx.agents.list()) {
+      ensureAgentScopedTools(liveAgent);
+    }
   }
 
   if (typeof ctx.inject === "function") {
@@ -385,28 +466,36 @@ export function apply(ctx) {
         try {
           const skillPath = join(PLUGIN_ROOT, "skills", skillName, "SKILL.md");
           const content = readFileSync(skillPath, "utf8");
-          scope.skills.register({
+          const dispose = scope.skills.register({
             name: skillName,
             description: desc,
             content,
             source: "bundled",
             resourceBase: { kind: "directory", path: dirname(skillPath) },
           });
+          if (typeof dispose === "function") {
+            activeDisposers.push(dispose);
+          }
         } catch {}
       }
     });
   }
 
   if (ctx.systemPrompt) {
-    ctx.systemPrompt.context({
-      name: "agent-learning-context",
-      order: 850,
-      text: (assembleCtx) => {
-        const scope = assembleCtx?.scope;
-        const id = scope && typeof scope === "object" && "id" in scope ? scope.id : undefined;
-        return (id && sessionContexts.get(id)) || "";
-      },
-    });
+    try {
+      const dispose = ctx.systemPrompt.context({
+        name: "agent-learning-context",
+        order: 850,
+        text: (assembleCtx) => {
+          const scope = assembleCtx?.scope;
+          const id = scope && typeof scope === "object" && "id" in scope ? scope.id : undefined;
+          return (id && sessionContexts.get(id)) || "";
+        },
+      });
+      if (typeof dispose === "function") {
+        activeDisposers.push(dispose);
+      }
+    } catch {}
   }
 
   ctx.on("session/created", (session) => {
@@ -422,6 +511,7 @@ export function apply(ctx) {
   ctx.on("agent/created", async (payload) => {
     const agent = payload?.agent;
     if (!agent?.id) return;
+    ensureAgentScopedTools(agent);
     const meta = sessionMeta.get(agent.id) || {};
     const eventKind = meta.origin === "subagent" ? "SubagentStart" : "SessionStart";
     const result = await dispatchEvent(
@@ -444,6 +534,9 @@ export function apply(ctx) {
 
   ctx.on("agent/pre-step", async (payload, next) => {
     const agent = payload?.agent;
+    if (agent?.id) {
+      ensureAgentScopedTools(agent);
+    }
     if (agent?.id && payload.step === 0) {
       const meta = sessionMeta.get(agent.id) || {};
       const promptText = Array.isArray(payload.messages)
@@ -504,8 +597,23 @@ export function apply(ctx) {
     return next();
   });
 
+  const WORKER_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.map((s) => s.name));
+
   ctx.on("tools/post-execute", async (exec, toolResult, next) => {
     const agent = exec?.agent;
+    if (
+      exec?.name &&
+      WORKER_TOOL_NAMES.has(exec.name) &&
+      toolResult?.isError &&
+      typeof toolResult?.error?.message === "string" &&
+      toolResult.error.message.includes("SyntaxError: invalid syntax")
+    ) {
+      const recovered = await invokeMcpTool(exec.name, exec.arguments || {}, exec);
+      return {
+        kind: "accept",
+        content: [{ type: "text", text: JSON.stringify(recovered, null, 2) }],
+      };
+    }
     if (agent?.id) {
       const meta = sessionMeta.get(agent.id) || {};
       await dispatchEvent(
