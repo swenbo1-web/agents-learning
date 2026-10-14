@@ -43,6 +43,19 @@ RESPONSE_SCHEMA = _strict_schema({
     }, "required": ["decision", "reason", "candidate"], "additionalProperties": False,
 })
 
+# 多条输出只用于用户显式启动的历史批次；日常审核与工作摘要保持单条契约。
+HISTORY_RESPONSE_SCHEMA = copy.deepcopy(RESPONSE_SCHEMA)
+HISTORY_RESPONSE_SCHEMA["properties"]["candidates"] = {
+    "type": "array", "maxItems": 5, "items": _strict_schema(CANDIDATE)}
+HISTORY_RESPONSE_SCHEMA["required"].append("candidates")
+
+
+def _history_packet(runtime, project, problem_id, job_id):
+    from .history_context import enrich_history_packet
+    limit = runtime.admin_effective_config(project)["max_input_chars"]
+    packet = runtime.review_packet(project, problem_id, max_chars=max(1000, limit - 800))
+    return enrich_history_packet(runtime, project, packet, job_id, max_chars=limit)
+
 _TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
 _TRUNCATION_NOTE = "原始证据已投影或截短；结论仅限可见记录，未核对完整原文。"
 
@@ -95,13 +108,16 @@ def _fingerprint(packet):
     if packet.get("purpose") == "work_summary":
         # 阶段请求的传输摘要不是新增工作；变更write-version不能绕过未知调用阻止。
         summary = re.sub(r" \[[a-f0-9]{16}\]$", "", summary)
-    return digest({"summary": summary,
+    identity = {"summary": summary,
                    "category": problem.get("category", "unknown"),
                    "goal": clean(task.get("goal", "")), "scope": clean(task.get("scope", {})),
                    "events": events, "evidence_truncated": bool(packet.get("evidence_truncated")),
                    "incomplete": bool(packet.get("incomplete")),
                    "feedback": {key: problem.get(key) for key in
-                                ("knowledge_id", "knowledge_revision", "resolution_status")}})
+                                ("knowledge_id", "knowledge_revision", "resolution_status")}}
+    if packet.get("purpose") == "history_review":
+        identity["history_context"] = packet.get("related_history", [])
+    return digest(identity)
 
 
 def _usage(log_path, elapsed):
@@ -306,7 +322,10 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         review_cfg = _review_configuration(cfg, provider_plan)
         if summary_context:
             review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
-        packet = runtime.review_packet(project, selected["id"])
+        packet = (_history_packet(runtime, project, selected["id"], history_job_id)
+                  if history_job_id else runtime.review_packet(project, selected["id"]))
+        if history_job_id:
+            review_cfg.update(review_purpose="history_review", history_instruction_version=1)
         if summary_context:
             packet["purpose"] = "work_summary"
         instruction = review_instruction(packet)
@@ -341,7 +360,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 response = current["response"]
                 return {"status": current["decision"], "reason": current["reason"], "reused": True,
                         "call_id": current["call_id"], "scanned_count": scanned,
-                        **{k: response[k] for k in ("candidate_id", "proposal_id", "missing_evidence") if k in response}}
+                        **{k: response[k] for k in ("candidate_id", "candidate_ids", "candidate_count", "proposal_id", "proposal_ids", "missing_evidence") if k in response}}
             continue
         previous = find_receipt(runtime, project, review)
         if previous:
@@ -355,7 +374,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                       "previous_decision": previous["decision"], "scanned_count": scanned,
                       "fingerprint": evidence, "review_signature": review,
                       "previous_missing_evidence": previous["response"].get("missing_evidence", [])}
-            for key in ("candidate_id", "proposal_id"):
+            for key in ("candidate_id", "candidate_ids", "proposal_id", "proposal_ids"):
                 if key in previous["response"]:
                     result["previous_" + key] = previous["response"][key]
             persist_receipt(runtime, project, packet, evidence, review, call_id, result, duplicate_of=previous["call_id"])
@@ -389,13 +408,46 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 "reason": "bounded scan blocked; no invocation reserved"} if skipped else {})}
 
 
+def _accept_history_candidates(runtime, project, reserved, bodies, reason):
+    """同一调用的候选全部成功或回滚；每条仍有独立来源与审批身份。"""
+    from .admin_governance import propose_governance
+    from .history_context import link_history_evidence
+    packet, job_id = reserved["packet"], reserved["history_job_id"]
+    prepared = []
+    for body in bodies:
+        validate(body, CANDIDATE)
+        if (body["problem_id"] != packet["problem"]["id"]
+                or body["problem_revision"] != packet["problem"]["revision"]):
+            raise ContractError("administrator changed review identity or revision")
+        if body["validation_level"] != "reported":
+            raise ContractError("historical public text must remain reported")
+        if packet.get("evidence_truncated"):
+            body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
+        prepared.append(body)
+    candidate_ids, proposal_ids = [], []
+    for body in prepared:
+        link_history_evidence(runtime, project, packet, body["evidence_refs"], job_id)
+        candidate = runtime.submit_candidate(project, expected_epoch=reserved["host_epoch"], **body)
+        proposal = propose_governance(runtime, project, packet["problem"]["id"], packet["problem"]["revision"],
+                                      "publish", candidate_id=candidate["candidate_id"], reason=reason,
+                                      evidence_refs=body["evidence_refs"], expected_epoch=reserved["host_epoch"])
+        if candidate["candidate_id"] not in candidate_ids:
+            candidate_ids.append(candidate["candidate_id"])
+            proposal_ids.append(proposal["proposal_id"])
+    return {"candidate_id": candidate_ids[0], "candidate_ids": candidate_ids,
+            "candidate_count": len(candidate_ids), "proposal_id": proposal_ids[0], "proposal_ids": proposal_ids}
+
+
 def _accept_response(runtime, project, reserved, response):
     from .admin_decisions import persist_receipt, review_signature
     from .admin_governance import propose_governance
     from .admin_lifecycle import validate_call
     from .admin_queue import remember_check
     call_id, packet = reserved["call_id"], reserved["packet"]
+    history_job_id = reserved.get("history_job_id")
     allowed = {"decision", "reason", "candidate", "missing_evidence", "proposal"}
+    if history_job_id:
+        allowed.add("candidates")
     if (not isinstance(response, dict) or not {"decision", "reason", "candidate"} <= set(response)
             or set(response) - allowed or response["decision"] not in {"candidate", "needs_evidence", "skip", "governance"}
             or not isinstance(response["reason"], str)):
@@ -403,6 +455,13 @@ def _accept_response(runtime, project, reserved, response):
     missing = response.get("missing_evidence", [])
     if not isinstance(missing, list) or len(missing) > 8 or not all(isinstance(v, str) and len(v) <= 1000 for v in missing):
         raise ContractError("invalid missing evidence requirements")
+    candidates = response.get("candidates", [])
+    if (not isinstance(candidates, list) or len(candidates) > 5
+            or candidates and (not history_job_id or response["decision"] != "candidate"
+                               or response["candidate"] is not None or response.get("proposal") is not None)):
+        raise ContractError("invalid history candidate batch")
+    if history_job_id and len(encode(response).encode("utf-8")) > 40000:
+        raise ContractError("history response exceeds total output budget")
     validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
     runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
                                            require_enabled=reserved.get("history_job_id") is None)
@@ -418,10 +477,13 @@ def _accept_response(runtime, project, reserved, response):
                                   (project, packet["problem"]["id"])).fetchone()
     if not revision or revision[0] != packet["problem"]["revision"]:
         raise ContractError("reviewed problem changed")
-    current_packet = runtime.review_packet(project, packet["problem"]["id"])
+    current_packet = (_history_packet(runtime, project, packet["problem"]["id"], history_job_id)
+                      if history_job_id else runtime.review_packet(project, packet["problem"]["id"]))
     if summary_context:
         current_packet["purpose"] = "work_summary"
     review_cfg = _review_configuration(runtime.admin_effective_config(project), reserved["provider_plan"])
+    if history_job_id:
+        review_cfg.update(review_purpose="history_review", history_instruction_version=1)
     if summary_context:
         review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
     if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
@@ -433,11 +495,18 @@ def _accept_response(runtime, project, reserved, response):
     body, proposal = response["candidate"], response.get("proposal")
     if summary_context and (proposal is not None or response["decision"] == "governance"):
         raise ContractError("work summary cannot propose knowledge governance")
-    if response["decision"] == "candidate":
+    if candidates:
+        result.update(_accept_history_candidates(runtime, project, reserved, candidates, result["reason"]))
+    elif response["decision"] == "candidate":
         validate(body, CANDIDATE)
         if body["problem_id"] != packet["problem"]["id"] or body["problem_revision"] != packet["problem"]["revision"]:
             raise ContractError("administrator changed review identity or revision")
-        if set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
+        if history_job_id:
+            from .history_context import link_history_evidence
+            if body["validation_level"] != "reported":
+                raise ContractError("historical public text must remain reported")
+            link_history_evidence(runtime, project, packet, body["evidence_refs"], history_job_id)
+        elif set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
             raise ContractError("candidate references evidence outside the review packet")
         if packet.get("evidence_truncated"):
             body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
@@ -467,6 +536,9 @@ def _accept_response(runtime, project, reserved, response):
                                         reason=result["reason"], evidence_refs=refs, expected_epoch=reserved["host_epoch"]))
     elif response["decision"] == "governance":
         raise ContractError("governance decision requires a proposal")
+    if history_job_id and response["decision"] == "candidate" and not candidates:
+        result.update(candidate_ids=[result["candidate_id"]], candidate_count=1,
+                      proposal_ids=[result["proposal_id"]] if result.get("proposal_id") else [])
     if (response["decision"] == "candidate" and runtime.admin_effective_config(project)["auto_publish"]
             and not reserved.get("history_job_id") and not summary_context):
         reason = ("evidence truncated" if packet.get("evidence_truncated") else
@@ -531,7 +603,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         temp = temporary.name
         directory = Path(temp)
         schema_path, output, log_path = directory / "response.schema.json", directory / "result.json", directory / "events.log"
-        schema_path.write_text(encode(RESPONSE_SCHEMA), encoding="utf-8")
+        schema_path.write_text(encode(HISTORY_RESPONSE_SCHEMA if _history_job_id else RESPONSE_SCHEMA), encoding="utf-8")
         execution = build_execution(provider_plan["command"], provider_plan["provider"], provider_plan.get("model", ""),
                                     directory, schema_path, output, reserved["instruction"], timeout,
                                     selection_mode=provider_plan.get("model_mode", "default"))

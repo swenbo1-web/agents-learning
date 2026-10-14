@@ -1,6 +1,7 @@
 """显式、按次批准的历史吸收；不由 Hook 或普通管理员队列唤醒。"""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import time
@@ -8,6 +9,63 @@ import uuid
 
 
 ACCESS_STATES = {"materialized", "reviewing", "review_complete"}
+_REVIEW_TERMINAL = {"candidate_ready", "proposal_ready", "skipped", "published"}
+
+
+@contextmanager
+def _read_snapshot(runtime):
+    """Reuse an enclosing transaction; standalone progress reads share one view."""
+    owned = not runtime.db.in_transaction
+    if owned:
+        runtime.db.execute("BEGIN")
+    try:
+        yield
+        if owned:
+            runtime.db.execute("COMMIT")
+    except BaseException:
+        if owned and runtime.db.in_transaction:
+            runtime.db.execute("ROLLBACK")
+        raise
+
+
+def _review_queue(runtime, project, job_id):
+    """Current-revision disposition; file order never depends on hashed unit IDs.
+
+    A related source included in another packet remains unreviewed here. Only a
+    decision/candidate for this exact problem revision settles its own unit.
+    """
+    rows = runtime.db.execute(
+        "SELECT p.id AS problem_id,p.revision,s.position,u.unit_index,r.state AS review_state,"
+        "r.revision AS review_revision,"
+        "EXISTS(SELECT 1 FROM candidates c WHERE c.project=p.project AND c.problem=p.id "
+        "AND c.problem_revision=p.revision) AS has_candidate,"
+        "EXISTS(SELECT 1 FROM review_receipts d WHERE d.project=p.project AND d.problem=p.id "
+        "AND d.revision=p.revision AND d.decision='needs_evidence') AS needs_evidence,"
+        "(SELECT a.id FROM admin_calls a WHERE a.project=p.project AND a.problem=p.id "
+        "AND a.revision=p.revision AND a.retry_allowed=0 AND a.state NOT IN ('not_started','deduplicated') "
+        "AND NOT EXISTS(SELECT 1 FROM review_receipts d WHERE d.project=a.project AND d.call_id=a.id) "
+        "ORDER BY a.created DESC,a.id DESC LIMIT 1) AS blocked_call_id "
+        "FROM history_case_links l JOIN problems p ON p.project=l.project AND p.id=l.problem_id "
+        "JOIN history_units u ON u.id=l.unit_id JOIN history_job_sources s "
+        "ON s.job_id=l.job_id AND s.material_id=u.material_id "
+        "LEFT JOIN review_states r ON r.project=p.project AND r.problem=p.id "
+        "WHERE l.project=? AND l.job_id=? ORDER BY s.position,u.unit_index,p.id", (project, job_id)).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        current = row["review_revision"] == row["revision"]
+        if row["blocked_call_id"]:
+            item["disposition"] = "blocked"
+            call = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (row["blocked_call_id"],)).fetchone()
+            item["blocked_call_state"] = call[0] if call else "unknown"
+        elif row["has_candidate"] or current and row["review_state"] in _REVIEW_TERMINAL:
+            item["disposition"] = "completed"
+        elif current and row["review_state"] == "awaiting_evidence" and row["needs_evidence"]:
+            item["disposition"] = "awaiting_evidence"
+        else:
+            item["disposition"] = "ready"
+        items.append(item)
+    return items
 
 
 def install_storage(runtime):
@@ -38,6 +96,16 @@ def _job(runtime, project, job_id):
 
 
 def _summary(runtime, row):
+    owned = not runtime.db.in_transaction
+    with _read_snapshot(runtime):
+        if owned:
+            # Direct callers may have fetched job metadata before this snapshot.
+            # Refresh it inside the view used by the counts and dispositions.
+            row = _job(runtime, row["project"], row["id"])
+        return _summary_snapshot(runtime, row)
+
+
+def _summary_snapshot(runtime, row):
     plan = json.loads(row["plan"])
     counts = {}
     for key, sql in {
@@ -58,14 +126,41 @@ def _summary(runtime, row):
     counts["pending_cases"] = max(0, counts["cases"] - counts["reviewed_cases"])
     counts["completed_review_cases"] = counts["reviewed_cases"]
     counts["reviewed_cases"] = counts["review_decision_cases"]
+    queue = _review_queue(runtime, row["project"], row["id"])
+    dispositions = {key: sum(item["disposition"] == key for item in queue)
+                    for key in ("completed", "ready", "awaiting_evidence", "blocked")}
+    selected_complete = counts["materialized_sources"] == counts["sources"]
+    review_complete = selected_complete and all(item["disposition"] == "completed" for item in queue)
+    blocked = [{"problem_id": item["problem_id"], "call_id": item["blocked_call_id"], "state": item["blocked_call_state"]}
+               for item in queue if item["disposition"] == "blocked"]
+    candidate_states = {item[0]: item[1] for item in runtime.db.execute(
+        "SELECT c.status,COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l "
+        "ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=? GROUP BY c.status", (row["id"],))}
+    active = bool(row["owner"] and (row["lease_until"] or 0) > time.time())
     return {"job_id": row["id"], "state": row["state"], "workspace": row["workspace"], "counts": counts,
             "coverage": {"incomplete": bool(plan.get("incomplete")), "stats": plan.get("stats", {}),
-                         "skipped_count": plan.get("skipped_count", 0), "pending_count": plan.get("pending_count", 0)},
+                         "skipped_count": plan.get("skipped_count", 0), "pending_count": plan.get("pending_count", 0),
+                         "archive": {"selected_sources": counts["sources"], "materialized_sources": counts["materialized_sources"],
+                                     "selected_sources_complete": selected_complete, "scan_incomplete": bool(plan.get("incomplete")),
+                                     "project_scan_complete": not bool(plan.get("incomplete"))},
+                         "review": {"scope": "materialized_units", "total_cases": len(queue), "completed_cases": dispositions["completed"],
+                                    "ready_cases": dispositions["ready"], "awaiting_evidence_cases": dispositions["awaiting_evidence"],
+                                    "blocked_cases": dispositions["blocked"], "complete": review_complete},
+                         "publication": {"candidates": counts["candidates"], "published_candidates": counts["published_candidates"],
+                                         "awaiting_approval": candidate_states.get("candidate", 0) + candidate_states.get("deferred", 0),
+                                         "rejected_candidates": candidate_states.get("rejected", 0), "automatic": False}},
             "remaining_calls": row["remaining_calls"], "review_enabled": bool(row["review_enabled"]),
             "created": row["created"], "updated": row["updated"], "last_result": json.loads(row["last_result"]),
             "automatic_resume": False, "publication_automatic": False,
-            "run_active": bool(row["owner"] and (row["lease_until"] or 0) > time.time()),
+            "run_active": active,
             "resume_required": row["state"] == "paused" or row["state"] in {"materializing", "reviewing"} and (row["lease_until"] or 0) <= time.time(),
+            "resume": {"automatic": False, "explicit_run_required": row["state"] != "cancelled" and not active
+                       and (not selected_complete or dispositions["ready"] > 0),
+                       "review_ready_cases": dispositions["ready"], "awaiting_evidence_cases": dispositions["awaiting_evidence"],
+                       "blocked_cases": dispositions["blocked"],
+                       "requires_call_retry": any(item["state"] not in {"reserved", "launch_intent", "started"} for item in blocked),
+                       "wait_for_active_calls": any(item["state"] in {"reserved", "launch_intent", "started"} for item in blocked),
+                       "blocked_calls": blocked[:20], "blocked_calls_truncated": len(blocked) > 20},
             "epoch_current": row["host_epoch"] == runtime.host_epoch()}
 
 
@@ -132,20 +227,22 @@ class HistoryImportMixin:
             return _summary(self, _job(self, project, ident))
 
     def history_status(self, project, job_id=None):
-        row = self.db.execute("SELECT * FROM project_onboarding WHERE project=?", (project,)).fetchone()
-        onboarding = {"state": row["state"], "job_id": row["job_id"]} if row else {"state": "unoffered", "job_id": None}
-        selected = _job(self, project, job_id) if job_id else self.db.execute(
-            "SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT 1", (project,)).fetchone()
-        return {"project_id": project, "onboarding": onboarding, "job": _summary(self, selected) if selected else None,
-                "manual_only": True, "automatic_resume": False}
+        with _read_snapshot(self):
+            row = self.db.execute("SELECT * FROM project_onboarding WHERE project=?", (project,)).fetchone()
+            onboarding = {"state": row["state"], "job_id": row["job_id"]} if row else {"state": "unoffered", "job_id": None}
+            selected = _job(self, project, job_id) if job_id else self.db.execute(
+                "SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT 1", (project,)).fetchone()
+            return {"project_id": project, "onboarding": onboarding, "job": _summary(self, selected) if selected else None,
+                    "manual_only": True, "automatic_resume": False}
 
     def history_jobs(self, project, limit=20):
         from .runtime import ContractError
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ContractError("history job limit must be 1..100")
-        rows = self.db.execute("SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT ?", (project, limit)).fetchall()
-        return {"items": [_summary(self, row) for row in rows], "limit": limit,
-                "total": self.db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]}
+        with _read_snapshot(self):
+            rows = self.db.execute("SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT ?", (project, limit)).fetchall()
+            return {"items": [_summary(self, row) for row in rows], "limit": limit,
+                    "total": self.db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]}
 
     def history_source_report(self, project, job_id, section="sources", offset=0, limit=20):
         from .runtime import ContractError
@@ -352,6 +449,7 @@ class HistoryImportMixin:
             self.db.execute("UPDATE history_jobs SET state='materializing',host_epoch=?,review_enabled=?,max_calls=?,remaining_calls=?,owner=?,lease_until=?,updated=? WHERE project=? AND id=?",
                             (epoch, int(allow_review), max_calls, max_calls, owner, time.time() + max_seconds + 30, time.time(), project, job_id))
         results, state, reason = [], "materialized", "manual_review_available"
+        run_queue = None
         try:
             if not self._history_materialize(project, job_id, owner, epoch, deadline):
                 state, reason = "paused", "materialization_time_budget"
@@ -362,22 +460,35 @@ class HistoryImportMixin:
                     if row["owner"] != owner or row["state"] != "materializing":
                         raise ContractError("history run ownership changed")
                     self.db.execute("UPDATE history_jobs SET state='reviewing' WHERE id=?", (job_id,))
-                problems = self.db.execute("SELECT DISTINCT problem_id FROM history_case_links WHERE project=? AND job_id=? ORDER BY unit_id", (project, job_id)).fetchall()
+                from .admin_lifecycle import recover_calls
+                # Recover abandoned reservations without launching or retrying any
+                # model. Unknown calls stay isolated while untouched work proceeds.
+                recover_calls(self, project)
+                queued = _review_queue(self, project, job_id)
+                run_queue = {key: sum(item["disposition"] == key for item in queued)
+                             for key in ("completed", "ready", "awaiting_evidence", "blocked")}
+                problems = [item for item in queued if item["disposition"] == "ready"]
                 state, reason = "review_complete", "bounded_review_complete"
                 for problem in problems:
                     if time.monotonic() >= deadline or _job(self, project, job_id)["remaining_calls"] <= 0:
                         state, reason = "paused", "review_budget_exhausted"
                         break
-                    result = admin_once(self, project, problem[0], expected_epoch=epoch, _deadline=deadline, _history_job_id=job_id)
-                    results.append({key: result[key] for key in ("status", "call_id", "candidate_id", "proposal_id", "reused") if key in result})
+                    result = admin_once(self, project, problem["problem_id"], expected_epoch=epoch, _deadline=deadline, _history_job_id=job_id)
+                    results.append({"problem_id": problem["problem_id"], **{key: result[key] for key in
+                                   ("status", "call_id", "candidate_id", "candidate_ids", "candidate_count", "proposal_id", "proposal_ids", "reused") if key in result}})
                     if result["status"] in {"failed", "timeout_unknown", "account_changed_unknown", "orphaned_unknown", "review_required", "waiting_for_review",
-                                             "budget_exhausted", "token_budget_exhausted", "concurrency_limited", "not_started", "batch_time_exhausted"}:
+                                             "budget_exhausted", "token_budget_exhausted", "concurrency_limited", "not_started", "batch_time_exhausted",
+                                             "executor_not_ready", "disabled"}:
                         state, reason = "paused", result["status"]
                         break
                 if state == "review_complete":
-                    counts = _summary(self, _job(self, project, job_id))["counts"]
-                    if counts["pending_cases"]:
-                        state, reason = "materialized", "needs_evidence" if counts["awaiting_evidence_cases"] else "pending_manual_review"
+                    review = _summary(self, _job(self, project, job_id))["coverage"]["review"]
+                    if review["blocked_cases"]:
+                        state, reason = "paused", "review_required"
+                    elif review["awaiting_evidence_cases"]:
+                        state, reason = "materialized", "needs_evidence"
+                    elif not review["complete"]:
+                        state, reason = "materialized", "pending_manual_review"
         except BaseException:
             with self.transaction():
                 self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=?,last_result=? WHERE project=? AND id=? AND owner=?",
@@ -387,7 +498,11 @@ class HistoryImportMixin:
             # Cancel/epoch changes can race with a completed model; never overwrite the fence.
             if self.host_epoch() != epoch:
                 state, reason = "paused", "host_epoch_changed"
+            last_result = {"reason": reason, "reviews": results[:20], "reviews_count": len(results),
+                           "reviews_truncated": len(results) > 20}
+            if run_queue is not None:
+                last_result["queue_at_start"] = run_queue
             self.db.execute("UPDATE history_jobs SET state=?,owner=NULL,lease_until=NULL,review_enabled=0,updated=?,last_result=? WHERE project=? AND id=? AND owner=?",
-                            (state, time.time(), encode({"reason": reason, "reviews": results[:20]}), project, job_id, owner))
+                            (state, time.time(), encode(last_result), project, job_id, owner))
             self.db.execute("UPDATE project_onboarding SET state='started',updated=? WHERE project=?", (time.time(), project))
         return self.history_status(project, job_id)

@@ -5,7 +5,7 @@ import contextlib
 import json
 import time
 
-from .review_packet import PACKET_FORMAT, REVIEW_PREFIX, REVIEW_SUFFIX
+from .review_packet import PACKET_FORMAT, REVIEW_PREFIX, REVIEW_SUFFIX, HISTORY_REVIEW_PREFIX
 
 
 DECISIONS = {"candidate", "governance", "needs_evidence", "skip", "preflight_blocked"}
@@ -68,6 +68,8 @@ def dependencies(packet, evidence_signature=None):
         result[key] = sorted((_business_reference(item, key == "related_candidates") for item in values), key=encode)
     result["target_knowledge"] = _business_reference(packet.get("target_knowledge"))
     result["review_context_revision"] = packet.get("review_context_revision", 0)
+    if packet.get("purpose") == "history_review":
+        result["related_history"] = packet.get("related_history", [])
     return result
 
 
@@ -84,8 +86,9 @@ def review_signature(packet, cfg, evidence_signature):
               if key not in {"enabled", "max_calls_per_day", "timeout_seconds", "max_cases_per_batch",
                              "max_calls_per_batch", "max_batch_seconds", "max_concurrent_calls",
                              "max_reported_tokens_per_day", "token_reservation_per_call"}}
+    instructions = (HISTORY_REVIEW_PREFIX if packet.get("purpose") == "history_review" else "")
     return digest({"format": 1, "evidence": evidence_signature, "dependencies": dependencies(packet, evidence_signature),
-                   "instructions": REVIEW_PREFIX + REVIEW_SUFFIX, "packet_format": PACKET_FORMAT,
+                   "instructions": instructions + REVIEW_PREFIX + REVIEW_SUFFIX, "packet_format": PACKET_FORMAT,
                    "policy": policy})
 
 
@@ -207,7 +210,7 @@ def get_reviews(runtime, project, problem_id=None, limit=20):
         item["current_problem_revision"] = row["current_problem_revision"]
         item["current_material"] = (row["revision"] == row["current_problem_revision"]
                                     and json.loads(row["dependencies"]).get("review_context_revision", 0) == row["current_context_revision"])
-        for key in ("candidate_id", "proposal_id", "previous_decision"):
+        for key in ("candidate_id", "candidate_ids", "candidate_count", "proposal_id", "proposal_ids", "previous_decision"):
             if key in body:
                 item[key] = body[key]
         candidate = body.get("candidate")

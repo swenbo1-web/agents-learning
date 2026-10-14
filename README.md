@@ -8,7 +8,7 @@
 
 在受支持事件中记录工具结果和公开工作说明，自动检索相关知识、注入有限摘要，让 Agent 在新对话中继续利用项目经验。需要时再启用管理员整理；你可以在本机浏览器中查看正式知识、来源、修订和审核待办。
 
-**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH 适配与可视化知识审批位于 `main` 源码中，尚未包含在该发行包内。**
+**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH 适配、可视化知识审批与历史整理增强位于 `main` 源码中，尚未包含在该发行包内。**
 
 [Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
@@ -678,7 +678,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" work-rebuild 
 安装回执提供“开始／稍后”的可选入口，安装和升级均不扫描项目。用户可明确调用 `$learning-history`，或由本地操作者使用下列命令。读取和运行必须提供明确的项目路径及 `--confirm`；普通与管理员 MCP 没有历史启动工具。
 
 ```powershell
-# 两平台共用核心；Antigravity 增加 --host antigravity 并保持原安装的 --home
+# 三宿主共用核心；Antigravity／DSH 分别加 --host antigravity／dsh，保持原安装的 --home
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-prepare --confirm
 # 回执给出 job_id；默认只将冻结素材归档为 reported 案例，无模型调用
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-run JOB_ID --confirm
@@ -700,11 +700,13 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-can
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
 ```
 
-扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。两平台都支持自己的 CLI 审核执行器或人工管理员。执行器选择与模型模式见[管理员执行器](#可选管理员执行器)；历史批次没有明确源会话，`current` 必须取得同项目、同宿主下唯一有效的活跃根模型标识，有不同模型或没有观察时停止，需用户选择 `fixed` 或 `default`。用 `history-cases JOB_ID` 分页取得准确案例 ID，再通过 `packet`／`review_packet` 提出候选。正式发布沿用独立入口；历史流程不自动发布。
+扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。Codex、Antigravity、DSH 均支持自己的 CLI 审核执行器或人工管理员。执行器选择与模型模式见[管理员执行器](#可选管理员执行器)；历史批次没有明确源会话，`current` 必须取得同项目、同宿主下唯一有效的活跃根模型标识，有不同模型或没有观察时停止，需用户选择 `fixed` 或 `default`。用 `history-cases JOB_ID` 分页取得准确案例 ID，再通过 `packet`／`review_packet` 提出候选。正式发布沿用独立入口；历史流程不自动发布。
 
-进度分别记录正式审核决定、待决定案例、已有候选的案例和已有发布的案例。人工提候选不会自动制造“审阅完成”回执；候选和发布成果仍单独计数。它们不证明整个来源已经理解或问题已解决。
+**`main` 新增历史整理增强，原 v1.0.0 发行包不包含：**优先处理项目说明、Agent 总结、备忘等文档，保留来源顺序；主审核只在已批准的归档中加入有限相关资料，原证据优先使用输入预算。每个历史模型调用最多生成 **5 条**独立候选，各自保存引用、适用条件和限制，实际数量取决于资料，不承诺固定产量。普通日常审核和工作摘要的输出契约保持原样，历史陈述保持 `reported`，不自动发布。
 
-来源版本、片段定位和处理回执保存在独立知识容器。重复素材复用归档及有效审核回执；文件更新形成新版本。暂停、取消、预算不足、重启、普通续聊和跨日额度恢复都不会自动续做。用户明确再次 `history-run` 才恢复允许的剩余工作；取消需重新准备。已发布知识不会因取消吸收而撤销。`history-jobs`／`history-status` 区分读取覆盖、案例、候选、调用和正式发布。
+进度分别记录归档覆盖、实际主审核、未触及与待补证单元、候选以及正式发布。**归档完成 ≠ 审核完成 ≠ 正式发布。** 仅作为相关参考的资料不算该来源已审核；一次主审核生成多条候选也只计一次主审核。人工提候选不会自动制造“审阅完成”回执；候选和发布成果单独计数，均不证明整个来源已经理解或问题已解决。用户可调用 `$learning-review`，在[可视化审批台](#可视化知识审批main)查看完整候选与证据，再选择批准发布、拒绝或暂缓。
+
+来源版本、片段定位和处理回执保存在独立知识容器。重复素材复用归档及有效审核回执；文件更新形成新版本。暂停、取消、预算不足、重启、普通续聊和跨日额度恢复都不会自动续做。用户明确再次运行 `history-run JOB_ID --confirm --allow-review --max-calls N --max-seconds S`，才在本次授权预算内继续剩余审核；不需要重新准备未变化资料，取消后需重新准备。已发布知识不会因取消吸收而撤销。`history-jobs`／`history-status` 区分读取覆盖、案例、候选、调用和正式发布。
 
 `--confirm` 是显式操作约定，不能独立鉴别人类身份；任意本地 Shell／数据库权限仍取决于宿主及操作系统。安装更新的批准与历史吸收的批准分别处理。
 

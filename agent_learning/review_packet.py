@@ -22,6 +22,15 @@ REVIEW_PREFIX = (
     "只返回schema要求的JSON。\n<untrusted_evidence>\n"
 )
 REVIEW_SUFFIX = "\n</untrusted_evidence>"
+HISTORY_REVIEW_PREFIX = (
+    "本次为用户明确批准的历史吸收。只从当前主资料中提取有依据的独立知识，不为凑数量拆条。"
+    "可返回最多5条candidates，每条仍使用主problem ID/revision、独立适用条件和evidence_refs；"
+    "多条时candidate=null且proposal=null，旧单条可用candidate并令candidates=[]。"
+    "related_history仅为同批次冻结来源；结合其内容时必须引用实际可见的event ID。"
+    "不得仅凭相关标题推断结论；不同历史版本、矛盾和缺失写入limitations。"
+    "相关资料的展示不表示该资料已审核。历史陈述只能reported，不自动发布。"
+    "全部JSON输出UTF-8总量不超过40000字节；skip/needs_evidence时candidates=[]。\n"
+)
 PACKET_FORMAT = 5
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
@@ -29,7 +38,9 @@ _REFERENCE_LIMIT = 6
 
 def review_instruction(packet):
     from .runtime import encode
-    return REVIEW_PREFIX + encode(packet) + REVIEW_SUFFIX
+    history = HISTORY_REVIEW_PREFIX if packet.get("purpose") == "history_review" else ""
+    # 补充规则放在不可信资料块之前，保持原有公共资料包边界。
+    return history + REVIEW_PREFIX + encode(packet) + REVIEW_SUFFIX
 
 
 def _fits(packet, limit):
@@ -80,7 +91,8 @@ class ReviewPacketMixin:
         if expected_revision is not None and problem["revision"] != expected_revision:
             raise ContractError("problem changed; restart packet pagination")
         target_required, target = self._review_target(project, problem_id)
-        count = self.db.execute("SELECT COUNT(*) FROM problem_events WHERE problem=?", (problem_id,)).fetchone()[0]
+        # 内部历史关联仅用于已引用来源的持久追踪，不回流主资料触发重复模型整理。
+        count = self.db.execute("SELECT COUNT(*) FROM problem_events WHERE problem=? AND role!='history_related'", (problem_id,)).fetchone()[0]
         origin = self.db.execute(
             "SELECT e.task_write_version,e.task_status FROM events e JOIN problem_events p ON p.event=e.id "
             "WHERE p.problem=? AND e.type IN ('Feedback','Stop','PostToolUse') "
@@ -105,7 +117,7 @@ class ReviewPacketMixin:
             "SELECT e.*,p.event AS linked_id,p.role,o.conflict AS operation_conflict,o.decision AS operation_decision "
             "FROM problem_events p LEFT JOIN events e ON e.id=p.event "
             "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
-            "WHERE p.problem=? ORDER BY e.created,e.id,p.event LIMIT ? OFFSET ?",
+            "WHERE p.problem=? AND p.role!='history_related' ORDER BY e.created,e.id,p.event LIMIT ? OFFSET ?",
             (problem_id, _EVENT_WINDOW, offset)).fetchall()
         window_count = len(rows)
         events = [self._review_event(dict(row)) for row in rows]
@@ -400,5 +412,12 @@ class ReviewPacketMixin:
                                      "ORDER BY created DESC LIMIT 1", (project, row["id"])).fetchone()
             if origin:
                 item["origin_evidence_signature"] = origin["evidence_signature"]
+            else:
+                origin = self.db.execute(
+                    "SELECT r.evidence_signature FROM review_receipts r, json_each(r.response,'$.candidate_ids') ids "
+                    "WHERE r.project=? AND r.decision='candidate' AND ids.value=? ORDER BY r.created DESC LIMIT 1",
+                    (project, row["id"])).fetchone()
+                if origin:
+                    item["origin_evidence_signature"] = origin["evidence_signature"]
             candidates.append(item)
         return knowledge, candidates
