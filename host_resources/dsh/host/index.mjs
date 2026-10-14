@@ -384,6 +384,13 @@ export function apply(ctx) {
   const browserProcesses = new Map();
   const scopedAgentIds = new Set();
   const activeDisposers = [];
+  let sessionQueryService = null;
+
+  if (typeof ctx.inject === "function") {
+    ctx.inject(["sessionQuery"], (scope) => {
+      sessionQueryService = scope?.sessionQuery || null;
+    });
+  }
 
   function stopAllBrowsers() {
     for (const [key, entry] of browserProcesses.entries()) {
@@ -401,7 +408,7 @@ export function apply(ctx) {
     if (!agentId) return {};
     const existing = sessionMeta.get(agentId);
     if (existing && existing.cwd) return existing;
-    const sessionQuery = typeof ctx.get === "function" ? ctx.get("sessionQuery") : undefined;
+    const sessionQuery = sessionQueryService;
     if (sessionQuery && typeof sessionQuery.observeSession === "function") {
       try {
         const obs = await sessionQuery.observeSession(agentId, { projectionMode: "none" });
@@ -996,9 +1003,9 @@ export function apply(ctx) {
         return c === r || c.startsWith(r + "\\");
       }
       const route = {
-        name: "agent-learning-project-ui",
+        name: "agent-learning-panel",
         kind: "exact",
-        path: "/agent-learning/project-ui",
+        path: "/agent-learning/panel",
         handler: async (req, res) => {
           const send = (status, body) => {
             res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
@@ -1015,13 +1022,18 @@ export function apply(ctx) {
             send(500, { ok: false, error: "runtime receipt unavailable" });
             return;
           }
-          const reqUrl = new URL(req.url || "/agent-learning/ui", "http://127.0.0.1");
-          const requestedCwd = (reqUrl.searchParams.get("cwd") || "").trim();
+          const reqUrl = new URL(req.url || "/agent-learning/panel", "http://127.0.0.1");
+          let requestedCwd = (reqUrl.searchParams.get("cwd") || "").trim();
+          const requestedSessionId = (reqUrl.searchParams.get("sessionId") || "").trim();
+          if (!requestedCwd && requestedSessionId) {
+            const meta = await resolveSessionMeta(requestedSessionId);
+            if (meta?.cwd) {
+              requestedCwd = String(meta.cwd).trim();
+            }
+          }
           const boundWorkspace = receipt.workspace || "";
 
           if (req.method === "GET") {
-            // 若传入了当前会话的 cwd，严格核对该 cwd 是否属于已安装绑定的项目；
-            // 未安装的其他项目返回 installed: false，前端隐藏知识库按钮。
             if (boundWorkspace && requestedCwd && !isWithinWorkspace(requestedCwd, boundWorkspace)) {
               send(200, { ok: true, installed: false, reason: "outside_bound_workspace" });
               return;
@@ -1056,6 +1068,7 @@ export function apply(ctx) {
               const data = parsed?.ok ? parsed.result?.data || {} : {};
               const browserStat = await manageBrowser("status", {}, workspace).catch(() => ({ running: false }));
               const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
+              const budgetValues = data.admin_budget?.budget_policy?.values || {};
               send(200, {
                 ok: true,
                 installed: true,
@@ -1071,6 +1084,8 @@ export function apply(ctx) {
                 file_relations: data.work_memory?.file_relations ?? 0,
                 admin_admission_enabled: Boolean(data.admin_admission_enabled ?? data.admin_enabled),
                 remaining_calls: data.admin_budget?.remaining_calls ?? 0,
+                max_calls_per_day: budgetValues.max_calls_per_day ?? data.admin_budget?.max_calls_per_day ?? 100,
+                max_calls_per_batch: budgetValues.max_calls_per_batch ?? 5,
                 onboarding: data.history_import?.onboarding?.state || "unoffered",
                 browser_running: Boolean(browserStat?.running),
               });
@@ -1099,13 +1114,41 @@ export function apply(ctx) {
             }
             const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
             const action = body?.action;
-            const bodyCwd = typeof body?.cwd === "string" ? body.cwd.trim() : "";
+            let bodyCwd = typeof body?.cwd === "string" ? body.cwd.trim() : "";
+            if (!bodyCwd && typeof body?.sessionId === "string" && body.sessionId.trim()) {
+              const meta = await resolveSessionMeta(body.sessionId.trim());
+              if (meta?.cwd) bodyCwd = String(meta.cwd).trim();
+            }
             if (boundWorkspace && bodyCwd && !isWithinWorkspace(bodyCwd, boundWorkspace)) {
               send(403, { ok: false, error: "project is not bound to this Agent Learning installation" });
               return;
             }
             const workspace = bodyCwd || boundWorkspace || process.cwd();
             const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
+
+            if (action === "set_admin_preset") {
+              const preset = String(body?.preset || "").toLowerCase();
+              const inputPayload = JSON.stringify({
+                home: receipt.home || null,
+                workspace,
+                admin_preset: preset,
+              });
+              const { code, stdout, stderr } = await runPythonProcess(
+                receipt.python,
+                ["-B", toolScript],
+                inputPayload,
+                workspace,
+                undefined,
+                20000,
+              );
+              const parsed = code === 0 && stdout.trim() ? JSON.parse(stdout.trim()) : null;
+              if (!parsed?.ok) {
+                send(400, { ok: false, error: parsed?.error || (stderr || stdout).trim() || "preset failed" });
+                return;
+              }
+              send(200, { ok: true, ...parsed.result });
+              return;
+            }
 
             if (action === "open_browser") {
               const info = await manageBrowser(
@@ -1166,6 +1209,22 @@ export function apply(ctx) {
       };
       try {
         scope.effect(() => scope.webServer.register(route), "agent-learning: project-ui route");
+      } catch {}
+    });
+    ctx.inject(["clientModules"], (scope) => {
+      const cm = scope?.clientModules;
+      if (!cm) return;
+      try {
+        if (cm.pkgMeta instanceof Map) {
+          cm.pkgMeta.delete("agent-learning");
+        }
+        if (cm.table instanceof Map && !cm.table.has("agent-learning") && typeof cm.processOne === "function") {
+          if (cm.processOne("agent-learning") && typeof cm.compose === "function") {
+            cm.composed = cm.compose();
+            cm.notifyGraphChanged?.();
+          }
+        }
+        cm.rebuilt?.("agent-learning");
       } catch {}
     });
   }

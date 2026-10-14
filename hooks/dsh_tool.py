@@ -303,6 +303,44 @@ def main():
             _emit({"ok": True, "result": cmd_res})
             return 0
 
+        if "admin_preset" in payload:
+            import uuid
+            from agent_learning.admin_control import apply_control, control_status
+            preset_name = str(payload["admin_preset"]).lower()
+            presets = {
+                "light": {"max_calls_per_day": 15, "max_calls_per_batch": 2, "max_batch_seconds": 120, "max_run_seconds": 300},
+                "balanced": {"max_calls_per_day": 100, "max_calls_per_batch": 5, "max_batch_seconds": 180, "max_run_seconds": 600},
+                "active": {"max_calls_per_day": 300, "max_calls_per_batch": 10, "max_batch_seconds": 300, "max_run_seconds": 1200},
+                "minimal": {"max_calls_per_day": 5, "max_calls_per_batch": 1, "max_batch_seconds": 90, "max_run_seconds": 180},
+            }
+            if preset_name != "off" and preset_name not in presets:
+                _emit({"ok": False, "error": "unsupported admin preset"})
+                return 0
+            st = control_status(runtime, project)
+            enabled = preset_name != "off"
+            limits = presets.get(preset_name) or {
+                k: st["budget_policy"]["values"][k]
+                for k in ("max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds")
+            }
+            mode = st["policy"]["model_mode"] if st["policy"]["policy_version"] else "first"
+            model = st["policy"]["model"] if mode == "fixed" else ""
+            req_body = {
+                "request_id": uuid.uuid4().hex,
+                "expected_policy_version": st["policy"]["policy_version"],
+                "expected_budget_version": st["budget_policy"]["version"],
+                "expected_settings_version": st["settings_version"],
+                "expected_session_epoch": st["session_epoch"],
+                "expected_governance_epoch": st["governance_epoch"],
+                "enabled": enabled,
+                "model_mode": mode,
+                "model": model,
+                "limits": limits,
+                "start": enabled,
+            }
+            applied = apply_control(runtime, project, req_body)
+            _emit({"ok": True, "result": {"preset": preset_name, "enabled": enabled, "limits": limits, "applied": applied}})
+            return 0
+
         tool_name = payload.get("tool")
         tool_args = payload.get("args")
         if not isinstance(tool_name, str) or not isinstance(tool_args, dict):

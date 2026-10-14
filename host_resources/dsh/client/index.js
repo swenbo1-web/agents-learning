@@ -1,5 +1,6 @@
 // Browser half of the agent-learning DSH plugin:
 // - Composer toolbar button (`conversation.input.left`) shown ONLY for the bound/installed project
+// - Quick administrator frequency presets (Off / Light / Balanced / Active / Minimal + fine-tuning page)
 // - Plugins page configuration card (`plugins.bundle.config` / `settings.plugin.item`)
 window.__ModuleLoader__.load({
   id: "agent-learning",
@@ -8,30 +9,36 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
 
     var PACKAGE_NAME = "agent-learning";
-    var ROUTE = "/agent-learning/project-ui";
+    var ROUTE = "/agent-learning/panel";
 
     var TEXT = {
       zh: {
         button: "知识库",
         title: "Agent Learning 项目记忆与知识库",
         subtitle: "查看项目知识、工作历史、候选审批与管理员设置",
-        currentProject: "当前绑定项目",
         knowledge: "正式知识",
         workMemory: "工作观察",
         pendingCases: "待审案例",
         admin: "自动管理员",
         adminOn: "已开启",
         adminOff: "已关闭",
+        freqTitle: "管理员调用频率方案（一键切换）",
+        freqOff: "关闭",
+        freqMinimal: "按需 (5/天)",
+        freqLight: "省流 (15/天)",
+        freqBalanced: "均衡 (100/天)",
+        freqActive: "积极 (300/天)",
+        freqSaved: "已应用管理员频率方案：",
         openBrowser: "打开可视化知识库（只读）",
-        openReview: "打开知识审批与管理员设置",
+        openReview: "打开知识审批与高级细致参数设置",
         runDebug: "发送 $learning-debug 调试检查",
         archiveHistory: "一键吸收当前项目历史知识",
         stopBrowser: "停止后台知识库服务",
         refresh: "刷新",
         loading: "正在读取状态…",
-        opening: "正在打开浏览器页面…",
+        opening: "正在处理…",
         openedBrowser: "已在浏览器打开只读可视化知识库",
-        openedReview: "已在浏览器打开知识审批与管理员设置",
+        openedReview: "已在浏览器打开知识审批与细致参数设置",
         stoppedBrowser: "已停止后台知识库服务",
         archiving: "正在扫描并归档项目历史…",
         archivedPrefix: "历史吸收完成：已归档案例 ",
@@ -41,23 +48,29 @@ window.__ModuleLoader__.load({
         button: "Memory",
         title: "Agent Learning Project Memory",
         subtitle: "Inspect knowledge, work history, candidate review and administrator settings",
-        currentProject: "Bound Project",
         knowledge: "Published Knowledge",
         workMemory: "Work Observations",
         pendingCases: "Pending Cases",
         admin: "Administrator",
         adminOn: "Enabled",
         adminOff: "Disabled",
+        freqTitle: "Administrator Frequency Preset",
+        freqOff: "Off",
+        freqMinimal: "Minimal (5/d)",
+        freqLight: "Light (15/d)",
+        freqBalanced: "Balanced (100/d)",
+        freqActive: "Active (300/d)",
+        freqSaved: "Applied frequency preset: ",
         openBrowser: "Open Visual Knowledge Browser (Read-Only)",
-        openReview: "Open Knowledge Review & Admin Settings",
+        openReview: "Open Review & Advanced Fine-Tuning",
         runDebug: "Send $learning-debug Check",
         archiveHistory: "Absorb Project History Now",
         stopBrowser: "Stop Background Browser Server",
         refresh: "Refresh",
         loading: "Loading status...",
-        opening: "Opening in browser...",
+        opening: "Working...",
         openedBrowser: "Opened read-only knowledge browser",
-        openedReview: "Opened knowledge review & admin settings",
+        openedReview: "Opened review & advanced fine-tuning page",
         stoppedBrowser: "Stopped background browser server",
         archiving: "Scanning and archiving project history...",
         archivedPrefix: "History archived: total cases ",
@@ -101,8 +114,11 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function fetchStatus(cwd) {
-      var url = cwd ? ROUTE + "?cwd=" + encodeURIComponent(cwd) : ROUTE;
+    function fetchStatus(cwd, sessionId) {
+      var params = [];
+      if (cwd) params.push("cwd=" + encodeURIComponent(cwd));
+      if (sessionId) params.push("sessionId=" + encodeURIComponent(sessionId));
+      var url = params.length ? ROUTE + "?" + params.join("&") : ROUTE;
       return fetch(url).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
@@ -113,11 +129,13 @@ window.__ModuleLoader__.load({
       });
     }
 
-    function postAction(action, cwd) {
+    function postAction(action, cwd, sessionId, extra) {
       return fetch(ROUTE, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: action, cwd: cwd || undefined }),
+        body: JSON.stringify(
+          Object.assign({ action: action, cwd: cwd || undefined, sessionId: sessionId || undefined }, extra || {})
+        ),
       }).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
@@ -128,11 +146,22 @@ window.__ModuleLoader__.load({
       });
     }
 
+    function currentPresetOf(summary) {
+      if (!summary || !summary.admin_admission_enabled) return "off";
+      var daily = summary.max_calls_per_day;
+      if (daily === 5) return "minimal";
+      if (daily === 15) return "light";
+      if (daily === 100) return "balanced";
+      if (daily === 300) return "active";
+      return "custom";
+    }
+
     function buildControlPanel(react, localeRef) {
       var h = react.createElement;
 
       return function AgentLearningPanel(props) {
         var cwd = props && props.cwd ? props.cwd : "";
+        var sessionId = props && props.sessionId ? props.sessionId : "";
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
         var statePair = react.useState(props && props.initialSummary ? props.initialSummary : null);
@@ -147,7 +176,7 @@ window.__ModuleLoader__.load({
 
         var reload = react.useCallback(
           function () {
-            fetchStatus(cwd)
+            fetchStatus(cwd, sessionId)
               .then(function (data) {
                 setSummary(data);
               })
@@ -155,7 +184,7 @@ window.__ModuleLoader__.load({
                 setNote(String((err && err.message) || t.failed));
               });
           },
-          [cwd, t.failed]
+          [cwd, sessionId, t.failed]
         );
 
         react.useEffect(
@@ -165,10 +194,10 @@ window.__ModuleLoader__.load({
           [reload]
         );
 
-        function trigger(action, startMsg, doneFn) {
+        function trigger(action, startMsg, doneFn, extra) {
           setBusy(true);
           setNote(startMsg);
-          postAction(action, cwd)
+          postAction(action, cwd, sessionId, extra)
             .then(function (res) {
               setBusy(false);
               setNote(doneFn(res));
@@ -227,6 +256,15 @@ window.__ModuleLoader__.load({
             h("div", { style: { fontWeight: 600, marginTop: "2px" } }, String(val))
           );
         };
+
+        var activePreset = currentPresetOf(summary);
+        var presetChips = [
+          ["off", t.freqOff],
+          ["minimal", t.freqMinimal],
+          ["light", t.freqLight],
+          ["balanced", t.freqBalanced],
+          ["active", t.freqActive],
+        ];
 
         return h(
           "div",
@@ -303,6 +341,8 @@ window.__ModuleLoader__.load({
                   (summary.admin_admission_enabled ? t.adminOn : t.adminOff) +
                     " (" +
                     (summary.remaining_calls ?? "-") +
+                    "/" +
+                    (summary.max_calls_per_day ?? "-") +
                     ")"
                 )
               )
@@ -311,6 +351,59 @@ window.__ModuleLoader__.load({
                 { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.8))" } },
                 t.loading
               ),
+          h(
+            "div",
+            { style: { display: "flex", flexDirection: "column", gap: "5px" } },
+            h(
+              "div",
+              { style: { fontSize: "11.5px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.85))" } },
+              t.freqTitle
+            ),
+            h(
+              "div",
+              { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+              presetChips.map(function (pair) {
+                var key = pair[0];
+                var label = pair[1];
+                var selected = activePreset === key;
+                return h(
+                  "button",
+                  {
+                    key: key,
+                    type: "button",
+                    disabled: busy,
+                    onClick: function () {
+                      trigger(
+                        "set_admin_preset",
+                        t.opening,
+                        function () {
+                          return t.freqSaved + label;
+                        },
+                        { preset: key }
+                      );
+                    },
+                    style: {
+                      appearance: "none",
+                      font: "inherit",
+                      fontSize: "11.5px",
+                      padding: "4px 8px",
+                      borderRadius: "6px",
+                      cursor: busy ? "default" : "pointer",
+                      border: selected
+                        ? "1px solid var(--dsw-alias-label-primary, #1f6feb)"
+                        : "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.3))",
+                      background: selected
+                        ? "var(--dsw-alias-bg-layer-2, rgba(31,111,235,0.18))"
+                        : "transparent",
+                      color: "var(--dsw-alias-label-primary, inherit)",
+                      fontWeight: selected ? 600 : 400,
+                    },
+                  },
+                  label
+                );
+              })
+            )
+          ),
           h(
             "div",
             { style: { display: "flex", flexDirection: "column", gap: "6px" } },
@@ -419,10 +512,13 @@ window.__ModuleLoader__.load({
       return function ComposerLearningButton(props) {
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
+        var sessionId = props && props.sessionId ? String(props.sessionId) : "";
         var sessionCwd =
-          props && typeof props.useSession === "function"
-            ? props.useSession(function (s) {
-                return s && s.cwd ? s.cwd : "";
+          props && typeof props.useSessions === "function" && sessionId
+            ? props.useSessions(function (s) {
+                return s && s.byId && s.byId[sessionId] && s.byId[sessionId].cwd
+                  ? String(s.byId[sessionId].cwd)
+                  : "";
               })
             : "";
 
@@ -436,13 +532,13 @@ window.__ModuleLoader__.load({
 
         react.useEffect(
           function () {
-            if (!sessionCwd) {
+            if (!sessionCwd && !sessionId) {
               setSummary(null);
               setOpen(false);
               return;
             }
             var cancelled = false;
-            fetchStatus(sessionCwd)
+            fetchStatus(sessionCwd, sessionId)
               .then(function (data) {
                 if (!cancelled) {
                   setSummary(data && data.installed ? data : null);
@@ -457,7 +553,7 @@ window.__ModuleLoader__.load({
               cancelled = true;
             };
           },
-          [sessionCwd]
+          [sessionCwd, sessionId]
         );
 
         react.useEffect(
@@ -476,8 +572,8 @@ window.__ModuleLoader__.load({
           [open]
         );
 
-        // 未安装或未绑定 Agent Learning 的项目对话，完全隐藏知识库图标
-        if (!sessionCwd || !summary || !summary.installed) {
+        // 仅在已安装绑定的项目中显示「知识库」按钮；其他未安装项目隐藏
+        if (!summary || !summary.installed) {
           return null;
         }
 
@@ -534,7 +630,7 @@ window.__ModuleLoader__.load({
                     position: "absolute",
                     bottom: "calc(100% + 8px)",
                     left: 0,
-                    width: "320px",
+                    width: "335px",
                     padding: "12px",
                     borderRadius: "12px",
                     border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.35))",
@@ -543,7 +639,12 @@ window.__ModuleLoader__.load({
                     zIndex: 1000,
                   },
                 },
-                h(Panel, { cwd: sessionCwd, initialSummary: summary, onSendPrompt: handleSendPrompt })
+                h(Panel, {
+                  cwd: sessionCwd,
+                  sessionId: sessionId,
+                  initialSummary: summary,
+                  onSendPrompt: handleSendPrompt,
+                })
               )
             : null
         );
