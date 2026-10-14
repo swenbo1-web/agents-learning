@@ -27,7 +27,7 @@ PATH_FIELDS = (
 _BASE_RECOVERY_NAMES = (
     "knowledge_search", "knowledge_read", "work_memory_search", "work_memory_read",
     "session_context", "task_update", "case_feedback", "knowledge_use", "learning_status",
-    "learning_history",
+    "learning_history", "learning_browser",
 )
 RECOVERY_TOOLS = frozenset({
     *_BASE_RECOVERY_NAMES,

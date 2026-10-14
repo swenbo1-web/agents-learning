@@ -58,6 +58,7 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-admin/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-history/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-browser/SKILL.md").is_file())
         plugin = read_json(self.target / "plugin.json")
         pkg = read_json(self.target / "package.json")
         self.assertEqual(plugin["name"], "agent-learning")

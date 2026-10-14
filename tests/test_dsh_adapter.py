@@ -508,6 +508,25 @@ class DshAdapterAndV1FeaturesTests(unittest.TestCase):
             self.assertTrue(cmd_res["ok"], cmd_res)
             self.assertIn("###", cmd_res["result"]["text"])
 
+        # 6. 测试 learning_browser 工具参数校验与只读契约
+        browser_ok = run_tool({
+            "home": str(self.home),
+            "workspace": str(self.workspace),
+            "tool": "learning_browser",
+            "args": {"action": "status"},
+        })
+        self.assertTrue(browser_ok["ok"], browser_ok)
+        self.assertEqual(browser_ok["result"]["project_id"], self.p)
+        self.assertTrue(browser_ok["result"]["read_only"])
+
+        browser_bad = run_tool({
+            "home": str(self.home),
+            "workspace": str(self.workspace),
+            "tool": "learning_browser",
+            "args": {"action": "invalid"},
+        })
+        self.assertFalse(browser_bad["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

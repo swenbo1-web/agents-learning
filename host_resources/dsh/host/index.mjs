@@ -304,6 +304,32 @@ const WORKER_TOOL_SPECS = [
     },
     readOnly: false,
   },
+  {
+    name: "learning_browser",
+    description:
+      "DSH 原生可视化知识库浏览器工具（learning-browser 技能）。在本机 127.0.0.1 启动、查看或关闭当前项目的只读可视化知识库页面（搜索筛选正式知识、查看正文/条件/限制、来源健康、修订历史、事件时间线与管理员待办）。action='start' 启动并默认打开浏览器，'status' 查看运行状态与链接，'stop' 停止服务。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["start", "status", "stop"],
+          description: "执行动作：start（启动并打开可视化知识库浏览器）、status（查看当前运行状态与访问链接）、stop（停止后台知识库浏览器服务）。",
+        },
+        open: {
+          type: "boolean",
+          description: "action='start' 时是否在默认浏览器中自动打开页面（默认 true）。",
+        },
+        port: {
+          type: "integer",
+          description: "可选本机监听端口（默认 0 自动分配空闲端口）。",
+        },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
 ];
 
 export const name = "agent-learning";
@@ -313,8 +339,21 @@ export function apply(ctx) {
   const sessionContexts = new Map();
   const sessionHandles = new Map();
   const sessionMeta = new Map();
+  const browserProcesses = new Map();
   const scopedAgentIds = new Set();
   const activeDisposers = [];
+
+  function stopAllBrowsers() {
+    for (const [key, entry] of browserProcesses.entries()) {
+      try {
+        if (entry?.child && !entry.child.killed) {
+          entry.child.kill();
+        }
+      } catch {}
+      browserProcesses.delete(key);
+    }
+  }
+  activeDisposers.push(stopAllBrowsers);
 
   async function resolveSessionMeta(agentId) {
     if (!agentId) return {};
@@ -421,12 +460,208 @@ export function apply(ctx) {
     return sessionHandles.get(agentId);
   }
 
+  async function manageBrowser(action, options, workspace, signal) {
+    const receipt = loadRuntimeReceipt();
+    const targetWorkspace = workspace || receipt.workspace || process.cwd();
+    const key = targetWorkspace.toLowerCase();
+    const existing = browserProcesses.get(key);
+    const isAlive = existing && existing.child && exitCodeOf(existing.child) === null && !existing.child.killed;
+
+    if (!isAlive && existing) {
+      browserProcesses.delete(key);
+    }
+
+    if (action === "status") {
+      if (isAlive) {
+        return {
+          status: "serving",
+          running: true,
+          ...existing.info,
+        };
+      }
+      return {
+        status: "stopped",
+        running: false,
+        workspace: targetWorkspace,
+        read_only: true,
+      };
+    }
+
+    if (action === "stop") {
+      if (isAlive) {
+        try {
+          existing.child.kill();
+        } catch {}
+        browserProcesses.delete(key);
+        return {
+          status: "stopped",
+          running: false,
+          stopped: true,
+          workspace: targetWorkspace,
+        };
+      }
+      return {
+        status: "stopped",
+        running: false,
+        stopped: false,
+        workspace: targetWorkspace,
+      };
+    }
+
+    if (action !== "start") {
+      throw new Error("learning_browser action must be start, status or stop");
+    }
+
+    const shouldOpen = options?.open !== false;
+    const requestedPort =
+      typeof options?.port === "number" && Number.isInteger(options.port) && options.port >= 0 && options.port <= 65535
+        ? options.port
+        : 0;
+
+    if (isAlive && (requestedPort === 0 || existing.info.port === requestedPort)) {
+      if (shouldOpen && existing.info.browser_url) {
+        await runPythonProcess(
+          receipt.python,
+          ["-B", "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])", existing.info.browser_url],
+          "",
+          targetWorkspace,
+          signal,
+          5000,
+        ).catch(() => {});
+      }
+      return {
+        status: "serving",
+        running: true,
+        reused: true,
+        opened: shouldOpen,
+        ...existing.info,
+      };
+    }
+
+    if (isAlive) {
+      try {
+        existing.child.kill();
+      } catch {}
+      browserProcesses.delete(key);
+    }
+
+    const cliScript = join(receipt.runtime_directory, "scripts", "learning.py");
+    const baseArgs = ["-B", cliScript];
+    if (receipt.home) {
+      baseArgs.push("--home", receipt.home);
+    }
+    baseArgs.push("--workspace", targetWorkspace, "--host", "dsh");
+
+    // 先确保当前项目已在数据库中注册
+    await runPythonProcess(receipt.python, [...baseArgs, "status"], "", targetWorkspace, signal, 10000);
+
+    const browserArgs = [...baseArgs, "browser", "--port", String(requestedPort)];
+    if (shouldOpen) {
+      browserArgs.push("--open");
+    }
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(receipt.python, browserArgs, {
+        cwd: targetWorkspace,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
+      });
+      let buffer = "";
+      let stderrText = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try {
+            child.kill();
+          } catch {}
+          reject(new Error("Timed out starting Agent Learning knowledge browser"));
+        }
+      }, 10000);
+
+      child.stdout.on("data", (chunk) => {
+        if (settled) return;
+        buffer += chunk.toString("utf8");
+        const newlineIdx = buffer.indexOf("\n");
+        if (newlineIdx !== -1) {
+          const firstLine = buffer.slice(0, newlineIdx).trim();
+          settled = true;
+          clearTimeout(timer);
+          try {
+            const parsed = JSON.parse(firstLine);
+            const url = parsed.url;
+            const token = parsed.access_token;
+            const browserUrl = url + "#token=" + encodeURIComponent(token);
+            const portMatch = String(url).match(/:(\d+)\//);
+            const info = {
+              project: parsed.project,
+              workspace: targetWorkspace,
+              url,
+              browser_url: browserUrl,
+              access_token: token,
+              port: portMatch ? Number(portMatch[1]) : requestedPort,
+              pid: child.pid,
+              read_only: true,
+            };
+            browserProcesses.set(key, { child, info });
+            child.on("close", () => {
+              const cur = browserProcesses.get(key);
+              if (cur && cur.child === child) {
+                browserProcesses.delete(key);
+              }
+            });
+            resolve({
+              status: "serving",
+              running: true,
+              reused: false,
+              opened: shouldOpen,
+              ...info,
+            });
+          } catch (err) {
+            try {
+              child.kill();
+            } catch {}
+            reject(new Error(`Failed to parse browser startup output: ${firstLine}`));
+          }
+        }
+      });
+
+      child.stderr.on("data", (chunk) => {
+        stderrText += chunk.toString("utf8");
+      });
+
+      child.on("error", (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+
+      child.on("close", (code) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(`Browser process exited with code ${code}: ${(stderrText || buffer).trim()}`));
+        }
+      });
+    });
+  }
+
+  function exitCodeOf(child) {
+    return child && typeof child.exitCode === "number" ? child.exitCode : null;
+  }
+
   async function invokeMcpTool(toolName, rawArgs, exec) {
     const receipt = loadRuntimeReceipt();
     const agentId = exec?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
     const workspace = meta.cwd || receipt.workspace || process.cwd();
     const args = { ...(rawArgs || {}) };
+    if (toolName === "learning_browser") {
+      return manageBrowser(args.action || "start", args, workspace, exec?.signal);
+    }
     if (!args.context_handle && agentId) {
       const boundHandle = await ensureSessionBound(agentId, workspace, exec?.signal);
       if (boundHandle) {
@@ -465,6 +700,52 @@ export function apply(ctx) {
     const agentId = invocation?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
     const workspace = meta.cwd || receipt.workspace || process.cwd();
+    if (commandName === "learning-browser") {
+      const tokens = String(invocation?.rawInput || "").trim().split(/\s+/).filter(Boolean);
+      if (tokens.length > 0 && tokens[0].replace(/^\//, "").toLowerCase() === "learning-browser") {
+        tokens.shift();
+      }
+      const sub = (tokens[0] || "start").toLowerCase();
+      if (!["start", "status", "stop"].includes(sub)) {
+        return {
+          kind: "success",
+          text: "用法：`/learning-browser [start | status | stop]`（默认 `start` 启动并在浏览器打开只读可视化知识库）",
+        };
+      }
+      try {
+        const res = await manageBrowser(sub, { open: true }, workspace, invocation?.signal);
+        if (sub === "stop") {
+          return {
+            kind: "success",
+            text: res.stopped
+              ? "已停止当前项目的可视化知识库浏览器服务。"
+              : "当前项目没有正在运行的可视化知识库浏览器服务。",
+          };
+        }
+        if (!res.running) {
+          return {
+            kind: "success",
+            text: "当前项目的可视化知识库浏览器未运行。输入 `/learning-browser` 或 `/learning-browser start` 即可启动并打开。",
+          };
+        }
+        return {
+          kind: "success",
+          text: [
+            `### 可视化知识库浏览器已就绪（只读模式）`,
+            `- **项目 ID**: \`${res.project}\`（\`${res.workspace}\`）`,
+            `- **直连地址（含临时访问码）**: [点击打开可视化知识库](${res.browser_url})`,
+            `- **本机监听地址**: \`${res.url}\` | **PID**: \`${res.pid}\``,
+            `- **临时访问码**: \`${res.access_token}\`（页面加载后自动从地址栏清除，仅保留在页面内存中）`,
+            `- 关闭方式：输入 \`/learning-browser stop\` 或调用 \`learning_browser(action="stop")\`。`,
+          ].join("\n"),
+        };
+      } catch (err) {
+        return {
+          kind: "error",
+          text: `可视化知识库启动失败：${err?.message || err}`,
+        };
+      }
+    }
     const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
     const inputPayload = JSON.stringify({
       home: receipt.home || null,
@@ -562,6 +843,10 @@ export function apply(ctx) {
           "learning-history",
           "用户明确要求为已有项目吸收历史文档、源码和选定的 DSH 对话记录时，操作独立有限历史批次。",
         ],
+        [
+          "learning-browser",
+          "在 DSH 中启动、查看或关闭本机只读可视化知识库浏览器（127.0.0.1），搜索和筛选正式知识、查看来源健康、修订历史、事件时间线与管理员待办。",
+        ],
       ]) {
         try {
           const skillPath = join(PLUGIN_ROOT, "skills", skillName, "SKILL.md");
@@ -595,6 +880,11 @@ export function apply(ctx) {
           name: "learning-admin",
           description: "配置或触发当前项目的 DSH 管理员知识审核与工作摘要整理",
           hint: "[status | on [current|fixed|default] [model_id] | off | once | batch]",
+        },
+        {
+          name: "learning-browser",
+          description: "启动、查看或关闭当前项目的本机只读可视化知识库浏览器",
+          hint: "[start | status | stop]",
         },
       ]) {
         try {
@@ -695,12 +985,14 @@ export function apply(ctx) {
     return next();
   });
 
+  const WORKER_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.map((s) => s.name));
+
   ctx.on("tools/pre-execute", async (exec, next) => {
     const agent = exec?.agent;
     if (!agent?.id) return next();
     const meta = sessionMeta.get(agent.id) || {};
     const toolArgs = { ...(exec.arguments || {}) };
-    if (!toolArgs.context_handle && sessionHandles.has(agent.id)) {
+    if (WORKER_TOOL_NAMES.has(exec.name) && !toolArgs.context_handle && sessionHandles.has(agent.id)) {
       toolArgs.context_handle = sessionHandles.get(agent.id);
     }
     const result = await dispatchEvent(
@@ -728,8 +1020,6 @@ export function apply(ctx) {
     }
     return next();
   });
-
-  const WORKER_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.map((s) => s.name));
 
   ctx.on("tools/post-execute", async (exec, toolResult, next) => {
     const agent = exec?.agent;

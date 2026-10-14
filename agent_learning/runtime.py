@@ -858,7 +858,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 )
                 recovery_tools = {"mcp__agent_learning__" + name for name in base_recovery}
                 if self.host == "dsh":
-                    dsh_recovery = (*base_recovery, "learning_history")
+                    dsh_recovery = (*base_recovery, "learning_history", "learning_browser")
                     recovery_tools |= set(dsh_recovery) | {"agent_learning_" + name for name in dsh_recovery}
                 if self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
                     verdict = self.check_execution(project, conversation, task, raw, assignment)

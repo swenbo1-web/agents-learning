@@ -299,6 +299,23 @@ def main():
             _emit({"ok": True, "result": result})
             return 0
 
+        if tool_name == "learning_browser":
+            action = tool_args.get("action", "status")
+            if action not in {"start", "status", "stop"}:
+                _emit({"ok": False, "error": "learning_browser action must be start, status or stop"})
+                return 0
+            _emit({
+                "ok": True,
+                "result": {
+                    "action": action,
+                    "project_id": project,
+                    "workspace": workspace,
+                    "read_only": True,
+                    "host_managed": True,
+                },
+            })
+            return 0
+
         native_session = payload.get("session_id")
         agent_id = payload.get("agent_id")
         if "context_handle" not in tool_args and isinstance(native_session, str) and native_session.strip():
