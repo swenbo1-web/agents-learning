@@ -7,12 +7,18 @@
   "exports": {
     ".": "./host/index.mjs",
     "./host": "./host/index.mjs",
+    "./client": "./client/index.js",
     "./*": "./host/*.mjs",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
     }
   }
 }

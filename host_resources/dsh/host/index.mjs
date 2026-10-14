@@ -555,12 +555,19 @@ export function apply(ctx) {
     }
 
     const shouldOpen = options?.open !== false;
+    const wantReview = Boolean(options?.review);
+    const wantAdminControl = Boolean(options?.adminControl);
     const requestedPort =
       typeof options?.port === "number" && Number.isInteger(options.port) && options.port >= 0 && options.port <= 65535
         ? options.port
         : 0;
 
-    if (isAlive && (requestedPort === 0 || existing.info.port === requestedPort)) {
+    if (
+      isAlive &&
+      (requestedPort === 0 || existing.info.port === requestedPort) &&
+      (!wantReview || existing.info.review) &&
+      (!wantAdminControl || existing.info.admin_control)
+    ) {
       if (shouldOpen && existing.info.browser_url) {
         await runPythonProcess(
           receipt.python,
@@ -598,6 +605,12 @@ export function apply(ctx) {
     await runPythonProcess(receipt.python, [...baseArgs, "status"], "", targetWorkspace, signal, 10000);
 
     const browserArgs = [...baseArgs, "browser", "--port", String(requestedPort)];
+    if (wantReview) {
+      browserArgs.push("--review");
+    }
+    if (wantAdminControl) {
+      browserArgs.push("--admin-control");
+    }
     if (shouldOpen) {
       browserArgs.push("--open");
     }
@@ -634,7 +647,10 @@ export function apply(ctx) {
             const parsed = JSON.parse(firstLine);
             const url = parsed.url;
             const token = parsed.access_token;
-            const browserUrl = url + "#token=" + encodeURIComponent(token);
+            const browserUrl =
+              parsed.admin_control_url ||
+              parsed.review_url ||
+              url + "#token=" + encodeURIComponent(token);
             const portMatch = String(url).match(/:(\d+)\//);
             const info = {
               project: parsed.project,
@@ -644,7 +660,9 @@ export function apply(ctx) {
               access_token: token,
               port: portMatch ? Number(portMatch[1]) : requestedPort,
               pid: child.pid,
-              read_only: true,
+              read_only: Boolean(parsed.read_only),
+              review: wantReview,
+              admin_control: wantAdminControl,
             };
             browserProcesses.set(key, { child, info });
             child.on("close", () => {
@@ -961,6 +979,156 @@ export function apply(ctx) {
           }
         } catch {}
       }
+    });
+    ctx.inject(["webServer"], (scope) => {
+      if (!scope?.webServer || typeof scope.webServer.register !== "function") return;
+      const route = {
+        name: "agent-learning-ui",
+        kind: "exact",
+        path: "/agent-learning/ui",
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify(body));
+          };
+          if (req.headers?.["sec-fetch-site"] === "cross-site") {
+            send(403, { ok: false, error: "cross-site request denied" });
+            return;
+          }
+          let receipt;
+          try {
+            receipt = loadRuntimeReceipt();
+          } catch (err) {
+            send(500, { ok: false, error: "runtime receipt unavailable" });
+            return;
+          }
+          const workspace = receipt.workspace || process.cwd();
+          const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
+
+          if (req.method === "GET") {
+            try {
+              const inputPayload = JSON.stringify({
+                home: receipt.home || null,
+                workspace,
+                slash_command: "learning-status",
+                raw_input: "/learning-status",
+              });
+              const { code, stdout } = await runPythonProcess(
+                receipt.python,
+                ["-B", toolScript],
+                inputPayload,
+                workspace,
+                undefined,
+                15000,
+              );
+              const parsed = code === 0 && stdout.trim() ? JSON.parse(stdout.trim()) : null;
+              const data = parsed?.ok ? parsed.result?.data || {} : {};
+              const browserStat = await manageBrowser("status", {}, workspace).catch(() => ({ running: false }));
+              send(200, {
+                ok: true,
+                project_id: data.project_id || "unknown",
+                workspace,
+                home: data.home || receipt.home || "",
+                host_scope: data.host_scope || "dsh:default",
+                active_knowledge: data.counts?.active ?? 0,
+                pending_problems: data.counts?.pending_problems ?? 0,
+                candidates: data.counts?.candidates ?? 0,
+                work_memories: data.work_memory?.memories ?? 0,
+                file_relations: data.work_memory?.file_relations ?? 0,
+                admin_admission_enabled: Boolean(data.admin_admission_enabled ?? data.admin_enabled),
+                remaining_calls: data.admin_budget?.remaining_calls ?? 0,
+                onboarding: data.history_import?.onboarding?.state || "unoffered",
+                browser_running: Boolean(browserStat?.running),
+              });
+            } catch (err) {
+              send(500, { ok: false, error: String(err?.message || err) });
+            }
+            return;
+          }
+
+          if (req.method !== "POST") {
+            res.writeHead(405).end();
+            return;
+          }
+
+          try {
+            const chunks = [];
+            let total = 0;
+            for await (const chunk of req) {
+              total += chunk.length;
+              if (total > 32 * 1024) {
+                send(413, { ok: false, error: "payload too large" });
+                req.destroy();
+                return;
+              }
+              chunks.push(chunk);
+            }
+            const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+            const action = body?.action;
+
+            if (action === "open_browser") {
+              const info = await manageBrowser(
+                "start",
+                { open: true, review: false, adminControl: false },
+                workspace,
+              );
+              send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: "readonly" });
+              return;
+            }
+            if (action === "open_review") {
+              const info = await manageBrowser(
+                "start",
+                { open: true, review: true, adminControl: true },
+                workspace,
+              );
+              send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: "review" });
+              return;
+            }
+            if (action === "stop_browser") {
+              const info = await manageBrowser("stop", {}, workspace);
+              send(200, { ok: true, running: false, stopped: Boolean(info.stopped) });
+              return;
+            }
+            if (action === "archive_history") {
+              const inputPayload = JSON.stringify({
+                home: receipt.home || null,
+                workspace,
+                tool: "learning_history",
+                args: { action: "auto", confirm: true },
+              });
+              const { code, stdout, stderr } = await runPythonProcess(
+                receipt.python,
+                ["-B", toolScript],
+                inputPayload,
+                workspace,
+                undefined,
+                120000,
+              );
+              const parsed = code === 0 && stdout.trim() ? JSON.parse(stdout.trim()) : null;
+              if (!parsed?.ok) {
+                send(400, { ok: false, error: parsed?.error || (stderr || stdout).trim() || "archive failed" });
+                return;
+              }
+              send(200, {
+                ok: true,
+                job_id: parsed.result?.prepared_job_id,
+                cases: parsed.result?.job?.counts?.cases ?? 0,
+                sources: parsed.result?.job?.counts?.materialized_sources ?? 0,
+              });
+              return;
+            }
+            send(400, { ok: false, error: "unsupported action" });
+          } catch (err) {
+            send(400, { ok: false, error: String(err?.message || err) });
+          }
+        },
+      };
+      try {
+        const dispose = scope.webServer.register(route);
+        if (typeof dispose === "function") {
+          activeDisposers.push(dispose);
+        }
+      } catch {}
     });
   }
 

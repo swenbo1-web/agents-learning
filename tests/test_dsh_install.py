@@ -56,6 +56,7 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "plugin.json").is_file())
         self.assertTrue((self.target / "package.json").is_file())
         self.assertTrue((self.target / "host/index.mjs").is_file())
+        self.assertTrue((self.target / "client/index.js").is_file())
         self.assertTrue((self.target / "rules/learning.md").is_file())
         self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-admin/SKILL.md").is_file())
