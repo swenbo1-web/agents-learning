@@ -1,0 +1,4 @@
+interface:
+  display_name: "可视化知识审批"
+  short_description: "打开当前项目本机审批台，预览来源并选择批准发布、拒绝或暂缓"
+  default_prompt: "使用 $learning-review 为当前项目打开可视化知识审批台，让我在页面查看候选并决定是否发布。"

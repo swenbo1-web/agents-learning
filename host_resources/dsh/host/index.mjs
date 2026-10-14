@@ -847,6 +847,10 @@ export function apply(ctx) {
           "learning-browser",
           "在 DSH 中启动、查看或关闭本机只读可视化知识库浏览器（127.0.0.1），搜索和筛选正式知识、查看来源健康、修订历史、事件时间线与管理员待办。",
         ],
+        [
+          "learning-review",
+          "打开当前项目的本机可视化知识审批台，预览候选和证据，由用户在页面批准发布、拒绝或暂缓选中条目。",
+        ],
       ]) {
         try {
           const skillPath = join(PLUGIN_ROOT, "skills", skillName, "SKILL.md");

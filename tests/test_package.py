@@ -52,6 +52,11 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/agents/openai.yaml", wheel.namelist())
+                for prefix in ("skills", "host_resources/antigravity/skills", "host_resources/dsh/skills"):
+                    for relative in ("SKILL.md", "agents/openai.yaml"):
+                        path = f"agent_learning/_plugin_resources/{prefix}/learning-review/{relative}"
+                        self.assertIn(path, wheel.namelist())
+                        self.assertEqual(wheel.read(path), (source_root / prefix / "learning-review" / relative).read_bytes())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/rules/learning.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/skills/learning-history/SKILL.md", wheel.namelist())
@@ -107,7 +112,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
             self.assertEqual(json.loads(result.stdout.decode("utf-8"))["status"], "exported")
             for relative in ("hooks/dispatch.py", "scripts/learning.py", "skills/learning-worker/SKILL.md",
-                             "skills/learning-admin/SKILL.md", ".codex-plugin/plugin.json",
+                             "skills/learning-admin/SKILL.md", "skills/learning-review/SKILL.md",
+                             "skills/learning-review/agents/openai.yaml", ".codex-plugin/plugin.json",
                              ".agents/plugins/marketplace.json", "agent_learning/runtime.py", ".mcp.json", "LICENSE"):
                 self.assertTrue((exported / relative).is_file(), relative)
             for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import"):
@@ -117,6 +123,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(manifest["version"], __version__)
             release = json.loads((exported / "runtime-release.json").read_text(encoding="utf-8"))
             self.assertEqual(validate_release_root(Path(release["runtime_directory"]))["release_id"], release["release_id"])
+            self.assertTrue((Path(release["runtime_directory"]) / "skills/learning-review/SKILL.md").is_file())
             native_export = base / "wheel exported Antigravity plugin"
             native_home = base / "Antigravity knowledge"
             native = subprocess.run(
@@ -132,7 +139,8 @@ class PackageTests(unittest.TestCase):
             self.assertFalse(native_home.exists())
             self.assertFalse((native_export / ".codex-plugin").exists())
             for relative in ("plugin.json", "hooks.json", "mcp_config.json", "rules/learning.md",
-                             "skills/learning-worker/SKILL.md", "hooks/antigravity_dispatch.py"):
+                             "skills/learning-worker/SKILL.md", "skills/learning-review/SKILL.md",
+                             "skills/learning-review/agents/openai.yaml", "hooks/antigravity_dispatch.py"):
                 self.assertTrue((native_export / relative).is_file(), relative)
 
     @unittest.skipUnless(shutil.which("codex"), "Codex CLI is optional")

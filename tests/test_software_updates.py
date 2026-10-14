@@ -349,6 +349,44 @@ class SoftwareUpdateTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 0)
             self.assertEqual(result["state"], "checking")
 
+    def test_empty_lock_is_initialized_only_after_acquisition(self):
+        self.home.mkdir()
+        path = self.home / "empty.lock"
+        path.touch()
+        with updates._locked(path) as acquired:
+            self.assertTrue(acquired)
+            self.assertEqual(path.stat().st_size, 1)
+            with updates._locked(path) as contender:
+                self.assertFalse(contender)
+        self.assertEqual(path.read_bytes(), b"0")
+
+    def test_contender_never_initializes_an_empty_locked_byte(self):
+        self.home.mkdir()
+        path = self.home / "empty-contended.lock"
+        # Pin the historical race deterministically: another opener owns byte 0
+        # while the file remains empty. Windows denies an unowned initialization
+        # write; POSIX advisory locks still must leave the losing file untouched.
+        with path.open("a+b") as owner:
+            owner.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                self.assertEqual(path.stat().st_size, 0)
+                with updates._locked(path) as contender:
+                    self.assertFalse(contender)
+                    self.assertEqual(path.stat().st_size, 0)
+            finally:
+                owner.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(owner.fileno(), fcntl.LOCK_UN)
+        self.assertEqual(path.read_bytes(), b"")
+
     def test_separate_process_cannot_replace_active_reservation(self):
         token = updates.reserve_automatic_check(self.home, self.config)
         # The child uses the real clock rather than the parent's deterministic clock.

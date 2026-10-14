@@ -119,7 +119,7 @@ class KnowledgeStoreMixin:
         return response
 
     def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
-                expected_epoch=None):
+                expected_epoch=None, *, _review_approval=False):
         from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint, metadata
         from .knowledge_lifecycle import lifecycle_state
         with self._case_transaction():
@@ -144,10 +144,16 @@ class KnowledgeStoreMixin:
             # 发布标记缺少回执可能表示数据受损，不把它当成新的请求。
             if candidate["status"] == "published":
                 raise ContractError("published candidate receipt is missing; inspect storage")
+            if candidate["status"] not in {"candidate", "deferred"}:
+                raise ContractError("candidate is rejected or not available for publication")
             body = clean(json.loads(candidate["body"]))
             body["metadata"] = metadata(body.get("metadata"))
             body.setdefault("knowledge_kind", "solution")
-            self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
+            if _review_approval:
+                from .candidate_review import history_publication_guard
+                history_publication_guard(self, project, body["problem_id"], expected_epoch=expected_epoch)
+            else:
+                self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
             self._validate_sources(project, body)
             version = self.db.execute("SELECT generation FROM projects WHERE id=?", (project,)).fetchone()
             if not version:

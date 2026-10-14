@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**Release scope: the v1.0.0 distribution includes Codex and Antigravity. DSH support is in the `main` source branch and is not included in that distribution.**
+**Release scope: the v1.0.0 distribution includes Codex and Antigravity. DSH support and visual knowledge review are in the `main` source branch and are not included in that distribution.**
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
 
@@ -25,7 +25,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
 | Optional administrator | Use a configured platform-model or custom executor to propose knowledge candidates; enable work summaries separately |
 | Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
-| Visual knowledge browser | Locally search/filter knowledge and inspect sources, revisions, event timelines and administrator work; read-only |
+| Visual knowledge browser | Locally inspect published knowledge, sources, revisions and queues; `main` adds candidate details, publication checks and visual batch review |
 | Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
 | Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
 | Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
@@ -119,6 +119,24 @@ python -B scripts/learning.py --workspace "$learningProject" browser --open
 
 `status` registers the workspace; `browser --open` opens its **local read-only** knowledge view. If installation uses a custom `ALP_HOME` / `--home`, use that same setting here. Keep the terminal running; stop with `Ctrl+C`. [Browser details](#knowledge-browser)
 
+### Visual knowledge review (main)
+
+In a project chat with the updated plugin, invoke:
+
+> Use `$learning-review` to open this project's visual knowledge review console.
+
+The skill uses the installed fixed runtime, host and knowledge directory. **Inspect candidates and evidence → select entries → choose Approve and publish, Reject or Defer.** Opening the console does not approve any candidate. Page actions run locally without an extra model call. The interface supports English and Simplified Chinese; original knowledge text and evidence levels are retained.
+
+Interface translations use bundled offline dictionaries. We evaluated translate.js: its [offline mode](https://translate.zvo.cn/4076.html) sends uncovered dynamic text to a translation API. This version loads no external translation script and sends no candidate data to a translation service.
+
+From the source checkout, explicitly choose the actual project, data directory and host:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language en
+```
+
+Use `--host antigravity` or `--host dsh` for those hosts, and `--language zh-CN` for Simplified Chinese. `--home` must match the Hooks and MCP data directory. Installed users invoke the skill with their installed entry rather than locating a source checkout. `learning-browser` and `browser` without `--review` remain read-only. **This is a `main` capability; the original v1.0.0 release must be updated before using it.**
+
 <details>
 <summary>macOS / Linux installation commands</summary>
 
@@ -179,6 +197,7 @@ Use it for a real project task: register the goal, search existing knowledge, re
 | I want to… | Reference |
 |---|---|
 | Browse the knowledge base | [Knowledge browser](#knowledge-browser) |
+| Review candidates in a page | [Visual knowledge review](#visual-knowledge-review-main), or invoke `$learning-review` |
 | Add semantic matching | [Semantic hybrid retrieval](#semantic-hybrid-retrieval) |
 | Enable an administrator | [Optional administrator executor](#optional-administrator-executor) |
 | Update the plugin | [Update an existing installation](#update-an-existing-installation) |
@@ -802,7 +821,9 @@ Use existing `--home` / `ALP_HOME` settings and a registered workspace; `--proje
 
 Search knowledge by text, category and state; inspect paginated content and conditions, revisions, revocation, source health, event timelines and administrator work. Browser search uses no embeddings. APIs stay within the selected project and read SQLite snapshots. Content pages retain the selected revision. An empty knowledge base shows an empty view.
 
-The server binds to `127.0.0.1` and validates the access code, Host and Origin. The page has no publication, revocation, task execution or administrator launch actions. It creates no projects, migrates no databases and records no model exposures. Older schemas require an explicit runtime upgrade first. This is a temporary local viewer; cross-device sharing needs a separate synchronization and service design.
+The server binds to `127.0.0.1` and validates the access code, Host and Origin. The default page is read-only, with no publication, revocation, task execution or administrator launch actions. It creates no projects, migrates no databases and records no model exposures. Older schemas require an explicit runtime upgrade first. This is a temporary local viewer; cross-device sharing needs a separate synchronization and service design.
+
+On `main`, explicit `browser --review` opens [visual knowledge review](#visual-knowledge-review-main): inspect full candidate content, conditions, limitations, evidence and publication checks; then approve and publish, reject or defer one entry or a fixed selected batch. Actions recheck candidate and source versions and return per-item receipts. Repeated clicks do not republish knowledge. A model-call budget pause does not prevent explicit approval of existing historical candidates; cancellation and invalid identity retain their separate checks. Review starts no model, resumes no historical processing and grants no task execution permission.
 
 ## Real-task paired evaluation
 
@@ -1149,7 +1170,7 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `knowledge-releases`, `knowledge-release`, `knowledge-release-rollback` | Query knowledge manifests, differences and safe rollback |
 | `doctor`, `backup`, `rebuild-index` | On-demand storage checks, online backup and derived index rebuilding |
 | `semantic-status`, `semantic-refresh` | Inspect vector coverage and explicitly refresh or rebuild |
-| `browser` | Start a temporary local read-only knowledge viewer |
+| `browser` | Read-only viewer by default; on `main`, `--review` opens visual candidate approval and `--language zh-CN\|en` selects the UI language |
 | `evaluation-protocol`, `evaluation-run`, `evaluation-report` | Freeze paired experiments, run explicit adapters, import and summarize observations |
 | `search`, `read` | Search and read published knowledge |
 | `work-search`, `work-read` | Search bounded work indices and read summaries or visible evidence by revision and page |

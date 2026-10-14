@@ -164,10 +164,17 @@ class SoftwareUpdateNoticeTests(unittest.TestCase):
 
     def test_concurrent_notice_reservations_return_one_owned_token(self):
         self.cache()
-        gate, results = threading.Barrier(4), []
+        gate, results, errors = threading.Barrier(4), [], []
+        result_lock = threading.Lock()
         def reserve():
-            gate.wait()
-            results.append(updates.update_notice(self.home, self.config, current_version="0.12.0"))
+            try:
+                gate.wait(timeout=5)
+                result = updates.update_notice(self.home, self.config, current_version="0.12.0")
+                with result_lock:
+                    results.append(result)
+            except BaseException as exc:
+                with result_lock:
+                    errors.append(exc)
         threads = [threading.Thread(target=reserve) for _ in range(4)]
         transport = updates._fetch
         # Patching a shared global separately in each thread can restore another
@@ -178,6 +185,8 @@ class SoftwareUpdateNoticeTests(unittest.TestCase):
             for thread in threads:
                 thread.join(5)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [], repr(errors))
+        self.assertEqual(len(results), 4)
         self.assertEqual(sum(result is not None for result in results), 1)
         self.assertIs(updates._fetch, transport)
 

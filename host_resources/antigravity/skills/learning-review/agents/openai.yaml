@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual knowledge review"
+  short_description: "Preview candidates and approve, reject or defer knowledge"
+  default_prompt: "Use $learning-review to open this project's visual knowledge review console so I can inspect candidates and decide what to publish."

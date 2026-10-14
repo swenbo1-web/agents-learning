@@ -1,7 +1,8 @@
-"""Project-scoped read-only knowledge browser using only the standard library.
+"""Project-scoped knowledge browser using only the standard library.
 
-The browser does not initialize Runtime, migrate storage, mark exposures or run
-an administrator. Its access key belongs to this process and is never persisted.
+Default viewing does not initialize Runtime or write storage. Explicit review
+mode uses a separate capability and fixed candidate plans for user decisions.
+Access keys belong to this process and are never persisted.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import threading
 import time
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -19,6 +21,8 @@ from .case_store import CaseStoreMixin
 from .knowledge_releases import KnowledgeReleaseMixin
 from .knowledge_store import KnowledgeStoreMixin
 from .publication_state import PublicationStateMixin
+from .browser_review_http import ReviewHandlerMixin
+from .browser_ui import HTML, CSS, JAVASCRIPT
 from .runtime import CATEGORIES, KNOWLEDGE_KINDS, ContractError, clean
 
 
@@ -27,6 +31,7 @@ MAX_OFFSET = 10000
 MAX_FIELD_PAGE = 8000
 MAX_RESPONSE_BYTES = 256000
 MAX_DISCARD_BYTES = 8192
+UI_LANGUAGES = {"auto", "zh-CN", "en"}
 
 
 def _connection(database):
@@ -121,7 +126,8 @@ class BrowserServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, database, project, *, host="127.0.0.1", port=0, token=None):
+    def __init__(self, database, project, *, host="127.0.0.1", port=0, token=None,
+                 review=False, language="auto", runtime_host="codex", runtime_instance="default"):
         if host != "127.0.0.1":
             raise ContractError("browser host must be 127.0.0.1")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -132,16 +138,32 @@ class BrowserServer(ThreadingHTTPServer):
                                   or not token.isascii() or not token.isalnum()):
             raise ContractError("browser token must be 32..200 ASCII letters or digits")
         self.database = Path(database).expanduser().resolve(strict=True)
+        if not isinstance(review, bool) or not isinstance(language, str) or language not in UI_LANGUAGES:
+            raise ContractError("invalid browser mode or language")
+        from .host_sessions import host_scope_key
+        host_scope_key(runtime_host, runtime_instance)
         with contextlib.closing(_connection(self.database)) as db:
             _schema(db)
+            if review and (db.execute("PRAGMA user_version").fetchone()[0] != 15
+                           or self.database.name != "runtime.sqlite3"):
+                raise ContractError("review mode requires an existing schema 15 runtime database")
             if not db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
                 raise ContractError("unknown browser project")
         self.project = project
+        self.review_enabled = review
+        self.language = language
+        self.runtime_host = runtime_host
+        self.runtime_instance = runtime_instance
         self.access_token = token or secrets.token_hex(24)
+        self.review_token = secrets.token_hex(32) if review else None
+        self.review_plans = {}
+        self.review_lock = threading.Lock()
         super().__init__((host, port), _Handler)
         self.url = f"http://127.0.0.1:{self.server_address[1]}/"
         self.origin = self.url.rstrip("/")
         self.browser_url = self.url + "#token=" + quote(self.access_token, safe="")
+        if self.review_enabled:
+            self.browser_url += "&review_token=" + self.review_token
 
     @contextlib.contextmanager
     def snapshot(self):
@@ -165,11 +187,14 @@ class BrowserServer(ThreadingHTTPServer):
                     db.execute("ROLLBACK")
 
 
-def make_browser_server(database, project, *, host="127.0.0.1", port=0, token=None):
-    return BrowserServer(database, project, host=host, port=port, token=token)
+def make_browser_server(database, project, *, host="127.0.0.1", port=0, token=None,
+                        review=False, language="auto", runtime_host="codex", runtime_instance="default"):
+    return BrowserServer(database, project, host=host, port=port, token=token,
+                         review=review, language=language, runtime_host=runtime_host,
+                         runtime_instance=runtime_instance)
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
     server_version = "AgentLearningBrowser"
     sys_version = ""
 
@@ -240,8 +265,16 @@ class _Handler(BaseHTTPRequestHandler):
             if any(len(values) != 1 for values in parsed_params.values()):
                 raise ContractError("duplicate query parameter")
             params = {key: values[0] for key, values in parsed_params.items()}
-            with self.server.snapshot() as db:
-                result = _read_api(db, self.server.project, parsed.path, params)
+            if parsed.path == "/api/session":
+                if params:
+                    raise ContractError("session endpoint takes no query parameters")
+                result = {"project": self.server.project, "review_enabled": self.server.review_enabled,
+                          "read_only": not self.server.review_enabled, "language": self.server.language}
+            else:
+                with self.server.snapshot() as db:
+                    result = _read_api(db, self.server.project, parsed.path, params)
+            if parsed.path == "/api/stats":
+                result["read_only"] = not self.server.review_enabled
             payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(payload) > MAX_RESPONSE_BYTES:
                 self._send(413, {"error": "response exceeds browser budget; reduce page size"})
@@ -280,7 +313,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(405, {"error": "browser is read-only"})
         self.close_connection = True
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = do_CONNECT = _write_denied
+    do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = do_CONNECT = _write_denied
 
     def do_HEAD(self):
         self.do_GET()
@@ -295,12 +328,39 @@ def _read_api(db, project, route, params):
         "/api/actions": {"knowledge_id", "offset", "limit"},
         "/api/events": {"knowledge_id", "offset", "limit"},
         "/api/admin": {"offset", "limit"},
+        "/api/candidates": {"status", "q", "offset", "limit"},
+        "/api/candidate": {"candidate_id", "section", "offset", "limit", "evidence_offset", "evidence_limit"},
+        "/api/review-receipt": {"request_id"},
     }
     if route not in contracts:
         raise LookupError
     if set(params) - contracts[route]:
         raise ContractError("unsupported query parameter")
     model = _ReadModel(db)
+    if route == "/api/review-receipt":
+        from .runtime import digest
+        request_id = _text(params, "request_id", maximum=200)
+        if not request_id.strip():
+            raise ContractError("review request_id is required")
+        event_id = digest(["candidate-review", project, request_id])
+        event = db.execute("SELECT payload FROM events WHERE project=? AND id=? AND type='CandidateReview'",
+                           (project, event_id)).fetchone()
+        if event is None:
+            return {"found": False}
+        receipt = json.loads(event[0])
+        return {"found": True, "plan_digest": receipt["plan_digest"], "response": receipt["response"]}
+    if route in {"/api/candidates", "/api/candidate"}:
+        from .candidate_review import candidate_review_list, candidate_review_detail
+        if route == "/api/candidates":
+            return candidate_review_list(model, project, status=_text(params, "status", "pending"),
+                q=_text(params, "q"), offset=_integer(params, "offset", 0, MAX_OFFSET),
+                limit=_integer(params, "limit", 20, MAX_PAGE, 1))
+        return candidate_review_detail(model, project, _text(params, "candidate_id", maximum=200),
+            section=_text(params, "section", "content"),
+            offset=_integer(params, "offset", 0, 1000000),
+            limit=_integer(params, "limit", 4000, MAX_FIELD_PAGE, 1),
+            evidence_offset=_integer(params, "evidence_offset", 0, MAX_OFFSET),
+            evidence_limit=_integer(params, "evidence_limit", 10, 20, 1))
     if route == "/api/stats":
         count = lambda table, suffix="": db.execute(
             "SELECT COUNT(*) FROM " + table + " WHERE project=?" + suffix, (project,)).fetchone()[0]
@@ -420,57 +480,3 @@ def _read_api(db, project, route, params):
             item["last_call"] = dict(call) if call else None
             items.append(item)
         return _page(items, total, offset, limit)
-
-
-HTML = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>agents-learning · 项目知识浏览</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
-<body><header><div><span class="eyebrow">AGENTS-LEARNING</span><h1>项目经验，随时核查</h1><p>查找知识、追溯来源、查看历史与审核状态。</p></div><span class="badge">只读浏览</span></header>
-<main><section id="login" class="panel"><h2>连接本地知识库</h2><p>输入启动命令显示的访问码。访问码仅保留在当前页面内存中。</p>
-<label for="token">访问码</label><input id="token" type="password" autocomplete="off"><button id="connect">连接</button></section>
-<div id="loading" role="status" hidden>正在读取本地数据…</div><div id="error" role="alert" hidden></div><section id="application" hidden>
-<div class="project-line"><strong id="project"></strong><button id="refresh">刷新当前视图</button><button id="disconnect">断开</button></div>
-<div id="stats" class="stats"></div><p class="note">工具成功是可观察结果；展示、采用声明和用户验收分别记录。这里不会发布、撤销知识或执行任务。</p>
-<nav aria-label="知识库视图"><button data-view="knowledge" class="selected">知识</button><button data-view="events">事件时间线</button><button data-view="admin">管理员待办</button></nav>
-<section class="panel"><div id="filters"><label for="query">搜索标题与正文</label><input id="query" placeholder="输入错误码、工具名称或关键词" maxlength="200">
-<select id="state" aria-label="发布状态"><option value="active">当前有效</option><option value="all">全部状态</option><option value="revoked">已撤销</option></select>
-<select id="category" aria-label="分类"><option value="">全部分类</option><option value="project">项目</option><option value="operation">操作</option><option value="professional">专业</option><option value="mixed">混合</option><option value="unknown">未分类</option></select><button id="search">查询</button></div>
-<div class="page-line"><span id="page-label"></span><div><button id="previous">上一页</button><button id="next">下一页</button></div></div><div id="list"></div></section>
-<section id="detail" class="panel" hidden><div class="page-line"><h2 id="detail-title"></h2><button id="close-detail">关闭详情</button></div>
-<div id="detail-meta"></div><div id="detail-tabs"><button data-section="content">正文</button><button data-section="applicability">适用条件</button><button data-section="limitations">限制</button></div>
-<pre id="detail-text"></pre><div class="page-line"><span id="field-label"></span><div><button id="field-previous">上一段</button><button id="field-next">下一段</button></div></div>
-<h3>来源与健康状态</h3><div id="sources"></div><h3>正文修订</h3><div id="revisions"></div><button id="more-revisions" hidden>查看更多修订</button><h3>发布与治理动作</h3><div id="actions"></div><button id="more-actions" hidden>查看更多动作</button><h3>来源事件时间线</h3><div id="source-events"></div><button id="more-events" hidden>查看更多来源事件</button></section>
-</section></main><footer>127.0.0.1 · 本地 SQLite 一致快照 · 无模型调用</footer></body></html>"""
-
-CSS = """*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#192735;font:15px/1.65 system-ui,sans-serif}header,main,footer{max-width:1120px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;align-items:center;gap:20px}h1{font-size:30px;line-height:1.25;margin:8px 0}h2{font-size:20px;margin:0 0 14px}h3{margin-top:24px}.eyebrow{font-size:12px;letter-spacing:2px;color:#547264}.badge{padding:6px 12px;background:#dfede3;color:#235537;border-radius:20px;white-space:nowrap}.panel{background:#fff;border:1px solid #dce3e9;border-radius:12px;padding:22px;margin:18px 0}button,input,select{font:inherit;border:1px solid #c5ced7;border-radius:6px;padding:7px 10px;background:#fff;color:inherit}button{cursor:pointer}button:hover,button.selected{background:#e8f0eb;border-color:#7d9f8b}button:disabled{opacity:.45;cursor:default}input{max-width:100%}#query{flex:1;min-width:160px}#filters,.page-line,.project-line,nav,#detail-tabs{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.page-line,.project-line{justify-content:space-between}.page-line{margin:15px 0}.project-line strong{overflow-wrap:anywhere}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}.stat{border:1px solid #dce3e9;border-radius:10px;padding:16px;background:#fff}.stat strong{display:block;font-size:27px}.note,.muted,footer{color:#667482;font-size:13px}.card{padding:17px 0;border-top:1px solid #e1e7ed;overflow-wrap:anywhere}.card:first-child{border-top:0}.card p{margin:7px 0}.card-title{font-size:17px;text-align:left}.tags{color:#476257;font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.8 ui-monospace,monospace;background:#f6f8fa;border:1px solid #e1e7ed;border-radius:8px;padding:15px}#error{background:#fff0ec;border:1px solid #e7b7aa;color:#973e25;padding:14px;border-radius:8px}[hidden]{display:none!important}#token{width:400px}.history-item{padding:10px 0;border-bottom:1px solid #e1e7ed}label{color:#50616f;font-size:13px}@media(max-width:650px){header,main,footer{padding:18px}.stats{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start}h1{font-size:24px}.panel{padding:16px}}"""
-
-JAVASCRIPT = r"""'use strict';
-const $=id=>document.getElementById(id);
-const state={token:'',connectionEpoch:0,view:'knowledge',offset:0,next:null,detail:null,section:'content',fieldOffset:0,fieldNext:null,pages:{},busy:false};
-const labels={active:'有效',revoked:'已撤销',historical:'历史修订',valid:'有效来源',missing:'来源缺失',conflicted:'来源冲突',denied:'操作被拒绝',candidate:'待晋升',stable:'稳定',reported:'陈述证据',tool_success:'工具成功证据',operation:'操作',professional:'专业',project:'项目',mixed:'混合',unknown:'未分类',pending:'待处理',candidate_ready:'候选就绪',work_summary_ready:'工作摘要就绪',awaiting_evidence:'等待证据',proposal_ready:'治理建议就绪',skipped:'已跳过',solution:'解法',fact:'事实',pattern:'方法'};
-const label=x=>labels[x]||x||'未知';
-const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;if(tag==='button')e.disabled=state.busy;return e;};
-const stamp=x=>x?new Date(x*1000).toLocaleString():'';
-const error=x=>{$('error').textContent=x;$('error').hidden=!x;};
-async function api(path,params={}){const epoch=state.connectionEpoch;const response=await fetch('/api/'+path+'?'+new URLSearchParams(params),{headers:{Authorization:'Bearer '+state.token},cache:'no-store',credentials:'omit'});const body=await response.json();if(epoch!==state.connectionEpoch)throw new Error('连接已断开，旧请求结果已丢弃。');if(!response.ok)throw new Error(body.error||'读取失败');return body;}
-function busy(value){state.busy=value;$('loading').hidden=!value;document.body.setAttribute('aria-busy',String(value));for(const button of document.querySelectorAll('button'))if(button.id!=='disconnect')button.disabled=value;if(!value){$('previous').disabled=state.offset===0;$('next').disabled=state.next===null;$('field-previous').disabled=!state.detail||state.fieldOffset===0;$('field-next').disabled=!state.detail||state.fieldNext===null;}}
-async function run(action){if(state.busy)return;busy(true);error('');try{await action();}catch(e){error(e.message);}finally{busy(false);}}
-function pager(data){state.next=data.next_offset;$('page-label').textContent='共 '+data.total+' 条 · 当前 '+(data.items.length?data.offset+1:0)+'–'+(data.offset+data.items.length);$('previous').disabled=state.busy||state.offset===0;$('next').disabled=state.busy||state.next===null;}
-function eventCard(item){const card=node('div',undefined,'card');card.append(node('strong',item.type+' · '+item.outcome),node('div',stamp(item.created)+' '+(item.tool_name||''),'muted'),node('p',item.summary||''),node('div',item.id,'muted'));return card;}
-async function stats(){const data=await api('stats');$('project').textContent='项目：'+data.project_id;$('stats').replaceChildren();for(const [title,value]of [['有效知识',data.knowledge_active],['已撤销知识',data.knowledge_revoked],['观察事件',data.events],['待处理问题',data.problems.pending||0]]){const card=node('div',undefined,'stat');card.append(node('span',title),node('strong',String(value)));$('stats').append(card);}}
-async function list(){const target=$('list');target.replaceChildren();$('filters').hidden=state.view!=='knowledge';let data;
-if(state.view==='knowledge'){data=await api('knowledge-list',{q:$('query').value,state:$('state').value,category:$('category').value,offset:state.offset,limit:20});for(const item of data.items){const card=node('article',undefined,'card');const title=node('button',item.title,'card-title');title.addEventListener('click',()=>run(()=>showDetail(item.knowledge_id,item.revision)));card.append(title,node('div',[label(item.state),'r'+item.revision,label(item.category),label(item.validation_level),label(item.source_health),label(item.maturity)].join(' · '),'tags'),node('p',item.preview),node('div',stamp(item.created)+' · '+item.knowledge_id,'muted'));if(item.problem_changed)card.append(node('p','来源案例已经变化，需要复核。','tags'));target.append(card);}}
-else if(state.view==='events'){data=await api('events',{offset:state.offset,limit:20});for(const item of data.items)target.append(eventCard(item));}
-else{data=await api('admin',{offset:state.offset,limit:20});for(const item of data.items){const card=node('article',undefined,'card');card.append(node('strong',item.summary),node('div',label(item.status)+' · 案例 r'+item.revision+' · '+label(item.review_state)+(item.review_state&&!item.review_current?'（旧案例修订）':''),'tags'),node('p',item.review_reason||'尚无审核决定'),node('div',stamp(item.created)+' · '+item.id,'muted'));if(item.last_call)card.append(node('div','最近调用：'+item.last_call.state+' · '+stamp(item.last_call.created),'muted'));for(const c of item.candidates)card.append(node('p','候选：'+c.title+' · '+label(c.status)));target.append(card);}}
-if(!data.items.length)target.append(node('p','当前视图没有记录。','muted'));pager(data);}
-async function field(){const data=await api('knowledge',{knowledge_id:state.detail.id,revision:state.detail.revision,section:state.section,offset:state.fieldOffset,limit:8000});$('detail-title').textContent=data.title;$('detail-meta').textContent=[label(data.state),'r'+data.revision,label(data.validation_level),label(data.source_health),label(data.maturity)].join(' · ');$('detail-text').textContent=data.field.text||'（空）';state.fieldNext=data.field.next_offset;$('field-label').textContent=label(state.section)+' · '+data.field.total_chars+' 字符 · 从 '+data.field.offset+' 开始';$('field-previous').disabled=state.busy||state.fieldOffset===0;$('field-next').disabled=state.busy||state.fieldNext===null;
-$('sources').replaceChildren();if(!data.sources.length)$('sources').append(node('p','未恢复关联来源；下方保留可查证据摘要。','muted'));for(const source of data.sources){const e=node('div',undefined,'history-item');e.append(node('strong',source.problem_id+' · 案例 r'+source.problem_revision),node('p',label(source.health)+(source.problem_changed?' · 案例已变化':'')+' · 工具成功观察：'+(source.current_tool_success?'有':'无')));for(const ref of source.evidence)e.append(node('div',ref.event_id+' · '+label(ref.health)+' · '+(ref.outcome||''),'muted'));if(source.evidence_count>source.evidence.length)e.append(node('p','更多证据请通过来源事件时间线查看。','muted'));$('sources').append(e);}if(!data.sources.length)for(const ref of data.evidence)$('sources').append(node('p',ref.event_id+' · '+label(ref.health)));if(data.sources_truncated)$('sources').append(node('p','来源较多，当前显示前 20 个；总计 '+data.source_count+' 个。','muted'));}
-async function detailPage(kind,append=false){const key=kind==='events'?'source-events':kind;const data=await api(kind,{knowledge_id:state.detail.id,offset:append?(state.pages[kind]||0):0,limit:20});if(!append)$(key).replaceChildren();for(const item of data.items){if(kind==='events'){$(key).append(eventCard(item));continue;}const e=node('div',undefined,'history-item');if(kind==='revisions'){const b=node('button','r'+item.revision+' · '+label(item.state)+' · '+item.title);b.addEventListener('click',()=>run(async()=>{state.detail.revision=item.revision;state.fieldOffset=0;await field();}));e.append(b,node('span',' '+stamp(item.created),'muted'));}else e.append(node('strong',item.action+' · r'+item.revision),node('p',item.reason),node('span',stamp(item.created)+' · '+item.actor,'muted'));$(key).append(e);}if(!data.items.length&&!append)$(key).append(node('p','没有记录。','muted'));state.pages[kind]=data.next_offset;$('more-'+kind).hidden=data.next_offset===null;}
-async function showDetail(id,revision){state.detail={id,revision};state.fieldOffset=0;state.section='content';state.pages={};$('detail').hidden=false;await field();for(const kind of ['revisions','actions','events'])await detailPage(kind);$('detail').scrollIntoView({behavior:'smooth',block:'start'});}
-async function connect(){state.token=$('token').value.trim()||state.token;if(!state.token)throw new Error('请输入访问码。');await stats();$('token').value='';$('login').hidden=true;$('application').hidden=false;await list();}
-$('connect').addEventListener('click',()=>run(connect));$('token').addEventListener('keydown',e=>{if(e.key==='Enter')run(connect);});$('disconnect').addEventListener('click',()=>{state.connectionEpoch++;state.token='';state.detail=null;state.pages={};state.fieldOffset=0;state.fieldNext=null;$('application').hidden=true;$('login').hidden=false;$('detail').hidden=true;for(const id of ['list','stats','sources','revisions','actions','source-events'])$(id).replaceChildren();for(const id of ['project','detail-title','detail-meta','detail-text','field-label','page-label'])$(id).textContent='';for(const id of ['more-revisions','more-actions','more-events'])$(id).hidden=true;error('');});
-$('refresh').addEventListener('click',()=>run(async()=>{await stats();await list();if(state.detail){await field();for(const kind of ['revisions','actions','events'])await detailPage(kind);}}));$('search').addEventListener('click',()=>run(async()=>{state.offset=0;await list();}));$('query').addEventListener('keydown',e=>{if(e.key==='Enter')$('search').click();});$('previous').addEventListener('click',()=>run(async()=>{state.offset=Math.max(0,state.offset-20);await list();}));$('next').addEventListener('click',()=>run(async()=>{if(state.next!==null){state.offset=state.next;await list();}}));
-for(const b of document.querySelectorAll('nav button'))b.addEventListener('click',()=>run(async()=>{state.view=b.dataset.view;state.offset=0;for(const x of document.querySelectorAll('nav button'))x.classList.toggle('selected',x===b);await list();}));
-for(const b of document.querySelectorAll('[data-section]'))b.addEventListener('click',()=>run(async()=>{state.section=b.dataset.section;state.fieldOffset=0;await field();}));$('field-previous').addEventListener('click',()=>run(async()=>{state.fieldOffset=Math.max(0,state.fieldOffset-8000);await field();}));$('field-next').addEventListener('click',()=>run(async()=>{if(state.fieldNext!==null){state.fieldOffset=state.fieldNext;await field();}}));$('close-detail').addEventListener('click',()=>{$('detail').hidden=true;state.detail=null;});for(const kind of ['revisions','actions','events'])$('more-'+kind).addEventListener('click',()=>run(()=>detailPage(kind,true)));
-const fragment=new URLSearchParams(location.hash.slice(1));const bootstrap=fragment.get('token');if(location.hash)history.replaceState(null,'',location.pathname);if(bootstrap){state.token=bootstrap;run(connect);}
-"""

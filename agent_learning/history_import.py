@@ -234,14 +234,14 @@ class HistoryImportMixin:
         return self.history_status(project, job_id)
 
     def history_pause(self, project, job_id, expected_epoch=None):
-        from .runtime import ContractError
+        from .runtime import ContractError, encode
         with self.transaction():
             self.assert_host_epoch(expected_epoch)
             row = _job(self, project, job_id)
             if row["state"] == "cancelled":
                 raise ContractError("cancelled history job cannot be paused")
-            self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=? WHERE project=? AND id=?",
-                            (time.time(), project, job_id))
+            self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=?,last_result=? WHERE project=? AND id=?",
+                            (time.time(), encode({"reason": "user_paused"}), project, job_id))
         return self.history_status(project, job_id)
 
     def history_guard(self, project, problem_id, history_job_id=None, *, require_review=False, expected_epoch=None):
@@ -380,7 +380,8 @@ class HistoryImportMixin:
                         state, reason = "materialized", "needs_evidence" if counts["awaiting_evidence_cases"] else "pending_manual_review"
         except BaseException:
             with self.transaction():
-                self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=? WHERE project=? AND id=? AND owner=?", (time.time(), project, job_id, owner))
+                self.db.execute("UPDATE history_jobs SET state='paused',owner=NULL,lease_until=NULL,review_enabled=0,updated=?,last_result=? WHERE project=? AND id=? AND owner=?",
+                                (time.time(), encode({"reason": "run_failed"}), project, job_id, owner))
             raise
         with self.transaction():
             # Cancel/epoch changes can race with a completed model; never overwrite the fence.

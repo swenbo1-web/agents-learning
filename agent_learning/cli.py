@@ -57,10 +57,13 @@ def parser():
         command = sub.add_parser(name, help="停止后续历史整理与回写，保留已发布知识")
         command.add_argument("job_id")
     sub.add_parser("history-skip", help="记录该项目暂不吸收历史；以后仍可明确启动")
-    browser = sub.add_parser("browser", help="临时启动本机只读知识浏览器，不创建或升级数据库")
+    browser = sub.add_parser("browser", help="启动本机知识浏览器；--review 明确开启候选审批")
     browser.add_argument("--port", type=int, default=0)
     browser.add_argument("--open", action="store_true", help="在默认浏览器打开页面")
     browser.add_argument("--project-id", help="选择已有项目；省略按已登记workspace解析")
+    browser.add_argument("--review", action="store_true", help="开启候选预览与明确批准、拒绝、暂缓；不自动批准")
+    browser.add_argument("--language", choices=["auto", "zh-CN", "en"], default="auto",
+                         help="界面语言；auto 跟随浏览器，知识与证据保持原文")
     sub.add_parser("semantic-status", help="查看可选本地向量索引状态，不调用模型")
     semantic = sub.add_parser("semantic-refresh", help="显式调用已配置的本地嵌入模型，增量刷新派生索引")
     semantic.add_argument("--limit", type=int, default=100)
@@ -333,11 +336,17 @@ def main(argv=None):
             home = Path(args.home or os.environ.get("ALP_HOME") or default_home).resolve()
             database = home / "runtime.sqlite3"
             project = resolve_browser_project(database, args.workspace, args.project_id)
-            browser_server = make_browser_server(database, project, port=args.port)
+            browser_server = make_browser_server(database, project, port=args.port,
+                review=args.review, language=args.language, runtime_host=args.host,
+                runtime_instance=args.host_instance)
             try:
-                print(encode({"status": "serving", "project": project, "url": browser_server.url,
+                connection = {"status": "serving", "project": project, "url": browser_server.url,
                               "access_token": browser_server.access_token,
-                              "read_only": True, "stop": "Ctrl+C"}), flush=True)
+                              "read_only": not args.review, "language": args.language, "stop": "Ctrl+C"}
+                if args.review:
+                    connection.update(review_token=browser_server.review_token,
+                                      review_url=browser_server.browser_url)
+                print(encode(connection), flush=True)
                 if args.open:
                     import webbrowser
                     webbrowser.open(browser_server.browser_url)

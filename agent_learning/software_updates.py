@@ -323,9 +323,6 @@ def _locked(path):
     stream = path.open("a+b")
     acquired = False
     try:
-        if stream.tell() == 0:
-            stream.write(b"0")
-            stream.flush()
         stream.seek(0)
         try:
             if os.name == "nt":
@@ -337,6 +334,11 @@ def _locked(path):
             acquired = True
         except (OSError, BlockingIOError):
             pass
+        if acquired and os.fstat(stream.fileno()).st_size == 0:
+            # Windows permits byte locks beyond EOF. Initialize only while owning
+            # that byte: another opener may still see an empty, locked file.
+            stream.write(b"0")
+            stream.flush()
         yield acquired
     finally:
         if acquired:

@@ -3,6 +3,8 @@ import base64
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -59,6 +61,8 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "skills/learning-admin/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-history/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-browser/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-review/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-review/agents/openai.yaml").is_file())
         plugin = read_json(self.target / "plugin.json")
         pkg = read_json(self.target / "package.json")
         self.assertEqual(plugin["name"], "agent-learning")
@@ -82,6 +86,52 @@ class DshInstallTests(unittest.TestCase):
         validate_release_root(runtime)
         self.assertTrue((runtime / "host_resources/dsh/plugin.json").is_file())
         self.assertTrue((runtime / "hooks/dsh_dispatch.py").is_file())
+        self.assertEqual((runtime / "host_resources/dsh/skills/learning-review/SKILL.md").read_bytes(),
+                         (self.target / "skills/learning-review/SKILL.md").read_bytes())
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required to exercise the DSH native bridge")
+    def test_native_bridge_registers_review_skill_with_exported_resource_directory(self):
+        self.initial()
+        probe = r"""
+import { pathToFileURL } from 'node:url';
+const { apply } = await import(pathToFileURL(process.argv[1]).href);
+const skills = [];
+const commands = [];
+const tools = [];
+const ctx = {
+  tools: { register(spec) { tools.push(spec.name); } },
+  effect() {},
+  on() {},
+  inject(names, callback) {
+    callback({
+      skills: { register(spec) { skills.push(spec); } },
+      commands: { register(spec) { commands.push(spec.name); } },
+    });
+  },
+};
+apply(ctx);
+console.log(JSON.stringify({ skills, commands, tools }));
+"""
+        response = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", probe, str(self.target / "host/index.mjs")],
+            cwd=self.workspace, capture_output=True, timeout=10,
+        )
+        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+        result = json.loads(response.stdout.decode("utf-8"))
+        skills = {item["name"]: item for item in result["skills"]}
+        self.assertEqual(set(skills), {"learning-worker", "learning-admin", "learning-history",
+                                       "learning-browser", "learning-review"})
+        review = skills["learning-review"]
+        expected_directory = self.target / "skills/learning-review"
+        self.assertEqual(review["resourceBase"]["kind"], "directory")
+        self.assertEqual(Path(review["resourceBase"]["path"]), expected_directory)
+        self.assertEqual(review["content"], (expected_directory / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertEqual(review["source"], "bundled")
+        self.assertIn("learning-browser", result["commands"])
+        self.assertNotIn("learning-review", result["commands"])
+        self.assertIn("learning_browser", result["tools"])
+        self.assertNotIn("learning_review", result["tools"])
+        self.assertFalse(self.home.exists(), "skill registration must not initialize the knowledge database")
 
     def test_dsh_export_supports_dynamic_workspace_and_enforce_mode(self):
         result = self.initial(mode="enforce", bind_workspace=False)

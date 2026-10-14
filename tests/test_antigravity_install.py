@@ -72,11 +72,15 @@ class AntigravityInstallTests(unittest.TestCase):
                          "--home", str(self.home), "serve", "--role", "worker", "--host", "antigravity"])
         self.assertTrue((self.target / "rules/learning.md").is_file())
         self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-review/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-review/agents/openai.yaml").is_file())
         self.assertEqual(read_json(self.target / INSTALL_MANIFEST)["target_host"], "antigravity")
         self.assertEqual(inspect_installation(self.target, _hook_commands)["target_host"], "antigravity")
         validate_release_root(runtime)
         self.assertTrue((runtime / ".codex-plugin/plugin.json").is_file())
         self.assertTrue((runtime / "host_resources/antigravity/plugin.json").is_file())
+        self.assertEqual((runtime / "host_resources/antigravity/skills/learning-review/SKILL.md").read_bytes(),
+                         (self.target / "skills/learning-review/SKILL.md").read_bytes())
 
     def test_enforce_hooks_use_pinned_dispatcher_with_native_command_field_only(self):
         result = self.initial("enforce")
