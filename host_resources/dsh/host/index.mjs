@@ -1215,14 +1215,23 @@ export function apply(ctx) {
       const cm = scope?.clientModules;
       if (!cm) return;
       try {
+        const meta = {
+          clientPath: join(PLUGIN_ROOT, "client", "index.js"),
+          external: [],
+          immediately: true,
+        };
         if (cm.pkgMeta instanceof Map) {
-          cm.pkgMeta.delete("agent-learning");
+          cm.pkgMeta.set("agent-learning", meta);
         }
-        if (cm.table instanceof Map && !cm.table.has("agent-learning") && typeof cm.processOne === "function") {
-          if (cm.processOne("agent-learning") && typeof cm.compose === "function") {
-            cm.composed = cm.compose();
-            cm.notifyGraphChanged?.();
-          }
+        if (cm.table instanceof Map) {
+          cm.table.delete("agent-learning");
+        }
+        if (typeof cm.processOne === "function") {
+          cm.processOne("agent-learning");
+        }
+        if (typeof cm.compose === "function") {
+          cm.composed = cm.compose();
+          cm.notifyGraphChanged?.();
         }
         cm.rebuilt?.("agent-learning");
       } catch {}
