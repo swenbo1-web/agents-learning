@@ -47,9 +47,10 @@ METADATA_KEYS = {"tool", "tool_version", "error_code", "environment", "verificat
 DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
     "enforce_task_policy": False, "capture_deliveries": True, "allowed_tools": [], "project_aliases": {},
-    "admin": {**ROUTING_DEFAULTS, "enabled": False, "command": ["codex"], "max_calls_per_day": 5,
+    "admin": {**ROUTING_DEFAULTS, "enabled": False, "command": ["codex"], "max_calls_per_day": 100,
               "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False,
-              "max_cases_per_batch": 20, "max_calls_per_batch": 2, "max_batch_seconds": 180,
+              "max_cases_per_batch": 40, "max_calls_per_batch": 5, "max_batch_seconds": 180,
+              "max_run_seconds": 600,
               "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
               "token_reservation_per_call": 4000},
     "scheduler": SCHEDULER_DEFAULTS,
@@ -274,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(16)):
+        if version not in set(range(17)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -310,7 +311,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 install_admin_routing(self)
                 install_work_memory(self)
                 install_work_summaries(self)
-                self.db.execute("PRAGMA user_version=15")
+                from .admin_control import install_control
+                install_control(self)
+                self.db.execute("PRAGMA user_version=16")
         except BaseException:
             self.db.close()
             raise
@@ -1032,7 +1035,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         return self._attach_software_update_notice(result, host=self.host) if update_notice_event else result
 
     def _launch_admin(self, workspace, dispatch_token=None):
-        self._launch_background(workspace, "admin-batch",
+        self._launch_background(workspace, "admin-drain",
                                 ["--dispatch-token", dispatch_token] if dispatch_token else [])
 
     def _launch_scheduler(self, workspace, worker_token):

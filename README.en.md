@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**Release scope: the v1.0.0 distribution includes Codex and Antigravity. DSH support, visual knowledge review and historical ingestion improvements are in the `main` source branch and are not included in that distribution.**
+**Release scope: v1.0.0 includes Codex and Antigravity. DSH, visual review, administrator settings and historical ingestion improvements are on `main`; no new downloadable Release has been published. `main` uses schema/internal protocol 16: back up the database and update every shared-database installation.**
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
 
@@ -23,7 +23,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 | Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
 | Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
-| Optional administrator | Use a configured platform-model or custom executor to propose knowledge candidates; enable work summaries separately |
+| Optional administrator | Manually enable in the page, choose a model and shared limits, pin the first valid project model, and process pending daily work in bounded small batches |
 | Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
 | Visual knowledge browser | Locally inspect published knowledge, sources, revisions and queues; `main` adds candidate details, publication checks and visual batch review |
 | Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
@@ -135,7 +135,9 @@ From the source checkout, explicitly choose the actual project, data directory a
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language en
 ```
 
-Use `--host antigravity` or `--host dsh` for those hosts, and `--language zh-CN` for Simplified Chinese. `--home` must match the Hooks and MCP data directory. Installed users invoke the skill with their installed entry rather than locating a source checkout. `learning-browser` and `browser` without `--review` remain read-only. **This is a `main` capability; the original v1.0.0 release must be updated before using it.**
+Use `--host antigravity` or `--host dsh` for those hosts, and `--language zh-CN` for Simplified Chinese. `--home` must match the Hooks and MCP data directory. Installed users invoke the skill with their installed entry rather than locating a source checkout. `learning-browser` and `browser` without `--review` or `--admin-control` remain read-only. **This is a `main` capability; the original v1.0.0 release must be updated before using it.**
+
+For administrator settings, ask “Use `$learning-review` to open this project's administrator settings,” or add `--admin-control` to the command above; omit `--review` if only settings are needed. **Opening the page starts no model; the user must click Save and enable.** Choose a model, inspect pending work and usage, and adjust daily calls, batch calls, batch time and runner time. Disabling blocks new calls while retaining the current call's result handling. Model changes wait for in-flight review to finish. Access, review and administrator tokens stay in process/page memory and are not saved to files or logs. [Administrator details](#optional-administrator-executor)
 
 <details>
 <summary>macOS / Linux installation commands</summary>
@@ -465,11 +467,11 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-1.0.0 uses database schema **15**, internal publication protocol **15**, and work index **1**. Knowledge full-text index **4** and optional semantic index **1** are unchanged. Back up the external database before upgrading. Update and reload every host's fixed runtime sharing it; older runtimes cannot open schema 15.
+Current `main` uses database schema **16** and internal publication protocol **16**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution retains schema/protocol 15. Back up the external database before upgrading, then update and reload every shared-database host runtime. Older runtimes cannot open schema 16.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
-Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation accessing it to 1.0.0, and reload the hosts. Updating only Antigravity leaves older Codex runtimes unable to open schema 15.
+Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation to the same compatible source version, and reload the hosts. Updating only part of the installations to current `main` leaves original v1.0.0 and older runtimes unable to open schema 16.
 
 ### Custom knowledge directory in Codex
 
@@ -751,6 +753,8 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Codex, Antigravity and DSH support their own CLI reviewer or manual administration. See [model selection](#optional-administrator-executor). Historical jobs have no explicit source conversation: `current` needs one unambiguous active root-model identifier for that project and host. Different models or missing observations stop the review until the user chooses `fixed` or `default`. Use `history-cases JOB_ID` to page through exact case IDs and propose candidates from existing packets. Publication uses its separate trusted entry; historical jobs never auto-publish.
 
+Enabling the daily administrator, increasing shared limits or running `admin-drain` does not start historical jobs. Current `main` defaults to at most **10 calls/600 seconds** for each explicit historical run; explain that budget before starting or resuming. The `--max-calls 2 --max-seconds 180` example above explicitly selects a smaller budget and remains respected. Users can adjust it; all historical calls remain subject to shared daily admission. Default `first` can use the first valid model already bound to this project, host instance and account epoch; missing observations wait without guessing.
+
 **Historical review enhancements on `main`, absent from the original v1.0.0 distribution:** prioritize project descriptions, agent summaries and handover notes while retaining source order. Primary review can include bounded related material from the already approved archive; original evidence has first claim on the input budget. Each historical model call may return up to **5** independent candidates with their own references, conditions and limitations. This is a limit rather than a promised yield. Everyday administrator and work-summary output contracts remain unchanged. Historical evidence remains `reported`, without automatic publication.
 
 Archive coverage, primary reviews, untouched units, units awaiting evidence, candidates and publication are counted separately. **Archival completion does not establish review completion or publication.** Material supplied only as a related reference does not count as reviewed, and several candidates from one primary review still count as one review. Manual candidate creation does not fabricate a completed-review receipt. None of these counts prove complete source understanding or problem resolution. Invoke `$learning-review` to inspect full candidates and evidence in the [visual console](#visual-knowledge-review-main), then choose approve-and-publish, reject or defer.
@@ -761,7 +765,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**1.0.0 is the first stable release.** Searchable working observations, file associations, progressive reading and optional administrator work summaries extend the existing eight modules while retaining separate knowledge review and governance. Database schema **15**, publication protocol **15**, work index **1**; knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage records; unknown old events do not become complete histories automatically. Update and reload every shared-database installation. Export backups do not replace external database backups.
+**1.0.0 is the first stable release; its original distribution uses schema/internal protocol 15.** Current `main` adds visual administrator settings, first valid project-model binding, shared limits and bounded continuous organization, advancing schema/internal publication protocol to **16** without a new downloadable Release. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage; unknown old events do not become complete histories. Back up the database before updating and reloading all shared-database installations. Older runtimes reject schema 16; export backups do not replace database backups.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -821,11 +825,13 @@ python -B scripts/learning.py --workspace . browser --open
 
 Use existing `--home` / `ALP_HOME` settings and a registered workspace; `--project-id ID` selects an existing project explicitly. The default port is random; `--port N` fixes it. The command prints the local URL and temporary access code. `--open` passes the code in a URL fragment that the page immediately clears; it stays in page memory only. Keep the terminal running and use `Ctrl+C` to stop.
 
-Search knowledge by text, category and state; inspect paginated content and conditions, revisions, revocation, source health, event timelines and administrator work. Browser search uses no embeddings. APIs stay within the selected project and read SQLite snapshots. Content pages retain the selected revision. An empty knowledge base shows an empty view.
+Search knowledge by text, category and state; inspect paginated content and conditions, revisions, revocation, source health, event timelines and administrator work. Browser queries use no embeddings, stay within the selected project and read SQLite snapshots. Content pages retain the selected revision. An empty knowledge base shows an empty view.
 
 The server binds to `127.0.0.1` and validates the access code, Host and Origin. The default page is read-only, with no publication, revocation, task execution or administrator launch actions. It creates no projects, migrates no databases and records no model exposures. Older schemas require an explicit runtime upgrade first. This is a temporary local viewer; cross-device sharing needs a separate synchronization and service design.
 
 On `main`, explicit `browser --review` opens [visual knowledge review](#visual-knowledge-review-main): inspect full candidate content, conditions, limitations, evidence and publication checks; then approve and publish, reject or defer one entry or a fixed selected batch. Actions recheck candidate and source versions and return per-item receipts. Repeated clicks do not republish knowledge. A model-call budget pause does not prevent explicit approval of existing historical candidates; cancellation and invalid identity retain their separate checks. Review starts no model, resumes no historical processing and grants no task execution permission.
+
+Separate `browser --admin-control` enables administrator settings and can accompany review mode. Only the user's Save and enable permits model work; reading the page or changing limits makes no model call. Distinct access codes scope browsing, approval and administration and are not written to the database or logs. See [administrator settings](#optional-administrator-executor) for models, pending work and shared limits.
 
 ## Real-task paired evaluation
 
@@ -1010,17 +1016,25 @@ Trusted approval also freezes actual path roots in rules, the task and existing 
 
 **Off by default; users enable it themselves.** The administrator reviews knowledge sources, conditions and candidates. It does not run project tasks or perform product acceptance. Reviews run in separate CLI processes, so no permanent administrator conversation is required. Manual review can still use a separate administrator MCP interface.
 
-Choose the commands for your host and specify the target project. `--provider host` selects that host's CLI. The first configuration defaults to `current`; subsequent omitted routing arguments preserve the selected model and command:
+On `main`, invoke `$learning-review` for administrator settings, or run:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex browser --admin-control --open --language en
+```
+
+Retain the installation's `--home` and select the actual Antigravity or DSH `--host` as needed. Opening the page makes no model call. The user chooses settings and clicks Save and enable to permit daily work for that project/host. Add `--review` to include candidate approval; those decisions remain separate. Settings persist across reopening. Disabling through the page prevents new calls while retaining the current call's result handling. Model changes wait for in-flight review to complete.
+
+The CLI can also explicitly configure the administrator. `--provider host` selects that host's CLI. The first configuration defaults to **`first`**; subsequent omitted routing arguments preserve the chosen model and command:
 
 ```powershell
 # Codex
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-status
 # Antigravity
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
 # DSH (main source)
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-status
 ```
 
@@ -1028,19 +1042,21 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh ad
 
 | Model mode | Selection | When unavailable |
 |---|---|---|
+| `first` (new default) | Atomically pins the first valid root-model observation in this project, host instance and account epoch; later conversations retain it | Wait for a valid observation; an account change requires the new epoch's observation, without guessing |
 | `current` | Codex Hook `model`, Antigravity `modelName` or DSH `requestContext/model`, from root observations in the same project, host, instance and epoch | Missing observations, ambiguity or a provider from another host prevent the call; no guessed fallback |
 | `fixed` | Explicit `--model MODEL_ID` | A model unavailable on that platform fails without silent substitution |
 | `default` | The independent CLI's default selection | It need not match the desktop selection or user-configured default; Codex review skips user config |
 
-When root conversations use different models, background review must identify its exact source conversation. Historical jobs require an unambiguous active model identifier. To pin a model, use `admin-configure --enabled on --provider host --model-mode fixed --model "AVAILABLE_MODEL_ID"`; for the CLI default, use `--model-mode default`. Keep the explicit workspace and host arguments with either command.
+`first` keeps its selection across later conversations; Codex, Antigravity and DSH bind their own host identifiers separately. With `current`, background work still identifies the source conversation and historical jobs need one unambiguous active model. Use `--model-mode fixed --model "AVAILABLE_MODEL_ID"` for an explicit model or `--model-mode default` for the CLI default. Retain the explicit project and host. Direct CLI route changes keep existing in-flight invalidation rules; the page waits for completion first.
 
 The corresponding CLI must already be authenticated. Desktop login does not establish CLI authentication. The plugin does not read, copy or modify credentials or sign users in. Calls use the CLI account; its platform determines quotas and charges. A trusted custom command can be supplied as a JSON argument array through `--command-file FILE`, without credentials or model flags. [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
 
-Once enabled, Codex `Stop` or Antigravity `fullyIdle=true` stop events reserve dispatch under the policy and start a separate bounded `admin-batch`. Worker delivery does not wait for the model. Missing evidence increments, unresolved model selection, calls already in flight or exhausted budgets prevent calls. An enabled scheduler can continue persistent work. Manual commands also specify the target project and host:
+Once enabled, Codex/DSH `Stop` or Antigravity `fullyIdle=true` events reserve dispatch without making worker delivery wait. The default bounded `admin-drain` advances daily pending work in small batches; installations using the optional scheduler retain its bounded scheduling. Empty queues, unavailable model observations, work in flight, unknown results or exhausted limits stop processing. Later supported events can resume eligible daily work; this is not an always-running service while the application is closed. Manual commands retain the project and host:
 
 ```powershell
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-once
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-batch
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-drain
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
 ```
 
@@ -1056,7 +1072,7 @@ The review snapshot and call reservation are committed in the same transaction; 
 
 Review decisions are stored separately from call accounting. `reviews` and administrator `review_list` show reasons, structured missing evidence, and candidate/proposal references. Candidates correspond to candidate_ready, missing evidence to awaiting_evidence, and proposals to proposal_ready, independent of case recovery or product acceptance. Exact reuse checks business evidence and the actual compared knowledge, candidates, counterexample target, source health and review policy. Failed or unknown calls are not reused as successful decisions. A candidate produced from a case's own evidence does not cause a review loop; new relevant material can trigger review again. Publication or candidate changes first trigger bounded comparison, and no model call occurs if the actual review signature is unchanged.
 
-Before writing review results and at final commit, the same transaction rechecks the case, host, lease, comparison material and frozen executor/model policy. Changing the model, disabling review or switching accounts rejects old writeback while preserving the actual terminal state and usage. After reconciling an unknown call, a trusted entry point can use `admin-retry CALL_ID --reason "Reason confirmed during reconciliation"` to explicitly permit one more review; the original record and quota remain. Repeated approval does not create unlimited retries. Truncated evidence is marked and blocks automatic publication.
+Before writing results and at final commit, the same transaction rechecks the case, host, lease, material and frozen executor/model policy. Disabling through the page only closes admission and leaves the current call's route unchanged. Direct CLI model/route enablement changes and account changes retain the existing stale-writeback checks, preserving terminal state and usage. After reconciling an unknown call, a trusted entry point can use `admin-retry CALL_ID --reason "Reason confirmed during reconciliation"` to permit one more review; original records and quota remain. Repeated approval does not create unlimited retries. Truncated evidence is marked and blocks automatic publication.
 
 The scheduler, batch, single review and call claim share the same expected_epoch, rechecked in the claim transaction. An executor started before an account change cannot reclaim work under the new account version. Changes to concurrency, daily reported usage thresholds and per-call reservations affect admission only, not the review's semantic signature for the same material. Long log deduplication compares the complete redacted business digest before projection, preserving nested business IDs and excluding only top-level transport identities. Fully visible events do not resend their digest; old truncated events without digests cannot be inferred identical across events.
 
@@ -1064,13 +1080,15 @@ Direct MCP and CLI packet reads also use a consistent snapshot. The whole packet
 
 Administrators can paginate with `review_packet(problem_id, offset, expected_revision, max_chars, section)` or `packet ID --offset N --expected-revision R --max-chars N`. Subsequent pages must retain the same problem revision; changed material requires a fresh read. Use `section=task` for the full JSON of a large task. Exact historical knowledge for a counterexample is required regardless of keyword overlap, even if revoked. If the target does not fit, target_omitted and incomplete are explicit; paginate with `section=target` or `--section target`. If one evidence item cannot fit, increase max_chars according to the returned guidance rather than repeatedly reading a page that makes no progress. Paginated material and current health do not constitute new independent validation.
 
-`admin-once` scans at most ten problems. `admin-batch` defaults to scanning 20 cases in total, starting at most 2 reviews and a 180-second runtime budget, also subject to the global UTC daily call quota. Prechecks and exact deduplication consume no model call count. Oversized prechecks are persistently cached and blocking items bypassed. Changes to problem revision, required target, budget or prompt permit another precheck; optional candidate changes do not re-expand unchanged oversized material. No work causes exit, while invalid launch configuration stops the current batch. Runtime includes waiting for the model; process cleanup and database finalization may slightly exceed the runtime budget.
+The new shared daily limit is **100 calls** across every project, host, historical review and optional work summary in the same `ALP_HOME`, resetting at the next UTC day. `admin-once` scans at most ten problems; `admin-batch` defaults to **40 cases**, at most **5 calls/180 seconds**. `admin-drain` retains one lease across small batches for at most **600 seconds**, with concurrency **1**. Empty queues, unknown calls, errors or exhausted limits stop it. Unknown calls are never automatically retried. Counts are limits, not a promise of five completed calls per batch.
+
+The page can adjust daily calls, batch calls, batch time and runner time, saving versioned policies in SQLite. Processes reread effective values at admission and batch boundaries, so the change affects actual execution. **An older explicit five-call daily configuration remains five until the user raises it.** Lowering limits neither erases usage nor cancels a started call or invalidates its paid result. Prechecks and exact reuse consume no model call count. Runtime includes model waiting; cleanup and database finalization may slightly exceed the allowance.
 
 Administrator MCP `propose_governance` can only propose publish/update/attach/revoke/dismiss_counterexample, not execute them. Trusted operators submit JSON with `governance-propose FILE` and execute with `governance-execute PROPOSAL_ID`. This checks case and target revisions, evidence and host boundaries, committing the governance change and idempotent receipt in one transaction. update must produce a real new revision; equivalent content should use attach. Publishing different knowledge does not resolve an old counterexample. A proposal in model output also remains a proposal.
 
 Even when `auto_publish` is enabled, it is limited to new operation/solution knowledge with no truncation and actual tool success evidence. Governance of existing knowledge, counterexamples, professional, pattern and unverified facts still require the trusted entry point. Tool success does not prove a domain conclusion correct.
 
-`max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits a single call's duration. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches. Characters and call counts are not tokens or costs, and the tool does not guarantee a strict token or dollar budget. Pending records remain when disabled or after failure. When background summary logs exceed 1 MiB, the next dispatch rotates them and keeps one old log. If an active Windows handle prevents rotation, the delay is recorded and dispatch continues. Antigravity streams enforce limits on total reads, event size and structured results, rejecting excess. Codex call logs remain constrained by timeout rather than a hard disk-write limit. Cleanup guarantees the direct review process; CLI descendants need host-level constraints.
+`max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits one call. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches; `max_run_seconds` bounds the continuous runner. Characters and counts are not tokens or costs; the tool guarantees no strict token or dollar cap. Pending records remain when disabled or after failure. The next dispatch rotates background logs exceeding 1 MiB and keeps one old log; an active Windows handle records a rotation delay without blocking dispatch. Antigravity streams reject excessive total reads, events or structured results. Codex logs have a timeout rather than a hard disk-write limit. Cleanup guarantees the direct process; CLI descendants need host-level constraints.
 
 Whether usage is reduced must be assessed from actual calls and task outcomes.
 
@@ -1172,12 +1190,12 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `knowledge-releases`, `knowledge-release`, `knowledge-release-rollback` | Query knowledge manifests, differences and safe rollback |
 | `doctor`, `backup`, `rebuild-index` | On-demand storage checks, online backup and derived index rebuilding |
 | `semantic-status`, `semantic-refresh` | Inspect vector coverage and explicitly refresh or rebuild |
-| `browser` | Read-only viewer by default; on `main`, `--review` opens visual candidate approval and `--language zh-CN\|en` selects the UI language |
+| `browser` | Read-only by default; `--review` enables candidate approval, `--admin-control` enables administrator settings, and `--language zh-CN\|en` chooses the UI language (main) |
 | `evaluation-protocol`, `evaluation-run`, `evaluation-report` | Freeze paired experiments, run explicit adapters, import and summarize observations |
 | `search`, `read` | Search and read published knowledge |
 | `work-search`, `work-read` | Search bounded work indices and read summaries or visible evidence by revision and page |
 | `work-rebuild` | Explicit, bounded rebuild from saved events and summaries; requires workspace, scans no project files |
-| `admin-once`, `admin-batch` | Single review and short background batches subject to several budgets |
+| `admin-once`, `admin-batch`, `admin-drain` | One review, a bounded small batch, or a finite runner for daily pending work |
 | `admin-configure`, `admin-status` | Explicit project/host review policy or inspection of executor/model readiness and recent calls |
 | `reviews`, `admin-retry` | Query persistent receipts and explicitly permit one review after a failed or unknown call |
 | `governance-propose`, `governance-execute` | Propose governance, execute through a trusted entry point and save receipts |

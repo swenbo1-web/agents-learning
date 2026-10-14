@@ -98,7 +98,7 @@ class SchedulerMixin:
                                                              "WHERE project=? GROUP BY state", (project,))],
             "retries": list(self.db.execute("SELECT COUNT(*),MAX(finished),COALESCE(SUM(retry_allowed),0) "
                                               "FROM admin_calls WHERE project=?", (project,)).fetchone())})
-        if not cfg["enabled"] or not self.admin_policy(project)["enabled"]:
+        if not cfg["enabled"] or not self.admin_effective_config(project)["enabled"]:
             return signature, "disabled", None, "admin_disabled"
         now = time.time()
         active = self.db.execute("SELECT MIN(lease_until) FROM admin_calls WHERE project=? AND state "

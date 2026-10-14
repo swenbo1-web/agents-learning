@@ -25,6 +25,9 @@ def _unique_fields(pairs):
 
 class ReviewHandlerMixin:
     def do_POST(self):
+        if urlsplit(self.path).path.startswith("/api/admin-control/"):
+            from .browser_admin_http import handle_admin_post
+            return handle_admin_post(self)
         if not self.server.review_enabled:
             return self._write_denied()
         if not self._boundary():

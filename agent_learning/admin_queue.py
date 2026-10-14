@@ -48,10 +48,13 @@ def scan_signature(runtime, project, *, include_candidates=True):
     candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
     # 发布变化允许重新比较；真正复审仍由实际比较资料的review_signature判定。
     scope = runtime._session_scope()
-    observations = [list(item) for item in runtime.db.execute(
-        "SELECT conversation,model,active,version FROM admin_model_observations "
-        "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
-        (project, scope, runtime.session_epoch()))]
+    if runtime.admin_policy(project)["model_mode"] == "first":
+        observations = runtime.admin_first_model_binding(project)
+    else:
+        observations = [list(item) for item in runtime.db.execute(
+            "SELECT conversation,model,active,version FROM admin_model_observations "
+            "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
+            (project, scope, runtime.session_epoch()))]
     return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
                    "work_summary_policy": runtime.config["work_memory"],
                    "host_scope": scope, "packet_format": PACKET_FORMAT,
@@ -129,12 +132,16 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
     from .admin_usage import admin_budget_status
-    if not runtime.admin_policy(project)["enabled"] or runtime.config["admin"]["max_calls_per_day"] <= 0:
+    cfg = runtime.admin_effective_config(project)
+    if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0:
         return None
     with runtime.transaction():
         runtime.assert_host_epoch(expected_epoch)
         if _phase_guard:
             _phase_guard()
+        cfg = runtime.admin_effective_config(project)
+        if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0:
+            return None
         recover_calls(runtime)
         now = time.time()
         runtime.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?",
@@ -163,7 +170,7 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
             return None
         token = str(uuid.uuid4())
         runtime.db.execute("INSERT INTO admin_dispatch VALUES(?,?,?,?,?)",
-                           (project, token, runtime.host_epoch(), now + runtime.config["admin"]["max_batch_seconds"] + 30, now))
+                           (project, token, runtime.host_epoch(), now + cfg.get("max_run_seconds", cfg["max_batch_seconds"]) + 30, now))
         return token
 
 

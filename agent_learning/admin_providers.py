@@ -54,8 +54,10 @@ def build_execution(command, provider, model, directory, schema, output, instruc
     model = validate_model(model)
     if provider not in {"codex", "antigravity", "dsh"}:
         raise _error("unsupported administrator provider")
-    if selection_mode not in {"default", "current", "fixed"}:
+    if selection_mode not in {"default", "current", "fixed", "first"}:
         raise _error("invalid administrator model selection")
+    if selection_mode == "first" and not model:
+        raise _error("first administrator model requires a valid root binding")
     if not isinstance(instruction, str) or not instruction:
         raise _error("administrator instruction must be nonempty")
     directory, schema, output = Path(directory), Path(schema), Path(output)

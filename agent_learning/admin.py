@@ -67,7 +67,7 @@ def _executor_semantics(provider_plan):
 
 def _review_configuration(cfg, provider_plan):
     result = {key: value for key, value in cfg.items() if key not in
-              {"executor", "routing_ready", "routing_reason", "antigravity_command", "dsh_command"}}
+              {"executor", "routing_ready", "routing_reason", "antigravity_command", "dsh_command", "max_run_seconds"}}
     result.update(_executor_semantics(provider_plan))
     return result
 
@@ -255,9 +255,9 @@ def _settings(cfg):
         raise ContractError("admin.command must be an executable argument array")
     ranges = {"timeout_seconds": (1, 600), "max_calls_per_day": (0, 100000),
               "max_input_chars": (1000, 200000), "max_cases_per_batch": (1, 100),
-              "max_calls_per_batch": (1, 20), "max_batch_seconds": (1, 600)}
+              "max_calls_per_batch": (1, 20), "max_batch_seconds": (1, 600), "max_run_seconds": (1, 3600)}
     for key, (low, high) in ranges.items():
-        value = cfg[key]
+        value = cfg.get(key, 600) if key == "max_run_seconds" else cfg[key]
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
             raise ContractError(f"invalid admin.{key}")
     from .admin_usage import budget_settings
@@ -273,6 +273,8 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     from .admin_queue import eligible_query, executor_query, remember_check, scan_signature
     from .admin_providers import executor_availability
     cfg = runtime.admin_effective_config(project)
+    if history_job_id is None and not cfg["enabled"]:
+        return {"status": "disabled", "scanned_count": 0}
     epoch = runtime.assert_host_epoch(expected_epoch)
     recover_calls(runtime, project)
     signature = scan_signature(runtime, project)
@@ -621,10 +623,13 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                                                        require_enabled=_history_job_id is None)
                 if reserved.get("summary_context"):
                     runtime.work_summary_guard(project, reserved["packet"]["problem"]["id"])
+                if _history_job_id is None and not runtime.admin_effective_config(project)["enabled"]:
+                    usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
+                    return {"status": "disabled", "call_id": call_id, "usage": usage, **context}
+                mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             if _history_job_id is not None:
                 with runtime.transaction():
                     runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
-            mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             try:
                 stream_mode = provider_plan["provider"] in {"antigravity", "dsh"}
                 process = subprocess.Popen(args, stdin=subprocess.PIPE,
@@ -700,7 +705,15 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             runtime.history_refund_call(_history_job_id, call_id)
 
 
-def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _deadline=None):
+_ADMIN_STOP_STATES = {
+    "disabled", "idle", "budget_exhausted", "token_budget_exhausted", "concurrency_limited",
+    "batch_time_exhausted", "waiting_for_review", "not_started", "executor_not_ready",
+    "failed", "timeout_unknown", "account_changed_unknown", "orphaned_unknown", "review_required",
+}
+
+
+def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _deadline=None,
+                _release_dispatch=True):
     from .admin_queue import release_dispatch
     cfg = runtime.admin_effective_config(project)
     results, scanned, calls = [], 0, 0
@@ -722,22 +735,98 @@ def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _
             if not math.isfinite(_deadline):
                 raise ContractError("invalid administrator batch deadline")
             deadline = min(deadline, _deadline)
-        while scanned < cfg["max_cases_per_batch"] and calls < cfg["max_calls_per_batch"]:
+        while True:
             runtime.assert_host_epoch(epoch)
+            cfg = runtime.admin_effective_config(project)
+            _settings(cfg)
+            if not cfg["enabled"]:
+                results.append({"status": "disabled", "scanned_count": 0})
+                break
+            deadline = min(deadline, started + cfg["max_batch_seconds"])
+            if scanned >= cfg["max_cases_per_batch"] or calls >= cfg["max_calls_per_batch"]:
+                break
             result = admin_once(runtime, project, expected_epoch=epoch, _deadline=deadline,
                                 _scan_limit=min(10, cfg["max_cases_per_batch"] - scanned))
             results.append(result)
             scanned += result.get("scanned_count", 0)
             calls += int("call_id" in result and "usage" in result
                          and result["status"] not in {"not_started", "batch_time_exhausted"})
-            if result["status"] in {"disabled", "idle", "budget_exhausted", "token_budget_exhausted", "concurrency_limited",
-                                    "batch_time_exhausted", "waiting_for_review", "not_started", "executor_not_ready"}:
+            if result["status"] in _ADMIN_STOP_STATES:
                 break
             if result.get("scanned_count", 0) == 0:
                 break
         return {"status": "batch_complete", "items": results, "scanned_count": scanned, "invocations": calls,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
-                "stop_reason": "case_limit" if scanned >= cfg["max_cases_per_batch"] else
+                "stop_reason": results[-1]["status"] if results and results[-1]["status"] in _ADMIN_STOP_STATES else
+                               "case_limit" if scanned >= cfg["max_cases_per_batch"] else
                                "call_limit" if calls >= cfg["max_calls_per_batch"] else results[-1]["status"] if results else "idle"}
     finally:
-        release_dispatch(runtime, project, dispatch_token)
+        if _release_dispatch:
+            release_dispatch(runtime, project, dispatch_token)
+
+
+def admin_drain(runtime, project, *, dispatch_token=None, expected_epoch=None, max_seconds=None):
+    """Drain authorized daily work in small batches within one finite dispatch lease."""
+    import math
+    from .admin_queue import claim_dispatch, release_dispatch
+    from .admin_usage import admin_budget_status
+
+    started = time.monotonic()
+    token = dispatch_token
+    summaries, calls, scanned, batches = [], 0, 0, 0
+    stop_reason = "idle"
+    try:
+        epoch = runtime.assert_host_epoch(expected_epoch)
+        cfg = runtime.admin_effective_config(project)
+        _settings(cfg)
+        if max_seconds is not None and (isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float))
+                                        or not math.isfinite(max_seconds) or not 0 < max_seconds <= 3600):
+            raise ContractError("administrator drain allowance must be finite and at most 3600 seconds")
+        seconds = min(cfg.get("max_run_seconds", 600), max_seconds if max_seconds is not None else 3600)
+        if not cfg["enabled"]:
+            return {"status": "disabled", "batches": 0, "invocations": 0, "items": []}
+        if token is None:
+            token = claim_dispatch(runtime, project, expected_epoch=epoch)
+            if token is None:
+                budget = admin_budget_status(runtime)
+                return {"status": budget["admission_status"] if budget["admission_status"] != "available" else "idle",
+                        "batches": 0, "invocations": 0, "items": []}
+        deadline = started + seconds
+        with runtime.transaction():
+            row = runtime.db.execute("SELECT * FROM admin_dispatch WHERE project=? AND token=?", (project, token)).fetchone()
+            if not row or row["host_epoch"] != epoch or row["lease_until"] <= time.time():
+                return {"status": "dispatch_expired", "batches": 0, "invocations": 0, "items": []}
+            runtime.db.execute("UPDATE admin_dispatch SET lease_until=? WHERE project=? AND token=?",
+                               (time.time() + max(0, deadline - time.monotonic()) + 30, project, token))
+        while time.monotonic() < deadline:
+            runtime.assert_host_epoch(epoch)
+            cfg = runtime.admin_effective_config(project)
+            _settings(cfg)
+            if not cfg["enabled"]:
+                stop_reason = "disabled"
+                break
+            deadline = min(deadline, started + cfg.get("max_run_seconds", 600))
+            if time.monotonic() >= deadline:
+                stop_reason = "run_time_exhausted"
+                break
+            batch = admin_batch(runtime, project, dispatch_token=token, expected_epoch=epoch,
+                                _deadline=deadline, _release_dispatch=False)
+            batches += 1
+            calls += batch.get("invocations", 0)
+            scanned += batch.get("scanned_count", 0)
+            stop_reason = batch.get("stop_reason", batch["status"])
+            summaries.append({key: batch[key] for key in
+                              ("status", "stop_reason", "invocations", "scanned_count", "elapsed_seconds") if key in batch})
+            summaries = summaries[-20:]
+            # Continue only after a successful bounded batch with actual progress.
+            # Unknown results, failed calls, missing evidence and empty scans stop here.
+            if (batch["status"] != "batch_complete" or stop_reason not in {"call_limit", "case_limit"}
+                    or not batch.get("scanned_count", 0)):
+                break
+        else:
+            stop_reason = "run_time_exhausted"
+        return {"status": "drain_complete", "batches": batches, "invocations": calls, "scanned_count": scanned,
+                "elapsed_seconds": round(time.monotonic() - started, 3), "stop_reason": stop_reason,
+                "items": summaries, "items_truncated": batches > len(summaries)}
+    finally:
+        release_dispatch(runtime, project, token)

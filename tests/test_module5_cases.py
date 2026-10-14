@@ -250,7 +250,7 @@ class Module5CaseTests(unittest.TestCase):
         self.assertIsNone(self.r.db.execute("SELECT tool_input_digest FROM events WHERE id=?", (event_refs[0],)).fetchone()[0])
         self.r.close()
         self.r = CaseRuntime(self.home)
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 15)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 16)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM problems WHERE id=?", (legacy["id"],)).fetchone()[0], 1)
 
     def test_migration_backfills_only_proven_legacy_delivery_round(self):

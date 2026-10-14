@@ -1,11 +1,11 @@
 ---
 name: learning-review
-description: "Open the current project's local visual knowledge review console, inspect candidates and evidence, and let the user approve publication, reject or defer selected entries. Applies to knowledge decisions, not task execution approvals."
+description: "Open the project's local knowledge review or administrator settings; inspect evidence, approve publication, reject or defer entries, and choose administrator models and shared limits. Does not approve task execution."
 ---
 
 # Visual knowledge review
 
-Open the console for the selected Antigravity project. The user previews candidates and chooses approve-and-publish, reject or defer in the page. Opening the console does not approve any candidate. Do not publish all candidates on the user's behalf or call a model to prepare them again.
+Open the console for the selected Antigravity project. The user previews candidates or administrator settings and makes the decision. Opening it approves no candidate and starts no model. Do not publish all candidates or click Save and enable on the user's behalf.
 
 ## Use the installed runtime
 
@@ -16,12 +16,19 @@ Open the console for the selected Antigravity project. The user previews candida
   <PYTHON> -B <RUNTIME>/scripts/learning.py --workspace <PROJECT_ABSOLUTE_PATH> --home <KNOWLEDGE_HOME> --host antigravity browser --review --open --language en
   ```
 
-  Use `--language zh-CN` for Simplified Chinese. First check this entry's `browser --help` for `--review`; an older installed runtime must be updated instead of silently using another checkout or bypassing review.
-- Keep the temporary loopback service running in a managed terminal or process session. Hide the window when starting a Windows background process. Keep the access token out of project documents and persistent logs.
+  For candidate approval alone use `--review` without `--admin-control`. When the user requests administrator settings, enabling or disabling, add `--admin-control`; it can be used alone or with `--review`. Use `--language zh-CN` for Simplified Chinese. Check this fixed entry's `browser --help` for the required flags; update an older installation rather than using another checkout or bypassing review.
+- Keep the temporary loopback service running in a managed terminal or process session. Hide Windows background windows. Access, review and administrator tokens stay in process/page memory; use `--open` to open the full link directly. Do not echo or save token-bearing launch output, project documents or persistent logs.
+
+## Administrator settings
+
+- Review is off by default. The user chooses a model and limits, then clicks Save and enable before daily model work is permitted. Browsing and approval make no model call; enabled organization consumes the selected platform model's allowance.
+- Default `first` pins the first valid root-conversation model observed for this project, host instance and account epoch. Later conversations retain it; missing observations wait without guessing. The user can instead choose `current`, `fixed` or CLI `default`. Model changes wait for in-flight review to finish. Disabling through the page blocks new calls while preserving handling of the current call under its existing boundaries.
+- New defaults: 100 calls per UTC day shared across the entire `ALP_HOME`, at most 5 calls/180 seconds per batch, a 600-second runner, concurrency 1. The page can adjust daily calls, batch calls, batch time and runner time. These persistent limits affect all projects and hosts using that data home. An explicitly configured older five-call limit is retained until the user changes it.
+- `admin-drain` processes daily pending work in finite small batches. Empty queues, unknown results, errors or exhausted limits stop the run; later supported events may resume eligible daily work. There is no always-running service or automatic retry of unknown calls. Historical imports require separate explicit authorization: current `main` defaults to at most 10 calls/600 seconds per historical run. Explain the budget before starting or resuming; retain a user's smaller explicit limit such as two calls. Enabling administration neither starts/resumes history nor establishes complete absorption.
 
 ## Let the user decide
 
 - Present complete candidate content, applicability, limitations, evidence level, sources and publication checks before the user selects one entry or a fixed batch. Page actions are performed by local code and do not invoke a model.
 - Historical facts retain their `reported` evidence level after publication. Publication does not assert a successful current test or user acceptance. A changed source, stale candidate or version conflict requires refreshed details and a new selection; do not bypass the checks.
-- Report only the actual per-item receipts. Opening a page, clicking an action or a successful tool exit does not establish publication. Knowledge review grants no tool-execution permission, starts no history import or administrator model and does not revoke published knowledge.
+- Report only actual per-item receipts. Opening a page, clicking an action or a successful tool exit does not establish publication. Knowledge review grants no tool-execution permission, starts no history import or administrator model and does not revoke published knowledge. Model work requires separate enabling in administrator settings.
 - For read-only browsing, use `learning-browser` without review mode.

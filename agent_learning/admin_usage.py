@@ -1,16 +1,93 @@
 """管理员的上报用量与准入账；未知消费保留预留，不估算价格。"""
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 
 from .runtime import ContractError, digest, encode
 
 TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
+ADMIN_BUDGET_DEFAULTS = {
+    "max_calls_per_day": 100, "max_calls_per_batch": 5, "max_cases_per_batch": 40,
+    "max_batch_seconds": 180, "max_run_seconds": 600, "timeout_seconds": 120,
+    "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
+    "token_reservation_per_call": 4000,
+}
+_BUDGET_RANGES = {
+    "max_calls_per_day": (0, 100000), "max_calls_per_batch": (1, 20),
+    "max_cases_per_batch": (1, 100), "max_batch_seconds": (1, 600),
+    "max_run_seconds": (1, 3600), "timeout_seconds": (1, 600),
+    "max_concurrent_calls": (1, 1000000000), "token_reservation_per_call": (1, 1000000000),
+}
+
+
+def _validate_budget_values(values, *, complete=False):
+    if not isinstance(values, dict) or set(values) - set(ADMIN_BUDGET_DEFAULTS):
+        raise ContractError("unsupported administrator budget fields")
+    if complete and set(values) != set(ADMIN_BUDGET_DEFAULTS):
+        raise ContractError("administrator budget policy is incomplete")
+    for key, value in values.items():
+        if key == "max_reported_tokens_per_day":
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ContractError("invalid admin.max_reported_tokens_per_day")
+        else:
+            low, high = _BUDGET_RANGES[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ContractError(f"invalid admin.{key}")
+    return values
+
+
+def admin_budget_policy(runtime):
+    """Read shared persistent limits on every admission; never initializes storage."""
+    values = {key: runtime.config["admin"].get(key, value) for key, value in ADMIN_BUDGET_DEFAULTS.items()}
+    version, updated = 0, None
+    db = getattr(runtime, "db", None)
+    if db is not None and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_runtime_settings'").fetchone():
+        row = db.execute("SELECT version,body,updated FROM admin_runtime_settings WHERE id=1").fetchone()
+        if row:
+            try:
+                stored = json.loads(row["body"])
+            except (TypeError, ValueError) as exc:
+                raise ContractError("administrator budget policy could not be read") from exc
+            _validate_budget_values(stored, complete=True)
+            values.update(stored)
+            version, updated = row["version"], row["updated"]
+    _validate_budget_values(values, complete=True)
+    return {"version": version, "values": values, "scope": "ALP_HOME", "updated": updated}
+
+
+def admin_budget_config(runtime):
+    """Global configuration copy with the authoritative ALP_HOME budget applied."""
+    result = dict(runtime.config["admin"])
+    result.update(admin_budget_policy(runtime)["values"])
+    return result
+
+
+def configure_admin_budget(runtime, values, *, expected_version, expected_epoch=None):
+    """Explicit CAS update shared by every project/host; leaves usage and routing intact."""
+    if not isinstance(values, dict) or not values:
+        raise ContractError("administrator budget update must contain values")
+    _validate_budget_values(values)
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+        raise ContractError("administrator expected budget version must be nonnegative")
+    with contextlib.nullcontext() if runtime.db.in_transaction else runtime.transaction():
+        runtime.assert_session_epoch(expected_epoch)
+        current = admin_budget_policy(runtime)
+        if current["version"] != expected_version:
+            raise ContractError("administrator budget changed; reread before configuring")
+        merged = dict(current["values"], **values)
+        changed = merged != current["values"] or current["version"] == 0
+        if changed:
+            runtime.db.execute(
+                "INSERT INTO admin_runtime_settings(id,version,body,updated) VALUES(1,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET version=excluded.version,body=excluded.body,updated=excluded.updated",
+                (current["version"] + 1, encode(merged), time.time()))
+        return dict(admin_budget_policy(runtime), changed=changed)
 
 
 def budget_settings(runtime):
-    cfg = runtime.config["admin"]
+    cfg = admin_budget_config(runtime)
     values = {"max_concurrent_calls": cfg.get("max_concurrent_calls", 1),
               "token_reservation_per_call": cfg.get("token_reservation_per_call", 4000),
               "max_reported_tokens_per_day": cfg.get("max_reported_tokens_per_day")}
@@ -72,6 +149,9 @@ def install_budget(runtime):
     """迁移入口在写事务内安装；旧调用缺少真实用量时保守保留预留。"""
     if not runtime.db.in_transaction:
         raise ContractError("administrator budget migration requires a write transaction")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_runtime_settings("
+                       "id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL CHECK(version>=1),"
+                       "body TEXT NOT NULL,updated REAL NOT NULL)")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_call_budgets("
                        "call_id TEXT PRIMARY KEY,reserved_tokens INTEGER NOT NULL,reported_tokens INTEGER NOT NULL DEFAULT 0,"
                        "completeness TEXT NOT NULL DEFAULT 'unknown',conflict INTEGER NOT NULL DEFAULT 0,updated REAL NOT NULL)")
@@ -133,7 +213,9 @@ def record_usage(runtime, call_id, usage):
 
 def admin_budget_status(runtime, *, now=None):
     """只读当前 UTC 日全局账；调度器回收后读取，查询本身不释放未知额度。"""
-    settings = budget_settings(runtime)
+    policy = admin_budget_policy(runtime)
+    cfg = policy["values"]
+    settings = {key: cfg[key] for key in ("max_concurrent_calls", "token_reservation_per_call", "max_reported_tokens_per_day")}
     current = time.time() if now is None else now
     day = time.strftime("%Y-%m-%d", time.gmtime(current))
     next_reset = (int(current) // 86400 + 1) * 86400
@@ -155,7 +237,7 @@ def admin_budget_status(runtime, *, now=None):
         accounted += max(reserved, known) if pending else known
     maximum = settings["max_reported_tokens_per_day"]
     remaining = None if maximum is None else max(0, maximum - accounted)
-    remaining_calls = max(0, runtime.config["admin"]["max_calls_per_day"] - len(rows))
+    remaining_calls = max(0, cfg["max_calls_per_day"] - len(rows))
     admission = ("budget_exhausted" if remaining_calls == 0 else
                  "concurrency_limited" if active >= settings["max_concurrent_calls"] else
                  "token_budget_exhausted" if remaining is not None and remaining < settings["token_reservation_per_call"] else "available")
@@ -163,4 +245,6 @@ def admin_budget_status(runtime, *, now=None):
             "next_reset_at": next_reset, "global_active_calls": active, **settings,
             "reported_tokens": reported, "token_reservations": reservations, "accounted_tokens": accounted,
             "remaining_reported_tokens": remaining, "usage_states": usage_states, "admission_status": admission,
-            "budget_scope": "ALP_HOME", "limitation": "reported usage admission; executor token or fee cap is not guaranteed"}
+            "budget_scope": "ALP_HOME", "budget_policy": policy,
+            "max_calls_per_day": cfg["max_calls_per_day"],
+            "limitation": "reported usage admission; executor token or fee cap is not guaranteed"}

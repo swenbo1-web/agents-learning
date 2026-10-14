@@ -8,7 +8,7 @@
 
 在受支持事件中记录工具结果和公开工作说明，自动检索相关知识、注入有限摘要，让 Agent 在新对话中继续利用项目经验。需要时再启用管理员整理；你可以在本机浏览器中查看正式知识、来源、修订和审核待办。
 
-**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH 适配、可视化知识审批与历史整理增强位于 `main` 源码中，尚未包含在该发行包内。**
+**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH、可视化审批、管理员设置与历史整理增强位于 `main`，尚未发布新下载 Release。`main` 使用 schema／内部协议 16，更新前需备份数据库并更新全部共库安装。**
 
 [Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
@@ -23,7 +23,7 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 | **检索、注入与渐进读取** | 本地全文检索，可选语义混合检索；自动提供有限摘要，Agent 按适用条件判断，再按需读取正文与证据 |
 | **知识库可视化** | 本机查看正式知识、来源、修订与待办；`main` 新增候选详情、发布检查和可视化批量审批 |
 | **已有项目历史吸收** | 用户主动导入项目文档、源码和选定的对话历史，保留来源与覆盖报告 |
-| **可选管理员整理** | 选择宿主执行器及模型，增量整理知识候选或工作摘要，复用调用预算 |
+| **可选管理员整理** | 在界面手动开启、选择模型与共享预算；默认绑定项目首次有效会话模型，按待办连续处理有限小批 |
 | **知识维护与审核** | 保存适用条件、限制和证据；可用 `learning-review` 打开审批台，支持反例反馈、修订、晋升与撤销 |
 | **任务保护与效果评估** | 可选执行范围保护；管理上下文和审核预算，对照评估有／无记忆任务 |
 | **共享与安装维护** | 同机、同数据目录、同项目共享知识，切换登录账户保留项目知识；按宿主分别安装，保留配置升级，可选 GitHub 更新提醒 |
@@ -137,7 +137,9 @@ python -B scripts/learning.py --workspace "$learningProject" browser --open
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language zh-CN
 ```
 
-Antigravity／DSH 分别用 `--host antigravity`／`--host dsh`；英文界面用 `--language en`。`--home` 必须与 Hooks、MCP 使用的目录一致。安装用户通过技能使用实际已安装入口，无需另找源码目录。`learning-browser` 和不带 `--review` 的 `browser` 保持只读。**原 v1.0.0 安装需要更新到包含此功能的版本后再使用。**
+Antigravity／DSH 分别用 `--host antigravity`／`--host dsh`；英文界面用 `--language en`。`--home` 必须与 Hooks、MCP 使用的目录一致。安装用户通过技能使用实际已安装入口，无需另找源码目录。`learning-browser` 和不带 `--review`／`--admin-control` 的 `browser` 保持只读。**原 v1.0.0 安装需要更新到包含此功能的版本后再使用。**
+
+要设置管理员，可直接说「使用 `$learning-review` 打开当前项目的管理员设置」，或在上方命令增加 `--admin-control`；仅管理设置时可省略 `--review`。**打开页面不会启动模型，用户点击「保存并开启」才启用整理。** 设置页支持选择模型、查看待办与用量、调整日上限／每批调用数／每批时长／运行器时长。关闭管理员只停止新调用，已在途审核保留原有结果处理；切换模型需等在途审核结束。访问码、审批码和管理员控制码仅留在当前进程及页面内存，不保存到文件或日志。[管理员说明](#可选管理员执行器)
 
 ## 工作方式
 
@@ -457,11 +459,11 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigr
 
 可用单独的管理员接口人工整理案例，或按对应宿主配置 CLI 自动知识审核；DSH 需要 `main` 源码。native admin skill 只是操作说明，默认 MCP 仍是 worker；具体开启方法见[管理员执行器](#可选管理员执行器)。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
 
-1.0.0 数据库 schema **15**、内部发布协议 **15**，工作索引 **1**；知识全文索引 **4**、可选语义索引 **1** 保持不变。升级前备份外部知识数据库；所有访问同一数据库的宿主固定运行副本均需更新并重载，旧运行端不能打开 schema 15。
+当前 `main` 数据库 schema **16**、内部发布协议 **16**，工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变；原 v1.0.0 发行包仍为 schema／协议 15。升级前备份外部知识数据库，更新并重载所有共库宿主的固定运行副本；旧运行端不能打开 schema 16。
 
 Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。Codex 自定义 MCP 入口需按下节同步新运行路径。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。多个宿主可复用同一固定运行 release，但需分别更新各自的安装目录。
 
-与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到 1.0.0，再重新加载宿主。只更新 Antigravity 而保留读取该数据库的旧 Codex 运行端，会因 schema 15 不兼容而被拒绝。
+与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到相同兼容版本，再重新加载宿主。只有一部分安装更新到当前 `main` 时，其他原 v1.0.0 或更早运行端会因 schema 16 不兼容而被拒绝。
 
 ### Codex 自定义知识目录
 
@@ -702,6 +704,8 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 扫描和内容去重不调用模型；`--allow-review` 允许本次有限执行，并不打开日常管理员开关，仍遵守全局调用、用量和并发额度。Codex、Antigravity、DSH 均支持自己的 CLI 审核执行器或人工管理员。执行器选择与模型模式见[管理员执行器](#可选管理员执行器)；历史批次没有明确源会话，`current` 必须取得同项目、同宿主下唯一有效的活跃根模型标识，有不同模型或没有观察时停止，需用户选择 `fixed` 或 `default`。用 `history-cases JOB_ID` 分页取得准确案例 ID，再通过 `packet`／`review_packet` 提出候选。正式发布沿用独立入口；历史流程不自动发布。
 
+日常管理员的界面开启、较宽日预算和 `admin-drain` 都不会启动历史批次。当前 `main` 显式历史运行默认最多 **10 次调用／600 秒**，开始或续跑前应先说明本次预算；上方 `--max-calls 2 --max-seconds 180` 是明确选择较小预算的示例，仍会遵守。用户可按需调整，所有历史调用仍受共享日预算限制。默认 `first` 可以使用本项目／宿主／账户轮次已绑定的首次有效模型；尚未绑定时等待，不猜模型。
+
 **`main` 新增历史整理增强，原 v1.0.0 发行包不包含：**优先处理项目说明、Agent 总结、备忘等文档，保留来源顺序；主审核只在已批准的归档中加入有限相关资料，原证据优先使用输入预算。每个历史模型调用最多生成 **5 条**独立候选，各自保存引用、适用条件和限制，实际数量取决于资料，不承诺固定产量。普通日常审核和工作摘要的输出契约保持原样，历史陈述保持 `reported`，不自动发布。
 
 进度分别记录归档覆盖、实际主审核、未触及与待补证单元、候选以及正式发布。**归档完成 ≠ 审核完成 ≠ 正式发布。** 仅作为相关参考的资料不算该来源已审核；一次主审核生成多条候选也只计一次主审核。人工提候选不会自动制造“审阅完成”回执；候选和发布成果单独计数，均不证明整个来源已经理解或问题已解决。用户可调用 `$learning-review`，在[可视化审批台](#可视化知识审批main)查看完整候选与证据，再选择批准发布、拒绝或暂缓。
@@ -712,7 +716,7 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 ## 当前版本与兼容
 
-**1.0.0 是第一正式版。** 在原八模块中增加可检索工作观察、文件关联、渐进读取和可选管理员工作摘要，保留知识审核与治理边界。数据库 schema **15**、内部发布协议 **15**、工作索引 **1**；知识全文索引 **4**、可选语义索引 **1** 不变。迁移保留现有知识、来源与用量记录，未知旧事件不自动补成完整历史。所有共享数据库的安装须更新并重载；安装目录备份不能代替外部数据库备份。
+**1.0.0 是第一正式版，原发行包使用 schema／内部协议 15。** 当前 `main` 增加可视化管理员设置、首次有效会话模型绑定、共享预算和有限连续整理，数据库 schema／内部发布协议升为 **16**，尚未发布新的下载 Release。工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变。迁移保留现有知识、来源与用量记录，未知旧事件不自动补成完整历史。更新前备份数据库并更新、重载全部共库安装；旧运行端拒绝 schema 16，安装目录备份不能代替外部数据库备份。
 
 以下为历次版本变更，描述各版本发布时的状态：
 
@@ -772,11 +776,13 @@ python -B scripts/learning.py --workspace . browser --open
 
 按现有 `--home`／`ALP_HOME` 定位数据库，按已登记 workspace 选择项目；可用 `--project-id ID` 明确选择已有项目。默认随机端口，`--port N` 可指定端口。命令显示本机地址和临时访问码；`--open` 使用 URL fragment 传递访问码，页面立即清除 fragment，访问码仅留在页面内存。终端保持运行，`Ctrl+C` 结束服务。
 
-界面提供知识文本搜索、分类与状态筛选、正文／条件分页、修订与撤销历史、来源健康、事件时间线和管理员待办。浏览查询不调用嵌入模型。所有 API 固定当前项目，以只读 SQLite 快照读取；正文续页固定修订，不混拼新版本。没有知识时显示空视图。
+界面提供知识文本搜索、分类与状态筛选、正文／条件分页、修订与撤销历史、来源健康、事件时间线和管理员待办。浏览查询不调用嵌入模型，固定当前项目并使用只读 SQLite 快照；正文续页固定修订，不混拼新版本。没有知识时显示空视图。
 
 浏览器只监听 `127.0.0.1`，校验访问码、Host 和 Origin。默认页面只读，不发布或撤销知识，不执行任务或启动管理员；不创建项目、迁移数据库或登记模型展示。旧 schema 数据库需先通过显式运行端操作升级。这是临时本机浏览入口，跨设备共享仍需独立的同步与服务设计。
 
 `main` 的 `browser --review` 是单独开启的[可视化知识审批](#可视化知识审批main)模式：展示候选完整内容、条件、限制、证据与发布检查，用户可单条或按固定选中清单批准发布、拒绝、暂缓。每次操作核对候选和来源版本，显示逐条回执；重复点击不会重复发布。历史整理因调用预算暂停，不影响用户明确批准已生成候选；主动取消和身份失效仍按各自状态检查。审批不会自动启动模型、继续历史整理或授予任务执行权限。
+
+`browser --admin-control` 独立开放管理员设置，可与审批模式同时使用。只有用户保存并开启才允许模型整理，页面读取和预算设置本身不调用模型。三种访问码分别限定浏览、审批和管理员控制，不写入知识库或日志；管理员模型、待办和共享预算说明见[管理员执行器](#可选管理员执行器)。
 
 ## 真实任务对照评估
 
@@ -962,17 +968,25 @@ python scripts/learning.py --workspace "D:\Projects\my-project" execution-approv
 
 **默认关闭，用户自行开启。** 管理员自动审核知识来源、条件和候选，不替用户验收产品或执行项目任务。它是独立 CLI 进程，不需要长期保留一个管理员聊天；人工整理仍可使用独立管理员 MCP。
 
-按你使用的宿主选择一组命令，显式指定目标项目。`--provider host` 使用该宿主的 CLI；首次设置默认模型模式为 `current`，后续省略路由参数会保留已有模型和命令：
+`main` 推荐通过 `$learning-review` 打开管理员设置，或执行：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex browser --admin-control --open --language zh-CN
+```
+
+保持原安装的 `--home`，Antigravity／DSH 改用对应 `--host`。页面打开时不调用模型；选择设置并点击「保存并开启」后，才允许处理该项目／宿主的日常待办。`--review` 可同时加上以提供知识审批，两种决定分别确认。模型与预算持久保存，重开页面不需要再次开启；关闭管理员只阻止新调用，当前在途审核按原规则回写。界面切换模型必须先等在途审核完成。
+
+CLI 也可显式配置。`--provider host` 使用该宿主的 CLI；首次设置默认模式为 **`first`**，后续省略路由参数保留已有选择：
 
 ```powershell
 # Codex
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-status
 # Antigravity
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigravity admin-status
 # DSH（main 源码）
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode current
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-configure --enabled on --provider host --model-mode first
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh admin-status
 ```
 
@@ -980,19 +994,21 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh ad
 
 | 模型模式 | 选择依据 | 不可用时 |
 |---|---|---|
+| `first`（新默认） | 同项目、同宿主实例、同账户轮次首次有效根会话观察，原子绑定模型标识；后续对话保留绑定 | 尚无有效观察时等待；换号后需要新轮次的有效观察，不猜模型 |
 | `current` | Codex Hook 的 `model`、Antigravity 的 `modelName` 或 DSH 的 `requestContext/model`，仅使用同项目、同宿主、同实例、同轮次的根会话观察 | 没有观察、模型歧义或执行器不属于观察宿主时不调用，不猜模型 |
 | `fixed` | 用户明确提供 `--model MODEL_ID` | 该平台不能使用此模型时失败，不静默换模型 |
 | `default` | 独立 CLI 自身的默认选择 | 不承诺等于桌面当前模型或用户配置默认；Codex 审核跳过用户配置 |
 
-多个根会话使用不同模型时，后台必须能确定准确源会话；历史批次只能使用唯一有效模型标识。需固定模型时执行 `admin-configure --enabled on --provider host --model-mode fixed --model "该平台可用的模型ID"`；需 CLI 默认选择时使用 `--model-mode default`。以上命令均保留显式项目及宿主参数。
+`first` 不随之后的新对话自动切换模型；Codex、Antigravity、DSH 分别绑定各自宿主的标识。使用 `current` 时，后台仍需确定准确源会话，历史批次要求唯一有效模型标识。需固定模型时使用 `--model-mode fixed --model "该平台可用的模型ID"`，需 CLI 默认选择时用 `--model-mode default`。CLI 参数仍保留显式项目及宿主；CLI 直接改变路由沿用原有在途失效规则，界面则要求先等待完成。
 
 本机对应 CLI 需要已有有效认证；图形界面登录不等于 CLI 已认证，插件不读取、复制或修改凭证，不自动登录。调用使用该 CLI 的账户，额度及费用由平台决定。自定义 CLI 路径可通过 `--command-file FILE` 提供可信 JSON 参数数组，不放令牌或模型选项。[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
 
-启用后，Codex `Stop` 或 Antigravity 的 `fullyIdle=true` 停止事件按策略预留派发，启动独立有限 `admin-batch`，普通任务不等待模型。没有可审增量、模型来源无法确认、审核在途或额度耗尽时不调用；启用调度后按持久待办续跑。手动命令同样带目标项目及宿主：
+启用后，Codex／DSH `Stop` 或 Antigravity 的 `fullyIdle=true` 停止事件按策略预留派发，普通任务不等待模型。默认使用有限 `admin-drain`，按日常待办连续推进小批；已启用调度器的安装沿用其有界调度。没有可审增量、模型来源无法确认、审核在途、未知结果或额度耗尽时停止，后续受支持事件可继续符合条件的待办。不是退出软件后的离线常驻服务。手动命令同样带目标项目及宿主：
 
 ```powershell
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-once
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-batch
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex admin-drain
 python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex reviews --problem CASE_ID
 ```
 
@@ -1008,7 +1024,7 @@ Antigravity CLI 仍可能加载受信全局 Hooks、规则或插件；空工具�
 
 审核决定与调用计量分开保存：`reviews` / 管理员 `review_list` 可查看理由、结构化缺证项、候选和提议引用。候选对应 candidate_ready，缺证对应 awaiting_evidence，生成提议对应 proposal_ready；与案例是否恢复、产品是否验收独立。精确复用同时检查业务证据及实际比较知识、候选、反例目标、来源健康和审核策略；失败或未知调用不复用为成功决定。自身证据产生的候选不形成再次审核循环，新相关资料才可能复审。发布或候选变化先唤醒有界比较，实际审核签名不变则不调用模型。
 
-审核结果写入前及最终提交边界，在同一事务重核案例、宿主、租约、实际比较资料及冻结的执行器／模型策略；调用中改模型、关审核或换号会拒绝旧回写，保留实际终态与用量。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
+审核结果写入前及最终提交边界，在同一事务重核案例、宿主、租约、实际比较资料及冻结的执行器／模型策略。界面关闭只阻止后续准入，不改变已在途调用的路由；CLI 直接改模型、改路由启用状态或换号仍按原边界拒绝旧回写，保留实际终态与用量。未知调用核对后，可由受信入口运行 `admin-retry CALL_ID --reason "已核对的原因"` 明确允许一次再审，原记录和额度保留。重复许可不会产生无限重试。截短证据会标明限制并阻止自动发布。
 
 调度器、批次、单次审核与调用认领贯穿同一个 expected_epoch，并在认领事务内复核；换号前启动的执行器不能在新账户版本下重新认领。并发数、每日上报用量门槛和单次预留的变化只影响准入，不改变同一资料的审核语义签名。长日志去重比较投影前的完整脱敏业务摘要，保留嵌套业务 ID；仅顶层传输身份被排除。完整可见事件不重复发送摘要，旧截短事件缺少摘要时不能跨事件推定相同。
 
@@ -1016,13 +1032,15 @@ Antigravity CLI 仍可能加载受信全局 Hooks、规则或插件；空工具�
 
 管理员可用 `review_packet(problem_id, offset, expected_revision, max_chars, section)` 或 `packet ID --offset N --expected-revision R --max-chars N` 分页；续页必须沿用同一问题 revision，素材变化则重读。大任务完整 JSON 使用 `section=task`；反例的准确历史知识必读，不依赖关键词重合，即使已撤销仍可查。目标放不下时明确 target_omitted 和 incomplete，可使用 `section=target` / `--section target` 分页。若单条证据本身放不下，按返回的预算提示增加 max_chars；不得反复读取无进展的页。分页材料及当前健康状态不等于新的独立验证。
 
-`admin-once` 一次最多扫描十个问题；`admin-batch` 默认总共扫描 20 个案例、最多启动 2 次审核、运行预算 180 秒，同时受全局 UTC 每日调用额度限制。预检和精确去重不消耗模型调用数，超限预检持久缓存并绕过阻塞项。问题版本、必要目标、预算或提示改变后可重检；可选候选变化不重新展开未变超限素材。无工作退出，坏启动配置停止当前批次。执行时间包含模型等待，进程清理和数据库收尾可能略超运行预算。
+新默认共享日上限为 **100 次**，作用于整个 `ALP_HOME` 的所有项目、宿主、历史审核与可选工作摘要；UTC 次日重置（北京时间 08:00）。`admin-once` 一次最多扫描十个问题；`admin-batch` 默认扫描 **40 个案例**、最多 **5 次调用／180 秒**。`admin-drain` 在同一租约下连续执行小批，默认总预算 **600 秒**、并发 **1**；空队列、未知调用、错误或额度不足即停，未知调用不自动重试。调用数是上限，不保证每批恰好完成五次。
+
+设置页可调整日调用数、每批调用数、每批时长和运行器时长，并将带版本的预算保存到 SQLite；各进程在实际准入和批次边界重新读取生效值，调整不是只改显示。**旧配置若显式指定每日 5 次，更新后仍为 5 次，用户可在界面提高。** 降低预算不删除既有用量或取消已启动调用，也不使同一材料的付费结果失效。预检和精确去重不消耗模型调用数；执行时间包含模型等待，清理及数据库收尾可能略超运行预算。
 
 管理员 MCP 的 `propose_governance` 只能提出 publish/update/attach/revoke/dismiss_counterexample，不能执行。受信操作者用 `governance-propose FILE` 提交 JSON、`governance-execute PROPOSAL_ID` 执行：校验案例及目标修订、证据和宿主边界，治理变更与幂等回执同事务提交。update 必须产生真实新修订，等价内容应 attach；发布不同知识不处置旧反例。模型输出中的 proposal 同样只作为提议。
 
 即使开启 `auto_publish`，也仅限无截短、具备真实工具成功证据的 operation/solution 新知识。已有知识治理、反例、professional、pattern 和未验证事实仍交受信入口处理；工具成功不证明专业结论正确。
 
-`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制批次。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；Windows活动句柄导致轮换失败时记录延迟并继续派发。Antigravity 协议流设总读取、单事件和结构化结果上限，超限拒绝；Codex 单次日志仍受超时约束，不是磁盘写入硬上限。清理保证直属审核进程，CLI 自行启动的后代进程仍需宿主级约束。
+`max_calls_per_day` 限制调用次数，`max_input_chars` 限制输入字符，`timeout_seconds` 限制单次时间；`max_cases_per_batch`、`max_calls_per_batch`、`max_batch_seconds` 控制小批，`max_run_seconds` 控制连续运行器。字符和次数不是 token 或费用，本工具不保证严格的 token 或美元预算。关闭或失败时保留待处理记录。后台摘要日志超过 1 MiB 后在下次派发轮换，保留一份旧日志；Windows活动句柄导致轮换失败时记录延迟并继续派发。Antigravity 协议流设总读取、单事件和结构化结果上限，超限拒绝；Codex 单次日志仍受超时约束，不是磁盘写入硬上限。清理保证直属审核进程，CLI 自行启动的后代进程仍需宿主级约束。
 
 是否降低消耗，需要结合实际调用和任务结果衡量。
 
@@ -1124,12 +1142,12 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `knowledge-releases`、`knowledge-release`、`knowledge-release-rollback` | 查询知识清单、差异与安全回退 |
 | `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
 | `semantic-status`、`semantic-refresh` | 查看向量完整度、显式增量刷新或重建 |
-| `browser` | 默认只读知识浏览；`main` 可用 `--review` 开启本机可视化候选审批，`--language zh-CN\|en` 选择界面语言 |
+| `browser` | 默认只读；`--review` 开启候选审批，`--admin-control` 开启管理员设置，`--language zh-CN\|en` 选择界面语言（main） |
 | `evaluation-protocol`、`evaluation-run`、`evaluation-report` | 冻结成对实验、运行显式执行器、导入并汇总观测 |
 | `search`、`read` | 查询和读取正式知识 |
 | `work-search`、`work-read` | 检索工作历史轻索引，按修订分页读取摘要或可见证据 |
 | `work-rebuild` | 显式为已有事件及工作摘要有界重建索引；必须指定工作区，不扫描项目 |
-| `admin-once`、`admin-batch` | 单次审核、受多项预算限制的后台短批次 |
+| `admin-once`、`admin-batch`、`admin-drain` | 单次审核、有限小批、连续处理日常待办的有界运行器 |
 | `admin-configure`、`admin-status` | 显式设置当前项目／宿主审核策略，或只读检查执行器、模型准备状态及近期调用 |
 | `reviews`、`admin-retry` | 查询持久回执、明确允许一次失败或未知调用再审 |
 | `governance-propose`、`governance-execute` | 提出治理建议、通过受信入口执行并保存回执 |

@@ -428,7 +428,7 @@ class HistoryImportMixin:
                 self.db.execute("UPDATE history_job_sources SET materialized=1 WHERE job_id=? AND material_id=?", (job_id, material["id"]))
         return True
 
-    def history_run(self, project, job_id, allow_review=False, max_calls=2, max_seconds=180, expected_epoch=None):
+    def history_run(self, project, job_id, allow_review=False, max_calls=10, max_seconds=600, expected_epoch=None):
         from .admin import admin_once
         from .runtime import ContractError, encode
         if not isinstance(allow_review, bool):

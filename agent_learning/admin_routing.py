@@ -14,7 +14,7 @@ ROUTING_DEFAULTS = {
     "antigravity_command": ["agy"], "dsh_command": ["dsh"],
 }
 _PROVIDERS = {"host", "codex", "antigravity", "dsh"}
-_MODES = {"default", "current", "fixed"}
+_MODES = {"default", "current", "fixed", "first"}
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 _MODEL_CREDENTIAL = re.compile(r"(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,})")
 _SECRET_ARGUMENT = re.compile(r"(?i)(?:api[_-]?key|password|secret|access[_-]?token|refresh[_-]?token|authorization|bearer|github_pat_|gh[pousr]_|sk-(?:proj-|ant-)?[a-z0-9_-]{16,})")
@@ -109,6 +109,11 @@ def install_admin_routing(runtime):
         version INTEGER NOT NULL CHECK(version>=1),observed REAL NOT NULL,
         PRIMARY KEY(project,host_scope,conversation))""")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS admin_model_scope ON admin_model_observations(project,host_scope,session_epoch,active)")
+    runtime.db.execute("""CREATE TABLE IF NOT EXISTS admin_first_models(
+        project TEXT NOT NULL,host_scope TEXT NOT NULL,session_epoch INTEGER NOT NULL,
+        conversation TEXT NOT NULL,model TEXT NOT NULL,observed REAL NOT NULL,
+        version INTEGER NOT NULL CHECK(version=1),
+        PRIMARY KEY(project,host_scope,session_epoch))""")
     runtime.db.execute("""CREATE TABLE IF NOT EXISTS admin_execution_plans(
         call_id TEXT PRIMARY KEY,project TEXT NOT NULL,host_scope TEXT NOT NULL,
         body TEXT NOT NULL,created REAL NOT NULL)""")
@@ -168,6 +173,8 @@ class AdminRoutingMixin:
         if not isinstance(enabled, bool):
             _error("administrator enabled must be a boolean")
         selected = validate_admin_routing_config({"enabled": enabled, "provider": provider, "model_mode": model_mode, "model": model})
+        if model_mode == "first" and provider not in {"host", self.host}:
+            _error("administrator_first_model_provider_mismatch: first model belongs to the observing host")
         selected_command = validate_executor_command(command) if command is not None else None
         if expected_policy_version is not None and (isinstance(expected_policy_version, bool)
                 or not isinstance(expected_policy_version, int) or expected_policy_version < 0):
@@ -225,8 +232,27 @@ class AdminRoutingMixin:
                                 "ON CONFLICT(project,host_scope,conversation) DO UPDATE SET session_epoch=excluded.session_epoch,"
                                 "model=excluded.model,active=excluded.active,version=excluded.version,observed=excluded.observed",
                                 (project, scope, conversation, epoch, model, int(active), version, time.time()))
+            first_recorded = False
+            if active:
+                # Observation and binding share the same transaction. Later root
+                # model changes, inactive sessions and stale account epochs must
+                # never rewrite the first valid model for this project and host.
+                first_recorded = bool(self.db.execute("INSERT OR IGNORE INTO admin_first_models VALUES(?,?,?,?,?,?,1)",
+                                      (project, scope, epoch, conversation, model, time.time())).rowcount)
             return {"recorded": True, "changed": not same, "host_scope": scope, "session_epoch": epoch,
-                    "conversation": conversation, "model": model, "active": active, "version": version}
+                    "conversation": conversation, "model": model, "active": active, "version": version,
+                    "first_recorded": first_recorded}
+
+    def admin_first_model_binding(self, project):
+        """Read only the immutable binding from this host's current account epoch."""
+        with _read_snapshot(self):
+            row = self.db.execute("SELECT * FROM admin_first_models WHERE project=? AND host_scope=? AND session_epoch=?",
+                                  (project, self._session_scope(), self.session_epoch())).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            validate_model_identifier(result["model"])
+            return result
 
     def resolve_admin_executor(self, project, conversation=None, *, require_enabled=True):
         """从当前宿主策略解析执行器；current 仅使用已核对的根会话观察。"""
@@ -249,6 +275,14 @@ class AdminRoutingMixin:
         model, source, observation = "", "provider_cli_default", None
         if policy["model_mode"] == "fixed":
             model, source = validate_model_identifier(policy["model"]), "operator_fixed"
+        elif policy["model_mode"] == "first":
+            if provider != self.host:
+                _error("administrator_first_model_provider_mismatch: first model belongs to the observing host")
+            binding = self.admin_first_model_binding(project)
+            if binding is None:
+                _error("administrator_first_model_unavailable: no first root model observed in this account context")
+            model, source = binding["model"], "first_host_observation"
+            observation = _digest(binding)
         elif policy["model_mode"] == "current":
             if provider != self.host:
                 _error("administrator_current_model_provider_mismatch: current model belongs to the observing host")
@@ -326,8 +360,10 @@ class AdminRoutingMixin:
         provider = self.host if policy["provider"] == "host" else policy["provider"]
         configuration = validate_admin_routing_config(self.config["admin"])
         command = policy["command"] or _default_provider_command(configuration, provider)
-        result = json.loads(_encode(self.config["admin"]))
-        result.update(enabled=policy["enabled"], command=validate_executor_command(command), provider=provider,
+        from .admin_usage import admin_budget_config
+        from .admin_control import admission_enabled
+        result = json.loads(_encode(admin_budget_config(self)))
+        result.update(enabled=policy["enabled"] and admission_enabled(self, project), command=validate_executor_command(command), provider=provider,
                       model_mode=policy["model_mode"], model=policy["model"])
         # 全局排队／预算配置不能因无会话的 current 歧义而读取失败；实际认领
         # 必须按案例 conversation 调用 resolve，并核对完整 executor 快照。
@@ -340,7 +376,22 @@ class AdminRoutingMixin:
         return result
 
     def admin_routing_status(self, project, conversation=None):
+        with _read_snapshot(self):
+            return self._admin_routing_status_snapshot(project, conversation)
+
+    def _admin_routing_status_snapshot(self, project, conversation=None):
         policy = self.admin_policy(project)
+        binding = self.admin_first_model_binding(project)
+        observed_models = []
+        for row in self.db.execute("SELECT model,MAX(observed) AS last_observed,MAX(active) AS active,COUNT(*) AS observations "
+                                   "FROM admin_model_observations WHERE project=? AND host_scope=? AND session_epoch=? "
+                                   "GROUP BY model ORDER BY last_observed DESC,model LIMIT 30",
+                                   (project, self._session_scope(), self.session_epoch())):
+            try:
+                validate_model_identifier(row["model"])
+            except ValueError:
+                continue
+            observed_models.append({**dict(row), "active": bool(row["active"]), "source": "host_observation"})
         recent = []
         for row in self.db.execute("SELECT call_id,body,created FROM admin_execution_plans WHERE project=? AND host_scope=? "
                                    "ORDER BY created DESC,call_id LIMIT 8", (project, self._session_scope())).fetchall():
@@ -354,9 +405,11 @@ class AdminRoutingMixin:
             availability = executor_availability(executor)
             return {"policy": policy, "executor": executor, "routing_ready": True,
                     "ready": availability["cli_available"], "availability": availability,
-                    "reason": availability["reason"], "recent_calls": recent}
+                    "reason": availability["reason"], "recent_calls": recent,
+                    "first_binding": binding, "observed_models": observed_models}
         except ValueError as exc:
             # 不回传潜在外部执行器错误文本或凭证，仅已定义的契约状态。
             reason = str(exc).split(":", 1)[0]
             return {"policy": policy, "executor": None, "routing_ready": False,
-                    "ready": False, "availability": None, "reason": reason, "recent_calls": recent}
+                    "ready": False, "availability": None, "reason": reason, "recent_calls": recent,
+                    "first_binding": binding, "observed_models": observed_models}

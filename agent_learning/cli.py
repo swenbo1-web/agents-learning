@@ -6,8 +6,9 @@ import os
 import sqlite3
 from pathlib import Path
 import sys
+import time
 
-from .admin import admin_batch, admin_once
+from .admin import admin_batch, admin_once, admin_drain
 from .install import install
 from .mcp import Server
 from .runtime import ContractError, Runtime, encode
@@ -39,8 +40,8 @@ def parser():
     run.add_argument("job_id")
     run.add_argument("--confirm", action="store_true", help="确认本次有限归档或整理")
     run.add_argument("--allow-review", action="store_true", help="允许已配置管理员执行器调用模型；省略只归档")
-    run.add_argument("--max-calls", type=int, default=2)
-    run.add_argument("--max-seconds", type=int, default=180)
+    run.add_argument("--max-calls", type=int, default=10, help="本次显式历史整理最多调用次数，默认10，范围0..20")
+    run.add_argument("--max-seconds", type=int, default=600, help="本次历史处理时长预算，默认600秒")
     state = sub.add_parser("history-status", help="查看来源覆盖、审阅进度和用量，不启动吸收")
     state.add_argument("--job-id")
     sub.add_parser("history-jobs", help="列出当前项目的有限历史任务摘要")
@@ -62,6 +63,7 @@ def parser():
     browser.add_argument("--open", action="store_true", help="在默认浏览器打开页面")
     browser.add_argument("--project-id", help="选择已有项目；省略按已登记workspace解析")
     browser.add_argument("--review", action="store_true", help="开启候选预览与明确批准、拒绝、暂缓；不自动批准")
+    browser.add_argument("--admin-control", action="store_true", help="明确开放管理员设置、模型与共享预算控制；页面由用户开启整理")
     browser.add_argument("--language", choices=["auto", "zh-CN", "en"], default="auto",
                          help="界面语言；auto 跟随浏览器，知识与证据保持原文")
     sub.add_parser("semantic-status", help="查看可选本地向量索引状态，不调用模型")
@@ -219,10 +221,12 @@ def parser():
     admin.add_argument("--problem")
     batch = sub.add_parser("admin-batch", help="按案例数、调用数与时长运行有限审核批次")
     batch.add_argument("--dispatch-token", help="由本地Hook预留的后台派发身份")
+    drain = sub.add_parser("admin-drain", help="在有限运行时长内按待办连续执行小批审核；不处理历史批次")
+    drain.add_argument("--dispatch-token")
     configure = sub.add_parser("admin-configure", help="明确开启或关闭当前项目/宿主的自动知识审核；不自动发布")
     configure.add_argument("--enabled", choices=["on", "off"], required=True)
     configure.add_argument("--provider", choices=["host", "codex", "antigravity", "dsh"], help="首次默认 host，后续省略保留")
-    configure.add_argument("--model-mode", choices=["current", "default", "fixed"], help="首次默认 current，后续省略保留")
+    configure.add_argument("--model-mode", choices=["first", "current", "default", "fixed"], help="首次默认 first，后续省略保留")
     configure.add_argument("--model", help="fixed 模式的模型标识")
     configure.add_argument("--command-file", help="可选 JSON 可执行参数数组，不包含令牌或模型选项")
     configure.add_argument("--expected-policy-version", type=int)
@@ -337,12 +341,14 @@ def main(argv=None):
             database = home / "runtime.sqlite3"
             project = resolve_browser_project(database, args.workspace, args.project_id)
             browser_server = make_browser_server(database, project, port=args.port,
-                review=args.review, language=args.language, runtime_host=args.host,
+                review=args.review, admin_control=args.admin_control, language=args.language, runtime_host=args.host,
                 runtime_instance=args.host_instance)
             try:
                 connection = {"status": "serving", "project": project, "url": browser_server.url,
                               "access_token": browser_server.access_token,
-                              "read_only": not args.review, "language": args.language, "stop": "Ctrl+C"}
+                              "read_only": not (args.review or args.admin_control), "language": args.language, "stop": "Ctrl+C"}
+                if args.admin_control:
+                    connection.update(admin_token=browser_server.admin_token, admin_control_url=browser_server.browser_url)
                 if args.review:
                     connection.update(review_token=browser_server.review_token,
                                       review_url=browser_server.browser_url)
@@ -492,15 +498,25 @@ def main(argv=None):
             project, args.workspace, cursor=args.cursor, limit=args.limit)
         elif args.command == "admin-once": result = admin_once(runtime, project, args.problem)
         elif args.command == "admin-batch": result = admin_batch(runtime, project, dispatch_token=args.dispatch_token)
+        elif args.command == "admin-drain": result = admin_drain(runtime, project, dispatch_token=args.dispatch_token)
         elif args.command == "admin-configure":
             command = json.loads(Path(args.command_file).read_text(encoding="utf-8-sig")) if args.command_file else None
             policy = runtime.admin_policy(project)
             provider = args.provider or (policy["provider"] if policy["policy_version"] else "host")
-            mode = args.model_mode or (policy["model_mode"] if policy["policy_version"] else "current")
+            mode = args.model_mode or (policy["model_mode"] if policy["policy_version"] else "first")
             model = args.model if args.model is not None else policy["model"] if mode == policy["model_mode"] else ""
             result = runtime.admin_configure(project, args.enabled == "on", provider, mode, model, command,
                                              expected_policy_version=(args.expected_policy_version if args.expected_policy_version is not None
                                                                       else policy["policy_version"]))
+            # A prior visual pause is an independent admission switch. Explicit
+            # CLI on/off controls that switch too, without resetting usage.
+            from .admin_control import control_state
+            with runtime.transaction():
+                state = control_state(runtime, project)
+                if bool(state["enabled"]) != (args.enabled == "on"):
+                    runtime.db.execute("INSERT INTO admin_control_state VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
+                        "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
+                        (project, runtime._session_scope(), int(args.enabled == "on"), state["version"] + 1, time.time()))
         elif args.command == "admin-status":
             from .admin_usage import admin_budget_status
             result = {**runtime.admin_routing_status(project, args.conversation), "budget": admin_budget_status(runtime)}

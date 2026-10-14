@@ -74,8 +74,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15}:
-        raise ContractError("browser requires database schema 11..15; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16}:
+        raise ContractError("browser requires database schema 11..16; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -127,7 +127,7 @@ class BrowserServer(ThreadingHTTPServer):
     block_on_close = False
 
     def __init__(self, database, project, *, host="127.0.0.1", port=0, token=None,
-                 review=False, language="auto", runtime_host="codex", runtime_instance="default"):
+                 review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default"):
         if host != "127.0.0.1":
             raise ContractError("browser host must be 127.0.0.1")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -138,24 +138,28 @@ class BrowserServer(ThreadingHTTPServer):
                                   or not token.isascii() or not token.isalnum()):
             raise ContractError("browser token must be 32..200 ASCII letters or digits")
         self.database = Path(database).expanduser().resolve(strict=True)
-        if not isinstance(review, bool) or not isinstance(language, str) or language not in UI_LANGUAGES:
+        if not isinstance(review, bool) or not isinstance(admin_control, bool) or not isinstance(language, str) or language not in UI_LANGUAGES:
             raise ContractError("invalid browser mode or language")
         from .host_sessions import host_scope_key
         host_scope_key(runtime_host, runtime_instance)
         with contextlib.closing(_connection(self.database)) as db:
             _schema(db)
-            if review and (db.execute("PRAGMA user_version").fetchone()[0] != 15
+            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16}
                            or self.database.name != "runtime.sqlite3"):
-                raise ContractError("review mode requires an existing schema 15 runtime database")
+                raise ContractError("review mode requires an existing schema 15/16 runtime database")
+            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] != 16 or self.database.name != "runtime.sqlite3"):
+                raise ContractError("administrator control requires an explicitly upgraded schema 16 runtime database")
             if not db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
                 raise ContractError("unknown browser project")
         self.project = project
         self.review_enabled = review
+        self.admin_control_enabled = admin_control
         self.language = language
         self.runtime_host = runtime_host
         self.runtime_instance = runtime_instance
         self.access_token = token or secrets.token_hex(24)
         self.review_token = secrets.token_hex(32) if review else None
+        self.admin_token = secrets.token_hex(32) if admin_control else None
         self.review_plans = {}
         self.review_lock = threading.Lock()
         super().__init__((host, port), _Handler)
@@ -164,6 +168,8 @@ class BrowserServer(ThreadingHTTPServer):
         self.browser_url = self.url + "#token=" + quote(self.access_token, safe="")
         if self.review_enabled:
             self.browser_url += "&review_token=" + self.review_token
+        if self.admin_control_enabled:
+            self.browser_url += "&admin_token=" + self.admin_token
 
     @contextlib.contextmanager
     def snapshot(self):
@@ -188,9 +194,9 @@ class BrowserServer(ThreadingHTTPServer):
 
 
 def make_browser_server(database, project, *, host="127.0.0.1", port=0, token=None,
-                        review=False, language="auto", runtime_host="codex", runtime_instance="default"):
+                        review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default"):
     return BrowserServer(database, project, host=host, port=port, token=token,
-                         review=review, language=language, runtime_host=runtime_host,
+                         review=review, admin_control=admin_control, language=language, runtime_host=runtime_host,
                          runtime_instance=runtime_instance)
 
 
@@ -269,12 +275,27 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                 if params:
                     raise ContractError("session endpoint takes no query parameters")
                 result = {"project": self.server.project, "review_enabled": self.server.review_enabled,
-                          "read_only": not self.server.review_enabled, "language": self.server.language}
+                          "admin_control_enabled": self.server.admin_control_enabled,
+                          "read_only": not (self.server.review_enabled or self.server.admin_control_enabled), "language": self.server.language}
+            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt"}:
+                if not self.server.admin_control_enabled:
+                    raise ContractError("administrator control capability was not opened")
+                from .admin_control import readonly_runtime, control_status, request_receipt
+                with self.server.snapshot() as db:
+                    view = readonly_runtime(self.server.database, db, self.server.runtime_host, self.server.runtime_instance)
+                    if parsed.path.endswith("/receipt"):
+                        if set(params) != {"request_id"}:
+                            raise ContractError("receipt requires request_id")
+                        result = request_receipt(view, self.server.project, params["request_id"])
+                    else:
+                        if params:
+                            raise ContractError("administrator status takes no parameters")
+                        result = control_status(view, self.server.project)
             else:
                 with self.server.snapshot() as db:
                     result = _read_api(db, self.server.project, parsed.path, params)
             if parsed.path == "/api/stats":
-                result["read_only"] = not self.server.review_enabled
+                result["read_only"] = not (self.server.review_enabled or self.server.admin_control_enabled)
             payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(payload) > MAX_RESPONSE_BYTES:
                 self._send(413, {"error": "response exceeds browser budget; reduce page size"})
