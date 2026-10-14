@@ -23,19 +23,24 @@ RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host
 RESOURCE_FILES = ("README.md", "LICENSE", "config.example.json", ".mcp.json")
 REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "hooks/hooks.json",
                   "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
+                  "skills/learning-browser/SKILL.md",
                   "skills/learning-history/agents/openai.yaml",
                   "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml",
+                  "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml",
                   ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json")
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
                      "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
+                     "skills/learning-browser/SKILL.md",
                      "skills/learning-history/agents/openai.yaml",
-                     "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml")
+                     "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml",
+                     "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml")
 DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json",
              "host/index.mjs", "rules/learning.md",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
              "skills/learning-history/SKILL.md", "skills/learning-browser/SKILL.md",
              "skills/learning-history/agents/openai.yaml",
-             "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml")
+             "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml",
+             "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml")
 
 
 def _resource_root():
@@ -88,7 +93,7 @@ def _validate_antigravity_resources(root):
     if not isinstance(json.loads(root.joinpath("mcp_config.json").read_text(encoding="utf-8")), dict):
         raise ContractError("Antigravity plugin MCP resource is invalid")
     for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
-                 "skills/learning-review/SKILL.md"):
+                 "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md", "skills/learning-debug/SKILL.md"):
         if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
             raise ContractError("Antigravity plugin skill resource is invalid: " + name)
 
@@ -135,7 +140,8 @@ def _validate_dsh_resources(root):
     if not isinstance(json.loads(root.joinpath("mcp_config.json").read_text(encoding="utf-8")), dict):
         raise ContractError("DSH plugin MCP resource is invalid")
     for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
-                 "skills/learning-history/SKILL.md", "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md"):
+                 "skills/learning-history/SKILL.md", "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md",
+                 "skills/learning-debug/SKILL.md"):
         if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
             raise ContractError("DSH plugin skill resource is invalid: " + name)
 
@@ -173,7 +179,7 @@ def _validate_resources(root, host="codex", *, bundle=False):
             if not isinstance(json.loads(root.joinpath(name).read_text(encoding="utf-8")), dict):
                 raise ContractError("plugin JSON resource is invalid: " + name)
         for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
-                     "skills/learning-review/SKILL.md"):
+                     "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md", "skills/learning-debug/SKILL.md"):
             if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
                 raise ContractError("plugin skill resource is invalid: " + name)
         if bundle:

@@ -1,7 +1,7 @@
 {
   "name": "agent-learning",
   "version": "1.0.0",
-  "description": "Local-first project memory for DeepSeek Harness (DSH) with automatic work history, file context, progressive retrieval, a read-only visual knowledge browser, historical ingestion and optional administrator review.",
+  "description": "Local project memory for DSH: work and file history, progressive retrieval, explicit history import, visual knowledge approval and optional administrator settings. Includes native host integration and a lightweight debug skill.",
   "skills": "./skills/",
   "hooks": "./hooks.json",
   "mcpServers": "./mcp_config.json",

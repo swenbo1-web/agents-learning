@@ -24,6 +24,48 @@ function extractTextFromBlocks(blocks) {
   return parts.join("\n");
 }
 
+function debugStatusText(value) {
+  // Project status includes history and governance records. Debug deliberately
+  // projects only scalar diagnostics, even when the native result has no data.
+  const object = (item) => item && typeof item === "object" && !Array.isArray(item) ? item : {};
+  const text = (item, maximum = 180) => typeof item === "string" && item.trim()
+    ? item.replace(/[\u0000-\u001f\u007f`]/g, " ").trim().slice(0, maximum)
+    : "unknown";
+  const data = object(value);
+  const routing = object(data.admin_routing);
+  const policy = object(routing.policy);
+  const executor = object(routing.executor);
+  const budget = object(data.admin_budget);
+  const mode = text(executor.model_mode || policy.model_mode, 24);
+  const model = text(executor.model || (mode === "fixed" ? policy.model : ""));
+  const resolvedModel = model === "unknown" && mode === "default" && routing.routing_ready === true
+    ? "宿主默认（未固定）" : model;
+  const enabled = data.admin_admission_enabled === true ? "已开启"
+    : data.admin_admission_enabled === false ? "已关闭" : "unknown";
+  const remaining = Number.isSafeInteger(budget.remaining_calls) && budget.remaining_calls >= 0
+    ? String(budget.remaining_calls) : "unknown";
+  const reasons = [];
+  if (data.admin_admission_enabled === false) reasons.push("administrator_disabled");
+  if (typeof routing.reason === "string" && routing.reason.trim()) reasons.push(text(routing.reason));
+  if (typeof budget.admission_status === "string" && budget.admission_status !== "available") {
+    reasons.push(text(budget.admission_status));
+  }
+  if (routing.ready === false && !routing.reason) reasons.push("administrator_route_unavailable");
+  const blocking = reasons.length ? [...new Set(reasons)].join(" / ")
+    : routing.ready === true && budget.admission_status === "available" ? "无" : "unknown";
+  return [
+    "### Agent Learning 调试（只读）",
+    `- 项目：\`${text(data.project_id)}\``,
+    `- 知识目录：\`${text(data.home, 384)}\``,
+    `- 宿主：\`${text(data.host_scope)}\``,
+    `- 管理员实际准入：${enabled} | 模式：\`${mode}\` | 模型：\`${resolvedModel}\``,
+    `- 剩余审核调用：${remaining}（同 ALP_HOME 共享的插件预算，不代表平台额度）`,
+    `- 阻塞原因：\`${blocking}\``,
+    "- 会话 / Hook：未验证；此命令未绑定当前对话，不能据此确认 Hooks 已连接。",
+    "- 详细核对使用 learning-debug 技能；知识库与审批使用 learning-browser / learning-review 技能。",
+  ].join("\n");
+}
+
 function runPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExe, args, {
@@ -700,6 +742,9 @@ export function apply(ctx) {
     const agentId = invocation?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
     const workspace = meta.cwd || receipt.workspace || process.cwd();
+    // Debug is a fixed read route. Never forward a user-supplied suffix into
+    // the administrator/history command handlers or start the browser.
+    const statusOnly = commandName === "learning-debug";
     if (commandName === "learning-browser") {
       const tokens = String(invocation?.rawInput || "").trim().split(/\s+/).filter(Boolean);
       if (tokens.length > 0 && tokens[0].replace(/^\//, "").toLowerCase() === "learning-browser") {
@@ -750,8 +795,8 @@ export function apply(ctx) {
     const inputPayload = JSON.stringify({
       home: receipt.home || null,
       workspace,
-      slash_command: commandName,
-      raw_input: invocation?.rawInput || "",
+      slash_command: statusOnly ? "learning-status" : commandName,
+      raw_input: statusOnly ? "/learning-status" : invocation?.rawInput || "",
     });
     const { code, stdout, stderr } = await runPythonProcess(
       receipt.python,
@@ -764,19 +809,22 @@ export function apply(ctx) {
     if (code !== 0 || !stdout.trim()) {
       return {
         kind: "error",
-        text: `Agent Learning /${commandName} 执行失败：${(stderr || stdout).trim()}`,
+        text: statusOnly ? "Agent Learning 调试：只读状态读取失败，请使用 learning-debug 技能继续核对。"
+          : `Agent Learning /${commandName} 执行失败：${(stderr || stdout).trim()}`,
       };
     }
     const parsed = JSON.parse(stdout.trim());
     if (!parsed.ok) {
       return {
         kind: "error",
-        text: `Agent Learning /${commandName} 拒绝：${parsed.error || "unknown error"}`,
+        text: statusOnly ? "Agent Learning 调试：只读状态读取被拒绝，请使用 learning-debug 技能继续核对。"
+          : `Agent Learning /${commandName} 拒绝：${parsed.error || "unknown error"}`,
       };
     }
     return {
       kind: "success",
-      text: parsed.result?.text || JSON.stringify(parsed.result, null, 2),
+      text: statusOnly ? debugStatusText(parsed.result?.data)
+        : parsed.result?.text || JSON.stringify(parsed.result, null, 2),
     };
   }
 
@@ -851,6 +899,10 @@ export function apply(ctx) {
           "learning-review",
           "打开当前项目的本机可视化知识审批台，预览候选和证据，由用户在页面批准发布、拒绝或暂缓选中条目。",
         ],
+        [
+          "learning-debug",
+          "Agent Learning 调试：只读检查当前项目连接、管理员、模型与预算，不启动模型、不修改设置、不展开知识正文。",
+        ],
       ]) {
         try {
           const skillPath = join(PLUGIN_ROOT, "skills", skillName, "SKILL.md");
@@ -878,6 +930,11 @@ export function apply(ctx) {
         {
           name: "learning-status",
           description: "查看当前项目的 Agent Learning 知识库、1.0.0 工作历史与吸收状态",
+          hint: "",
+        },
+        {
+          name: "learning-debug",
+          description: "Agent Learning 调试：只读查看连接、管理员、模型与预算",
           hint: "",
         },
         {

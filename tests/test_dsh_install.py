@@ -63,6 +63,8 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "skills/learning-browser/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-review/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-review/agents/openai.yaml").is_file())
+        self.assertTrue((self.target / "skills/learning-debug/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-debug/agents/openai.yaml").is_file())
         plugin = read_json(self.target / "plugin.json")
         pkg = read_json(self.target / "package.json")
         self.assertEqual(plugin["name"], "agent-learning")
@@ -88,6 +90,9 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((runtime / "hooks/dsh_dispatch.py").is_file())
         self.assertEqual((runtime / "host_resources/dsh/skills/learning-review/SKILL.md").read_bytes(),
                          (self.target / "skills/learning-review/SKILL.md").read_bytes())
+        for relative in ("SKILL.md", "agents/openai.yaml"):
+            self.assertEqual((runtime / "host_resources/dsh/skills/learning-debug" / relative).read_bytes(),
+                             (self.target / "skills/learning-debug" / relative).read_bytes())
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required to exercise the DSH native bridge")
     def test_native_bridge_registers_review_skill_with_exported_resource_directory(self):
@@ -120,18 +125,121 @@ console.log(JSON.stringify({ skills, commands, tools }));
         result = json.loads(response.stdout.decode("utf-8"))
         skills = {item["name"]: item for item in result["skills"]}
         self.assertEqual(set(skills), {"learning-worker", "learning-admin", "learning-history",
-                                       "learning-browser", "learning-review"})
+                                       "learning-browser", "learning-review", "learning-debug"})
         review = skills["learning-review"]
         expected_directory = self.target / "skills/learning-review"
         self.assertEqual(review["resourceBase"]["kind"], "directory")
         self.assertEqual(Path(review["resourceBase"]["path"]), expected_directory)
         self.assertEqual(review["content"], (expected_directory / "SKILL.md").read_text(encoding="utf-8"))
         self.assertEqual(review["source"], "bundled")
+        debug = skills["learning-debug"]
+        self.assertEqual(debug["resourceBase"]["kind"], "directory")
+        self.assertEqual(Path(debug["resourceBase"]["path"]), self.target / "skills/learning-debug")
+        self.assertEqual(debug["content"], (self.target / "skills/learning-debug/SKILL.md").read_text(encoding="utf-8"))
+        self.assertEqual(debug["source"], "bundled")
         self.assertIn("learning-browser", result["commands"])
+        self.assertIn("learning-debug", result["commands"])
         self.assertNotIn("learning-review", result["commands"])
         self.assertIn("learning_browser", result["tools"])
         self.assertNotIn("learning_review", result["tools"])
         self.assertFalse(self.home.exists(), "skill registration must not initialize the knowledge database")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required to exercise the DSH native bridge")
+    def test_debug_command_uses_only_native_status_even_with_action_suffixes(self):
+        self.initial()
+        probe = r"""
+import { EventEmitter } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
+import childProcess from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+const calls = [];
+const historyMarker = 'PRIVATE_HISTORY_SHOULD_NOT_RENDER';
+const statusData = {
+  project_id: 'synthetic-project', home: 'synthetic-knowledge-home', host_scope: 'dsh:synthetic-host',
+  admin_enabled: true, admin_admission_enabled: false,
+  admin_routing: {
+    policy: {model_mode: 'fixed', model: 'configured-model'},
+    executor: {model_mode: 'fixed', model: 'resolved-model'},
+    ready: false, reason: 'synthetic_route_blocked',
+  },
+  admin_budget: {remaining_calls: 7, admission_status: 'concurrency_limited'},
+  history_import: {body: historyMarker.repeat(2000)},
+  work_memory: {evidence: historyMarker.repeat(2000)},
+};
+childProcess.spawn = (executable, args, options) => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const call = { executable, args, cwd: options.cwd, hidden: options.windowsHide, input: '' };
+  calls.push(call);
+  child.stdin = {
+    write(value) { call.input += value; },
+    end() { queueMicrotask(() => {
+      const result = calls.length === 5
+        ? {text: 'UNSAFE_RAW_FALLBACK_' + historyMarker, unexpected_history: statusData.history_import}
+        : {text: 'Synthetic native status', data: statusData};
+      child.stdout.emit('data', Buffer.from(JSON.stringify({ok:true,result})));
+      child.emit('close', 0);
+    }); },
+  };
+  child.kill = () => {};
+  return child;
+};
+syncBuiltinESMExports();
+const commands = new Map();
+const { apply } = await import(pathToFileURL(process.argv[1]).href);
+apply({
+  tools: { register() {} }, effect() {}, on() {},
+  inject(_names, callback) { callback({
+    skills: { register() {} },
+    commands: { register(spec) { commands.set(spec.name, spec); } },
+  }); },
+});
+const debug = commands.get('learning-debug');
+const outputs = [];
+for (const rawInput of ['/learning-debug', '/learning-debug on fixed model --allow-review', '/learning-debug once', '/learning-debug browser start']) {
+  outputs.push(await debug.handler({rawInput}));
+}
+const missingData = await debug.handler({rawInput:'/learning-debug'});
+const legacy = await commands.get('learning-status').handler({rawInput:'/learning-status original suffix'});
+console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.input??null}));
+"""
+        response = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", probe, str(self.target / "host/index.mjs")],
+            cwd=self.workspace, capture_output=True, timeout=10,
+        )
+        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+        result = json.loads(response.stdout.decode("utf-8"))
+        self.assertIsNone(result["inputClaim"], "debug should execute as a fixed command without an argument prompt")
+        self.assertEqual(len(result["calls"]), 6)
+        for call in result["calls"][:5]:
+            payload = json.loads(call["input"])
+            self.assertEqual(payload["slash_command"], "learning-status")
+            self.assertEqual(payload["raw_input"], "/learning-status")
+            self.assertEqual(payload["home"], str(self.home))
+            self.assertEqual(payload["workspace"], str(self.workspace))
+            self.assertEqual(call["args"][0], "-B")
+            self.assertEqual(Path(call["args"][1]).name, "dsh_tool.py")
+            self.assertTrue(call["hidden"])
+        for output in result["outputs"]:
+            self.assertEqual(output["kind"], "success")
+            self.assertLess(len(output["text"]), 2000)
+            for expected in ("synthetic-project", "synthetic-knowledge-home", "dsh:synthetic-host",
+                             "已关闭", "fixed", "resolved-model", "7", "synthetic_route_blocked",
+                             "concurrency_limited", "不能据此确认 Hooks 已连接"):
+                self.assertIn(expected, output["text"])
+            self.assertNotIn("configured-model", output["text"])
+            self.assertNotIn("PRIVATE_HISTORY_SHOULD_NOT_RENDER", output["text"])
+            self.assertNotIn("Synthetic native status", output["text"])
+        self.assertEqual(result["missingData"]["kind"], "success")
+        self.assertIn("unknown", result["missingData"]["text"])
+        self.assertNotIn("UNSAFE_RAW_FALLBACK", result["missingData"]["text"])
+        self.assertNotIn("PRIVATE_HISTORY_SHOULD_NOT_RENDER", result["missingData"]["text"])
+        self.assertEqual(result["legacy"], {"kind": "success", "text": "Synthetic native status"})
+        legacy_payload = json.loads(result["calls"][-1]["input"])
+        self.assertEqual(legacy_payload["slash_command"], "learning-status")
+        self.assertEqual(legacy_payload["raw_input"], "/learning-status original suffix")
+        self.assertFalse(self.home.exists(), "debug routing probe must not initialize storage or run a real model")
 
     def test_dsh_export_supports_dynamic_workspace_and_enforce_mode(self):
         result = self.initial(mode="enforce", bind_workspace=False)

@@ -18,10 +18,13 @@ description: "在 DeepSeek Harness (DSH) 中启动、查看或关闭本机只读
    - `/learning-browser status`：查看运行状态与访问链接；
    - `/learning-browser stop`：关闭后台浏览器服务。
 3. **显式 CLI 命令（终端手动运行）**：
-   - `python -B scripts/learning.py --workspace "<项目绝对路径>" browser --open`
+   - 从当前安装的 `runtime-release.json` 或生效的 MCP 配置确认实际解释器、固定入口、项目和知识目录，沿用安装的 `ALP_CONFIG`；不依赖终端 cwd、开发源码或猜测默认目录。
+   - 用已核实的实际值运行 `<PYTHON> -B <RUNTIME>/scripts/learning.py --workspace <PROJECT> --home <KNOWLEDGE_HOME> --host dsh browser --open`。保持临时服务运行，Windows 后台进程隐藏窗口。
 
 ## 边界与安全约定
 
 - 访问码（`access_token`）仅属于当前运行中的浏览器服务进程与页面内存，绝不写入持久磁盘文件或知识库。
+- 让 `--open` 直接打开启动链接；不回显或保存含访问码的启动输出。
 - 若项目尚未在知识库中登记，启动时会自动为当前工作区完成项目身份登记，再以只读模式打开。
 - 浏览界面为纯只读视图；知识的正式发布（`publish`）、撤销（`revoke`）、恢复（`restore`）与任务执行审批（`execution-approve`）仍通过各自的显式受信入口执行。
+- 需要候选审批或管理员设置时调用 `learning-review`；只读浏览不增加 `--review` 或 `--admin-control`。

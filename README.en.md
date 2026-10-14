@@ -12,25 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**Release scope: v1.0.0 includes Codex and Antigravity. DSH, visual review, administrator settings and historical ingestion improvements are on `main`; no new downloadable Release has been published. `main` uses schema/internal protocol 16: back up the database and update every shared-database installation.**
-
-**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
-
-## Core capabilities
-
-| Capability | What you get |
-|---|---|
-| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
-| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
-| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
-| Optional administrator | Manually enable in the page, choose a model and shared limits, pin the first valid project model, and process pending daily work in bounded small batches |
-| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
-| Visual knowledge browser | Locally inspect published knowledge, sources, revisions and queues; `main` adds candidate details, publication checks and visual batch review |
-| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
-| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
-| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
-
-No real-task net token, speed or quality gains have been established by paired evaluation.
+**These steps use `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Before installing
 
@@ -44,6 +26,21 @@ cd agents-learning
 Already cloned it? Use that directory, check its version and skip `git clone`. Run the commands below from the repository, installing each host into its own export directory. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below. To pin the stable distribution, replace `main` with `v1.0.0` and use only the Codex or Antigravity instructions.
 
 The [1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) also includes source, wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
+
+## Install in Codex (desktop and CLI)
+
+Use a [Codex CLI](https://learn.chatgpt.com/docs/cli) with `codex plugin` commands, under the same operating-system user and `CODEX_HOME` as your desktop app.
+
+These steps use the **default knowledge directory**. If you use `ALP_HOME` or `ALP_CONFIG`, first complete the [custom-directory wiring](#custom-knowledge-directory-in-codex). Setting variables only in the installation terminal does not ensure that Hooks and MCP tools use the same database.
+
+```powershell
+$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
+python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
+codex plugin marketplace add "$learningPlugin"
+codex plugin add agent-learning@agent-learning-local
+```
+
+**Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 ## Install in Antigravity (native plugin)
 
@@ -70,108 +67,81 @@ Restart the CLI and use the same bound project. The CLI copies the plugin into i
 
 </details>
 
-## Install in Codex (desktop and CLI)
-
-Use a [Codex CLI](https://learn.chatgpt.com/docs/cli) with `codex plugin` commands, under the same operating-system user and `CODEX_HOME` as your desktop app.
-
-These steps use the **default knowledge directory**. If you use `ALP_HOME` or `ALP_CONFIG`, first complete the [custom-directory wiring](#custom-knowledge-directory-in-codex). Setting variables only in the installation terminal does not ensure that Hooks and MCP tools use the same database.
-
-```powershell
-$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
-python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
-codex plugin marketplace add "$learningPlugin"
-codex plugin add agent-learning@agent-learning-local
-```
-
-**Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
-
 ## Install in DSH (DeepSeek Harness)
 
-Use the `main` source; the v1.0.0 distribution does not include DSH. Export the DSH plugin bundle (including the Cordis Host event bridge, 8-event Hooks and MCP configuration):
+Use DSH with plugin Bundle support and **pnpm** available on PATH. Export, then install into the profile you actually use. This example selects Web; change the first line for another profile such as TUI:
 
 ```powershell
+$learningProfile = "web"
 $learningProject = "D:\Projects\my-project"
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/dsh"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host dsh --hook-mode observe
+dsh plugin --profile "$learningProfile" add "$learningPlugin"
 ```
 
-**Load or enable the exported bundle directory in DSH Plugin Manager (or attach `mcp_config.json` and `hooks.json`) → start a new project conversation.** Upgrade an existing DSH export with `install "$learningPlugin" --host dsh --upgrade`.
+**Restart that DSH profile → open a conversation in the target project.** The full Bundle loads the host bridge, skills, commands, Hooks and MCP. Attaching only MCP/Hooks does not load all native components. To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
 ## Check the installation
 
-Paste this in the new conversation:
+In a new target-project conversation, select **Agent Learning 调试** from the input skill menu, or send:
 
-> Use learning_status to check my project, host and knowledge data directory. Pass this turn's Hook context_handle to session_context and confirm context_bound=true. Report a missing handle or failed binding without guessing another session.
+> Use `$learning-debug` to check this project's plugin integration.
+
+Check the expected project, host, data directory and current handle binding. If no handle is available, follow the Hook diagnostic; never guess another session.
+
+<details>
+<summary>If the skill is not visible, check manually</summary>
+
+Send: “Use learning_status to check my project, host and knowledge data directory. Pass this turn's Hook context_handle to session_context and confirm context_bound=true. Report a missing handle or failed binding without guessing another session.”
+
+</details>
 
 Success means the expected project/host and `context_bound=true` for the current Hook handle. Tools appearing in the list alone do not confirm Hook integration; an empty knowledge base is normal.
 
 The default knowledge directory is `%LOCALAPPDATA%\AgentLearning` on Windows and `~/.local/share/agent-learning` on macOS / Linux. Hosts share project knowledge on the same machine when they use the same OS user, data directory and project mapping. Antigravity binds the exported project; Codex follows project events, and DSH supports fixed or dynamic project selection. Hooks and MCP must use the same custom directory. See [shared knowledge](#shared-knowledge-upgrades-and-administrators).
 
+## Use it in your project
+
+In a new project conversation, select a skill or send one of these requests:
+
+| I want to… | Use |
+|---|---|
+| Check integration, task and administrator status | Select **Agent Learning 调试** in the input skill menu, or say “Use `$learning-debug` to check this project” |
+| Reuse project experience during a task | Describe the task; supported events retrieve and record observations, and the Agent can search further |
+| Browse detailed knowledge | “Use `$learning-browser` to open this project's knowledge base” |
+| Review candidates | “Use `$learning-review` to open candidate approval”; inspect evidence, then approve, reject or defer in the page |
+| Set up the administrator and limits | “Use `$learning-review` to open administrator settings”; choose a model, then click Save and enable yourself |
+| Absorb an existing project's history | “Use `$learning-history` for my selected project sources; explain scope and review limits first” |
+
+**Debug is a skill-menu entry for lightweight status checks. Detailed knowledge and approval open through their own skills.** Codex offers its input skill menu; in Antigravity/DSH use the available skill picker or mention the skill by name. This is neither a permanent chat button nor a shared native slash command.
+
+Installation makes no administrator call and starts no historical scan. Observations, candidates and publication are separate; an initially empty knowledge base is normal. [Administrator usage](#optional-administrator-executor) · [Historical ingestion](#absorb-history-from-an-existing-project)
+
 ## Open the visual knowledge base
 
-From the source repository, use the same project and data directory as the installed plugin:
-
-```powershell
-$learningProject = "D:\Projects\my-project"
-python -B scripts/learning.py --workspace "$learningProject" status
-python -B scripts/learning.py --workspace "$learningProject" browser --open
-```
-
-`status` registers the workspace; `browser --open` opens its **local read-only** knowledge view. If installation uses a custom `ALP_HOME` / `--home`, use that same setting here. Keep the terminal running; stop with `Ctrl+C`. [Browser details](#knowledge-browser)
+Invoke `$learning-browser` for the local read-only knowledge base. Search published knowledge and inspect sources, conditions, limitations and revisions using the installed project's data directory. [Terminal entry and reference](#knowledge-browser)
 
 ### Visual knowledge review (main)
 
-In a project chat with the updated plugin, invoke:
+Invoke `$learning-review` for candidate approval or administrator settings. **Opening the page approves nothing and starts no model.** The user separately confirms publication or Save and enable in the page. English and Simplified Chinese interfaces retain original knowledge and evidence text. [Review and administrator settings](#optional-administrator-executor)
 
-> Use `$learning-review` to open this project's visual knowledge review console.
+## Core capabilities
 
-The skill uses the installed fixed runtime, host and knowledge directory. **Inspect candidates and evidence → select entries → choose Approve and publish, Reject or Defer.** Opening the console does not approve any candidate. Page actions run locally without an extra model call. The interface supports English and Simplified Chinese; original knowledge text and evidence levels are retained.
+| Capability | What you get |
+|---|---|
+| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
+| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
+| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
+| Optional administrator | Manually enable in the page, choose a model and shared limits, pin the first valid project model, and process pending daily work in bounded small batches |
+| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
+| Visual knowledge browser | Locally inspect published knowledge, sources, revisions and queues; `main` adds candidate details, publication checks and visual batch review |
+| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
+| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
+| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
 
-Interface translations use bundled offline dictionaries. We evaluated translate.js: its [offline mode](https://translate.zvo.cn/4076.html) sends uncovered dynamic text to a translation API. This version loads no external translation script and sends no candidate data to a translation service.
+No real-task net token, speed or quality gains have been established by paired evaluation.
 
-From the source checkout, explicitly choose the actual project, data directory and host:
-
-```powershell
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language en
-```
-
-Use `--host antigravity` or `--host dsh` for those hosts, and `--language zh-CN` for Simplified Chinese. `--home` must match the Hooks and MCP data directory. Installed users invoke the skill with their installed entry rather than locating a source checkout. `learning-browser` and `browser` without `--review` or `--admin-control` remain read-only. **This is a `main` capability; the original v1.0.0 release must be updated before using it.**
-
-For administrator settings, ask “Use `$learning-review` to open this project's administrator settings,” or add `--admin-control` to the command above; omit `--review` if only settings are needed. **Opening the page starts no model; the user must click Save and enable.** Choose a model, inspect pending work and usage, and adjust daily calls, batch calls, batch time and runner time. Disabling blocks new calls while retaining the current call's result handling. Model changes wait for in-flight review to finish. Access, review and administrator tokens stay in process/page memory and are not saved to files or logs. [Administrator details](#optional-administrator-executor)
-
-<details>
-<summary>macOS / Linux installation commands</summary>
-
-## macOS / Linux
-
-Clone the source as above, use `python3` for your Python 3.10+ interpreter, and select the commands for your host. Install each host separately if using more than one; custom paths require matching Hook and MCP settings.
-
-Antigravity: replace this with an existing project path, then reload it in the IDE.
-
-```sh
-learning_project="/absolute/path/to/my-project"
-python3 -B scripts/learning.py --workspace "$learning_project" install "$learning_project/.agents/plugins/agent-learning" --host antigravity --hook-mode observe
-```
-
-Codex: run these only when installing the Codex profile.
-
-```sh
-learning_plugin="$HOME/agent-learning-plugins/codex"
-python3 -B scripts/learning.py install "$learning_plugin" --host codex --hook-mode observe
-codex plugin marketplace add "$learning_plugin"
-codex plugin add agent-learning@agent-learning-local
-```
-
-DSH (`main` source):
-
-```sh
-learning_project="/absolute/path/to/my-project"
-python3 -B scripts/learning.py --workspace "$learning_project" install "$HOME/agent-learning-plugins/dsh" --host dsh --hook-mode observe
-```
-
-Then restart/reload the host, review its Hook trust settings and use the [installation check](#check-the-installation). Antigravity CLI users additionally install the exported directory with `agy plugin install`.
-
-</details>
+**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
 
 ## How it works
 
@@ -215,6 +185,43 @@ Use it for a real project task: register the goal, search existing knowledge, re
 **Can different devices share one database?** Default SQLite storage is local. Hosts on one device can share a project and data directory; cross-device synchronization is not implemented.
 
 **The tools appear, but there is no current handle.** Check plugin enablement, Hook trust and the bound interpreter/runtime paths, then start a fresh project conversation. See [installation troubleshooting](#installation-troubleshooting).
+
+<details>
+<summary>macOS / Linux installation commands</summary>
+
+## macOS / Linux
+
+Clone the source as above, use `python3` for your Python 3.10+ interpreter, and select the commands for your host. Install each host separately if using more than one; custom paths require matching Hook and MCP settings.
+
+Antigravity: replace this with an existing project path, then reload it in the IDE.
+
+```sh
+learning_project="/absolute/path/to/my-project"
+python3 -B scripts/learning.py --workspace "$learning_project" install "$learning_project/.agents/plugins/agent-learning" --host antigravity --hook-mode observe
+```
+
+Codex: run these only when installing the Codex profile.
+
+```sh
+learning_plugin="$HOME/agent-learning-plugins/codex"
+python3 -B scripts/learning.py install "$learning_plugin" --host codex --hook-mode observe
+codex plugin marketplace add "$learning_plugin"
+codex plugin add agent-learning@agent-learning-local
+```
+
+DSH (`main` source):
+
+```sh
+learning_profile="web" # Change to the DSH profile you use.
+learning_project="/absolute/path/to/my-project"
+learning_plugin="$HOME/agent-learning-plugins/dsh"
+python3 -B scripts/learning.py --workspace "$learning_project" install "$learning_plugin" --host dsh --hook-mode observe
+dsh plugin --profile "$learning_profile" add "$learning_plugin"
+```
+
+Then restart/reload the host, review its Hook trust settings and use the [installation check](#check-the-installation). Antigravity CLI users additionally install the exported directory with `agy plugin install`.
+
+</details>
 
 ## How the project took shape
 
@@ -818,6 +825,14 @@ Queries use RRF to combine bounded lexical and cosine candidates. Match informat
 Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates; `scan_truncated` signals the bound. This is a bounded linear scan without a full-corpus ANN guarantee. Embeddings add local computation and initial latency; speed improvements require measurement.
 
 ## Knowledge browser
+
+Skill entries: `$learning-browser` for read-only viewing; `$learning-review` for candidate approval or administrator settings. Terminal users select the actual project, data directory and host:
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language en
+```
+
+Use `--admin-control` for settings, optionally with `--review`; choose the matching Antigravity/DSH `--host` and `--language zh-CN` for Simplified Chinese. Installed users invoke the fixed installed entry through the skill. Interface dictionaries are bundled offline. [translate.js offline mode](https://translate.zvo.cn/4076.html) can send uncovered dynamic text to translation services, so this version loads no external translation script and sends no knowledge content.
 
 ```sh
 python -B scripts/learning.py --workspace . browser --open

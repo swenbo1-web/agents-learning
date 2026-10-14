@@ -53,6 +53,22 @@ class AdminControlTests(unittest.TestCase):
         self.assertEqual(response["settings"]["budget_policy"]["values"]["max_calls_per_day"], 100)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM active").fetchone()[0], 0)
 
+    def test_status_reports_effective_admission_without_starting_or_changing_settings(self):
+        self.assertFalse(self.r.status(self.p)["admin_admission_enabled"])
+        apply_control(self.r, self.p, self.body())
+        pause = self.body(request_id="pause-for-status", enabled=False)
+        apply_control(self.r, self.p, pause)
+        before = self.r.db.total_changes
+        with patch.object(self.r, "_launch_admin") as launch, patch("agent_learning.admin.subprocess.Popen") as model:
+            paused = self.r.status(self.p)
+        self.assertTrue(paused["admin_enabled"], "legacy policy remains enabled for in-flight results")
+        self.assertFalse(paused["admin_admission_enabled"])
+        self.assertEqual(self.r.db.total_changes, before, "status must not mutate the runtime")
+        launch.assert_not_called()
+        model.assert_not_called()
+        apply_control(self.r, self.p, self.body(request_id="resume-for-status"))
+        self.assertTrue(self.r.status(self.p)["admin_admission_enabled"])
+
     def test_history_budget_defaults_are_bounded_and_do_not_enable_review(self):
         from agent_learning.cli import parser
         args = parser().parse_args(["history-run", "chosen-job", "--confirm"])

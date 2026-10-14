@@ -74,6 +74,8 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-review/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-review/agents/openai.yaml").is_file())
+        self.assertTrue((self.target / "skills/learning-debug/SKILL.md").is_file())
+        self.assertTrue((self.target / "skills/learning-debug/agents/openai.yaml").is_file())
         self.assertEqual(read_json(self.target / INSTALL_MANIFEST)["target_host"], "antigravity")
         self.assertEqual(inspect_installation(self.target, _hook_commands)["target_host"], "antigravity")
         validate_release_root(runtime)
@@ -81,6 +83,9 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertTrue((runtime / "host_resources/antigravity/plugin.json").is_file())
         self.assertEqual((runtime / "host_resources/antigravity/skills/learning-review/SKILL.md").read_bytes(),
                          (self.target / "skills/learning-review/SKILL.md").read_bytes())
+        for relative in ("SKILL.md", "agents/openai.yaml"):
+            self.assertEqual((runtime / "host_resources/antigravity/skills/learning-debug" / relative).read_bytes(),
+                             (self.target / "skills/learning-debug" / relative).read_bytes())
 
     def test_enforce_hooks_use_pinned_dispatcher_with_native_command_field_only(self):
         result = self.initial("enforce")

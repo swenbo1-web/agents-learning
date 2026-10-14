@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Learning 调试"
+  short_description: "只读检查 DSH 对话绑定、项目知识目录、管理员模型、共享预算及阻塞原因"
+  default_prompt: "使用 $learning-debug 只读检查当前 DSH 项目的 Agent Learning 接入、本轮会话绑定和管理员状态，给我简短结果。"

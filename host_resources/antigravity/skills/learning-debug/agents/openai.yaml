@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Learning Debug"
+  short_description: "Check session binding, knowledge location and admin readiness"
+  default_prompt: "Use $learning-debug to check Agent Learning connectivity, this invocation binding, knowledge location and administrator readiness without changing settings."

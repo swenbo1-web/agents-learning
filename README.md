@@ -8,27 +8,11 @@
 
 在受支持事件中记录工具结果和公开工作说明，自动检索相关知识、注入有限摘要，让 Agent 在新对话中继续利用项目经验。需要时再启用管理员整理；你可以在本机浏览器中查看正式知识、来源、修订和审核待办。
 
-**版本范围：v1.0.0 发行包提供 Codex 与 Antigravity；DSH、可视化审批、管理员设置与历史整理增强位于 `main`，尚未发布新下载 Release。`main` 使用 schema／内部协议 16，更新前需备份数据库并更新全部共库安装。**
+**以下使用 `main` 源码；原 v1.0.0 发行包不含全部新功能。已有安装请先看[版本与共库升级](#当前版本与兼容)。**
 
 [Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [打开知识库](#打开可视化知识库) · [完整架构](#完整架构)
 
 Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0)
-
-## 核心能力
-
-| 功能 | 可以做什么 |
-|---|---|
-| **项目记忆与文件历史** | 跨对话查阅项目知识、工作尝试和文件关联；提示来源及文件状态变化 |
-| **自动记录与错误补查** | 记录可观察的工具结果和公开说明；遇错后在受支持事件中补查经验 |
-| **检索、注入与渐进读取** | 本地全文检索，可选语义混合检索；自动提供有限摘要，Agent 按适用条件判断，再按需读取正文与证据 |
-| **知识库可视化** | 本机查看正式知识、来源、修订与待办；`main` 新增候选详情、发布检查和可视化批量审批 |
-| **已有项目历史吸收** | 用户主动导入项目文档、源码和选定的对话历史，保留来源与覆盖报告 |
-| **可选管理员整理** | 在界面手动开启、选择模型与共享预算；默认绑定项目首次有效会话模型，按待办连续处理有限小批 |
-| **知识维护与审核** | 保存适用条件、限制和证据；可用 `learning-review` 打开审批台，支持反例反馈、修订、晋升与撤销 |
-| **任务保护与效果评估** | 可选执行范围保护；管理上下文和审核预算，对照评估有／无记忆任务 |
-| **共享与安装维护** | 同机、同数据目录、同项目共享知识，切换登录账户保留项目知识；按宿主分别安装，保留配置升级，可选 GitHub 更新提醒 |
-
-**默认工作记录与全文检索由本地程序执行，不额外调用生成模型；被宿主纳入模型输入的知识仍占上下文和输入 token。** 管理员、AI 摘要、语义模型、后台调度、自动发布和更新检查均需另行开启。历史吸收需用户主动启动；跨设备知识同步尚未提供。实际 token、耗时与质量收益需通过任务对照评估确认。
 
 ## 快速开始
 
@@ -42,6 +26,21 @@ cd agents-learning
 ```
 
 下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；使用多个宿主时分别安装。需要固定稳定版时，可将克隆命令的 `main` 改为 `v1.0.0`，该版本仅使用下方 Codex／Antigravity 步骤。
+
+## 在 Codex 中安装（桌面端与 CLI）
+
+需要支持 `codex plugin` 的 [Codex CLI](https://learn.chatgpt.com/docs/cli)，使用与桌面端相同的系统用户及 `CODEX_HOME`。
+
+以下使用**默认知识目录**。若已设置 `ALP_HOME` 或 `ALP_CONFIG`，请先完成[自定义目录接线](#codex-自定义知识目录)，仅在安装终端设置变量不足以让 MCP 工具与 Hooks 共库。
+
+```powershell
+$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
+python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
+codex plugin marketplace add "$learningPlugin"
+codex plugin add agent-learning@agent-learning-local
+```
+
+**重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 ## 在 Antigravity 中安装（原生插件）
 
@@ -68,38 +67,34 @@ CLI 会复制插件；安装后重新启动 CLI。以后更新导出目录时，
 
 </details>
 
-## 在 Codex 中安装（桌面端与 CLI）
-
-需要支持 `codex plugin` 的 [Codex CLI](https://learn.chatgpt.com/docs/cli)，使用与桌面端相同的系统用户及 `CODEX_HOME`。
-
-以下使用**默认知识目录**。若已设置 `ALP_HOME` 或 `ALP_CONFIG`，请先完成[自定义目录接线](#codex-自定义知识目录)，仅在安装终端设置变量不足以让 MCP 工具与 Hooks 共库。
-
-```powershell
-$learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
-python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
-codex plugin marketplace add "$learningPlugin"
-codex plugin add agent-learning@agent-learning-local
-```
-
-**重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
-
 ## 在 DSH 中安装（DeepSeek Harness）
 
-使用 `main` 源码；v1.0.0 发行包不包含 DSH。支持动态工作区或绑定指定项目导出 DSH 插件 Bundle（含 Cordis Host 事件桥接、8 事件 Hook 与 MCP 配置）：
+需要支持插件 Bundle 的 DSH 和可用的 **pnpm**。导出后安装到实际使用的 profile；下面以 Web profile 为例，使用 TUI 等其他 profile 时修改第一行：
 
 ```powershell
+$learningProfile = "web"
 $learningProject = "D:\Projects\my-project"
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/dsh"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host dsh --hook-mode observe
+dsh plugin --profile "$learningProfile" add "$learningPlugin"
 ```
 
-**在 DSH 插件管理中安装或启用该本地 Bundle 目录，或挂载导出的 `mcp_config.json` 与 `hooks.json` → 开启新对话。** 覆盖升级使用 `install "$learningPlugin" --host dsh --upgrade`。
+**重新启动同一个 DSH profile → 在目标项目开启新对话。** 完整 Bundle 加载宿主事件桥接、技能、命令、Hooks 与 MCP；仅手动挂接 MCP／Hooks 不包含完整原生接入。升级先使用同宿主 `install --upgrade`，再更新该 profile 中的插件。[DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
 ## 安装是否成功
 
-在宿主的新对话中发送：
+在目标项目开启新对话，选择输入框技能菜单的 **Agent Learning 调试**，或发送：
 
-> 检查 Agent Learning：用 learning_status 确认当前项目、宿主和知识数据目录，再用本轮 Hook 提供的 context_handle 调用 session_context，确认 context_bound=true。没有句柄或绑定失败时报告原因，不猜测其他会话。
+> 使用 `$learning-debug` 检查当前项目的插件接入。
+
+应显示目标项目、宿主、知识目录，以及本轮句柄绑定状态；没有句柄时按诊断提示检查 Hooks，不猜测其他会话。
+
+<details>
+<summary>技能暂未显示时，手动检查</summary>
+
+发送：「用 learning_status 确认当前项目、宿主和知识数据目录，再用本轮 Hook 提供的 context_handle 调用 session_context，确认 context_bound=true。没有句柄或绑定失败时报告原因，不猜测其他会话。」
+
+</details>
 
 通过后说明你的任务目标，即可开始使用。初始知识库为空是正常现象；**仅出现 MCP 工具，不代表 Hooks 已接通**。
 
@@ -107,39 +102,46 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 
 安装目录已存在时，请使用[覆盖更新](#覆盖更新已有安装)。无法连接时先看[常见问题](#常见问题)。macOS／Linux 命令见[其他系统](#macoslinux-安装)。
 
+## 安装后怎么用
+
+在目标项目的新对话中选择技能，或直接发送下面的话：
+
+| 想做什么 | 直接使用 |
+|---|---|
+| 检查接入、当前任务和管理员状态 | 输入框技能菜单选择 **Agent Learning 调试**，或「使用 `$learning-debug` 检查当前项目」 |
+| 日常任务复用项目经验 | 直接说明任务；插件在支持的事件中检索和记录，Agent 按需补查 |
+| 查看详细知识库 | 「使用 `$learning-browser` 打开当前项目知识库」 |
+| 审批候选知识 | 「使用 `$learning-review` 打开知识审批台」；在页面查看证据，再批准、拒绝或暂缓 |
+| 设置管理员与预算 | 「使用 `$learning-review` 打开管理员设置」；选择模型后由用户点击「保存并开启」 |
+| 吸收已有项目历史 | 「使用 `$learning-history` 吸收当前项目选定资料，先说明范围和整理预算」 |
+
+**调试入口是技能菜单项，轻量检查状态；完整知识库和审批另由技能打开。** Codex 可在输入框技能菜单选择；Antigravity／DSH 按宿主支持的技能选择方式或直接提及技能名称。它们不是每次对话自动弹出的常驻按钮，也不是统一的原生斜杠命令。
+
+安装不会自动调用管理员模型或扫描历史。日常记录、知识候选和正式发布分别处理；新项目知识库为空是正常现象。[管理员与用量](#可选管理员执行器) · [历史吸收](#为已有项目吸收历史)
+
 ## 打开可视化知识库
 
-在源码目录执行，将项目路径换成你的实际路径：
-
-```powershell
-$learningProject = "D:\Projects\my-project"
-python -B scripts/learning.py --workspace "$learningProject" status
-python -B scripts/learning.py --workspace "$learningProject" browser --open
-```
-
-`status` 登记项目；已有项目可只执行 `browser`。若安装时自定义 `ALP_HOME`／`--home`，这里使用同一数据目录。保持终端运行，关闭时按 `Ctrl+C`。
-
-界面仅在本机提供**正式知识、来源和审核待办的只读查看**；工作历史通过 MCP／CLI 查询。完整功能见[知识浏览界面](#知识浏览界面)。
+调用 `$learning-browser` 打开本机只读知识库，搜索正式知识并查看来源、条件、限制和修订；保持当前项目及安装时的知识目录一致。[终端启动与详细参数](#知识浏览界面)
 
 ### 可视化知识审批（main）
 
-在已更新插件的项目对话中直接调用：
+调用 `$learning-review` 打开审批台或管理员设置。**打开页面不批准候选、不开启模型**；批准发布和保存并开启管理员分别由用户在页面确认。界面支持简体中文和英文，知识及证据保留原文。[审批与管理员设置](#可选管理员执行器)
 
-> 使用 `$learning-review` 为当前项目打开可视化知识审批台。
+## 核心能力
 
-技能使用当前安装的固定运行副本、宿主和知识目录打开页面。**查看候选与证据 → 勾选条目 → 点击「批准并发布」「拒绝」或「暂缓」**。打开页面不批准任何候选；页面操作由本地程序执行，不额外调用模型。支持简体中文与英文界面，知识原文和证据等级保持原样。
+| 功能 | 可以做什么 |
+|---|---|
+| **项目记忆与文件历史** | 跨对话查阅项目知识、工作尝试和文件关联；提示来源及文件状态变化 |
+| **自动记录与错误补查** | 记录可观察的工具结果和公开说明；遇错后在受支持事件中补查经验 |
+| **检索、注入与渐进读取** | 本地全文检索，可选语义混合检索；自动提供有限摘要，Agent 按适用条件判断，再按需读取正文与证据 |
+| **知识库可视化** | 本机查看正式知识、来源、修订与待办；`main` 新增候选详情、发布检查和可视化批量审批 |
+| **已有项目历史吸收** | 用户主动导入项目文档、源码和选定的对话历史，保留来源与覆盖报告 |
+| **可选管理员整理** | 在界面手动开启、选择模型与共享预算；默认绑定项目首次有效会话模型，按待办连续处理有限小批 |
+| **知识维护与审核** | 保存适用条件、限制和证据；可用 `learning-review` 打开审批台，支持反例反馈、修订、晋升与撤销 |
+| **任务保护与效果评估** | 可选执行范围保护；管理上下文和审核预算，对照评估有／无记忆任务 |
+| **共享与安装维护** | 同机、同数据目录、同项目共享知识，切换登录账户保留项目知识；按宿主分别安装，保留配置升级，可选 GitHub 更新提醒 |
 
-界面语言使用内置离线词典。已评估 translate.js；其[离线模式](https://translate.zvo.cn/4076.html)会对未覆盖的动态文本请求在线翻译，因此本版不加载外部翻译脚本或发送候选资料。
-
-源码用户也可显式启动，将项目、数据目录及宿主替换为实际值：
-
-```powershell
-python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language zh-CN
-```
-
-Antigravity／DSH 分别用 `--host antigravity`／`--host dsh`；英文界面用 `--language en`。`--home` 必须与 Hooks、MCP 使用的目录一致。安装用户通过技能使用实际已安装入口，无需另找源码目录。`learning-browser` 和不带 `--review`／`--admin-control` 的 `browser` 保持只读。**原 v1.0.0 安装需要更新到包含此功能的版本后再使用。**
-
-要设置管理员，可直接说「使用 `$learning-review` 打开当前项目的管理员设置」，或在上方命令增加 `--admin-control`；仅管理设置时可省略 `--review`。**打开页面不会启动模型，用户点击「保存并开启」才启用整理。** 设置页支持选择模型、查看待办与用量、调整日上限／每批调用数／每批时长／运行器时长。关闭管理员只停止新调用，已在途审核保留原有结果处理；切换模型需等在途审核结束。访问码、审批码和管理员控制码仅留在当前进程及页面内存，不保存到文件或日志。[管理员说明](#可选管理员执行器)
+**默认工作记录与全文检索由本地程序执行，不额外调用生成模型；被宿主纳入模型输入的知识仍占上下文和输入 token。** 管理员、AI 摘要、语义模型、后台调度、自动发布和更新检查均需另行开启。历史吸收需用户主动启动；跨设备知识同步尚未提供。实际 token、耗时与质量收益需通过任务对照评估确认。
 
 ## 工作方式
 
@@ -402,8 +404,11 @@ codex plugin add agent-learning@agent-learning-local
 DSH（`main` 源码）：
 
 ```sh
+learning_profile="web" # 改为实际使用的 DSH profile
 learning_project="/absolute/path/to/my-project"
-python3 -B scripts/learning.py --workspace "$learning_project" install "$HOME/agent-learning-plugins/dsh" --host dsh --hook-mode observe
+learning_plugin="$HOME/agent-learning-plugins/dsh"
+python3 -B scripts/learning.py --workspace "$learning_project" install "$learning_plugin" --host dsh --hook-mode observe
+dsh plugin --profile "$learning_profile" add "$learning_plugin"
 ```
 
 导出后仍需按上方步骤重新加载宿主、审阅 Hook 信任并检查新会话。可选 Python 包入口：`python -B -m pip install .` 后，把 `scripts/learning.py` 替换为 `-m agent_learning.cli`。不要移动或删除已绑定的 Python 解释器、导出目录和固定运行副本；其他机器请重新导出。
@@ -769,6 +774,14 @@ python -B scripts/learning.py --workspace . search "之前类似的导入故障�
 服务离线、响应异常或索引在查询间变化时回退到全文检索，返回 `retrieval` 诊断。临时故障最少冷却五秒，后续受支持事件可以重试，通知链继续运行。查询不隐式刷新整库。向量扫描默认最多 2000 条、候选最多 32 条，超出范围标记 `scan_truncated`；当前为有界线性扫描，没有全库 ANN 保证。启用嵌入增加本机计算和首次查询延迟，是否更快需要实测。
 
 ## 知识浏览界面
+
+技能入口：`$learning-browser` 只读浏览；`$learning-review` 打开候选审批或管理员设置。终端示例使用实际项目、知识目录及宿主：
+
+```powershell
+python -B scripts/learning.py --workspace "D:\Projects\my-project" --home "D:\AgentLearning" --host codex browser --review --open --language zh-CN
+```
+
+管理员设置用 `--admin-control`，可与 `--review` 同开；Antigravity／DSH 使用对应 `--host`，英文界面用 `--language en`。安装用户通过技能使用已安装固定入口，无需查找源码。界面词典离线内置；[translate.js 离线模式](https://translate.zvo.cn/4076.html)仍可能对未覆盖动态文本请求翻译服务，因此当前不加载外部翻译脚本，不发送知识内容。
 
 ```sh
 python -B scripts/learning.py --workspace . browser --open

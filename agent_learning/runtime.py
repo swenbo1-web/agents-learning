@@ -699,6 +699,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (project, name, value))
 
     def status(self, project):
+        from .admin_control import admission_enabled
         from .admin_usage import admin_budget_status
         from .software_updates import update_status
         counts = {}
@@ -719,6 +720,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
                 "admin_enabled": self.admin_policy(project)["enabled"],
+                "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
