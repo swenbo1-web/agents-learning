@@ -996,9 +996,9 @@ export function apply(ctx) {
         return c === r || c.startsWith(r + "\\");
       }
       const route = {
-        name: "agent-learning-ui",
+        name: "agent-learning-project-ui",
         kind: "exact",
-        path: "/agent-learning/ui",
+        path: "/agent-learning/project-ui",
         handler: async (req, res) => {
           const send = (status, body) => {
             res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
@@ -1165,10 +1165,7 @@ export function apply(ctx) {
         },
       };
       try {
-        const dispose = scope.webServer.register(route);
-        if (typeof dispose === "function") {
-          activeDisposers.push(dispose);
-        }
+        scope.effect(() => scope.webServer.register(route), "agent-learning: project-ui route");
       } catch {}
     });
   }

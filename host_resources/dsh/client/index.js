@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
 
     var PACKAGE_NAME = "agent-learning";
-    var ROUTE = "/agent-learning/ui";
+    var ROUTE = "/agent-learning/project-ui";
 
     var TEXT = {
       zh: {
