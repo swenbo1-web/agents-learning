@@ -8,11 +8,66 @@
 
 Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
-[Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [DSH installation](#install-in-dsh-deepseek-harness) · [Visual knowledge base](#open-the-visual-knowledge-base) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
+[Core capabilities](#core-capabilities) · [Visual control](#visual-control-and-the-knowledge-button) · [84-second demo](#84-second-demo) · [Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [DSH installation](#install-in-dsh-deepseek-harness) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
 **These steps use `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+
+## Core capabilities
+
+| Capability | What you get |
+|---|---|
+| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
+| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
+| Direct visual control and knowledge browser | DSH renders a project-scoped **📖 Memory / 知识库** button in the chat composer with quick frequency presets; all three hosts share a local visual WebUI showing readable project names/paths, candidate batch approval and administrator settings |
+| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
+| Optional administrator and frequency presets | Switch between simple presets (**Light 15/day, Balanced 100/day, Active 300/day, Minimal 5/day**) or expand advanced fine-tuning (daily cap, batch size and timeouts), pinning the first valid project model |
+| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
+| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
+| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
+| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
+
+No real-task net token, speed or quality gains have been established by paired evaluation.
+
+**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
+
+## Visual control and the knowledge button
+
+You can inspect and control project memory visually without memorizing CLI flags:
+
+| Visual Entry | Host & Location | What You Can Control Directly |
+|---|---|---|
+| **Composer “📖 Memory / 知识库” Button** | **DSH (DeepSeek Harness)**: automatically shown at the bottom-left of the chat input bar **only** in bound/installed projects (hidden in other projects) | Click to open the floating control panel: view the project name/path, published knowledge count, 1.0.0 work observations and pending cases; **one-click switch administrator frequency presets (Off / Minimal 5/d / Light 15/d / Balanced 100/d / Active 300/d)**; open the review console, read-only browser or absorb project history |
+| **Input Skill Picker Menu** | **Codex Desktop**: shown in the composer skill menu as **Agent Learning 调试** and **可视化知识审批** | Run a one-click read-only diagnostic (`$learning-debug`), or launch the local visual candidate review and administrator settings WebUI (`$learning-review`) |
+| **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
+
+### Open the visual knowledge base
+
+Invoke `$learning-browser` (or click **Open Visual Knowledge Browser (Read-Only)** in the DSH **📖 Memory** button popover) for the local read-only knowledge base. Search published knowledge and inspect sources, conditions, limitations and revisions using the installed project's data directory. [Terminal entry and reference](#knowledge-browser)
+
+### Visual knowledge review (main)
+
+Invoke `$learning-review` (or click **Open Review & Advanced Fine-Tuning** in the DSH **📖 Memory** button popover) for candidate approval or administrator settings. **Opening the page approves nothing and starts no model.** The user separately confirms publication or Save and enable in the page. Choose from **Light (15/day), Balanced (100/day), Active (300/day) or Minimal (5/day)** presets or expand advanced fine-tuning. English and Simplified Chinese interfaces retain original knowledge and evidence text. [Review and administrator settings](#optional-administrator-executor)
+
+## How it works
+
+1. **Retrieve.** Register the task goal. At supported events, the plugin supplies relevant knowledge cards and small working-history indices; read details by revision and section as needed.
+2. **Work and observe.** The Agent completes the task while Hooks build observations for file changes, failures, verification and public work notes. Ordinary reads help file associations without a model call per read. Errors queue follow-up retrieval.
+3. **Organize when enabled.** An administrator receives a bounded evidence packet and proposes knowledge candidates or governance changes.
+4. **Publish and reuse.** A trusted operator or explicitly enabled publication policy admits eligible knowledge. Later tasks retrieve its conditions, evidence and current revision.
+
+Knowledge is reference material; it does not grant execution permission. Tool completion, observed success and user acceptance remain separate.
+
+## 84-second demo
+
+The Chinese version uses Xiaoxiao neural narration with revised spoken copy and matching captions.
+
+[![Isolated demo: export, capture tool results, publish knowledge and retrieve in a fresh session](assets/demo-preview-en.gif)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4)
+
+[English video (MP4)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4) · [中文视频](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4) · [English captions (SRT)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.srt)
+
+The demo replays selected fields from an actual local export, SQLite tool failure and recovery, fresh-session retrieval, and read-only browser captures. Hook events run through an isolated dispatcher; administrator review uses a deterministic candidate fixture followed by explicit trusted publication. Codex setup is shown as installation-guide steps. Knowledge retains its conditions, sources and revision.
 
 ## Before installing
 
@@ -79,11 +134,11 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 dsh plugin --profile "$learningProfile" add "$learningPlugin"
 ```
 
-**Restart that DSH profile → open a conversation in the target project.** The full Bundle loads the host bridge, skills, commands, Hooks and MCP. Attaching only MCP/Hooks does not load all native components. To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
+**Restart that DSH profile → open a conversation in the target project.** The full Bundle loads the host bridge, the project-scoped **📖 Memory / 知识库** button in the composer toolbar, skills, commands, Hooks and MCP. Attaching only MCP/Hooks does not load all native components. To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
 ## Check the installation
 
-In a new target-project conversation, select **Agent Learning 调试** from the input skill menu, or send:
+In a new target-project conversation, click the DSH **📖 Memory / 知识库** button, select **Agent Learning 调试** from the Codex input skill menu, or send:
 
 > Use `$learning-debug` to check this project's plugin integration.
 
@@ -102,65 +157,18 @@ The default knowledge directory is `%LOCALAPPDATA%\AgentLearning` on Windows and
 
 ## Use it in your project
 
-In a new project conversation, select a skill or send one of these requests:
+In a new project conversation, use the visual button, select a skill, or send one of these requests:
 
 | I want to… | Use |
 |---|---|
-| Check integration, task and administrator status | Select **Agent Learning 调试** in the input skill menu, or say “Use `$learning-debug` to check this project” |
+| Check integration, task and administrator status | Click **📖 Memory / 知识库** in DSH; select **Agent Learning 调试** in the Codex input skill menu, or say “Use `$learning-debug` to check this project” |
 | Reuse project experience during a task | Describe the task; supported events retrieve and record observations, and the Agent can search further |
-| Browse detailed knowledge | “Use `$learning-browser` to open this project's knowledge base” |
-| Review candidates | “Use `$learning-review` to open candidate approval”; inspect evidence, then approve, reject or defer in the page |
-| Set up the administrator and limits | “Use `$learning-review` to open administrator settings”; choose a model, then click Save and enable yourself |
-| Absorb an existing project's history | “Use `$learning-history` for my selected project sources; explain scope and review limits first” |
-
-**Debug is a skill-menu entry for lightweight status checks. Detailed knowledge and approval open through their own skills.** Codex offers its input skill menu; in Antigravity/DSH use the available skill picker or mention the skill by name. This is neither a permanent chat button nor a shared native slash command.
+| Browse detailed knowledge | Click **Open Visual Knowledge Browser (Read-Only)** in the DSH **📖 Memory** button popover, or say “Use `$learning-browser` to open this project's knowledge base” |
+| Review candidates | Click **Open Review & Advanced Fine-Tuning** in the DSH **📖 Memory** button popover, or say “Use `$learning-review` to open candidate approval”; inspect evidence, then approve, reject or defer in the page |
+| Set up the administrator and frequency | Pick a frequency preset (**Light / Balanced / Active / Minimal**) directly in the DSH **📖 Memory** popover, or use `$learning-review` to open **Administrator settings** for model selection, presets and advanced fine-tuning |
+| Absorb an existing project's history | Click **Absorb Project History Now** in the DSH **📖 Memory** popover, or say “Use `$learning-history` for my selected project sources; explain scope and review limits first” |
 
 Installation makes no administrator call and starts no historical scan. Observations, candidates and publication are separate; an initially empty knowledge base is normal. [Administrator usage](#optional-administrator-executor) · [Historical ingestion](#absorb-history-from-an-existing-project)
-
-## Open the visual knowledge base
-
-Invoke `$learning-browser` for the local read-only knowledge base. Search published knowledge and inspect sources, conditions, limitations and revisions using the installed project's data directory. [Terminal entry and reference](#knowledge-browser)
-
-### Visual knowledge review (main)
-
-Invoke `$learning-review` for candidate approval or administrator settings. **Opening the page approves nothing and starts no model.** The user separately confirms publication or Save and enable in the page. English and Simplified Chinese interfaces retain original knowledge and evidence text. [Review and administrator settings](#optional-administrator-executor)
-
-## Core capabilities
-
-| Capability | What you get |
-|---|---|
-| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
-| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
-| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
-| Optional administrator | Manually enable in the page, choose a model and shared limits, pin the first valid project model, and process pending daily work in bounded small batches |
-| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
-| Visual knowledge browser | Locally inspect published knowledge, sources, revisions and queues; `main` adds candidate details, publication checks and visual batch review |
-| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
-| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
-| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
-
-No real-task net token, speed or quality gains have been established by paired evaluation.
-
-**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
-
-## How it works
-
-1. **Retrieve.** Register the task goal. At supported events, the plugin supplies relevant knowledge cards and small working-history indices; read details by revision and section as needed.
-2. **Work and observe.** The Agent completes the task while Hooks build observations for file changes, failures, verification and public work notes. Ordinary reads help file associations without a model call per read. Errors queue follow-up retrieval.
-3. **Organize when enabled.** An administrator receives a bounded evidence packet and proposes knowledge candidates or governance changes.
-4. **Publish and reuse.** A trusted operator or explicitly enabled publication policy admits eligible knowledge. Later tasks retrieve its conditions, evidence and current revision.
-
-Knowledge is reference material; it does not grant execution permission. Tool completion, observed success and user acceptance remain separate.
-
-## 84-second demo
-
-The Chinese version uses Xiaoxiao neural narration with revised spoken copy and matching captions.
-
-[![Isolated demo: export, capture tool results, publish knowledge and retrieve in a fresh session](assets/demo-preview-en.gif)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4)
-
-[English video (MP4)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.mp4) · [中文视频](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-zh.mp4) · [English captions (SRT)](https://github.com/swenbo1-web/agents-learning/releases/download/v0.13.0/agents-learning-demo-en.srt)
-
-The demo replays selected fields from an actual local export, SQLite tool failure and recovery, fresh-session retrieval, and read-only browser captures. Hook events run through an isolated dispatcher; administrator review uses a deterministic candidate fixture followed by explicit trusted publication. Codex setup is shown as installation-guide steps. Knowledge retains its conditions, sources and revision.
 
 ## After installation
 
