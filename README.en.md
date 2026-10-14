@@ -42,6 +42,14 @@ You can inspect and control project memory visually without memorizing CLI flags
 | **Input Skill Picker Menu** | **Codex Desktop**: shown in the composer skill menu as **Agent Learning 调试** and **可视化知识审批** | Run a one-click read-only diagnostic (`$learning-debug`), or launch the local visual candidate review and administrator settings WebUI (`$learning-review`) |
 | **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
 
+### 1. Composer “📖 Memory” Button & Quick Control Popover (DSH)
+
+![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
+
+### 2. Local Visual Knowledge Browser, Candidate Review & Frequency Presets (All Hosts)
+
+![Local Visual Knowledge Browser, Candidate Review and Administrator Frequency Presets](assets/ui-knowledge-browser-en.png)
+
 ### Open the visual knowledge base
 
 Invoke `$learning-browser` (or click **Open Visual Knowledge Browser (Read-Only)** in the DSH **📖 Memory** button popover) for the local read-only knowledge base. Search published knowledge and inspect sources, conditions, limitations and revisions using the installed project's data directory. [Terminal entry and reference](#knowledge-browser)
