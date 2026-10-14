@@ -1,6 +1,5 @@
 // Browser half of the agent-learning DSH plugin:
-// - Composer toolbar button (`conversation.input.left`) with a popover menu
-// - Sidebar footer action button (`sidebar.footer.action`)
+// - Composer toolbar button (`conversation.input.left`) shown ONLY for the bound/installed project
 // - Plugins page configuration card (`plugins.bundle.config` / `settings.plugin.item`)
 window.__ModuleLoader__.load({
   id: "agent-learning",
@@ -16,15 +15,13 @@ window.__ModuleLoader__.load({
         button: "知识库",
         title: "Agent Learning 项目记忆与知识库",
         subtitle: "查看项目知识、工作历史、候选审批与管理员设置",
-        project: "项目 ID",
-        home: "知识目录",
+        currentProject: "当前绑定项目",
         knowledge: "正式知识",
         workMemory: "工作观察",
         pendingCases: "待审案例",
         admin: "自动管理员",
         adminOn: "已开启",
         adminOff: "已关闭",
-        remainingCalls: "今日剩余额度",
         openBrowser: "打开可视化知识库（只读）",
         openReview: "打开知识审批与管理员设置",
         runDebug: "发送 $learning-debug 调试检查",
@@ -44,15 +41,13 @@ window.__ModuleLoader__.load({
         button: "Memory",
         title: "Agent Learning Project Memory",
         subtitle: "Inspect knowledge, work history, candidate review and administrator settings",
-        project: "Project ID",
-        home: "Knowledge Home",
+        currentProject: "Bound Project",
         knowledge: "Published Knowledge",
         workMemory: "Work Observations",
         pendingCases: "Pending Cases",
         admin: "Administrator",
         adminOn: "Enabled",
         adminOff: "Disabled",
-        remainingCalls: "Remaining Daily Calls",
         openBrowser: "Open Visual Knowledge Browser (Read-Only)",
         openReview: "Open Knowledge Review & Admin Settings",
         runDebug: "Send $learning-debug Check",
@@ -106,8 +101,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function fetchStatus() {
-      return fetch(ROUTE).then(function (r) {
+    function fetchStatus(cwd) {
+      var url = cwd ? ROUTE + "?cwd=" + encodeURIComponent(cwd) : ROUTE;
+      return fetch(url).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
             throw new Error((body && body.error) || "status error");
@@ -117,11 +113,11 @@ window.__ModuleLoader__.load({
       });
     }
 
-    function postAction(action, extra) {
+    function postAction(action, cwd) {
       return fetch(ROUTE, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(Object.assign({ action: action }, extra || {})),
+        body: JSON.stringify({ action: action, cwd: cwd || undefined }),
       }).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
@@ -132,13 +128,14 @@ window.__ModuleLoader__.load({
       });
     }
 
-    function buildControlPanel(react, localeRef, compact) {
+    function buildControlPanel(react, localeRef) {
       var h = react.createElement;
 
       return function AgentLearningPanel(props) {
+        var cwd = props && props.cwd ? props.cwd : "";
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
-        var statePair = react.useState(null);
+        var statePair = react.useState(props && props.initialSummary ? props.initialSummary : null);
         var notePair = react.useState("");
         var busyPair = react.useState(false);
         var summary = statePair[0];
@@ -148,24 +145,30 @@ window.__ModuleLoader__.load({
         var busy = busyPair[0];
         var setBusy = busyPair[1];
 
-        var reload = react.useCallback(function () {
-          fetchStatus()
-            .then(function (data) {
-              setSummary(data);
-            })
-            .catch(function (err) {
-              setNote(String((err && err.message) || t.failed));
-            });
-        }, [t.failed]);
+        var reload = react.useCallback(
+          function () {
+            fetchStatus(cwd)
+              .then(function (data) {
+                setSummary(data);
+              })
+              .catch(function (err) {
+                setNote(String((err && err.message) || t.failed));
+              });
+          },
+          [cwd, t.failed]
+        );
 
-        react.useEffect(function () {
-          reload();
-        }, [reload]);
+        react.useEffect(
+          function () {
+            reload();
+          },
+          [reload]
+        );
 
         function trigger(action, startMsg, doneFn) {
           setBusy(true);
           setNote(startMsg);
-          postAction(action)
+          postAction(action, cwd)
             .then(function (res) {
               setBusy(false);
               setNote(doneFn(res));
@@ -264,6 +267,24 @@ window.__ModuleLoader__.load({
               t.refresh
             )
           ),
+          summary && summary.project_name
+            ? h(
+                "div",
+                {
+                  style: {
+                    fontSize: "11.5px",
+                    color: "var(--dsw-alias-label-secondary, rgba(127,127,127,0.9))",
+                    padding: "5px 8px",
+                    borderRadius: "6px",
+                    background: "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.06))",
+                    wordBreak: "break-all",
+                  },
+                },
+                h("strong", null, summary.project_name),
+                " · ",
+                h("span", { style: { opacity: 0.8 } }, summary.workspace || "")
+              )
+            : null,
           summary
             ? h(
                 "div",
@@ -393,15 +414,51 @@ window.__ModuleLoader__.load({
 
     function createComposerButton(react, localeRef) {
       var h = react.createElement;
-      var Panel = buildControlPanel(react, localeRef, true);
+      var Panel = buildControlPanel(react, localeRef);
 
       return function ComposerLearningButton(props) {
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
+        var sessionCwd =
+          props && typeof props.useSession === "function"
+            ? props.useSession(function (s) {
+                return s && s.cwd ? s.cwd : "";
+              })
+            : "";
+
+        var checkPair = react.useState(null);
+        var summary = checkPair[0];
+        var setSummary = checkPair[1];
         var openPair = react.useState(false);
         var open = openPair[0];
         var setOpen = openPair[1];
         var wrapRef = react.useRef(null);
+
+        react.useEffect(
+          function () {
+            if (!sessionCwd) {
+              setSummary(null);
+              setOpen(false);
+              return;
+            }
+            var cancelled = false;
+            fetchStatus(sessionCwd)
+              .then(function (data) {
+                if (!cancelled) {
+                  setSummary(data && data.installed ? data : null);
+                }
+              })
+              .catch(function () {
+                if (!cancelled) {
+                  setSummary(null);
+                }
+              });
+            return function () {
+              cancelled = true;
+            };
+          },
+          [sessionCwd]
+        );
 
         react.useEffect(
           function () {
@@ -418,6 +475,11 @@ window.__ModuleLoader__.load({
           },
           [open]
         );
+
+        // 未安装或未绑定 Agent Learning 的项目对话，完全隐藏知识库图标
+        if (!sessionCwd || !summary || !summary.installed) {
+          return null;
+        }
 
         var handleSendPrompt = function (promptText) {
           setOpen(false);
@@ -436,7 +498,7 @@ window.__ModuleLoader__.load({
             "button",
             {
               type: "button",
-              title: t.title,
+              title: t.title + (summary.project_name ? " (" + summary.project_name + ")" : ""),
               "aria-expanded": open,
               onClick: function () {
                 setOpen(!open);
@@ -472,7 +534,7 @@ window.__ModuleLoader__.load({
                     position: "absolute",
                     bottom: "calc(100% + 8px)",
                     left: 0,
-                    width: "310px",
+                    width: "320px",
                     padding: "12px",
                     borderRadius: "12px",
                     border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.35))",
@@ -481,53 +543,16 @@ window.__ModuleLoader__.load({
                     zIndex: 1000,
                   },
                 },
-                h(Panel, { onSendPrompt: handleSendPrompt })
+                h(Panel, { cwd: sessionCwd, initialSummary: summary, onSendPrompt: handleSendPrompt })
               )
             : null
         );
       };
     }
 
-    function createSidebarFooterButton(react, localeRef) {
-      var h = react.createElement;
-      return function SidebarLearningAction(props) {
-        var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
-        var t = getLabels(activeLocale);
-        var wide = !props || props.wide !== false;
-        return h(
-          "button",
-          {
-            type: "button",
-            title: t.title,
-            onClick: function () {
-              postAction("open_review").catch(function () {});
-            },
-            style: {
-              appearance: "none",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "6px",
-              height: "32px",
-              padding: wide ? "0 10px" : "0 8px",
-              borderRadius: "8px",
-              border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.28))",
-              background: "transparent",
-              color: "var(--dsw-alias-label-secondary, inherit)",
-              font: "inherit",
-              fontSize: "12.5px",
-              cursor: "pointer",
-            },
-          },
-          bookIcon(h, 15),
-          wide ? h("span", null, t.button) : null
-        );
-      };
-    }
-
     function createSettingsCard(react, localeRef) {
       var h = react.createElement;
-      var Panel = buildControlPanel(react, localeRef, false);
+      var Panel = buildControlPanel(react, localeRef);
       return function SettingsCard(props) {
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
@@ -571,19 +596,12 @@ window.__ModuleLoader__.load({
           return;
         }
         var ComposerBtn = createComposerButton(react, localeRef);
-        var SidebarBtn = createSidebarFooterButton(react, localeRef);
         var Card = createSettingsCard(react, localeRef);
 
         scope.slots.inject("conversation.input.left", function* () {
           yield scope.slots.register(
             { name: "conversation.input.left", id: "agent-learning-button", order: 20, label: "知识库" },
             ComposerBtn
-          );
-        });
-        scope.slots.inject("sidebar.footer.action", function* () {
-          yield scope.slots.register(
-            { name: "sidebar.footer.action", id: "agent-learning-footer", order: 20, label: "知识库" },
-            SidebarBtn
           );
         });
         scope.slots.inject("plugins.bundle.config", function* () {

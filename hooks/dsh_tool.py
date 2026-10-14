@@ -276,6 +276,21 @@ def main():
         if not isinstance(workspace, str) or not workspace.strip():
             _emit({"ok": False, "error": "workspace is required"})
             return 0
+        if payload.get("check_registered_only") is True:
+            import os
+            from agent_learning.knowledge_browser import resolve_browser_project
+            default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning"
+                            if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
+            home = Path(payload.get("home") or os.environ.get("ALP_HOME") or default_home).resolve()
+            db_file = home / "runtime.sqlite3"
+            if not db_file.is_file():
+                _emit({"ok": True, "result": {"registered": False}})
+                return 0
+            try:
+                resolve_browser_project(db_file, workspace)
+            except Exception:
+                _emit({"ok": True, "result": {"registered": False}})
+                return 0
         runtime = Runtime(home=payload.get("home"), host="dsh")
         project = runtime.project(workspace)
 

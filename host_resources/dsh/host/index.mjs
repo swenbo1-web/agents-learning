@@ -982,6 +982,19 @@ export function apply(ctx) {
     });
     ctx.inject(["webServer"], (scope) => {
       if (!scope?.webServer || typeof scope.webServer.register !== "function") return;
+      function normalizeWinPath(p) {
+        return String(p || "")
+          .trim()
+          .replace(/\//g, "\\")
+          .replace(/\\+$/, "")
+          .toLowerCase();
+      }
+      function isWithinWorkspace(childPath, rootPath) {
+        const c = normalizeWinPath(childPath);
+        const r = normalizeWinPath(rootPath);
+        if (!c || !r) return false;
+        return c === r || c.startsWith(r + "\\");
+      }
       const route = {
         name: "agent-learning-ui",
         kind: "exact",
@@ -1002,14 +1015,28 @@ export function apply(ctx) {
             send(500, { ok: false, error: "runtime receipt unavailable" });
             return;
           }
-          const workspace = receipt.workspace || process.cwd();
-          const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
+          const reqUrl = new URL(req.url || "/agent-learning/ui", "http://127.0.0.1");
+          const requestedCwd = (reqUrl.searchParams.get("cwd") || "").trim();
+          const boundWorkspace = receipt.workspace || "";
 
           if (req.method === "GET") {
+            // 若传入了当前会话的 cwd，严格核对该 cwd 是否属于已安装绑定的项目；
+            // 未安装的其他项目返回 installed: false，前端隐藏知识库按钮。
+            if (boundWorkspace && requestedCwd && !isWithinWorkspace(requestedCwd, boundWorkspace)) {
+              send(200, { ok: true, installed: false, reason: "outside_bound_workspace" });
+              return;
+            }
+            const workspace = requestedCwd || boundWorkspace;
+            if (!workspace) {
+              send(200, { ok: true, installed: false, reason: "no_workspace" });
+              return;
+            }
+            const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
             try {
               const inputPayload = JSON.stringify({
                 home: receipt.home || null,
                 workspace,
+                check_registered_only: !boundWorkspace,
                 slash_command: "learning-status",
                 raw_input: "/learning-status",
               });
@@ -1022,11 +1049,18 @@ export function apply(ctx) {
                 15000,
               );
               const parsed = code === 0 && stdout.trim() ? JSON.parse(stdout.trim()) : null;
+              if (parsed?.ok && parsed.result?.registered === false) {
+                send(200, { ok: true, installed: false, reason: "workspace_not_registered" });
+                return;
+              }
               const data = parsed?.ok ? parsed.result?.data || {} : {};
               const browserStat = await manageBrowser("status", {}, workspace).catch(() => ({ running: false }));
+              const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
               send(200, {
                 ok: true,
+                installed: true,
                 project_id: data.project_id || "unknown",
+                project_name: projectName,
                 workspace,
                 home: data.home || receipt.home || "",
                 host_scope: data.host_scope || "dsh:default",
@@ -1065,6 +1099,13 @@ export function apply(ctx) {
             }
             const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
             const action = body?.action;
+            const bodyCwd = typeof body?.cwd === "string" ? body.cwd.trim() : "";
+            if (boundWorkspace && bodyCwd && !isWithinWorkspace(bodyCwd, boundWorkspace)) {
+              send(403, { ok: false, error: "project is not bound to this Agent Learning installation" });
+              return;
+            }
+            const workspace = bodyCwd || boundWorkspace || process.cwd();
+            const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
 
             if (action === "open_browser") {
               const info = await manageBrowser(

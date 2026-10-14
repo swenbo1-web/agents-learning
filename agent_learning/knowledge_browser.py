@@ -389,7 +389,10 @@ def _read_api(db, project, route, params):
             "SELECT " + column + ",COUNT(*) FROM " + table + " WHERE project=? GROUP BY " + column, (project,))}
         knowledge_count = db.execute("SELECT COUNT(DISTINCT id) FROM knowledge WHERE project=?", (project,)).fetchone()[0]
         active_count = count("active")
-        return {"project_id": project, "read_only": True,
+        path_row = db.execute("SELECT path FROM project_paths WHERE project=? ORDER BY length(path) ASC,path ASC LIMIT 1", (project,)).fetchone()
+        project_path = path_row[0] if path_row and isinstance(path_row[0], str) else ""
+        project_name = Path(project_path).name if project_path else ""
+        return {"project_id": project, "project_name": project_name, "project_path": project_path, "read_only": True,
                 "schema_version": db.execute("PRAGMA user_version").fetchone()[0],
                 "knowledge_total": knowledge_count, "knowledge_active": active_count,
                 "knowledge_revoked": knowledge_count - active_count,
