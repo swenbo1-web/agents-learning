@@ -385,6 +385,7 @@ export function apply(ctx) {
   const scopedAgentIds = new Set();
   const activeDisposers = [];
   let sessionQueryService = null;
+  let clientModulesDebug = "not_injected";
 
   if (typeof ctx.inject === "function") {
     ctx.inject(["sessionQuery"], (scope) => {
@@ -1209,32 +1210,68 @@ export function apply(ctx) {
       };
       try {
         scope.effect(() => scope.webServer.register(route), "agent-learning: project-ui route");
+        const clientBundleRoute = {
+          name: "agent-learning-client-bundle",
+          kind: "exact",
+          path: "/plugins/agent-learning/client.js",
+          handler: (_req, res) => {
+            try {
+              const code = readFileSync(join(PLUGIN_ROOT, "client", "index.js"));
+              res.writeHead(200, {
+                "content-type": "text/javascript; charset=utf-8",
+                "cache-control": "no-cache",
+              });
+              res.end(code);
+            } catch {
+              res.writeHead(404).end();
+            }
+          },
+        };
+        scope.effect(() => scope.webServer.register(clientBundleRoute), "agent-learning: client bundle route");
       } catch {}
     });
     ctx.inject(["clientModules"], (scope) => {
       const cm = scope?.clientModules;
       if (!cm) return;
-      try {
-        const meta = {
-          clientPath: join(PLUGIN_ROOT, "client", "index.js"),
-          external: [],
-          immediately: true,
-        };
-        if (cm.pkgMeta instanceof Map) {
-          cm.pkgMeta.set("agent-learning", meta);
+      const syncClientModule = () => {
+        try {
+          const clientPath = join(PLUGIN_ROOT, "client", "index.js");
+          const rev = String(Date.now()).slice(-12);
+          const meta = {
+            clientPath,
+            external: [],
+            immediately: true,
+          };
+          const entry = {
+            id: "agent-learning",
+            url: `/plugins/agent-learning/client.js?rev=${rev}`,
+            rev,
+            immediately: true,
+          };
+          if (cm.pkgMeta instanceof Map) {
+            cm.pkgMeta.set("agent-learning", meta);
+          }
+          if (cm.table instanceof Map) {
+            cm.table.set("agent-learning", { entry, meta });
+          }
+          if (typeof cm.compose === "function") {
+            cm.composed = cm.compose();
+            cm.notifyGraphChanged?.();
+          }
+          if (cm.rebuildListeners instanceof Set) {
+            for (const notify of cm.rebuildListeners) {
+              try {
+                notify("agent-learning", rev);
+              } catch {}
+            }
+          }
+          clientModulesDebug = "synced:" + (cm.clientPath?.("agent-learning") || "none");
+        } catch (err) {
+          clientModulesDebug = "error:" + String(err?.message || err);
         }
-        if (cm.table instanceof Map) {
-          cm.table.delete("agent-learning");
-        }
-        if (typeof cm.processOne === "function") {
-          cm.processOne("agent-learning");
-        }
-        if (typeof cm.compose === "function") {
-          cm.composed = cm.compose();
-          cm.notifyGraphChanged?.();
-        }
-        cm.rebuilt?.("agent-learning");
-      } catch {}
+      };
+      syncClientModule();
+      setTimeout(syncClientModule, 50);
     });
   }
 
