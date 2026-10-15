@@ -1,4 +1,4 @@
 {
   "name": "agent-learning",
-  "description": "Local project memory for Antigravity: work and file history, progressive retrieval, explicit history import, visual knowledge approval and optional administrator settings. Use dedicated skills for lightweight debugging and detailed views."
+  "description": "Project-scoped memory and a native control side panel for supported Antigravity App versions: work/file history, progressive retrieval, explicit history archival, visual knowledge approval and optional administrator settings. Unsupported surfaces retain dedicated skills."
 }

@@ -131,12 +131,13 @@ console.log(JSON.stringify({ skills, commands, tools }));
         expected_directory = self.target / "skills/learning-review"
         self.assertEqual(review["resourceBase"]["kind"], "directory")
         self.assertEqual(Path(review["resourceBase"]["path"]), expected_directory)
-        self.assertEqual(review["content"], (expected_directory / "SKILL.md").read_text(encoding="utf-8"))
+        # Node preserves resource line endings; compare the exact decoded bytes on every platform.
+        self.assertEqual(review["content"], (expected_directory / "SKILL.md").read_bytes().decode("utf-8"))
         self.assertEqual(review["source"], "bundled")
         debug = skills["learning-debug"]
         self.assertEqual(debug["resourceBase"]["kind"], "directory")
         self.assertEqual(Path(debug["resourceBase"]["path"]), self.target / "skills/learning-debug")
-        self.assertEqual(debug["content"], (self.target / "skills/learning-debug/SKILL.md").read_text(encoding="utf-8"))
+        self.assertEqual(debug["content"], (self.target / "skills/learning-debug/SKILL.md").read_bytes().decode("utf-8"))
         self.assertEqual(debug["source"], "bundled")
         self.assertIn("learning-browser", result["commands"])
         self.assertIn("learning-debug", result["commands"])

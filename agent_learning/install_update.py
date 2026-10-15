@@ -224,7 +224,7 @@ def dsh_hooks(runtime, python, mode, command_builder, workspace=None, home=None)
     return hooks
 
 
-def mcp_document(runtime, python, host="codex", workspace=None, home=None):
+def mcp_document(runtime, python, host="codex", workspace=None, home=None, *, panel_installation=None):
     arguments = [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]
     if host == "antigravity":
         arguments = ["-B", str(runtime / "scripts/learning.py"), "--workspace", workspace, "--home", home,
@@ -236,6 +236,10 @@ def mcp_document(runtime, python, host="codex", workspace=None, home=None):
         if home is not None:
             arguments.extend(["--home", home])
         arguments.extend(["serve", "--role", "worker", "--host", "dsh"])
+    if panel_installation is not None:
+        if host != "codex":
+            raise ContractError("MCP panel installation binding applies only to Codex")
+        arguments.extend(["--panel-installation", str(panel_installation)])
     return {"mcpServers": {"agent_learning": {"command": python, "args": arguments}}}
 
 
@@ -262,6 +266,13 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
             or not Path(receipt["python"]).is_absolute()
             or receipt.get("hook_mode") not in (None, "observe", "enforce")):
         raise ContractError("existing installation runtime receipt is invalid")
+    if "panel_workspace" in receipt:
+        value = receipt["panel_workspace"]
+        if host != "codex" or not isinstance(value, str) or not Path(value).is_absolute():
+            raise ContractError("existing installation panel workspace binding is invalid")
+        panel_workspace = safe_path(value)
+        if not panel_workspace.is_dir() or str(panel_workspace) != value:
+            raise ContractError("existing installation panel workspace must be a canonical existing directory")
     if host == "antigravity":
         if (receipt.get("hook_mode") not in ("observe", "enforce")
                 or any(not isinstance(receipt.get(name), str) or not Path(receipt[name]).is_absolute()
@@ -301,7 +312,8 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
           or not isinstance(plugin.get("description"), str)):
         raise ContractError("existing installation is not a valid Antigravity plugin export")
     # 这些文件只含安装时的固定路径；其余受管理文件必须与旧发布副本一致。
-    mcp = mcp_document(runtime, receipt["python"], host, receipt.get("workspace"), receipt.get("home"))
+    mcp = mcp_document(runtime, receipt["python"], host, receipt.get("workspace"), receipt.get("home"),
+                       panel_installation=target if "panel_workspace" in receipt else None)
     mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
     hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
     if host == "codex":

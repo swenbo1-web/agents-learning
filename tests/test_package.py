@@ -45,7 +45,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import",
-                               "work_memory", "work_files", "work_summaries", "dsh"):
+                               "work_memory", "work_files", "work_summaries", "dsh",
+                               "panel_control", "panel_ui", "panel_browser"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/README.en.md", wheel.namelist())
@@ -53,11 +54,16 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/agents/openai.yaml", wheel.namelist())
                 for prefix in ("skills", "host_resources/antigravity/skills", "host_resources/dsh/skills"):
-                    for skill in ("learning-review", "learning-debug"):
+                    for skill in (("learning-review", "learning-debug", "learning-panel")
+                                  if prefix != "host_resources/dsh/skills" else ("learning-review", "learning-debug")):
                         for relative in ("SKILL.md", "agents/openai.yaml"):
                             path = f"agent_learning/_plugin_resources/{prefix}/{skill}/{relative}"
                             self.assertIn(path, wheel.namelist())
                             self.assertEqual(wheel.read(path), (source_root / prefix / skill / relative).read_bytes())
+                for relative in ("sidecar.json", "main.mjs", "index.html"):
+                    path = "agent_learning/_plugin_resources/host_resources/antigravity/sidecars/control/" + relative
+                    self.assertIn(path, wheel.namelist())
+                    self.assertEqual(wheel.read(path), (source_root / "host_resources/antigravity/sidecars/control" / relative).read_bytes())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/rules/learning.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/antigravity/skills/learning-history/SKILL.md", wheel.namelist())

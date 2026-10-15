@@ -7,7 +7,7 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Learning",
-    "shortDescription": "项目记忆、技能调试、可视化知识审批与管理员设置",
+    "shortDescription": "项目记忆、项目控制卡、可视化知识审批与管理员设置",
     "longDescription": "自动记录可见工作结果和文件历史，检索项目经验并按需读取证据。技能菜单可运行轻量调试；详细知识库、候选审批和管理员设置由专用技能打开。支持用户主动历史吸收、宿主模型整理、共享预算、知识修订与撤销、任务对照评估，以及保留配置升级和更新提醒。默认本地 SQLite；管理员模型调用需单独开启。"
   }
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Learning 控制面板"
+  short_description: "打开项目对话控制卡，使用按钮查看状态、知识库和审批并确认管理员设置"
+  default_prompt: "使用 $learning-panel 打开当前项目的 Agent Learning 可视化控制卡，供我通过按钮操作。"

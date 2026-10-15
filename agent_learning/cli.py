@@ -17,7 +17,7 @@ from .runtime import ContractError, Runtime, encode
 def parser():
     p = argparse.ArgumentParser(description="Agent Learning 本地插件运行端")
     p.add_argument("--home", help="持久数据目录（默认ALP_HOME或用户数据目录）")
-    p.add_argument("--workspace", help="当前项目目录；Antigravity首次安装必须显式指定")
+    p.add_argument("--workspace", help="当前项目目录；Antigravity首次安装必填，Codex安装时仅绑定可视化面板项目")
     p.add_argument("--host", choices=["codex", "antigravity", "dsh"], default="codex", help="宿主会话与安装配置")
     p.add_argument("--host-instance", default="default", help="受信Runtime命令的宿主实例；安装导出当前固定为default")
     sub = p.add_subparsers(dest="command", required=True)
@@ -106,6 +106,9 @@ def parser():
     serve.add_argument("--host", choices=["codex", "antigravity", "dsh"], default=argparse.SUPPRESS)
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
     serve.add_argument("--context-handle", help="受信显式绑定句柄；Codex可使用ALP_CONTEXT_HANDLE，Antigravity不继承环境句柄")
+    serve.add_argument("--panel-installation", help="Codex可视化面板对应的已验证项目安装目录")
+    panel = sub.add_parser("panel-serve", help="供原生宿主界面调用的有限JSON控制桥，不执行任意命令")
+    panel.add_argument("--installation", required=True, help="当前项目的原生插件安装目录")
     bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
     bind.add_argument("--conversation", required=True)
     bind.add_argument("--agent-id")
@@ -289,13 +292,20 @@ def main(argv=None):
             print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode,
                                  upgrade=args.upgrade, expected_release_id=args.expected_release_id,
                                  host=args.host, **({"workspace": args.workspace, "home": args.home}
-                                                   if args.host in {"antigravity", "dsh"} else {}))))
+                                                   if args.host in {"antigravity", "dsh"}
+                                                   else {"panel_workspace": args.workspace}))))
             return 0
         except (ContractError, OSError) as exc:
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
             return 1
     runtime = None
     try:
+        if args.command == "panel-serve":
+            from .panel_control import serve_panel
+            if hasattr(sys.stdin, "reconfigure"):
+                sys.stdin.reconfigure(encoding="utf-8")
+            serve_panel(args.installation)
+            return 0
         if args.command in {"admin-configure", "work-rebuild"} and not args.workspace:
             raise ContractError(f"{args.command} requires an explicit --workspace")
         if args.command.startswith("history-"):
@@ -407,7 +417,8 @@ def main(argv=None):
             handle = args.context_handle
             if handle is None and args.host == "codex":
                 handle = os.environ.get("ALP_CONTEXT_HANDLE")
-            Server(runtime, project, args.role, context_handle=handle, workspace=args.workspace).serve()
+            Server(runtime, project, args.role, context_handle=handle, workspace=args.workspace,
+                   panel_installation=args.panel_installation).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
         elif args.command == "history-prepare":

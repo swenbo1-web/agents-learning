@@ -127,7 +127,8 @@ class BrowserServer(ThreadingHTTPServer):
     block_on_close = False
 
     def __init__(self, database, project, *, host="127.0.0.1", port=0, token=None,
-                 review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default"):
+                 review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default",
+                 access_guard=None):
         if host != "127.0.0.1":
             raise ContractError("browser host must be 127.0.0.1")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
@@ -137,6 +138,9 @@ class BrowserServer(ThreadingHTTPServer):
         if token is not None and (not isinstance(token, str) or len(token) < 32 or len(token) > 200
                                   or not token.isascii() or not token.isalnum()):
             raise ContractError("browser token must be 32..200 ASCII letters or digits")
+        if access_guard is not None and not callable(access_guard):
+            raise ContractError("browser access guard must be callable")
+        self.access_guard = access_guard
         self.database = Path(database).expanduser().resolve(strict=True)
         if not isinstance(review, bool) or not isinstance(admin_control, bool) or not isinstance(language, str) or language not in UI_LANGUAGES:
             raise ContractError("invalid browser mode or language")
@@ -194,10 +198,11 @@ class BrowserServer(ThreadingHTTPServer):
 
 
 def make_browser_server(database, project, *, host="127.0.0.1", port=0, token=None,
-                        review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default"):
+                        review=False, admin_control=False, language="auto", runtime_host="codex", runtime_instance="default",
+                        access_guard=None):
     return BrowserServer(database, project, host=host, port=port, token=token,
                          review=review, admin_control=admin_control, language=language, runtime_host=runtime_host,
-                         runtime_instance=runtime_instance)
+                         runtime_instance=runtime_instance, access_guard=access_guard)
 
 
 class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
@@ -229,6 +234,15 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _boundary(self):
+        guard = self.server.access_guard
+        if guard is not None:
+            try:
+                valid = guard() is True
+            except Exception:
+                valid = False
+            if not valid:
+                self._send(403, {"error": "browser access expired; reopen the current project panel"})
+                return False
         expected = "127.0.0.1:" + str(self.server.server_address[1])
         if self.headers.get_all("Host") != [expected]:
             self._send(403, {"error": "invalid host"})

@@ -20,6 +20,23 @@ STRINGS = {"type": "array", "items": S}
 METADATA = schema({key: S for key in sorted(METADATA_KEYS)})
 CATEGORY = {"type": "string", "enum": sorted(CATEGORIES)}
 KNOWLEDGE_KIND = {"type": "string", "enum": sorted(KNOWLEDGE_KINDS)}
+PANEL_EXPECTED = schema({key: {"type": "integer", "minimum": 0} for key in (
+    "expected_policy_version", "expected_budget_version", "expected_settings_version",
+    "expected_session_epoch", "expected_governance_epoch")}, (
+    "expected_policy_version", "expected_budget_version", "expected_settings_version",
+    "expected_session_epoch", "expected_governance_epoch"))
+PANEL_TOOLS = [
+    ("learning_panel", "打开当前已安装项目的轻量控制卡；仅展示状态，不开启管理员或历史吸收。需要本轮真实会话句柄；不支持UI时使用learning-debug。",
+     schema({"context_handle": NONEMPTY})),
+    ("learning_panel_action", "仅供控制卡按钮使用；需要当前卡片的私有能力及真实会话句柄，不能用作模型执行入口。",
+     schema({"capability": {"type": "string", "minLength": 1, "maxLength": 256},
+             "context_handle": NONEMPTY,
+             "action": {"type": "string", "enum": ["status", "open_browser", "open_review", "set_admin_preset", "archive_history"]},
+             "request_id": {"type": "string", "minLength": 1, "maxLength": 200},
+             "expected": PANEL_EXPECTED,
+             "preset": {"type": "string", "enum": ["off", "minimal", "light", "balanced", "active"]},
+             "confirm": {"type": "boolean"}}, ("capability", "context_handle", "action"))),
+]
 KNOWLEDGE_FILTERS = schema({**{key: NONEMPTY for key in sorted(METADATA_KEYS)},
                             "category": CATEGORY, "knowledge_kind": KNOWLEDGE_KIND})
 TASK_SCOPE = {"type": "object", "additionalProperties": True, "properties": {
@@ -156,6 +173,13 @@ class ProtocolError(ContractError):
         self.code, self.data = code, data
 
 
+class _PanelResult(dict):
+    """模型可见结果与仅交给UI的短期能力分开，普通encode不会序列化私有字段。"""
+    def __init__(self, body, private):
+        super().__init__(body)
+        self.panel_private = private
+
+
 def error_response(ident, code, message, data=None):
     error = {"code": code, "message": message}
     if data is not None:
@@ -167,7 +191,8 @@ class Server:
     MAX_MESSAGE_BYTES = 2 * 1024 * 1024
     SUPPORTED_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
-    def __init__(self, runtime, project, role="worker", context_handle=None, workspace=None):
+    def __init__(self, runtime, project, role="worker", context_handle=None, workspace=None,
+                 panel_installation=None):
         if role not in {"worker", "admin"}:
             raise ContractError("invalid server role")
         self.runtime, self.project = runtime, project
@@ -181,6 +206,41 @@ class Server:
         self.state, self.protocol_version = "new", None
         self.tools = {name: (description, contract) for name, description, contract in
                       WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])}
+        self.panel, self.panel_ui_supported = None, False
+        if panel_installation is not None and role == "worker":
+            from .panel_control import PanelControl
+            self.panel = PanelControl(runtime, project, workspace, panel_installation, require_context=True)
+            if self.panel.eligible():
+                self.tools[PANEL_TOOLS[0][0]] = PANEL_TOOLS[0][1:]
+
+    def _panel_eligible(self):
+        return self.panel is not None and self.panel.eligible()
+
+    def _panel_call(self, name, args):
+        if not self._panel_eligible() or not self.panel_ui_supported:
+            if name == "learning_panel_action":
+                raise ContractError("panel UI is unavailable; reopen learning-panel in a supported client")
+            return {"visible": False, "reason": "panel_ui_unavailable", "fallback_skill": "learning-debug"}
+        # 旧连接的默认句柄不能证明当前对话；打开卡片和每次按钮操作均显式提交句柄。
+        handle = args.get("context_handle")
+        if handle is not None:
+            self._handle(args)
+        if name == "learning_panel":
+            result = self.panel.bootstrap(context_handle=handle, workspace=self.workspace)
+        else:
+            result = self.panel.action(args["capability"], args["action"], context_handle=handle,
+                workspace=self.workspace, request_id=args.get("request_id"), expected=args.get("expected"),
+                preset=args.get("preset"), confirm=args.get("confirm", False))
+        public = {key: result[key] for key in ("visible", "reason", "summary", "opened", "preset", "history")
+                  if key in result}
+        private = dict(result)
+        if result.get("visible") is True and handle is not None:
+            private["context_handle"] = handle
+        return _PanelResult(public, private)
+
+    def close(self):
+        if self.panel is not None:
+            self.panel.close()
 
     def _check_epoch(self):
         if (self.runtime.session_epoch() != self.epoch
@@ -206,6 +266,8 @@ class Server:
         if name not in self.tools:
             raise ProtocolError(-32602, "unknown tool")
         validate(args, self.tools[name][1])
+        if name in {"learning_panel", "learning_panel_action"}:
+            return self._panel_call(name, args)
         p, r = self.project, self.runtime
         if name in {"work_memory_search", "work_memory_read"}:
             handle = self._handle(args)
@@ -327,16 +389,49 @@ class Server:
                                                               for key in ("name", "version"))):
                     raise ProtocolError(-32602, "initialize requires protocolVersion, capabilities and clientInfo")
                 self.protocol_version = version if version in self.SUPPORTED_VERSIONS else "2025-11-25"
+                from .panel_ui import MIME_TYPE, UI_EXTENSION
+                extension = params["capabilities"].get("extensions", {}).get(UI_EXTENSION) if isinstance(
+                    params["capabilities"].get("extensions"), dict) else None
+                self.panel_ui_supported = (isinstance(extension, dict) and
+                    isinstance(extension.get("mimeTypes"), list) and MIME_TYPE in extension["mimeTypes"])
+                if self._panel_eligible() and self.panel_ui_supported:
+                    self.tools[PANEL_TOOLS[1][0]] = PANEL_TOOLS[1][1:]
                 self.state = "negotiated"
                 result = {"protocolVersion": self.protocol_version, "capabilities": {"tools": {}},
                           "serverInfo": {"name": "agent-learning", "version": __version__}}
+                if self._panel_eligible() and self.panel_ui_supported:
+                    result["capabilities"]["resources"] = {}
             elif method == "ping":
                 result = {}
             elif self.state != "ready":
                 raise ProtocolError(-32002, "initialization_required", {"state": self.state})
             elif method == "tools/list":
-                result = {"tools": [{"name": k, "description": v[0], "inputSchema": v[1]}
-                                    for k, v in self.tools.items()]}
+                result = {"tools": []}
+                for name, (description, contract) in self.tools.items():
+                    if name in {"learning_panel", "learning_panel_action"} and not self._panel_eligible():
+                        continue
+                    tool = {"name": name, "description": description, "inputSchema": contract}
+                    if name == "learning_panel" and self.panel_ui_supported:
+                        from .panel_ui import RESOURCE_URI
+                        tool.update(annotations={"readOnlyHint": True, "openWorldHint": False},
+                                    _meta={"ui": {"resourceUri": RESOURCE_URI}})
+                    elif name == "learning_panel_action":
+                        tool.update(annotations={"readOnlyHint": False, "openWorldHint": False},
+                                    _meta={"ui": {"visibility": ["app"]}})
+                    result["tools"].append(tool)
+            elif method in {"resources/list", "resources/read"} and self.panel_ui_supported and self.panel is not None:
+                from .panel_ui import MIME_TYPE, RESOURCE_URI, resource_content
+                if not self._panel_eligible():
+                    if method == "resources/read":
+                        raise ProtocolError(-32602, "panel resource is unavailable")
+                    result = {"resources": []}
+                elif method == "resources/list":
+                    result = {"resources": [{"uri": RESOURCE_URI, "name": "Agent Learning control panel",
+                                             "mimeType": MIME_TYPE}]}
+                else:
+                    if params.get("uri") != RESOURCE_URI or set(params) - {"uri", "_meta"}:
+                        raise ProtocolError(-32602, "unknown panel resource")
+                    result = {"contents": [resource_content()]}
             elif method == "tools/call":
                 if not isinstance(params.get("name"), str) or not isinstance(params.get("arguments", {}), dict):
                     raise ProtocolError(-32602, "tools/call requires a string name and object arguments")
@@ -346,6 +441,8 @@ class Server:
                     # 旧协议保留文本结果；新版同时提供机器可直接读取的结构化结果。
                     if self.protocol_version in {"2025-06-18", "2025-11-25"} and isinstance(body, dict):
                         result["structuredContent"] = body
+                    if isinstance(body, _PanelResult):
+                        result["_meta"] = {"agentLearningPanel": body.panel_private}
                 except ProtocolError:
                     raise
                 except ContractError as exc:
@@ -361,6 +458,12 @@ class Server:
             return None if notification else error_response(ident, -32603, type(exc).__name__)
 
     def serve(self):
+        try:
+            self._serve()
+        finally:
+            self.close()
+
+    def _serve(self):
         # MCP stdio每行一条JSON；诊断不得混进stdout协议流。
         # 从字节流按协议解码，Windows默认GBK不能用于MCP；console入口同样生效。
         for stream in (sys.stdout, sys.stderr):

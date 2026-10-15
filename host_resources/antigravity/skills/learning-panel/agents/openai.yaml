@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Learning 控制面板"
+  short_description: "Open project knowledge and administrator controls in Antigravity"
+  default_prompt: "Use $learning-panel to open this project's installed Antigravity control panel without changing settings or starting model work."

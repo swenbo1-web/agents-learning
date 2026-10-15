@@ -20,7 +20,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 |---|---|
 | Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
 | Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
-| Direct visual control and knowledge browser | DSH renders a project-scoped **📖 Memory / 知识库** button in the chat composer with quick frequency presets; all three hosts share a local visual WebUI showing readable project names/paths, candidate batch approval and administrator settings |
+| Direct visual control and knowledge browser | A DSH composer button, Codex conversation card and Antigravity App side panel offer installation-scoped status, administrator presets and history archival; detailed knowledge and batch approval use the shared local WebUI |
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
 | Optional administrator and frequency presets | Switch between simple presets (**Light 15/day, Balanced 100/day, Active 300/day, Minimal 5/day**) or expand advanced fine-tuning (daily cap, batch size and timeouts), pinning the first valid project model |
 | Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
@@ -39,8 +39,15 @@ You can inspect and control project memory visually without memorizing CLI flags
 | Visual Entry | Host & Location | What You Can Control Directly |
 |---|---|---|
 | **Composer “📖 Memory / 知识库” Button** | **DSH (DeepSeek Harness)**: automatically shown at the bottom-left of the chat input bar **only** in bound/installed projects (hidden in other projects) | Click to open the floating control panel: view the project name/path, published knowledge count, 1.0.0 work observations and pending cases; **one-click switch administrator frequency presets (Off / Minimal 5/d / Light 15/d / Balanced 100/d / Active 300/d)**; open the review console, read-only browser or absorb project history |
-| **Input Skill Picker Menu** | **Codex Desktop**: shown in the composer skill menu as **Agent Learning 调试** and **可视化知识审批** | Run a one-click read-only diagnostic (`$learning-debug`), or launch the local visual candidate review and administrator settings WebUI (`$learning-review`) |
+| **Conversation control card** | **Codex Desktop with MCP Apps support**: invoke **Agent Learning 控制面板** / `$learning-panel` in the installation's bound project | Buttons refresh status, open knowledge/review pages, and explicitly confirm administrator presets or history archival without asking the model to generate each operation |
+| **Conversation side panel** | **Antigravity App 2.22+ with UI Extension support**: **⋮ → Extensions → Agent Learning**, or the `learning-panel` skill | A host-managed Sidecar provides the same controls; another project, ambiguous workspaces or an expired session hides the controls and rejects requests |
 | **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
+
+**The new panels require an installation bound to the current project. A knowledge database entry alone is insufficient.** Explicitly pass `--workspace` when exporting the Codex installation; an older unbound global installation does not expose the card. Antigravity uses its receipt's workspace. Project mismatch, account changes, uninstall or installation replacement invalidate the old panel capability. Host-owned skill and Extensions lists remain controlled by the host; this plugin gates the actual panel and its actionable controls.
+
+The first Codex skill invocation uses a model tool call. Subsequent panel operations connect directly to local code. Enabling the administrator uses platform allowance; daily limits are shared across the same `ALP_HOME`. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval stays in the separate local WebUI. CLI and unsupported surfaces retain the existing debug, browser and review skills.
+
+The panels passed isolated regressions, actual fixed-runtime checks and Edge checks with simulated host bridges. Live Codex and Antigravity desktop rendering still needs host acceptance. Reload the host connection after an installation update; old panels expire.
 
 ### 1. Composer “📖 Memory” Button & Quick Control Popover (DSH)
 
@@ -97,13 +104,16 @@ Use a [Codex CLI](https://learn.chatgpt.com/docs/cli) with `codex plugin` comman
 These steps use the **default knowledge directory**. If you use `ALP_HOME` or `ALP_CONFIG`, first complete the [custom-directory wiring](#custom-knowledge-directory-in-codex). Setting variables only in the installation terminal does not ensure that Hooks and MCP tools use the same database.
 
 ```powershell
+$learningProject = "D:\Projects\my-project"
 $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
-python -B scripts/learning.py install "$learningPlugin" --host codex --hook-mode observe
+python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host codex --hook-mode observe
 codex plugin marketplace add "$learningPlugin"
 codex plugin add agent-learning@agent-learning-local
 ```
 
 **Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
+
+Replace `$learningProject` with your existing project's absolute path. This binding scopes the control card; ordinary MCP tools keep using the host's current workspace. Existing exports can add that project with matching-host `install --upgrade`. A bound export cannot be reassigned to another project; use a separate export directory. Hosts without UI support keep the text diagnostic fallback.
 
 ## Install in Antigravity (native plugin)
 
@@ -116,6 +126,8 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 ```
 
 **Reload the project in Antigravity IDE / 2.0 → enable the plugin components → start a new conversation.** The IDE loads this project's export without the `agy` CLI. [Official plugin guide](https://antigravity.google/docs/plugins/)
+
+In Antigravity App 2.22+ with native UI support, enable this project's **Agent Learning UI Sidecar**, then open it from the conversation's Extensions menu. Enabling the UI does not enable an administrator model; the user separately confirms presets and history archival. Use the existing skills in unsupported IDE/CLI surfaces.
 
 <details>
 <summary>Using Antigravity CLI instead?</summary>
@@ -169,6 +181,7 @@ In a new project conversation, use the visual button, select a skill, or send on
 
 | I want to… | Use |
 |---|---|
+| Open project quick controls | In Codex, choose **Agent Learning 控制面板** or send `$learning-panel`; in Antigravity App 2.22+, open **Extensions → Agent Learning** in the current conversation; in DSH, click **📖 Memory**. Actionable controls require a matching project installation |
 | Check integration, task and administrator status | Click **📖 Memory / 知识库** in DSH; select **Agent Learning 调试** in the Codex input skill menu, or say “Use `$learning-debug` to check this project” |
 | Reuse project experience during a task | Describe the task; supported events retrieve and record observations, and the Agent can search further |
 | Browse detailed knowledge | Click **Open Visual Knowledge Browser (Read-Only)** in the DSH **📖 Memory** button popover, or say “Use `$learning-browser` to open this project's knowledge base” |

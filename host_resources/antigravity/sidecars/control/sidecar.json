@@ -1,0 +1,18 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "on-failure",
+  "display_name": "Agent Learning",
+  "description": "Project knowledge status and explicit local controls. Opening this panel starts no administrator model or history import.",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Agent Learning",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Agent Learning"
+      }
+    ]
+  }
+}

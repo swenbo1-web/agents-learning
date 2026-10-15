@@ -27,13 +27,16 @@ REQUIRED_FILES = (*RESOURCE_FILES, "scripts/learning.py", "hooks/dispatch.py", "
                   "skills/learning-history/agents/openai.yaml",
                   "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml",
                   "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml",
+                  "skills/learning-panel/SKILL.md", "skills/learning-panel/agents/openai.yaml",
                   ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json")
 ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/learning.md",
                      "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
                      "skills/learning-browser/SKILL.md",
                      "skills/learning-history/agents/openai.yaml",
                      "skills/learning-review/SKILL.md", "skills/learning-review/agents/openai.yaml",
-                     "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml")
+                     "skills/learning-debug/SKILL.md", "skills/learning-debug/agents/openai.yaml",
+                     "skills/learning-panel/SKILL.md", "skills/learning-panel/agents/openai.yaml",
+                     "sidecars/control/sidecar.json", "sidecars/control/main.mjs", "sidecars/control/index.html")
 DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json",
              "host/index.mjs", "client/index.js", "rules/learning.md",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
@@ -179,7 +182,8 @@ def _validate_resources(root, host="codex", *, bundle=False):
             if not isinstance(json.loads(root.joinpath(name).read_text(encoding="utf-8")), dict):
                 raise ContractError("plugin JSON resource is invalid: " + name)
         for name in ("skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md", "skills/learning-history/SKILL.md",
-                     "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md", "skills/learning-debug/SKILL.md"):
+                     "skills/learning-browser/SKILL.md", "skills/learning-review/SKILL.md", "skills/learning-debug/SKILL.md",
+                     "skills/learning-panel/SKILL.md"):
             if not root.joinpath(name).read_text(encoding="utf-8").startswith("---\n"):
                 raise ContractError("plugin skill resource is invalid: " + name)
         if bundle:
@@ -288,7 +292,7 @@ def _hook_commands(python, script_path, event_name, hook_mode, *, host="codex", 
 
 
 def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, expected_release_id=None,
-            host="codex", workspace=None, home=None):
+            host="codex", workspace=None, home=None, panel_workspace=None):
     """导出或显式覆盖已验证的插件目录；知识库与用户宿主配置不参与切换。"""
     if not isinstance(upgrade, bool):
         raise ContractError("upgrade must be a boolean")
@@ -300,6 +304,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         raise ContractError("target host must be codex, antigravity or dsh")
     if host == "codex" and (workspace is not None or home is not None):
         raise ContractError("fixed workspace and home bindings apply to Antigravity or DSH installations")
+    if host != "codex" and panel_workspace is not None:
+        raise ContractError("panel workspace binding applies only to Codex installations")
     source = _resource_root()
     _validate_resources(source, bundle=True)
     package = Path(__file__).resolve().parent
@@ -320,6 +326,16 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         if host in {"antigravity", "dsh"}:
             workspace = workspace if workspace is not None else previous["receipt"].get("workspace")
             home = home if home is not None else previous["receipt"].get("home")
+        if host == "codex":
+            prior_panel = previous["receipt"].get("panel_workspace")
+            if panel_workspace is None:
+                panel_workspace = prior_panel
+            elif prior_panel is not None and safe_path(panel_workspace) != Path(prior_panel):
+                raise ContractError("panel workspace cannot be rebound; export a new installation for another project")
+    if panel_workspace is not None:
+        panel_workspace = safe_path(panel_workspace)
+        if not panel_workspace.is_dir():
+            raise ContractError("panel workspace must be an existing directory")
     if host == "antigravity":
         if workspace is None:
             raise ContractError("Antigravity export requires an explicit workspace")
@@ -353,6 +369,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                          for path in protected)
     if any(_overlaps(target, path) for path in protected) or store_conflict or _overlaps(target, store):
         raise ContractError("export and runtime store must use separate directories outside the source and installed package")
+    if panel_workspace is not None and (
+            panel_workspace == target or target in panel_workspace.parents
+            or panel_workspace == store or store in panel_workspace.parents):
+        raise ContractError("panel workspace must be outside export and runtime directories")
     if host in {"antigravity", "dsh"} and (workspace is not None or home is not None):
         # 默认 home 是数据容器，runtime-releases 是其中唯一保留的运行副本目录。
         # 数据本身仍不能落入运行副本、源码或导出目录。
@@ -395,7 +415,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                         _copy_resource(runtime_directory / original, staging / name)
                 mcp = mcp_document(runtime_directory, sys.executable, host,
                                    str(workspace) if workspace is not None else None,
-                                   str(home) if home is not None else None)
+                                   str(home) if home is not None else None,
+                                   panel_installation=target if panel_workspace is not None else None)
                 mcp_file = staging / (".mcp.json" if host == "codex" else "mcp_config.json")
                 mcp_file.write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 hook_file = staging / ("hooks/hooks.json" if host == "codex" else "hooks.json")
@@ -420,6 +441,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                     "release_id": release["release_id"], "version": release["version"],
                     "protocol_version": release["protocol_version"], "content_digest": release["content_digest"],
                     "python": sys.executable, "hook_mode": hook_mode, "target_host": host}
+                if panel_workspace is not None:
+                    receipt["panel_workspace"] = str(panel_workspace)
                 if host == "antigravity":
                     receipt.update(workspace=str(workspace), home=str(home))
                 elif host == "dsh":
@@ -447,6 +470,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
             "runtime_directory": str(runtime_directory), "release_id": release["release_id"],
             "version": __version__, "hook_mode": hook_mode, "target_host": host,
             "next_step": "将此目录加入本地插件源并安装；保留固定运行目录及解释器，在Codex界面审阅并信任Hooks。"}
+    if panel_workspace is not None:
+        result["panel_workspace"] = str(panel_workspace)
     if host == "antigravity":
         result.update(workspace=str(workspace), home=str(home),
                       next_step="在Antigravity中加载此原生插件目录，核对MCP与Hooks已启用；固定项目安装不要全局用于其他项目。")
