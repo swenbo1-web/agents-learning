@@ -115,8 +115,15 @@ class PanelControl:
         from .install_update import inspect_installation
         installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
         receipt = installed["receipt"]
-        bound = receipt.get("panel_workspace") if self.runtime.host == "codex" else receipt.get("workspace")
-        if not bound or not same_workspace(self.workspace, bound):
+        if self.runtime.host == "codex":
+            candidates = [receipt["panel_workspace"]] if receipt.get("panel_workspace") else []
+        elif self.runtime.host == "dsh" and isinstance(receipt.get("workspaces"), list):
+            candidates = list(receipt["workspaces"])
+        else:
+            candidates = [receipt["workspace"]] if receipt.get("workspace") else []
+        bound = next((item for item in sorted(candidates, key=len, reverse=True)
+                      if same_workspace(self.workspace, item)), None)
+        if not bound:
             raise ContractError("project_panel_not_installed")
         if receipt.get("home") and _path(receipt["home"]) != self.runtime.home.resolve():
             raise ContractError("panel_knowledge_directory_mismatch")

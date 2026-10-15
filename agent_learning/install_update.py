@@ -286,6 +286,13 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
                 if not isinstance(receipt[name], str) or not Path(receipt[name]).is_absolute():
                     raise ContractError("existing DSH installation binding is invalid")
                 safe_path(receipt[name])
+        if "workspaces" in receipt:
+            workspaces = receipt.get("workspaces")
+            if (not isinstance(workspaces, list) or not workspaces
+                    or any(not isinstance(item, str) or not Path(item).is_absolute() for item in workspaces)):
+                raise ContractError("existing DSH installation workspaces binding is invalid")
+            for item in workspaces:
+                safe_path(item)
     runtime = safe_path(receipt["runtime_directory"])
     if target == runtime or target in runtime.parents or runtime in target.parents:
         raise ContractError("existing installation and fixed runtime must use separate directories")
@@ -312,7 +319,9 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
           or not isinstance(plugin.get("description"), str)):
         raise ContractError("existing installation is not a valid Antigravity plugin export")
     # 这些文件只含安装时的固定路径；其余受管理文件必须与旧发布副本一致。
-    mcp = mcp_document(runtime, receipt["python"], host, receipt.get("workspace"), receipt.get("home"),
+    dsh_multi = host == "dsh" and isinstance(receipt.get("workspaces"), list) and len(receipt["workspaces"]) > 1
+    pinned_workspace = None if dsh_multi else receipt.get("workspace")
+    mcp = mcp_document(runtime, receipt["python"], host, pinned_workspace, receipt.get("home"),
                        panel_installation=target if "panel_workspace" in receipt else None)
     mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
     hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
@@ -323,7 +332,7 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
                                            command_builder, receipt["workspace"], receipt["home"])
     else:
         expected_hooks = dsh_hooks(runtime, receipt["python"], receipt["hook_mode"],
-                                   command_builder, receipt.get("workspace"), receipt.get("home"))
+                                   command_builder, pinned_workspace, receipt.get("home"))
     if _json(target / mcp_path) != mcp:
         raise ContractError("existing installation MCP configuration was modified")
     if _json(target / hook_path) != expected_hooks:

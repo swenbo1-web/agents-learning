@@ -316,6 +316,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         raise ContractError("upgrade requires an existing plugin installation directory")
     # 在写入 store 前确定旧身份；锁内会再次核对以覆盖并发调用。
     previous = inspect_installation(target, _hook_commands, expected_release_id, target_host=host) if upgrade else None
+    dsh_workspaces = []
     if previous is not None:
         if tuple(map(int, previous["release"]["version"].split("."))) > tuple(map(int, __version__.split("."))):
             raise ContractError("refusing to downgrade a newer plugin installation")
@@ -324,6 +325,14 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         if runtime_store is None:
             runtime_store = previous["runtime_directory"].parent
         if host in {"antigravity", "dsh"}:
+            if host == "dsh":
+                prior_list = previous["receipt"].get("workspaces") or (
+                    [previous["receipt"]["workspace"]] if previous["receipt"].get("workspace") else []
+                )
+                for item in prior_list:
+                    resolved_item = str(safe_path(item))
+                    if resolved_item not in dsh_workspaces:
+                        dsh_workspaces.append(resolved_item)
             workspace = workspace if workspace is not None else previous["receipt"].get("workspace")
             home = home if home is not None else previous["receipt"].get("home")
         if host == "codex":
@@ -352,6 +361,11 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         if workspace is not None:
             workspace = safe_path(workspace)
             if not workspace.is_dir():
+                raise ContractError("DSH workspace must be an existing directory")
+            if str(workspace) not in dsh_workspaces:
+                dsh_workspaces.append(str(workspace))
+        for item in dsh_workspaces:
+            if not safe_path(item).is_dir():
                 raise ContractError("DSH workspace must be an existing directory")
         if home is not None:
             home = safe_path(home)
@@ -386,8 +400,12 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 _overlaps(home, path) and not
                 (source_in_reserved_store and source in (path, *path.parents))
                 for path in protected)
-        workspace_conflict = workspace is not None and (
-            workspace == target or target in workspace.parents or workspace == store or store in workspace.parents
+        all_workspaces = [safe_path(item) for item in dsh_workspaces] if host == "dsh" and dsh_workspaces else (
+            [workspace] if workspace is not None else []
+        )
+        workspace_conflict = any(
+            w == target or target in w.parents or w == store or store in w.parents
+            for w in all_workspaces
         )
         home_conflict = home is not None and (
             _overlaps(home, target) or home_source_conflict or (_overlaps(home, store) and store != reserved_store)
@@ -413,8 +431,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 else:
                     for name, original in payload_mapping(release["files"], host).items():
                         _copy_resource(runtime_directory / original, staging / name)
+                dsh_multi = host == "dsh" and len(dsh_workspaces) > 1
+                pinned_workspace = None if dsh_multi else (str(workspace) if workspace is not None else None)
                 mcp = mcp_document(runtime_directory, sys.executable, host,
-                                   str(workspace) if workspace is not None else None,
+                                   pinned_workspace,
                                    str(home) if home is not None else None,
                                    panel_installation=target if panel_workspace is not None else None)
                 mcp_file = staging / (".mcp.json" if host == "codex" else "mcp_config.json")
@@ -425,7 +445,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                                               str(workspace), str(home))
                 elif host == "dsh":
                     hooks = dsh_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
-                                      str(workspace) if workspace is not None else None,
+                                      pinned_workspace,
                                       str(home) if home is not None else None)
                 else:
                     hooks = json.loads(hook_file.read_text(encoding="utf-8"))
@@ -448,6 +468,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 elif host == "dsh":
                     if workspace is not None:
                         receipt["workspace"] = str(workspace)
+                    if len(dsh_workspaces) > 1:
+                        receipt["workspaces"] = list(dsh_workspaces)
                     if home is not None:
                         receipt["home"] = str(home)
                 (staging / "runtime-release.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -478,6 +500,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
     elif host == "dsh":
         if workspace is not None:
             result["workspace"] = str(workspace)
+        if len(dsh_workspaces) > 1:
+            result["workspaces"] = list(dsh_workspaces)
         if home is not None:
             result["home"] = str(home)
         result["next_step"] = "在DSH (DeepSeek Harness) 中加载此插件Bundle或配置MCP与Hooks入口；保留固定运行目录及解释器。"

@@ -303,6 +303,18 @@ console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.in
         self.assertEqual((self.target / "notes/custom.txt").read_text(encoding="utf-8"), "user custom file")
         self.assertTrue(Path(updated["backup_directory"]).is_dir())
 
+    def test_dsh_upgrade_with_second_workspace_preserves_both_projects(self):
+        self.initial("observe", bind_workspace=True)
+        second = self.root / "second-project"
+        second.mkdir()
+        updated = install(self.target, upgrade=True, host="dsh", workspace=second)
+        self.assertEqual(updated["workspace"], str(second.resolve()))
+        self.assertEqual(updated["workspaces"], [str(self.workspace.resolve()), str(second.resolve())])
+        receipt = read_json(self.target / "runtime-release.json")
+        self.assertEqual(receipt["workspaces"], [str(self.workspace.resolve()), str(second.resolve())])
+        again = install(self.target, upgrade=True, host="dsh")
+        self.assertEqual(again["workspaces"], [str(self.workspace.resolve()), str(second.resolve())])
+
 
 if __name__ == "__main__":
     unittest.main()

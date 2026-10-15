@@ -10,6 +10,56 @@ function loadRuntimeReceipt() {
   return JSON.parse(readFileSync(receiptPath, "utf8").replace(/^\uFEFF/, ""));
 }
 
+function normalizeWinPath(p) {
+  return String(p || "")
+    .trim()
+    .replace(/\//g, "\\")
+    .replace(/\\+$/, "")
+    .toLowerCase();
+}
+
+function isWithinWorkspace(childPath, rootPath) {
+  const c = normalizeWinPath(childPath);
+  const r = normalizeWinPath(rootPath);
+  if (!c || !r) return false;
+  return c === r || c.startsWith(r + "\\");
+}
+
+function loadAllowedWorkspaces(receipt) {
+  const list = [];
+  if (receipt && Array.isArray(receipt.workspaces)) {
+    for (const item of receipt.workspaces) {
+      if (typeof item === "string" && item.trim() && !list.includes(item.trim())) {
+        list.push(item.trim());
+      }
+    }
+  }
+  if (receipt && typeof receipt.workspace === "string" && receipt.workspace.trim()) {
+    if (!list.includes(receipt.workspace.trim())) {
+      list.push(receipt.workspace.trim());
+    }
+  }
+  return list;
+}
+
+function matchInstalledWorkspace(candidateCwd, receipt) {
+  const allowed = loadAllowedWorkspaces(receipt);
+  const cand = String(candidateCwd || "").trim();
+  if (!allowed.length) {
+    return cand || null;
+  }
+  if (!cand) {
+    return receipt?.workspace || allowed[0];
+  }
+  const sorted = [...allowed].sort((a, b) => b.length - a.length);
+  for (const root of sorted) {
+    if (isWithinWorkspace(cand, root)) {
+      return root;
+    }
+  }
+  return null;
+}
+
 function extractTextFromBlocks(blocks) {
   if (typeof blocks === "string") return blocks;
   if (!Array.isArray(blocks)) return "";
@@ -462,13 +512,19 @@ export function apply(ctx) {
     if (receipt.hook_mode) {
       argv.push("--hook-mode", receipt.hook_mode);
     }
-    if (receipt.workspace) {
-      argv.push("--workspace", receipt.workspace);
+    const allowedList = loadAllowedWorkspaces(receipt);
+    const matchedWorkspace = matchInstalledWorkspace(payload.cwd, receipt);
+    if (allowedList.length > 0 && payload.cwd && !matchedWorkspace) {
+      return {};
+    }
+    const effectiveWorkspace = matchedWorkspace || receipt.workspace;
+    if (effectiveWorkspace) {
+      argv.push("--workspace", effectiveWorkspace);
     }
     if (receipt.home) {
       argv.push("--home", receipt.home);
     }
-    const cwd = payload.cwd || receipt.workspace || process.cwd();
+    const cwd = payload.cwd || effectiveWorkspace || process.cwd();
     try {
       const { code, stdout } = await runPythonProcess(
         receipt.python,
@@ -725,7 +781,8 @@ export function apply(ctx) {
     const receipt = loadRuntimeReceipt();
     const agentId = exec?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
-    const workspace = meta.cwd || receipt.workspace || process.cwd();
+    const matched = matchInstalledWorkspace(meta.cwd, receipt);
+    const workspace = matched || meta.cwd || receipt.workspace || process.cwd();
     const args = { ...(rawArgs || {}) };
     if (toolName === "learning_browser") {
       return manageBrowser(args.action || "start", args, workspace, exec?.signal);
@@ -767,7 +824,8 @@ export function apply(ctx) {
     const receipt = loadRuntimeReceipt();
     const agentId = invocation?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
-    const workspace = meta.cwd || receipt.workspace || process.cwd();
+    const matched = matchInstalledWorkspace(meta.cwd, receipt);
+    const workspace = matched || meta.cwd || receipt.workspace || process.cwd();
     // Debug is a fixed read route. Never forward a user-supplied suffix into
     // the administrator/history command handlers or start the browser.
     const statusOnly = commandName === "learning-debug";
@@ -990,23 +1048,10 @@ export function apply(ctx) {
     });
     ctx.inject(["webServer"], (scope) => {
       if (!scope?.webServer || typeof scope.webServer.register !== "function") return;
-      function normalizeWinPath(p) {
-        return String(p || "")
-          .trim()
-          .replace(/\//g, "\\")
-          .replace(/\\+$/, "")
-          .toLowerCase();
-      }
-      function isWithinWorkspace(childPath, rootPath) {
-        const c = normalizeWinPath(childPath);
-        const r = normalizeWinPath(rootPath);
-        if (!c || !r) return false;
-        return c === r || c.startsWith(r + "\\");
-      }
       const route = {
-        name: "agent-learning-panel",
+        name: "agent-learning-panel-v2",
         kind: "exact",
-        path: "/agent-learning/panel",
+        path: "/agent-learning/panel-v2",
         handler: async (req, res) => {
           const send = (status, body) => {
             res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
@@ -1032,14 +1077,15 @@ export function apply(ctx) {
               requestedCwd = String(meta.cwd).trim();
             }
           }
-          const boundWorkspace = receipt.workspace || "";
+          const allowedList = loadAllowedWorkspaces(receipt);
+          const matchedWorkspace = matchInstalledWorkspace(requestedCwd, receipt);
 
           if (req.method === "GET") {
-            if (boundWorkspace && requestedCwd && !isWithinWorkspace(requestedCwd, boundWorkspace)) {
+            if (allowedList.length > 0 && requestedCwd && !matchedWorkspace) {
               send(200, { ok: true, installed: false, reason: "outside_bound_workspace" });
               return;
             }
-            const workspace = requestedCwd || boundWorkspace;
+            const workspace = matchedWorkspace || requestedCwd;
             if (!workspace) {
               send(200, { ok: true, installed: false, reason: "no_workspace" });
               return;
@@ -1049,7 +1095,7 @@ export function apply(ctx) {
               const inputPayload = JSON.stringify({
                 home: receipt.home || null,
                 workspace,
-                check_registered_only: !boundWorkspace,
+                check_registered_only: allowedList.length === 0,
                 slash_command: "learning-status",
                 raw_input: "/learning-status",
               });
@@ -1120,11 +1166,12 @@ export function apply(ctx) {
               const meta = await resolveSessionMeta(body.sessionId.trim());
               if (meta?.cwd) bodyCwd = String(meta.cwd).trim();
             }
-            if (boundWorkspace && bodyCwd && !isWithinWorkspace(bodyCwd, boundWorkspace)) {
+            const matchedPostWorkspace = matchInstalledWorkspace(bodyCwd, receipt);
+            if (allowedList.length > 0 && bodyCwd && !matchedPostWorkspace) {
               send(403, { ok: false, error: "project is not bound to this Agent Learning installation" });
               return;
             }
-            const workspace = bodyCwd || boundWorkspace || process.cwd();
+            const workspace = matchedPostWorkspace || bodyCwd || receipt.workspace || process.cwd();
             const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
 
             if (action === "set_admin_preset") {

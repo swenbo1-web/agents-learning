@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     var exports = module.exports;
 
     var PACKAGE_NAME = "agent-learning";
-    var ROUTE = "/agent-learning/panel";
+    var ROUTE = "/agent-learning/panel-v2";
 
     var TEXT = {
       zh: {
