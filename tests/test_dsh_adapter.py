@@ -596,6 +596,46 @@ class DshAdapterAndV1FeaturesTests(unittest.TestCase):
         diag = dispatch_diagnostic(self.r, self.p)
         self.assertNotEqual(diag["reason"], "awaiting_tool_completion")
 
+    def test_dsh_fault_remains_pending_on_unrelated_prompt_and_marks_queried_only_when_searched(self):
+        self.adapter.handle("SessionStart", {"sessionId": "dsh-fault-1"})
+        self.adapter.handle("PreToolUse", {
+            "sessionId": "dsh-fault-1",
+            "callId": "fault-call-1",
+            "name": "pwsh",
+            "arguments": {"command": "bad-cmd"},
+        })
+        self.adapter.handle("PostToolUse", {
+            "sessionId": "dsh-fault-1",
+            "callId": "fault-call-1",
+            "name": "pwsh",
+            "arguments": {"command": "bad-cmd"},
+            "result": {"isError": True, "error": {"message": "EPERM named pipe error"}},
+        })
+        state_initial = self.r.db.execute(
+            "SELECT state FROM dsh_faults WHERE project=?", (self.p,)
+        ).fetchone()[0]
+        self.assertEqual(state_initial, "pending")
+        # 发送一条普通非空用户提示词（检索的是新问题，并未消费 dsh_faults 查询词）
+        self.adapter.handle("UserPromptSubmit", {
+            "sessionId": "dsh-fault-1",
+            "turn": 2,
+            "prompt": "请帮我检查 README 文档格式",
+        })
+        state_after_unrelated = self.r.db.execute(
+            "SELECT state FROM dsh_faults WHERE project=?", (self.p,)
+        ).fetchone()[0]
+        self.assertEqual(state_after_unrelated, "pending")
+        # 当空提示触发消费 dsh_faults 查询词时，完成检索（即便 0 命中）后标记为 queried
+        self.adapter.handle("UserPromptSubmit", {
+            "sessionId": "dsh-fault-1",
+            "turn": 3,
+            "prompt": "",
+        })
+        state_after_queried = self.r.db.execute(
+            "SELECT state FROM dsh_faults WHERE project=?", (self.p,)
+        ).fetchone()[0]
+        self.assertEqual(state_after_queried, "queried")
+
 
 if __name__ == "__main__":
     unittest.main()

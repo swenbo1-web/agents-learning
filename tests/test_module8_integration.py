@@ -192,6 +192,35 @@ class Module8IntegrationTests(unittest.TestCase):
         self.assertTrue(result["budget_exhausted"])
         self.assertEqual(result["processed"], 0)
 
+    def test_default_mode_session_start_wakes_ready_admin_queue(self):
+        self.r.admin_configure(self.p, True)
+        self.r.admin_observe_model(self.p, "chat", "model-v1")
+        self.r.feedback(self.p, "chat", "Pending reviewable problem before resume")
+        with patch.object(self.r, "claim_scheduler_worker") as sched_claim, \
+             patch("agent_learning.admin_queue.dispatch_diagnostic", return_value={"reason": "ready"}), \
+             patch("agent_learning.admin_queue.claim_dispatch", return_value="dispatch-tok-1"), \
+             patch.object(self.r, "_launch_admin") as launch_admin:
+            self.r.handle_hook({"hook_event_name": "SessionStart", "session_id": "chat", "cwd": str(self.work), "source": "resume"})
+        sched_claim.assert_not_called()
+        launch_admin.assert_called_once_with(str(self.work), "dispatch-tok-1")
+
+    def test_multi_host_shared_database_scheduler_preserves_enabled_host_ready_state(self):
+        import sys
+        self.r.config["scheduler"]["enabled"] = True
+        self.r.config["admin"].update(command=[sys.executable], max_calls_per_day=100)
+        self.r.admin_configure(self.p, True, provider="host", model_mode="default")
+        self.r.feedback(self.p, "chat", "Problem queued under codex host")
+        self.assertTrue(self.r.scheduler_wake(self.p))
+        state_codex = self.r.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind='admin'", (self.p,)).fetchone()[0]
+        self.assertEqual(state_codex, "ready")
+
+        other = Runtime(self.home, config={"scheduler": {"enabled": True}, "admin": {"command": [sys.executable], "max_calls_per_day": 100}}, host="dsh")
+        self.addCleanup(other.close)
+        # dsh 宿主尚未开启管理员，但其刷新调度时不能把 codex 宿主已就绪的 ready 覆盖成 disabled
+        self.assertTrue(other.scheduler_wake(self.p))
+        state_after_dsh = other.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind='admin'", (self.p,)).fetchone()[0]
+        self.assertEqual(state_after_dsh, "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

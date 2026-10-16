@@ -767,7 +767,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         return names
 
     def handle_hook(self, raw, *, context_delivery=True, expected_epoch=None, _phase_guard=None,
-                    _adapter_event_key=None, _adapter_conflict=False):
+                    _adapter_event_key=None, _adapter_conflict=False, _context_outcome=None):
         # 原生身份摘要由适配器核对，不能从 Hook JSON 中注入冲突或更换去重身份。
         if _adapter_event_key is not None or _adapter_conflict:
             if (self.host != "antigravity" or not isinstance(_adapter_event_key, str)
@@ -1005,6 +1005,28 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     pass
                 warning = "Agent Learning: 事件已保存，后台调度未确认启动；待办保留。"
                 schedule_warning = "\n".join(filter(None, (schedule_warning, warning)))
+        if fresh and kind == "SessionStart" and not agent_id and raw.get("source") in {None, "startup", "resume"} and self.admin_policy(project)["enabled"] and not self.config["scheduler"]["enabled"]:
+            token = None
+            try:
+                from .admin import _settings
+                from .admin_queue import claim_dispatch, release_dispatch, dispatch_diagnostic
+                _settings(self.admin_effective_config(project))
+                if dispatch_diagnostic(self, project).get("reason") == "ready":
+                    token = claim_dispatch(self, project)
+                    if token:
+                        self._launch_admin(raw["cwd"], token)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                if token:
+                    try:
+                        release_dispatch(self, project, token)
+                    except sqlite3.Error:
+                        pass
+                try:
+                    self._metric(project, "admin_schedule_failed")
+                except sqlite3.Error:
+                    pass
+                warning = "Agent Learning: event_recorded; admin_schedule_failed，事件已保存，后台整理未确认启动。"
+                schedule_warning = "\n".join(filter(None, (schedule_warning, warning)))
         if denied:
             return {"hookSpecificOutput": {"hookEventName": kind, "permissionDecision": "deny",
                     "permissionDecisionReason": "Agent Learning: 当前任务状态或执行范围不允许此调用：" + deny_reason}}
@@ -1021,7 +1043,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             query = raw.get("prompt", "")
             text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
                                  agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"],
-                                 workspace=raw["cwd"], raw=raw)
+                                 _outcome=_context_outcome, workspace=raw["cwd"], raw=raw)
             if text:
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
@@ -1125,21 +1147,31 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
 
     def _work_capture_safely(self, project, event_id, workspace, *, raw=None, summarize=False, conversation=None,
                               native_context_hint=False):
-        """派生功能故障不回滚已记录的任务、事件或执行决定。"""
+        """派生功能故障不回滚已记录的任务、事件或执行决定；可选摘要排队与普通工作记录采集彼此隔离。"""
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
+        captured = False
         self.db.execute("SAVEPOINT work_capture_extension")
         try:
             self._work_capture_event(project, event_id, workspace, raw=raw,
                                      native_context_hint=native_context_hint)
-            if summarize and conversation:
-                self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
-        except (OSError, ValueError, TypeError, sqlite3.Error):
+        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
             self.db.execute("ROLLBACK TO work_capture_extension")
             self.db.execute("RELEASE work_capture_extension")
             self._metric(project, "work_memory_capture_failed")
         else:
             self.db.execute("RELEASE work_capture_extension")
+            captured = True
+        if captured and summarize and conversation:
+            self.db.execute("SAVEPOINT work_summary_extension")
+            try:
+                self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
+            except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+                self.db.execute("ROLLBACK TO work_summary_extension")
+                self.db.execute("RELEASE work_summary_extension")
+                self._metric(project, "work_summary_queue_failed")
+            else:
+                self.db.execute("RELEASE work_summary_extension")
 
     def _launch_background(self, workspace, command, arguments):
         import subprocess

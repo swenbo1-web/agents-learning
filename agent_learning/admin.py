@@ -525,6 +525,8 @@ def _accept_response(runtime, project, reserved, response):
         raise ContractError("non-candidate response must use candidate=null")
     if summary_context and response["decision"] == "skip":
         result.update(runtime.work_summary_skip(project, packet["problem"]["id"], call_id))
+    elif summary_context and response["decision"] == "needs_evidence":
+        result.update(runtime.work_summary_needs_evidence(project, packet["problem"]["id"], call_id))
     if proposal is not None:
         if (not isinstance(proposal, dict) or set(proposal) != {"action", "knowledge_id", "expected_revision"}
                 or proposal["action"] not in {"publish", "update", "attach", "revoke", "dismiss_counterexample"}):
@@ -576,7 +578,7 @@ def _accept_response(runtime, project, reserved, response):
                               require_review=True, expected_epoch=reserved["host_epoch"])
     if summary_context:
         runtime.work_summary_guard(project, packet["problem"]["id"],
-                                   accepted_call_id=call_id if response["decision"] in {"candidate", "skip"} else None)
+                                   accepted_call_id=call_id if response["decision"] in {"candidate", "skip", "needs_evidence"} else None)
     return result
 
 

@@ -87,50 +87,92 @@ class SchedulerMixin:
         from .admin_queue import recover_dispatch
         recover_dispatch(self, now)
 
-    def _scheduler_admin_state(self, project, cfg):
-        from .admin_queue import eligible_query, scan_signature, ready_executor
+    def _scheduler_admin_scopes(self, project):
+        current = self._session_scope()
+        scopes = [current]
+        for table in ("admin_control_state", "admin_host_policies"):
+            exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
+            if exists:
+                for row in self.db.execute(
+                    f"SELECT host_scope FROM {table} WHERE project=? AND enabled=1 ORDER BY updated DESC,host_scope ASC",
+                    (project,),
+                ).fetchall():
+                    scope = row[0]
+                    if isinstance(scope, str) and ":" in scope and scope not in scopes:
+                        scopes.append(scope)
+        return scopes
+
+    def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
+        from .admin_queue import eligible_query, scan_signature, ready_executor, dispatch_diagnostic
         from .admin_usage import admin_budget_status
         from .runtime import digest
-        signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
-            "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "
-                                               "FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()),
-            "tasks": self.db.execute("SELECT MAX(updated) FROM tasks WHERE project=?", (project,)).fetchone()[0],
-            "operations": [list(r) for r in self.db.execute("SELECT state,COUNT(*),MAX(rowid) FROM operations "
-                                                             "WHERE project=? GROUP BY state", (project,))],
-            "retries": list(self.db.execute("SELECT COUNT(*),MAX(finished),COALESCE(SUM(retry_allowed),0) "
-                                              "FROM admin_calls WHERE project=?", (project,)).fetchone())})
-        if not cfg["enabled"] or not self.admin_effective_config(project)["enabled"]:
-            return signature, "disabled", None, "admin_disabled"
-        now = time.time()
-        active = self.db.execute("SELECT MIN(lease_until) FROM admin_calls WHERE project=? AND state "
-                                  "IN ('reserved','launch_intent','started')", (project,)).fetchone()[0]
-        dispatch = self.db.execute("SELECT lease_until FROM admin_dispatch WHERE project=?", (project,)).fetchone()
-        if active is not None or dispatch:
-            return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
-        query, args = eligible_query(scan_signature(self, project),
-                                     preflight_signature=scan_signature(self, project, include_candidates=False),
-                                     summary_enabled=self.work_summary_enabled(project),
-                                     summary_host_scope=self._session_scope())
-        eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
-        if not eligible:
-            unknown = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND retry_allowed=0 "
-                "AND state IN ('timeout_unknown','account_changed_unknown','orphaned_unknown','failed') LIMIT 1", (project,)).fetchone()
-            blocked = self.db.execute("SELECT 1 FROM admin_preflights f JOIN problems p ON p.id=f.problem AND p.project=f.project "
-                "WHERE f.project=? AND p.status='pending' AND f.revision=p.revision LIMIT 1", (project,)).fetchone()
-            awaiting = self.db.execute("SELECT 1 FROM review_states s JOIN problems p ON p.id=s.problem AND p.project=s.project "
-                "WHERE s.project=? AND p.status='pending' AND s.revision=p.revision AND s.state='awaiting_evidence' LIMIT 1", (project,)).fetchone()
-            reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
-            return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
-        if not ready_executor(self, project, query, args):
-            from .admin_queue import dispatch_diagnostic
-            diagnostic = dispatch_diagnostic(self, project)
-            return signature, "waiting", diagnostic.get("next_due"), diagnostic["reason"]
-        budget = admin_budget_status(self)
-        admission = budget["admission_status"]
-        if admission != "available":
-            due = now + cfg["poll_seconds"] if admission == "concurrency_limited" else budget["next_reset_at"]
-            return signature, "waiting", due, admission
-        return signature, "ready", now, ""
+        old_host, old_instance = self.host, getattr(self, "host_instance", "default")
+        old_scope = getattr(self, "host_scope", None)
+        parts = target_scope.split(":", 1)
+        if len(parts) == 2 and parts[0] in {"codex", "antigravity", "dsh"} and parts[1]:
+            self.host, self.host_instance, self.host_scope = parts[0], parts[1], target_scope
+        try:
+            signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
+                "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "
+                                                   "FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()),
+                "tasks": self.db.execute("SELECT MAX(updated) FROM tasks WHERE project=?", (project,)).fetchone()[0],
+                "operations": [list(r) for r in self.db.execute("SELECT state,COUNT(*),MAX(rowid) FROM operations "
+                                                                 "WHERE project=? GROUP BY state", (project,))],
+                "retries": list(self.db.execute("SELECT COUNT(*),MAX(finished),COALESCE(SUM(retry_allowed),0) "
+                                                  "FROM admin_calls WHERE project=?", (project,)).fetchone())})
+            if not cfg["enabled"] or not self.admin_effective_config(project)["enabled"]:
+                return signature, "disabled", None, "admin_disabled"
+            now = time.time()
+            active = self.db.execute("SELECT MIN(lease_until) FROM admin_calls WHERE project=? AND state "
+                                      "IN ('reserved','launch_intent','started')", (project,)).fetchone()[0]
+            dispatch = self.db.execute("SELECT lease_until FROM admin_dispatch WHERE project=?", (project,)).fetchone()
+            if active is not None or dispatch:
+                return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
+            query, args = eligible_query(scan_signature(self, project),
+                                         preflight_signature=scan_signature(self, project, include_candidates=False),
+                                         summary_enabled=self.work_summary_enabled(project),
+                                         summary_host_scope=self._session_scope())
+            eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
+            if not eligible:
+                unknown = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND retry_allowed=0 "
+                    "AND state IN ('timeout_unknown','account_changed_unknown','orphaned_unknown','failed') LIMIT 1", (project,)).fetchone()
+                blocked = self.db.execute("SELECT 1 FROM admin_preflights f JOIN problems p ON p.id=f.problem AND p.project=f.project "
+                    "WHERE f.project=? AND p.status='pending' AND f.revision=p.revision LIMIT 1", (project,)).fetchone()
+                awaiting = self.db.execute("SELECT 1 FROM review_states s JOIN problems p ON p.id=s.problem AND p.project=s.project "
+                    "WHERE s.project=? AND p.status='pending' AND s.revision=p.revision AND s.state='awaiting_evidence' LIMIT 1", (project,)).fetchone()
+                reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
+                return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
+            if not ready_executor(self, project, query, args):
+                diagnostic = dispatch_diagnostic(self, project)
+                return signature, "waiting", diagnostic.get("next_due"), diagnostic["reason"]
+            budget = admin_budget_status(self)
+            admission = budget["admission_status"]
+            if admission != "available":
+                due = now + cfg["poll_seconds"] if admission == "concurrency_limited" else budget["next_reset_at"]
+                return signature, "waiting", due, admission
+            return signature, "ready", now, ""
+        finally:
+            self.host, self.host_instance = old_host, old_instance
+            if old_scope is not None:
+                self.host_scope = old_scope
+
+    def _scheduler_admin_state(self, project, cfg):
+        scopes = self._scheduler_admin_scopes(project)
+        primary = self._scheduler_eval_admin_for_scope(project, cfg, scopes[0])
+        if not cfg["enabled"] or primary[1] == "ready" or len(scopes) == 1:
+            return primary
+        best = primary
+        rank = {"ready": 3, "waiting": 2, "idle": 1, "disabled": 0}
+        for scope in scopes[1:]:
+            candidate = self._scheduler_eval_admin_for_scope(project, cfg, scope)
+            if candidate[1] == "ready":
+                return candidate
+            if rank[candidate[1]] > rank[best[1]]:
+                best = candidate
+            elif candidate[1] == "waiting" and best[1] == "waiting":
+                if candidate[2] is not None and (best[2] is None or candidate[2] < best[2]):
+                    best = candidate
+        return best
 
     def _scheduler_release_state(self, project, cfg, prior):
         from .runtime import digest
@@ -285,7 +327,23 @@ class SchedulerMixin:
                 if remaining <= 0:
                     result = {"status": "time_exhausted"}
                 elif kind == "admin":
-                    result = admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
+                    target_scope = self._session_scope()
+                    if not self.admin_effective_config(identifier)["enabled"]:
+                        for candidate_scope in self._scheduler_admin_scopes(identifier):
+                            if self._scheduler_eval_admin_for_scope(identifier, cfg, candidate_scope)[1] == "ready":
+                                target_scope = candidate_scope
+                                break
+                    old_host, old_instance = self.host, getattr(self, "host_instance", "default")
+                    old_scope = getattr(self, "host_scope", None)
+                    parts = target_scope.split(":", 1)
+                    if len(parts) == 2 and parts[0] in {"codex", "antigravity", "dsh"} and parts[1]:
+                        self.host, self.host_instance, self.host_scope = parts[0], parts[1], target_scope
+                    try:
+                        result = admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
+                    finally:
+                        self.host, self.host_instance = old_host, old_instance
+                        if old_scope is not None:
+                            self.host_scope = old_scope
                 elif kind == "release":
                     result = self.daily_knowledge_release(identifier, max_items=cfg["max_release_items"], expected_epoch=epoch)
                 else:

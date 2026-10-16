@@ -165,6 +165,67 @@ class WorkSummaryWindowTests(unittest.TestCase):
         self.assertGreaterEqual(result["batches"], 2)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_summary_links WHERE state='pending'").fetchone()[0], 1)
 
+    def test_needs_evidence_window_recovers_with_replacement_when_new_observation_arrives(self):
+        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=4)
+        self.sources()
+        first = self.queue()
+        res1, calls1 = self.review(first, "needs_evidence")
+        self.assertEqual(res1["status"], "needs_evidence")
+        self.assertEqual(calls1, 1)
+        self.assertEqual(self.link(first)["state"], "awaiting_evidence")
+        # 无新观察记录时，再次排队不会创建重复窗口
+        same = self.queue()
+        self.assertEqual(same["status"], "awaiting_evidence")
+        self.assertTrue(same["reused"])
+        # 新增补充观察记录后，自动生成包含旧观察与新补证的替代窗口
+        self.capture("Supplementary hardware calibration log confirming unit conversion.")
+        replacement = self.queue()
+        self.assertEqual(replacement["status"], "pending", replacement)
+        self.assertNotEqual(replacement["problem_id"], first["problem_id"])
+        self.assertEqual(self.link(first)["state"], "superseded")
+        res2, calls2 = self.review(replacement, "candidate")
+        self.assertEqual(res2["status"], "candidate", res2)
+        self.assertEqual(calls2, 1)
+        self.assertEqual(self.r.work_memory_status(self.p)["model_summaries"], 1)
+
+    def test_small_input_budget_skips_oversize_first_item_and_reports_budget_exceeded_when_blocked(self):
+        self.r.config["admin"]["max_input_chars"] = 4000
+        self.capture("Oversize observation payload " * 120, "UserPromptSubmit")
+        all_blocked = self.r._work_queue_summary(self.p, "chat", self.workspace, _continuation=True)
+        self.assertEqual(all_blocked["status"], "input_budget_exceeded", all_blocked)
+        self.assertGreater(all_blocked["required_max_input_chars"], 4000)
+        # 后续加入两条短记录后，首条超长记录不会堵死后续短记录成窗
+        self.capture("Short prompt note.", "UserPromptSubmit")
+        self.capture("Short stop note.")
+        queued = self.queue()
+        self.assertEqual(queued["status"], "pending", queued)
+        self.assertEqual(queued["source_count"], 2)
+
+    def test_mixed_task_and_untasked_observations_deduplicate_by_original_snapshot_binding(self):
+        self.capture("Untasked initial observation A.", "UserPromptSubmit")
+        self.r.task_update(self.p, "chat", "Optical task goal")
+        self.capture("Tasked observation B.")
+        first = self.queue()
+        self.assertEqual(first["status"], "pending")
+        res, calls = self.review(first, "candidate")
+        self.assertEqual(res["status"], "candidate")
+        self.assertEqual(calls, 1)
+        # 删除 source_record_ids 模拟跨记录 ID 场景，仅靠 source_snapshots 的 business_digest 去重
+        self.r.db.execute("UPDATE work_summary_links SET source_record_ids='[]' WHERE problem_id=?", (first["problem_id"],))
+        again = self.r._work_queue_summary(self.p, "chat", self.workspace, _continuation=True)
+        self.assertEqual(again["status"], "insufficient_delta", again)
+
+    def test_work_capture_persists_when_optional_summary_queue_raises(self):
+        before = self.r.work_memory_status(self.p)["memories"]
+        with patch.object(self.r, "_work_queue_summary", side_effect=RuntimeError("unexpectederror") if False else ValueError("summaryboom")):
+            with self.r.transaction():
+                ev, _ = self.r._event(self.p, "chat", "Stop", {"last_assistant_message": " public delivery note "}, outcome="reported")
+                self.r._work_capture_safely(self.p, ev["id"], self.workspace, raw={"last_assistant_message": " public delivery note "},
+                                            summarize=True, conversation="chat")
+        after = self.r.work_memory_status(self.p)["memories"]
+        self.assertEqual(after, before + 1)
+        self.assertEqual(self.r.status(self.p)["metrics"].get("work_summary_queue_failed"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

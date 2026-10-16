@@ -126,8 +126,10 @@ class WorkSummaryMixin:
                 "WHERE s.project=m.project AND s.host_scope=? AND s.state IN ('pending','accepted','skipped') "
                 "AND j.value=m.id) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_snapshots) j "
-                "WHERE s.project=m.project AND s.host_scope=? AND s.task_id IS m.task_id "
-                "AND s.task_revision IS m.task_revision AND s.state IN ('pending','accepted','skipped') "
+                "WHERE s.project=m.project AND s.host_scope=? AND s.conversation=m.conversation AND s.workspace_key=m.workspace_key "
+                "AND ((json_extract(j.value,'$.task_id') IS m.task_id AND json_extract(j.value,'$.task_revision') IS m.task_revision) "
+                "OR (s.task_id IS m.task_id AND s.task_revision IS m.task_revision)) "
+                "AND s.state IN ('pending','accepted','skipped') "
                 "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
                 "JOIN admin_calls c ON c.project=s.project AND c.problem=s.problem_id "
@@ -138,12 +140,23 @@ class WorkSummaryMixin:
                 (project, conversation, checkout, task.get("id"), task.get("revision"), self._session_scope(),
                  self._session_scope(), self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
             distinct, seen, used = [], set(), 0
-            window_budget = max(0, self.config["admin"]["max_input_chars"] - 5000)
+            blocked_by_budget, min_blocked_cost = 0, None
+            configured_max = self.config["admin"]["max_input_chars"]
+            overhead = 2200 if configured_max <= 8000 else 5000
+            window_budget = max(0, configured_max - overhead)
             for row in rows:
                 signature = row["business_digest"] or row["id"]
                 if signature not in seen:
                     cost = len(row["body"]) + 350
+                    if cost > window_budget:
+                        seen.add(signature)
+                        blocked_by_budget += 1
+                        min_blocked_cost = cost if min_blocked_cost is None else min(min_blocked_cost, cost)
+                        continue
                     if used + cost > window_budget:
+                        blocked_by_budget += 1
+                        needed = used + cost
+                        min_blocked_cost = needed if min_blocked_cost is None else min(min_blocked_cost, needed)
                         break
                     distinct.append(row)
                     seen.add(signature)
@@ -153,6 +166,10 @@ class WorkSummaryMixin:
             rows = distinct
             minimum = 1 if _continuation else settings["summary_min_events"]
             if len(rows) < minimum:
+                if blocked_by_budget > 0 and len(rows) + blocked_by_budget >= minimum:
+                    return {"status": "input_budget_exceeded", "source_count": len(rows),
+                            "blocked_count": blocked_by_budget,
+                            "required_max_input_chars": (min_blocked_cost or 0) + overhead, "invocations": 0}
                 return {"status": "insufficient_delta", "source_count": len(rows), "invocations": 0}
             snapshots = [dict(self.work_source_snapshot(project, row["event_id"]), business_digest=row["business_digest"],
                               projection=json.loads(row["body"]), task_id=row["task_id"],
@@ -170,6 +187,22 @@ class WorkSummaryMixin:
                                   (project, self._session_scope(), identity)).fetchone()
             if old:
                 return {"status": old["state"], "problem_id": old["problem_id"], "reused": True, "invocations": 0}
+            selected_ids = {row["id"] for row in rows}
+            awaiting_rows = self.db.execute(
+                "SELECT problem_id,source_record_ids FROM work_summary_links WHERE project=? AND conversation=? "
+                "AND host_scope=? AND state='awaiting_evidence'",
+                (project, conversation, self._session_scope()),
+            ).fetchall()
+            superseded_problems = []
+            for awaiting in awaiting_rows:
+                prior_ids = set(json.loads(awaiting["source_record_ids"]))
+                if prior_ids & selected_ids and selected_ids - prior_ids:
+                    superseded_problems.append(awaiting["problem_id"])
+            if awaiting_rows and not superseded_problems and all(
+                selected_ids <= set(json.loads(a["source_record_ids"])) for a in awaiting_rows
+            ):
+                return {"status": "awaiting_evidence", "problem_id": awaiting_rows[0]["problem_id"],
+                        "reused": True, "invocations": 0}
             request, _ = self._event(project, conversation, "WorkSummaryRequested",
                                      {"purpose": "work_summary", "source_event_refs": [row["event_id"] for row in rows],
                                       "source_digest": identity, "source_count": len(rows),
@@ -183,6 +216,11 @@ class WorkSummaryMixin:
             problem = self._problem(project, conversation, title, "project", [request["id"]],
                                     task_binding=task or {"id": None, "revision": None})
             now = time.time()
+            for prior_problem in superseded_problems:
+                self.db.execute("UPDATE work_summary_links SET state='superseded',updated=? WHERE project=? AND problem_id=? AND state='awaiting_evidence'",
+                                (now, project, prior_problem))
+                self.db.execute("UPDATE problems SET status='superseded' WHERE project=? AND id=? AND status='pending'",
+                                (project, prior_problem))
             self.db.execute("INSERT INTO work_summary_links(project,problem_id,conversation,task_id,task_revision,"
                             "task_write_version,workspace_key,source_digest,source_snapshots,source_record_ids,"
                             "policy_digest,host_scope,session_epoch,governance_epoch,state,created,updated) "
@@ -193,8 +231,11 @@ class WorkSummaryMixin:
             self._metric(project, "work_summary_requests")
             if _phase_guard:
                 _phase_guard()
-            return {"status": "pending", "problem_id": problem["id"], "request_event_id": request["id"],
-                    "source_count": len(rows), "invocations": 0, "purpose": "work_summary"}
+            out = {"status": "pending", "problem_id": problem["id"], "request_event_id": request["id"],
+                   "source_count": len(rows), "invocations": 0, "purpose": "work_summary"}
+            if superseded_problems:
+                out["superseded_problem_ids"] = superseded_problems
+            return out
 
     def work_summary_guard(self, project, problem_id, *, accepted_call_id=None):
         """返回用途快照；关闭、换号、改任务、变更来源时禁止旧摘要写回。"""
@@ -203,8 +244,10 @@ class WorkSummaryMixin:
         link = _link(self, project, problem_id)
         if link is None:
             return None
-        if link["state"] != "pending" and not (accepted_call_id and link["state"] in {"accepted", "skipped"}
-                                                 and link["call_id"] == accepted_call_id):
+        if link["state"] != "pending" and not (
+            accepted_call_id and link["state"] in {"accepted", "skipped", "awaiting_evidence"}
+            and link["call_id"] == accepted_call_id
+        ):
             raise ContractError("work_summary_not_pending")
         settings = _settings(self, project)
         if not settings["summary_enabled"] or not self.admin_policy(project)["enabled"]:
@@ -340,3 +383,14 @@ class WorkSummaryMixin:
         self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, problem_id))
         return {"continuation": self._work_queue_summary(project, link["conversation"], None,
                     expected_epoch=link["governance_epoch"], _checkout_key=link["workspace_key"], _continuation=True)}
+
+    def work_summary_needs_evidence(self, project, problem_id, call_id):
+        """Mark the window as awaiting supplementary observations so new evidence can form a bounded replacement."""
+        from .runtime import ContractError
+        link = self.work_summary_guard(project, problem_id)
+        if link is None:
+            raise ContractError("work_summary_link_missing")
+        self.db.execute("UPDATE work_summary_links SET state='awaiting_evidence',call_id=?,updated=? "
+                        "WHERE project=? AND problem_id=? AND state='pending'",
+                        (call_id, time.time(), project, problem_id))
+        return {"summary_state": "awaiting_evidence"}

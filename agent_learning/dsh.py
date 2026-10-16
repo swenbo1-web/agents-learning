@@ -421,6 +421,7 @@ class DshAdapter:
         elif isinstance(turn_val, str) and turn_val.strip():
             normalized["turn_id"] = turn_val.strip()[:200]
 
+        queried_fault_signature = None
         if event == "SessionStart":
             source = raw.get("source", "startup")
             if source not in {"startup", "resume", "clear", "compact"}:
@@ -435,6 +436,7 @@ class DshAdapter:
                 ).fetchone()
                 if fault:
                     prompt = fault["query"]
+                    queried_fault_signature = fault["signature"]
             if prompt:
                 normalized["prompt"] = prompt
         elif event in {"UserPromptSubmit", "SubagentStart"}:
@@ -447,6 +449,7 @@ class DshAdapter:
                 ).fetchone()
                 if fault:
                     prompt = fault["query"]
+                    queried_fault_signature = fault["signature"]
             normalized["prompt"] = prompt
             if raw.get("prompt_truncated") is True:
                 normalized["prompt_truncated"] = True
@@ -481,7 +484,11 @@ class DshAdapter:
             if event == "PostToolUse":
                 normalized["tool_response"] = self._normalize_tool_response(tool_name, tool_args, raw)
 
-        result = r.handle_hook(normalized, context_delivery=True, expected_epoch=epoch, _phase_guard=phase_guard)
+        context_outcome = {}
+        result = r.handle_hook(
+            normalized, context_delivery=True, expected_epoch=epoch,
+            _phase_guard=phase_guard, _context_outcome=context_outcome,
+        )
         if event == "PostToolUse" and normalized["tool_response"].get("isError") is True and not agent_id:
             with r.transaction():
                 self._assert_phase(project, conversation, epoch, generation)
@@ -490,18 +497,19 @@ class DshAdapter:
                 if binding and binding["task_id"] is None:
                     self._orphan_fault(project, conversation, epoch, normalized)
         elif event in {"SessionStart", "UserPromptSubmit"} and not agent_id:
-            with r.transaction():
-                self._assert_phase(project, conversation, epoch, generation)
-                fault = r.db.execute(
-                    "SELECT signature FROM dsh_faults WHERE project=? AND conversation=? AND host_epoch=? AND state='pending' "
-                    "ORDER BY created LIMIT 1",
-                    (project, conversation, epoch),
-                ).fetchone()
-                if fault and result.get("hookSpecificOutput", {}).get("additionalContext"):
-                    r.db.execute(
-                        "UPDATE dsh_faults SET state='queried' WHERE project=? AND conversation=? AND signature=?",
-                        (project, conversation, fault["signature"]),
+            if queried_fault_signature is not None:
+                with r.transaction():
+                    self._assert_phase(project, conversation, epoch, generation)
+                    pending = (
+                        context_outcome.get("retryable")
+                        or context_outcome.get("cooling")
+                        or context_outcome.get("delivery_pending")
                     )
+                    if not pending:
+                        r.db.execute(
+                            "UPDATE dsh_faults SET state='queried' WHERE project=? AND conversation=? AND signature=?",
+                            (project, conversation, queried_fault_signature),
+                        )
             if event == "SessionStart" and normalized.get("source") == "startup":
                 try:
                     hist = r.history_status(project)
