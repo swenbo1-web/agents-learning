@@ -70,6 +70,9 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/package.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/host_resources/dsh/host/index.mjs", wheel.namelist())
+                reviewer = "host_resources/dsh/reviewer/runner.mjs"
+                self.assertEqual(wheel.read("agent_learning/_plugin_resources/" + reviewer),
+                                 (source_root / reviewer).read_bytes())
                 self.assertIn("agent_learning/_plugin_resources/hooks/dsh_dispatch.py", wheel.namelist())
                 self.assertEqual(wheel.read("agent_learning/_plugin_resources/LICENSE"), (source_root / "LICENSE").read_bytes())
                 licenses = [name for name in wheel.namelist() if ".dist-info/" in name and name.endswith("/LICENSE")]

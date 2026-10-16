@@ -168,7 +168,10 @@ class PanelControl:
                 "host_scope": state["host_scope"], "admin_admission_enabled": state["enabled"],
                 "model_mode": policy["model_mode"], "model": executor.get("model"),
                 "remaining_calls": usage.get("remaining_calls"), "max_calls_per_day": usage.get("max_calls_per_day"),
-                "budget_scope": "ALP_HOME", "reason": routing.get("reason") or usage.get("admission_status"),
+                "budget_scope": "ALP_HOME", "reason": state.get("diagnostic", {}).get("reason")
+                    or routing.get("reason") or usage.get("admission_status"),
+                "admin_phase": state.get("diagnostic", {}).get("phase", "idle"),
+                "work_summary_enabled": state.get("work_summary", {}).get("enabled", False),
                 "counts": {"active": count("active"), "work_memory": count("work_memories"),
                            "pending_problems": count("problems", " AND status='pending'"),
                            "candidates": count("candidates", " AND status IN ('candidate','deferred')")},

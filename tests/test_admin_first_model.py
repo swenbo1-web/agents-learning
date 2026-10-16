@@ -194,7 +194,9 @@ class AdminFirstModelTests(unittest.TestCase):
         directory = Path(self.temp.name) / "execution"
         directory.mkdir()
         with patch("agent_learning.admin.subprocess.Popen") as process:
-            for provider, command in (("codex", ["codex"]), ("antigravity", ["agy"]), ("dsh", ["dsh"])):
+            # Standard DSH SDK discovery has separate launcher regressions;
+            # this protocol check uses an explicit launcher without a host install.
+            for provider, command in (("codex", ["codex"]), ("antigravity", ["agy"]), ("dsh", [sys.executable])):
                 plan = build_execution(command, provider, "bound-model", directory,
                     directory / "schema.json", directory / "output.json", "Review supplied observations", 10,
                     selection_mode="first")
@@ -241,8 +243,7 @@ class FirstModelQueueTests(unittest.TestCase):
             token = claim_dispatch(self.r, self.p)
         self.assertIsNotNone(token)
         dispatch = self.r.db.execute("SELECT lease_until FROM admin_dispatch WHERE token=?", (token,)).fetchone()
-        cfg = self.r.admin_effective_config(self.p)
-        self.assertEqual(dispatch[0], 100000 + cfg.get("max_run_seconds", cfg["max_batch_seconds"]) + 30)
+        self.assertEqual(dispatch[0], 100000 + 30, "Python reservation waits only for worker acknowledgement")
 
     def test_first_dispatch_waits_for_observation_without_spending_model_calls(self):
         self.r.task_update(self.p, "case-chat", "Review the supplied observation")
@@ -273,7 +274,7 @@ class FirstModelQueueTests(unittest.TestCase):
         self.r.close()
         upgraded = Runtime(home, config={})
         self.addCleanup(upgraded.close)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 16)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 17)
         after = dict(upgraded.db.execute("SELECT * FROM knowledge WHERE project=? AND id=?", (self.p, published["knowledge_id"])).fetchone())
         self.assertEqual(before, after)
         self.assertEqual(upgraded.db.execute("SELECT revision FROM active WHERE project=? AND id=?", (self.p, published["knowledge_id"])).fetchone()[0], published["revision"])

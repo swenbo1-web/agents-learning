@@ -70,9 +70,9 @@ class WorkMemoryTests(unittest.TestCase):
     def test_public_report_and_correction_are_not_user_acceptance(self):
         self.event("Stop", last_assistant_message="mapping changed but gameplay not verified")
         self.event("UserPromptSubmit", prompt="不对，动画仍然播放错误")
-        self.assertIsNone(self.event("UserPromptSubmit", prompt="请继续修复")[1])
+        self.assertTrue(self.event("UserPromptSubmit", prompt="请继续修复")[1]["indexed"])
         cards = self.r.work_search(self.p)["items"]
-        self.assertEqual(len(cards), 2)
+        self.assertEqual(len(cards), 3)
         self.assertTrue(all(card["validation_level"] == "reported" and card["state"] == "reported" for card in cards))
 
     def test_history_import_is_not_automatically_exposed(self):

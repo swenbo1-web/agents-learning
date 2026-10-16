@@ -412,6 +412,12 @@ class DshAdapter:
                 if fault:
                     prompt = fault["query"]
             normalized["prompt"] = prompt
+            if raw.get("prompt_truncated") is True:
+                normalized["prompt_truncated"] = True
+            if type(raw.get("prompt_chars")) is int and raw["prompt_chars"] >= len(prompt):
+                normalized["prompt_chars"] = raw["prompt_chars"]
+            if isinstance(raw.get("message_ids"), list):
+                normalized["message_ids"] = [value[:200] for value in raw["message_ids"][:32] if isinstance(value, str)]
             if event == "SubagentStart" and isinstance(raw.get("agent_type") or raw.get("provider"), str):
                 normalized["agent_type"] = (raw.get("agent_type") or raw.get("provider")).strip()[:100]
         elif event in {"Stop", "SubagentStop"}:
@@ -420,6 +426,11 @@ class DshAdapter:
             )
             if last_msg:
                 normalized["last_assistant_message"] = last_msg
+                if raw.get("last_assistant_message_truncated") is True:
+                    normalized["last_assistant_message_truncated"] = True
+                length = raw.get("last_assistant_message_chars")
+                if type(length) is int and length >= len(last_msg):
+                    normalized["last_assistant_message_chars"] = length
         elif event in {"PreToolUse", "PostToolUse"}:
             tool_name, tool_args, call_id = self._normalize_tool_call(raw)
             # 校验显式传入的 context_handle 是否属于当前 DSH 会话，防止跨会话句柄混用

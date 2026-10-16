@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -82,7 +83,9 @@ class WorkSummaryTests(unittest.TestCase):
         self.assertEqual(result["invocations"], 0)
         problem_events = [row[0] for row in self.r.db.execute("SELECT event FROM problem_events WHERE problem=?",
                                                            (result["problem_id"],))]
-        self.assertEqual(set(problem_events), {event["id"] for event in events})
+        self.assertEqual(problem_events, [result["request_event_id"]])
+        frozen = self.r.work_summary_packet(self.p, result["problem_id"])
+        self.assertEqual({event["id"] for event in frozen["events"]}, {event["id"] for event in events})
         requested = json.loads(self.r.db.execute("SELECT payload FROM events WHERE id=?",
                                                 (result["request_event_id"],)).fetchone()[0])
         self.assertEqual(requested["source_event_refs"], [event["id"] for event in events])
@@ -158,15 +161,18 @@ class WorkSummaryTests(unittest.TestCase):
         self.assertNotEqual(result["status"], "candidate")
         self.assertEqual(self.r.work_memory_status(self.p)["model_summaries"], 0)
 
-    def test_projected_source_is_preflight_blocked_without_a_model_call(self):
+    def test_projected_source_can_only_produce_a_reported_work_summary(self):
         self.event(tool_name="write_file", tool_input={"path": "src/mapping.py"}, tool_response={"output": "x" * 16000})
         self.event("Stop", outcome="reported", last_assistant_message="changed, validation missing")
         queued = self.queue()
-        with patch("agent_learning.admin.subprocess.Popen") as popen:
-            result = admin_once(self.r, self.p, queued["problem_id"])
-        self.assertEqual(result["status"], "needs_evidence")
-        self.assertEqual(self.counts()["admin_calls"], 0)
-        popen.assert_not_called()
+        packet = self.r.work_summary_packet(self.p, queued["problem_id"])
+        self.assertTrue(packet["evidence_truncated"])
+        self.assertFalse(packet["incomplete"])
+        result = self.run_review(queued)
+        self.assertEqual(result["status"], "candidate")
+        self.assertEqual(result["validation_level"], "model_reported")
+        self.assertEqual(self.counts()["candidates"], 0)
+        self.assertEqual(self.counts()["active"], 0)
 
     def test_same_global_budget_applies_to_summaries(self):
         self.sources()
@@ -233,16 +239,14 @@ class WorkSummaryTests(unittest.TestCase):
         queued = self.queue()
         def change(packet, process):
             self.r.task_update(self.p, "chat", "animation mapping", status="paused")
+            raise subprocess.TimeoutExpired("controlled-review", process.timeout)
         first = self.run_review(queued, fake_reviewer("candidate", change))
-        self.assertNotEqual(first["status"], "candidate")
-        # 先把过期的旧阶段移出队列，新的write-version仍不能伪装成新增业务证据。
-        self.r.work_summary_select(self.p, queued["problem_id"])
+        self.assertEqual(first["status"], "timeout_unknown")
         replacement = self.queue()
-        self.assertEqual(replacement["status"], "pending")
-        self.assertNotEqual(replacement["problem_id"], queued["problem_id"])
+        self.assertEqual(replacement["status"], "insufficient_delta")
         with patch("agent_learning.admin.subprocess.Popen") as popen:
-            result = admin_once(self.r, self.p, replacement["problem_id"])
-        self.assertEqual(result["status"], "review_required")
+            result = admin_once(self.r, self.p, queued["problem_id"])
+        self.assertIn(result["status"], {"review_required", "idle"})
         self.assertEqual(self.counts()["admin_calls"], 1)
         popen.assert_not_called()
 

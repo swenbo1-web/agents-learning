@@ -84,7 +84,8 @@ class SchedulerMixin:
         self.db.execute("UPDATE scheduler_jobs SET state='waiting',wait_reason='interrupted',owner=NULL,"
                         "lease_until=NULL,next_due=NULL,updated=? WHERE state='running' "
                         "AND (lease_until<=? OR host_epoch!=?)", (now, now, epoch))
-        self.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?", (now, epoch))
+        from .admin_queue import recover_dispatch
+        recover_dispatch(self, now)
 
     def _scheduler_admin_state(self, project, cfg):
         from .admin_queue import eligible_query, scan_signature, ready_executor
@@ -108,8 +109,7 @@ class SchedulerMixin:
             return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
         query, args = eligible_query(scan_signature(self, project),
                                      preflight_signature=scan_signature(self, project, include_candidates=False),
-                                     summary_enabled=(self.config["work_memory"]["enabled"]
-                                                      and self.config["work_memory"]["summary_enabled"]),
+                                     summary_enabled=self.work_summary_enabled(project),
                                      summary_host_scope=self._session_scope())
         eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
         if not eligible:
@@ -122,7 +122,9 @@ class SchedulerMixin:
             reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
             return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
         if not ready_executor(self, project, query, args):
-            return signature, "waiting", None, "executor_not_ready"
+            from .admin_queue import dispatch_diagnostic
+            diagnostic = dispatch_diagnostic(self, project)
+            return signature, "waiting", diagnostic.get("next_due"), diagnostic["reason"]
         budget = admin_budget_status(self)
         admission = budget["admission_status"]
         if admission != "available":

@@ -5,6 +5,12 @@ import time
 import uuid
 
 
+# A known executor failure must not permanently pin the oldest problem at the
+# head of every bounded scan. Unknown/paid calls remain excluded by eligibility.
+REVIEW_ORDER = ("ORDER BY COALESCE((SELECT MAX(c.finished) FROM admin_calls c WHERE c.project=p.project "
+                "AND c.problem=p.id AND c.revision=p.revision AND c.state='not_started'),0),p.created,p.id ")
+
+
 def install_queue(runtime):
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_review_checks("
                        "project TEXT NOT NULL,problem TEXT NOT NULL,revision INTEGER NOT NULL,"
@@ -17,6 +23,21 @@ def install_queue(runtime):
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_dispatch("
                        "project TEXT PRIMARY KEY,token TEXT NOT NULL,host_epoch INTEGER NOT NULL,"
                        "lease_until REAL NOT NULL,created REAL NOT NULL)")
+    columns = {row[1] for row in runtime.db.execute("PRAGMA table_info(admin_dispatch)")}
+    for name, declaration in {"phase": "TEXT NOT NULL DEFAULT 'reserved'", "claimed_at": "REAL", "worker_pid": "INTEGER",
+                              "host_scope": "TEXT NOT NULL DEFAULT ''"}.items():
+        if name not in columns:
+            runtime.db.execute("ALTER TABLE admin_dispatch ADD COLUMN " + name + " " + declaration)
+    # Legacy reservations never had a worker acknowledgement. Bound their
+    # remaining life rather than declaring an old dispatch to be running.
+    runtime.db.execute("UPDATE admin_dispatch SET lease_until=MIN(lease_until,created+30) WHERE claimed_at IS NULL")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_executor_failures("
+                       "project TEXT NOT NULL,host_scope TEXT NOT NULL,signature TEXT NOT NULL,"
+                       "failures INTEGER NOT NULL,next_try REAL NOT NULL,reason TEXT NOT NULL,updated REAL NOT NULL,"
+                       "PRIMARY KEY(project,host_scope,signature))")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_dispatch_diagnostics("
+                       "project TEXT NOT NULL,host_scope TEXT NOT NULL,reason TEXT NOT NULL,details TEXT NOT NULL,"
+                       "updated REAL NOT NULL,PRIMARY KEY(project,host_scope))")
     if "blocked_call" not in {row[1] for row in runtime.db.execute("PRAGMA table_info(admin_review_checks)")}:
         runtime.db.execute("ALTER TABLE admin_review_checks ADD COLUMN blocked_call TEXT")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_queue_epochs(project TEXT PRIMARY KEY,candidates INTEGER NOT NULL DEFAULT 0)")
@@ -56,7 +77,8 @@ def scan_signature(runtime, project, *, include_candidates=True):
             "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
             (project, scope, runtime.session_epoch()))]
     return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
-                   "work_summary_policy": runtime.config["work_memory"],
+                   "work_summary_policy": {"configuration": runtime.config["work_memory"],
+                                           "effective": runtime.work_summary_policy(project)},
                    "host_scope": scope, "packet_format": PACKET_FORMAT,
                    "instructions": REVIEW_PREFIX, "knowledge_changes": list(row) if row else None,
                    "candidate_changes": (candidates[0] if candidates else 0) if include_candidates else None})
@@ -117,13 +139,13 @@ def executor_query(runtime, project, query, args):
 def ready_executor(runtime, project, query, args):
     from .admin_providers import executor_availability
     query, args = executor_query(runtime, project, query, args)
-    for item in runtime.db.execute(query + "ORDER BY p.created,p.id LIMIT 10", (project, *args)).fetchall():
+    for item in runtime.db.execute(query + REVIEW_ORDER + "LIMIT 40", (project, *args)).fetchall():
         try:
             plan = runtime.resolve_admin_executor(project, item["conversation"])
             available = executor_availability(plan)["cli_available"]
         except ValueError:
             continue
-        if available:
+        if available and not executor_backoff(runtime, project, plan):
             return True
     return False
 
@@ -144,9 +166,12 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
             return None
         recover_calls(runtime)
         now = time.time()
+        recover_dispatch(runtime, now)
         runtime.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?",
                            (now, runtime.host_epoch()))
         if runtime.db.execute("SELECT 1 FROM admin_dispatch WHERE project=?", (project,)).fetchone():
+            return None
+        if executor_backoff(runtime, project, background_plan(runtime)):
             return None
         placeholders = ",".join("?" for _ in ACTIVE_STATES)
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
@@ -163,17 +188,184 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
             return None
         query, args = eligible_query(scan_signature(runtime, project),
                                      preflight_signature=scan_signature(runtime, project, include_candidates=False),
-                                     summary_enabled=(runtime.config["work_memory"]["enabled"]
-                                                      and runtime.config["work_memory"]["summary_enabled"]),
+                                     summary_enabled=runtime.work_summary_enabled(project),
                                      summary_host_scope=runtime._session_scope())
         if not ready_executor(runtime, project, query, args):
             return None
         token = str(uuid.uuid4())
-        runtime.db.execute("INSERT INTO admin_dispatch VALUES(?,?,?,?,?)",
-                           (project, token, runtime.host_epoch(), now + cfg.get("max_run_seconds", cfg["max_batch_seconds"]) + 30, now))
+        runtime.db.execute("INSERT INTO admin_dispatch(project,token,host_epoch,lease_until,created,host_scope) VALUES(?,?,?,?,?,?)",
+                           (project, token, runtime.host_epoch(), now + 30, now, runtime._session_scope()))
+        record_dispatch_diagnostic(runtime, project, "worker_reserved")
         return token
 
 
 def release_dispatch(runtime, project, token):
     if token:
         runtime.db.execute("DELETE FROM admin_dispatch WHERE project=? AND token=?", (project, token))
+
+
+def background_plan(runtime):
+    import sys
+    from pathlib import Path
+    return {"provider": "background_python", "command": [sys.executable],
+            "model": str(Path(__file__).resolve()), "session_epoch": runtime.session_epoch()}
+
+
+def recover_dispatch(runtime, now=None):
+    """An unacknowledged expired Python reservation is never active model work."""
+    now = time.time() if now is None else now
+    rows = runtime.db.execute("SELECT project,host_scope FROM admin_dispatch WHERE phase='reserved' "
+                             "AND host_epoch=? AND lease_until<=?", (runtime.host_epoch(), now)).fetchall()
+    for row in rows:
+        if row["host_scope"] == runtime._session_scope():
+            record_executor_failure(runtime, row["project"], background_plan(runtime), "worker_ack_expired")
+        elif row["host_scope"]:
+            # The recoverer may be another host sharing this SQLite database.
+            # Without the original session's frozen executor signature, record
+            # its failure in the owning host; never penalize the recoverer.
+            record_dispatch_diagnostic(runtime, row["project"], "worker_ack_expired", host_scope=row["host_scope"])
+    runtime.db.execute("DELETE FROM admin_dispatch WHERE lease_until<=? OR host_epoch!=?", (now, runtime.host_epoch()))
+
+
+def claim_dispatch_worker(runtime, project, token, seconds):
+    """Only the worker can acknowledge its reservation; duplicate workers fail closed."""
+    import os
+    with runtime.transaction():
+        now = time.time()
+        cursor = runtime.db.execute("UPDATE admin_dispatch SET phase='worker_claimed',claimed_at=?,worker_pid=?,lease_until=? "
+            "WHERE project=? AND token=? AND host_epoch=? AND lease_until>? AND phase='reserved' AND host_scope IN ('',?)",
+            (now, os.getpid(), now + seconds + 30, project, token, runtime.host_epoch(), now, runtime._session_scope()))
+        if cursor.rowcount != 1:
+            return False
+        clear_executor_failure(runtime, project, background_plan(runtime))
+        record_dispatch_diagnostic(runtime, project, "worker_claimed")
+        return True
+
+
+def record_dispatch_diagnostic(runtime, project, reason, details=None, *, host_scope=None):
+    from .runtime import encode
+    # details must be fixed fields; never persist CLI stderr/exception messages.
+    details = {key: value for key, value in (details or {}).items()
+               if key in {"error_type", "errno", "winerror", "returncode", "failures", "next_try"}
+               and (isinstance(value, (int, float)) or key == "error_type" and isinstance(value, str) and value.isidentifier())}
+    runtime.db.execute("INSERT INTO admin_dispatch_diagnostics VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) "
+                       "DO UPDATE SET reason=excluded.reason,details=excluded.details,updated=excluded.updated",
+                       (project, host_scope or runtime._session_scope(), reason, encode(details), time.time()))
+
+
+def executor_signature(plan):
+    from .runtime import digest
+    from .admin_providers import resolve_command, dsh_sdk_launcher
+    try:
+        sdk = dsh_sdk_launcher(plan["command"]) if plan.get("provider") == "dsh" else None
+        command = sdk["args"] if sdk else resolve_command(plan["command"])["args"]
+        from pathlib import Path
+        files = [(item, Path(item).stat().st_mtime_ns, Path(item).stat().st_size)
+                 for item in command if not item.startswith("-") and Path(item).is_file()]
+    except (OSError, ValueError):
+        command, files = plan.get("command"), []
+    return digest({"command": command, "files": files, "provider": plan.get("provider"),
+                   "model": plan.get("model"), "session_epoch": plan.get("session_epoch")})
+
+
+def executor_backoff(runtime, project, plan):
+    if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_executor_failures'").fetchone():
+        return None
+    row = runtime.db.execute("SELECT failures,next_try,reason FROM admin_executor_failures "
+        "WHERE project=? AND host_scope=? AND signature=? AND next_try>?",
+        (project, runtime._session_scope(), executor_signature(plan), time.time())).fetchone()
+    return dict(row) if row else None
+
+
+def record_executor_failure(runtime, project, plan, reason, details=None):
+    key, now = executor_signature(plan), time.time()
+    row = runtime.db.execute("SELECT failures FROM admin_executor_failures WHERE project=? AND host_scope=? AND signature=?",
+                            (project, runtime._session_scope(), key)).fetchone()
+    failures = min(30, (row[0] if row else 0) + 1)
+    delay = 30 if failures == 1 else 120 if failures == 2 else 900
+    runtime.db.execute("INSERT INTO admin_executor_failures VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,host_scope,signature) "
+                       "DO UPDATE SET failures=excluded.failures,next_try=excluded.next_try,reason=excluded.reason,updated=excluded.updated",
+                       (project, runtime._session_scope(), key, failures, now + delay, reason, now))
+    record_dispatch_diagnostic(runtime, project, reason, dict(details or {}, failures=failures, next_try=now + delay))
+
+
+def clear_executor_failure(runtime, project, plan):
+    runtime.db.execute("DELETE FROM admin_executor_failures WHERE project=? AND host_scope=? AND signature=?",
+                       (project, runtime._session_scope(), executor_signature(plan)))
+
+
+def dispatch_diagnostic(runtime, project):
+    import json
+    result = _dispatch_diagnostic(runtime, project)
+    exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_dispatch_diagnostics'").fetchone()
+    last = runtime.db.execute("SELECT reason,details,updated FROM admin_dispatch_diagnostics WHERE project=? AND host_scope=?",
+                              (project, runtime._session_scope())).fetchone() if exists else None
+    if last:
+        result["last_observation"] = {"reason": last["reason"], "details": json.loads(last["details"]), "updated": last["updated"]}
+    return result
+
+
+def _dispatch_diagnostic(runtime, project):
+    """Read-only admission/worker/model observation, shared by all hosts and UI."""
+    from .admin_usage import admin_budget_status
+    from .admin_providers import executor_availability
+    now = time.time()
+    detail = {"phase": "idle", "reason": "no_increment", "next_due": None}
+    active = runtime.db.execute("SELECT state,lease_until FROM admin_calls WHERE project=? "
+        "AND state IN ('reserved','launch_intent','started') AND lease_until>? ORDER BY created LIMIT 1", (project, now)).fetchone()
+    if active:
+        phase = {"reserved": "model_reserved", "launch_intent": "model_launching", "started": "model_started"}[active["state"]]
+        return dict(detail, phase=phase, reason=phase, next_due=active["lease_until"])
+    if not runtime.admin_effective_config(project)["enabled"]:
+        return dict(detail, reason="disabled")
+    dispatch_columns = {row[1] for row in runtime.db.execute("PRAGMA table_info(admin_dispatch)")}
+    phase_column = "phase" if "phase" in dispatch_columns else "'reserved' AS phase"
+    dispatch = runtime.db.execute("SELECT " + phase_column + ",lease_until FROM admin_dispatch WHERE project=? AND host_epoch=? AND lease_until>?",
+                                  (project, runtime.host_epoch(), now)).fetchone()
+    if dispatch:
+        phase = "worker_claimed" if dispatch["phase"] == "worker_claimed" else "worker_reserved"
+        return dict(detail, phase=phase, reason=phase, next_due=dispatch["lease_until"])
+    query, args = eligible_query(scan_signature(runtime, project),
+        preflight_signature=scan_signature(runtime, project, include_candidates=False),
+        summary_enabled=runtime.work_summary_enabled(project),
+        summary_host_scope=runtime._session_scope())
+    routed, routed_args = executor_query(runtime, project, query, args)
+    rows = runtime.db.execute(routed + REVIEW_ORDER + "LIMIT 40", (project, *routed_args)).fetchall()
+    if not rows:
+        if runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():
+            return dict(detail, reason="model_missing")
+        if runtime.db.execute("SELECT 1 FROM operations o JOIN problems p ON p.project=o.project AND p.conversation=o.conversation "
+            "AND p.task_id IS o.task_id AND p.task_revision IS o.task_revision WHERE p.project=? AND p.status='pending' "
+            "AND o.state IN ('running','started') LIMIT 1", (project,)).fetchone():
+            return dict(detail, reason="awaiting_tool_completion")
+        if runtime.db.execute("SELECT 1 FROM admin_calls c WHERE c.project=? AND c.retry_allowed=0 "
+            "AND c.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
+            "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.call_id=c.id) LIMIT 1", (project,)).fetchone():
+            return dict(detail, reason="unknown_call_requires_review")
+        if runtime.db.execute("SELECT 1 FROM admin_preflights WHERE project=? LIMIT 1", (project,)).fetchone():
+            return dict(detail, reason="awaiting_evidence")
+        return detail
+    budget = admin_budget_status(runtime)
+    if budget["admission_status"] != "available":
+        return dict(detail, reason=budget["admission_status"], next_due=budget.get("next_reset_at"))
+    worker_backoff = executor_backoff(runtime, project, background_plan(runtime))
+    if worker_backoff:
+        return dict(detail, reason="worker_launch_backoff", next_due=worker_backoff["next_try"],
+                    failure_reason=worker_backoff["reason"])
+    last = dict(detail, reason="model_missing")
+    for row in rows:
+        try:
+            plan = runtime.resolve_admin_executor(project, row["conversation"])
+        except ValueError:
+            continue
+        availability = executor_availability(plan)
+        if not availability["cli_available"]:
+            last = dict(detail, reason=availability["reason"])
+            continue
+        backoff = executor_backoff(runtime, project, plan)
+        if backoff:
+            last = dict(detail, reason="executor_circuit_open" if backoff["failures"] >= 3 else "executor_backoff",
+                        next_due=backoff["next_try"], failure_reason=backoff["reason"])
+            continue
+        return dict(detail, reason="ready")
+    return last

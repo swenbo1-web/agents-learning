@@ -445,7 +445,7 @@ class ProviderLifecycleTests(unittest.TestCase):
                                 "turn_id": "unobserved-stop", "last_assistant_message": "task stopped"})
         launch.assert_not_called()
         waiting = self.r.db.execute("SELECT state,next_due,wait_reason FROM scheduler_jobs WHERE project=? AND kind='admin'", (self.p,)).fetchone()
-        self.assertEqual(waiting["wait_reason"], "executor_not_ready")
+        self.assertEqual(waiting["wait_reason"], "model_missing")
         self.assertIsNone(waiting["next_due"])
         with patch("agent_learning.scheduler.time.sleep", side_effect=AssertionError("not ready job must not wait")), patch("agent_learning.admin.subprocess.Popen") as model:
             result = self.r.scheduler_run(self.p, max_seconds=5)

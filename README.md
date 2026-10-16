@@ -18,7 +18,7 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 
 | 功能 | 可以做什么 |
 |---|---|
-| **项目记忆与文件历史** | 跨对话查阅项目知识、工作尝试和文件关联；提示来源及文件状态变化 |
+| **项目记忆与文件历史** | 跨对话查阅公开需求、分析、工作尝试与文件关联；长公开回复分段保存，保留来源、部分输出与截断标记，不需要先批准成正式知识 |
 | **自动记录与错误补查** | 记录可观察的工具结果和公开说明；遇错后在受支持事件中补查经验 |
 | **检索、注入与渐进读取** | 本地全文检索，可选语义混合检索；自动提供有限摘要，Agent 按适用条件判断，再按需读取正文与证据 |
 | **直接可视化控制与知识库** | DSH 聊天框按键、Codex 对话控制卡、Antigravity App 侧边面板；按安装项目提供状态、管理员档位与历史归档入口，详细知识及批量审批使用共用本机 WebUI |
@@ -90,7 +90,7 @@ git clone --branch main --depth 1 https://github.com/swenbo1-web/agents-learning
 cd agents-learning
 ```
 
-下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；使用多个宿主时分别安装。需要固定稳定版时，可将克隆命令的 `main` 改为 `v1.0.0`，该版本仅使用下方 Codex／Antigravity 步骤。
+下面是 **Windows PowerShell** 命令，均在仓库目录执行。选择你使用的宿主即可；使用多个宿主时分别安装对应入口。**三个宿主共用一套插件源码和项目知识库，无需建三份知识库**；保持同一 `ALP_HOME`、配置和项目路径，安装目录分别选择 `--host codex|antigravity|dsh`，不要相互覆盖。需要固定稳定版时，可将克隆命令的 `main` 改为 `v1.0.0`，该版本仅使用下方 Codex／Antigravity 步骤。
 
 ## 在 Codex 中安装（桌面端与 CLI）
 
@@ -187,6 +187,10 @@ dsh plugin --profile "$learningProfile" add "$learningPlugin"
 | 吸收已有项目历史 | DSH 点击「📖 知识库」→「一键吸收当前项目历史知识」，或发送「使用 `$learning-history` 吸收当前项目选定资料，先说明范围和整理预算」 |
 
 安装不会自动调用管理员模型或扫描历史。日常记录、知识候选和正式发布分别处理；新项目知识库为空是正常现象。[管理员与用量](#可选管理员执行器) · [历史吸收](#为已有项目吸收历史)
+
+**正常对话接续：** 公开需求和最终说明先成为工作记忆；新对话可检索，未指定问题时可获得同项目、同工作目录的近期交接索引，不继承旧任务权限。管理员设置中可另行勾选「整理会话摘要」，保存后按共享预算整理有限阶段窗口；无需 Agent 先登记任务，摘要保持 `model_reported`，不会发布正式知识。中止或不完整输出不当成完成交付。
+
+**管理员没有运行时：** 在管理员设置中查看派发阶段和原因，例如无新增内容、等待工具结果、CLI 不可用、模型未就绪、共享预算不足、启动失败冷却或上一调用结果未知。「已派发」与「工作器已启动」「模型已启动」分别显示。管理员当前使用独立平台 CLI，Antigravity 日常插件接入无需 `agy`，但自动管理员需要可用的 `agy`；不会直接占用已打开聊天里的模型连接。
 
 ## 使用与配置
 
@@ -493,11 +497,11 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigr
 
 可用单独的管理员接口人工整理案例，或按对应宿主配置 CLI 自动知识审核；DSH 需要 `main` 源码。native admin skill 只是操作说明，默认 MCP 仍是 worker；具体开启方法见[管理员执行器](#可选管理员执行器)。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
 
-当前 `main` 数据库 schema **16**、内部发布协议 **16**，工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变；原 v1.0.0 发行包仍为 schema／协议 15。升级前备份外部知识数据库，更新并重载所有共库宿主的固定运行副本；旧运行端不能打开 schema 16。
+当前 `main` 数据库 schema **17**、内部发布协议 **17**，工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变；原 v1.0.0 发行包仍为 schema／协议 15。升级前备份外部知识数据库，更新并重载所有共库宿主的固定运行副本；旧运行端不能打开 schema 17。
 
 Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。Codex 自定义 MCP 入口需按下节同步新运行路径。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。多个宿主可复用同一固定运行 release，但需分别更新各自的安装目录。
 
-与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到相同兼容版本，再重新加载宿主。只有一部分安装更新到当前 `main` 时，其他原 v1.0.0 或更早运行端会因 schema 16 不兼容而被拒绝。
+与旧安装共用数据时，先停止相关运行端、备份数据库，并把所有访问同一知识库的安装都更新到相同兼容版本，再重新加载宿主。只有一部分安装更新到当前 `main` 时，其他原 v1.0.0 或更早运行端会因 schema 17 不兼容而被拒绝。
 
 ### Codex 自定义知识目录
 
@@ -516,7 +520,7 @@ Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作�
 
    macOS／Linux 需在启动宿主的环境中设置同一变量；仅在一个终端 `export` 不会修改已运行的桌面进程。若使用 `ALP_CONFIG`，也以同样方式配置它。
 
-2. 导出安装后，在实际 `CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）合并下面配置。`command` 使用导出目录 `runtime-release.json` 的 `python`；脚本使用其中 `runtime_directory` 下的 `scripts/learning.py`。已有同名条目时修改原条目，保留其他设置。示例中的三处路径都需替换：
+2. 导出安装后，在实际 `CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）合并下面配置。`command` 使用导出目录 `runtime-release.json` 的 `python`；脚本使用其中 `runtime_directory` 下的 `scripts/learning.py`。已有同名条目时修改原条目，保留其他设置。示例中的解释器、脚本、知识目录和安装目录路径都需替换：
 
    ```toml
    [plugins."agent-learning@agent-learning-local".mcp_servers.agent_learning]
@@ -524,7 +528,7 @@ Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作�
 
    [mcp_servers.agent_learning]
    command = 'C:/path/to/python.exe'
-   args = ['D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker']
+   args = ['-B', 'D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker', '--panel-installation', 'C:/path/to/agent-learning-plugins/codex']
 
    [mcp_servers.agent_learning.env]
    ALP_HOME = 'D:/AgentLearning'
@@ -697,7 +701,7 @@ Codex 在有明确目标参数的 `PreToolUse` 提供索引。Antigravity 在新
 }
 ```
 
-设 `automatic_context=false` 可保留手动查询而关闭工作索引注入。AI 工作摘要需要同时开启 `summary_enabled` 和对应项目／宿主的[管理员执行器](#可选管理员执行器)，不会只因安装插件就调用模型。默认至少两条有价值的新增记录才排队，单批最多十二条；复用现有执行器、预算和调用回执，未知调用不自动重试。
+设 `automatic_context=false` 可保留手动查询而关闭工作索引注入。AI 工作摘要需要在管理员设置中勾选「整理会话摘要」（按项目／宿主保存），或配置 `summary_enabled=true`，并开启对应项目／宿主的[管理员执行器](#可选管理员执行器)，不会只因安装插件就调用模型。默认至少两条新增工作记录才启动有界窗口，单窗口最多十二条；不要求显式 task，未绑定任务的工具保留原归属。已接受或判定无需摘要的窗口会在本地续排下一窗口，最后不足两条的尾段也可继续处理；实际调用仍受共享日额度和运行时限约束，达到上限保留待办。开关或账户版本变化使未启动窗口重新核对，未知调用不自动重试。原始工作记录在未整理前仍可检索。
 
 AI 摘要标记 `model_reported`，只概括可见尝试、结果、公开说明及未确认事项，不产生知识候选或治理动作。需要正式解法时仍经过独立知识审核和发布流程。
 
@@ -750,7 +754,7 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 ## 当前版本与兼容
 
-**1.0.0 是第一正式版，原发行包使用 schema／内部协议 15。** 当前 `main` 增加可视化管理员设置、首次有效会话模型绑定、共享预算和有限连续整理，数据库 schema／内部发布协议升为 **16**，尚未发布新的下载 Release。工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变。迁移保留现有知识、来源与用量记录，未知旧事件不自动补成完整历史。更新前备份数据库并更新、重载全部共库安装；旧运行端拒绝 schema 16，安装目录备份不能代替外部数据库备份。
+**1.0.0 是第一正式版，原发行包使用 schema／内部协议 15。** 当前 `main` 增加可视化管理员设置、首次有效会话模型绑定、共享预算和有限连续整理，数据库 schema／内部发布协议升为 **17**，尚未发布新的下载 Release。工作索引 **1**、知识全文索引 **4**、可选语义索引 **1** 不变。迁移保留现有知识、来源与用量记录，未知旧事件不自动补成完整历史。更新前备份数据库并更新、重载全部共库安装；旧运行端拒绝 schema 17，安装目录备份不能代替外部数据库备份。
 
 以下为历次版本变更，描述各版本发布时的状态：
 
@@ -1008,7 +1012,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" execution-approv
 
 ## 可选管理员执行器
 
-**默认关闭，用户自行开启。** 管理员自动审核知识来源、条件和候选，不替用户验收产品或执行项目任务。它是独立 CLI 进程，不需要长期保留一个管理员聊天；人工整理仍可使用独立管理员 MCP。
+**默认关闭，用户自行开启。** 管理员自动审核知识来源、条件和候选，不替用户验收产品或执行项目任务。审核在独立进程中进行：Codex／Antigravity 使用平台 CLI，DSH 使用受限的平台 SDK 入口；不需要长期保留一个管理员聊天。人工整理仍可使用独立管理员 MCP。
 
 `main` 推荐通过 `$learning-review` 打开管理员设置，或执行：
 
@@ -1018,7 +1022,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 
 保持原安装的 `--home`，Antigravity／DSH 改用对应 `--host`。页面打开时不调用模型；选择设置并点击「保存并开启」后，才允许处理该项目／宿主的日常待办。`--review` 可同时加上以提供知识审批，两种决定分别确认。模型与预算持久保存，重开页面不需要再次开启；关闭管理员只阻止新调用，当前在途审核按原规则回写。界面切换模型必须先等在途审核完成。
 
-CLI 也可显式配置。`--provider host` 使用该宿主的 CLI；首次设置默认模式为 **`first`**，后续省略路由参数保留已有选择：
+CLI 也可显式配置。`--provider host` 使用对应宿主的审核入口；首次设置默认模式为 **`first`**，后续省略路由参数保留已有选择：
 
 ```powershell
 # Codex
@@ -1039,11 +1043,11 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh ad
 | `first`（新默认） | 同项目、同宿主实例、同账户轮次首次有效根会话观察，原子绑定模型标识；后续对话保留绑定 | 尚无有效观察时等待；换号后需要新轮次的有效观察，不猜模型 |
 | `current` | Codex Hook 的 `model`、Antigravity 的 `modelName` 或 DSH 的 `requestContext/model`，仅使用同项目、同宿主、同实例、同轮次的根会话观察 | 没有观察、模型歧义或执行器不属于观察宿主时不调用，不猜模型 |
 | `fixed` | 用户明确提供 `--model MODEL_ID` | 该平台不能使用此模型时失败，不静默换模型 |
-| `default` | 独立 CLI 自身的默认选择 | 不承诺等于桌面当前模型或用户配置默认；Codex 审核跳过用户配置 |
+| `default` | 独立 CLI 的默认选择；DSH 为 SDK 中明确保存的默认 provider/model | 不承诺等于桌面当前模型；Codex 审核跳过用户配置，DSH 未保存默认选择时拒绝调用 |
 
 `first` 不随之后的新对话自动切换模型；Codex、Antigravity、DSH 分别绑定各自宿主的标识。使用 `current` 时，后台仍需确定准确源会话，历史批次要求唯一有效模型标识。需固定模型时使用 `--model-mode fixed --model "该平台可用的模型ID"`，需 CLI 默认选择时用 `--model-mode default`。CLI 参数仍保留显式项目及宿主；CLI 直接改变路由沿用原有在途失效规则，界面则要求先等待完成。
 
-本机对应 CLI 需要已有有效认证；图形界面登录不等于 CLI 已认证，插件不读取、复制或修改凭证，不自动登录。调用使用该 CLI 的账户，额度及费用由平台决定。自定义 CLI 路径可通过 `--command-file FILE` 提供可信 JSON 参数数组，不放令牌或模型选项。[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
+本机平台需要已有有效认证；图形界面登录不等于对应 CLI／SDK 已认证。Python Runtime 不处理凭证；DSH 由平台 SDK 读取本机平台设置及认证，审核入口禁止保存、删除和刷新写回凭证，不自动登录。调用使用该平台账户，额度及费用由平台决定。DSH 的 `first/current/fixed` 要求准确的 `PROVIDER/MODEL` 标识，缺失时等待或报告原因。自定义 CLI 路径可通过 `--command-file FILE` 提供可信 JSON 参数数组，不放令牌或模型选项。[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
 
 启用后，Codex／DSH `Stop` 或 Antigravity 的 `fullyIdle=true` 停止事件按策略预留派发，普通任务不等待模型。默认使用有限 `admin-drain`，按日常待办连续推进小批；已启用调度器的安装沿用其有界调度。没有可审增量、模型来源无法确认、审核在途、未知结果或额度耗尽时停止，后续受支持事件可继续符合条件的待办。不是退出软件后的离线常驻服务。手动命令同样带目标项目及宿主：
 
@@ -1056,7 +1060,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 
 Antigravity 将上方 `--host codex` 改为 `--host antigravity`，DSH 改为 `--host dsh`。可用 `admin-once --problem ID` 限定问题。历史整理仍须独立的 `history-run --confirm --allow-review`，开启日常审核不会启动历史吸收。
 
-两种执行器在临时目录接收有限审核包，以结构化输出返回候选，并设置 `ALP_DISABLED=1` 避免插件递归。Codex 跳过用户配置和 execpolicy 规则，关闭支持的 Hooks、应用、插件、命令及多 Agent 能力，使用只读沙箱；只读不等于全部工具为零。Antigravity 使用空工具 Agent，确认 `init.tools=[]` 和 `permission_mode=request-review` 后才发送审核材料；严格核对终态，丢弃 thinking 和中途文本流。
+审核入口在临时目录接收有限审核包，以结构化输出返回候选，并设置 `ALP_DISABLED=1` 避免插件递归。Codex 跳过用户配置和 execpolicy 规则，关闭支持的 Hooks、应用、插件、命令及多 Agent 能力，使用只读沙箱；只读不等于全部工具为零。Antigravity 使用空工具 Agent，确认 `init.tools=[]` 和 `permission_mode=request-review` 后才发送审核材料；严格核对终态，丢弃 thinking 和中途文本流。DSH 使用固定 SDK 模块白名单，只进行一次无工具的模型请求，不创建 Agent 或加载项目 Hooks、技能、规则及动态插件；`--probe` 仅检查 SDK 接口，不初始化平台设置、认证或模型。
 
 Antigravity CLI 仍可能加载受信全局 Hooks、规则或插件；空工具初始化不能证明这些组件没有执行。管理员参数不提供完整操作系统隔离。需要更严格的运行边界时使用独立受控环境；真实 `agy` 加载及模型调用仍待验收。
 
@@ -1197,6 +1201,14 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | `--host codex\|antigravity\|dsh` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
 | `antigravity-session-reset`、`dsh-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
+
+## main 会话连续性与管理员修复（2026-10-16）
+
+普通需求与公开长回复进入工作历史，长消息有界分段；检索先考虑相关度，再提供有限索引。Codex 补齐 fork 会话启动，Antigravity 按可选公开字段与完成状态采集，DSH 补齐用户轮次与最终公开文本；不会读取模型内部思考，也不会把不完整输出当作交付。
+
+可选 AI 摘要不再要求先创建 task；冻结窗口完成或判定无需摘要后，只在本地续排一个下一窗口，继续受共享预算约束。修复开关切换后未启动窗口卡住、重复工作器误释放派发，以及 Windows npm 启动器问题。界面区分派发预留、工作器认领与模型进程启动，启动失败会退避；DSH 使用固定白名单 SDK 审核入口，不沿用其 CLI 不支持的参数。
+
+Windows／Python 3.12 完整隔离回归 **1493 项：1490 通过、3 项平台条件跳过，零失败与错误**，耗时 420.115 秒，`ResourceWarning` 作为错误检查。另有 11 项实际 Edge／本机服务／隔离 SQLite 界面检查通过，145 个 Python 文件通过 Python 3.10 语法解析；DSH 真实 SDK 仅执行接口探测。上述检查不启用真实 Hooks、不调用付费模型、不修改真实项目知识库；三端桌面加载与真实模型执行仍需分别验收。
 
 ## 1.0.0 检查状态（2026-10-13）
 

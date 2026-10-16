@@ -5,7 +5,7 @@ import json
 import time
 
 
-SUMMARY_INSTRUCTION_VERSION = 1
+SUMMARY_INSTRUCTION_VERSION = 2
 SUMMARY_PREFIX = (
     "本次用途是工作历史摘要，不是知识发布。仅概括可见来源中的尝试、结果、公开决策和未确认事项。"
     "不能将工具成功称为专业正确或用户验收；不能补全缺失的原文或模型内部思考。"
@@ -35,13 +35,18 @@ def install_work_summaries(runtime):
     runtime.db.execute("CREATE INDEX IF NOT EXISTS work_summary_conversation "
                        "ON work_summary_links(project,conversation,task_id,task_revision,created)")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS work_summary_call ON work_summary_links(call_id) WHERE call_id IS NOT NULL")
+    runtime.db.execute("""CREATE TABLE IF NOT EXISTS work_summary_policies(
+        project TEXT NOT NULL,host_scope TEXT NOT NULL,enabled INTEGER NOT NULL,
+        version INTEGER NOT NULL,updated REAL NOT NULL,PRIMARY KEY(project,host_scope))""")
 
 
-def _settings(runtime):
+def _settings(runtime, project=None):
     from .runtime import ContractError
 
     cfg = runtime.config.get("work_memory", {})
     raw_enabled, master_enabled = cfg.get("summary_enabled", False), cfg.get("enabled", True)
+    if project is not None:
+        raw_enabled = runtime.work_summary_policy(project)["enabled"]
     enabled = raw_enabled and master_enabled
     minimum, maximum = cfg.get("summary_min_events", 2), cfg.get("summary_max_events", 12)
     if not isinstance(raw_enabled, bool) or not isinstance(master_enabled, bool):
@@ -50,7 +55,8 @@ def _settings(runtime):
             or not 1 <= minimum <= maximum <= 40):
         raise ContractError("work summary event limits must satisfy 1 <= min <= max <= 40")
     return {"summary_enabled": enabled, "summary_min_events": minimum,
-            "summary_max_events": maximum, "instruction_version": SUMMARY_INSTRUCTION_VERSION}
+            "summary_max_events": maximum, "instruction_version": SUMMARY_INSTRUCTION_VERSION,
+            "policy_version": runtime.work_summary_policy(project)["version"] if project is not None else 0}
 
 
 def _link(runtime, project, problem_id):
@@ -60,11 +66,35 @@ def _link(runtime, project, problem_id):
 
 
 class WorkSummaryMixin:
-    def _work_queue_summary(self, project, conversation, workspace, *, expected_epoch=None, _phase_guard=None):
-        """仅在可信阶段结束调用；只查看已记录的工作投影，不扫描项目或会话文件。"""
+    def work_summary_policy(self, project):
+        exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE name='work_summary_policies'").fetchone()
+        row = self.db.execute("SELECT * FROM work_summary_policies WHERE project=? AND host_scope=?",
+                              (project, self._session_scope())).fetchone() if exists else None
+        return {"enabled": bool(row["enabled"]) if row else bool(self.config["work_memory"]["summary_enabled"]),
+                "configured": bool(row), "version": row["version"] if row else 0,
+                "source": "project_host" if row else "configuration"}
+
+    def work_summary_enabled(self, project):
+        return bool(self.config["work_memory"]["enabled"] and self.work_summary_policy(project)["enabled"])
+
+    def configure_work_summary(self, project, enabled):
+        from .runtime import ContractError
+        if type(enabled) is not bool:
+            raise ContractError("work summary enable flag must be boolean")
+        with self._case_transaction():
+            policy = self.work_summary_policy(project)
+            if not policy["configured"] or policy["enabled"] != enabled:
+                self.db.execute("INSERT INTO work_summary_policies VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(project,host_scope) DO UPDATE SET enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
+                    (project, self._session_scope(), int(enabled), policy["version"] + 1, time.time()))
+            return self.work_summary_policy(project)
+
+    def _work_queue_summary(self, project, conversation, workspace, *, expected_epoch=None, _phase_guard=None,
+                            _checkout_key=None, _continuation=False):
+        """阶段结束或已接受窗口的本地续排；不扫描项目或会话文件，不调用模型。"""
         from .runtime import digest, encode
 
-        settings = _settings(self)
+        settings = _settings(self, project)
         if not settings["summary_enabled"] or not self.admin_policy(project)["enabled"]:
             return {"status": "disabled", "invocations": 0}
         with self._case_transaction():
@@ -74,45 +104,67 @@ class WorkSummaryMixin:
             if not self.owns_conversation(conversation):
                 return {"status": "wrong_host", "invocations": 0}
             task = self.task(project, conversation)
-            if not task:
-                return {"status": "task_required", "invocations": 0}
+            task = task or {}
             # 工作投影的 workspace_key 来自采集时的实际目录；不由当前分支名称猜文件版本。
             from .work_files import checkout_key
-            checkout = checkout_key(workspace)
+            checkout = _checkout_key if _checkout_key is not None else checkout_key(workspace)
+            # A policy/account transition invalidates an unstarted window. Retire
+            # it before selecting its observations again under the new lifecycle.
+            pending = self.db.execute("SELECT problem_id FROM work_summary_links WHERE project=? "
+                "AND conversation=? AND host_scope=? AND state='pending' ORDER BY created LIMIT 40",
+                (project, conversation, self._session_scope())).fetchall()
+            for previous in pending:
+                self.work_summary_select(project, previous["problem_id"])
             rows = self.db.execute(
                 "SELECT m.*,e.task_write_version AS source_task_write_version,e.business_digest AS business_digest FROM work_memories m "
                 "JOIN events e ON e.id=m.event_id AND e.project=m.project "
                 "WHERE m.project=? AND m.conversation=? AND m.workspace_key=? "
-                "AND m.task_id=? AND m.task_revision=? AND m.agent IS NULL "
+                "AND ((m.task_id IS ? AND m.task_revision IS ?) OR m.task_id IS NULL) AND m.agent IS NULL "
+                "AND COALESCE(json_extract(m.body,'$.completion'),'complete')='complete' "
                 "AND e.type NOT IN ('HistoryImport','WorkSummaryRequested') "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
-                "WHERE s.project=m.project AND s.host_scope=? AND s.state IN ('pending','accepted') "
+                "WHERE s.project=m.project AND s.host_scope=? AND s.state IN ('pending','accepted','skipped') "
                 "AND j.value=m.id) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_snapshots) j "
-                "WHERE s.project=m.project AND s.host_scope=? AND s.task_id=m.task_id "
-                "AND s.task_revision=m.task_revision AND s.state IN ('pending','accepted') "
+                "WHERE s.project=m.project AND s.host_scope=? AND s.task_id IS m.task_id "
+                "AND s.task_revision IS m.task_revision AND s.state IN ('pending','accepted','skipped') "
                 "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest) "
+                "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
+                "JOIN admin_calls c ON c.project=s.project AND c.problem=s.problem_id "
+                "WHERE s.project=m.project AND s.host_scope=? AND j.value=m.id "
+                "AND c.state NOT IN ('not_started','deduplicated') AND c.retry_allowed=0 "
+                "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) "
                 "ORDER BY m.created,m.id LIMIT ?",
-                (project, conversation, checkout, task["id"], task["revision"], self._session_scope(),
-                 self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
-            distinct, seen = [], set()
+                (project, conversation, checkout, task.get("id"), task.get("revision"), self._session_scope(),
+                 self._session_scope(), self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
+            distinct, seen, used = [], set(), 0
+            window_budget = max(0, self.config["admin"]["max_input_chars"] - 5000)
             for row in rows:
                 signature = row["business_digest"] or row["id"]
                 if signature not in seen:
+                    cost = len(row["body"]) + 350
+                    if used + cost > window_budget:
+                        break
                     distinct.append(row)
                     seen.add(signature)
+                    used += cost
                 if len(distinct) >= settings["summary_max_events"]:
                     break
             rows = distinct
-            if len(rows) < settings["summary_min_events"]:
+            minimum = 1 if _continuation else settings["summary_min_events"]
+            if len(rows) < minimum:
                 return {"status": "insufficient_delta", "source_count": len(rows), "invocations": 0}
-            snapshots = [dict(self.work_source_snapshot(project, row["event_id"]), business_digest=row["business_digest"])
+            snapshots = [dict(self.work_source_snapshot(project, row["event_id"]), business_digest=row["business_digest"],
+                              projection=json.loads(row["body"]), task_id=row["task_id"],
+                              task_revision=row["task_revision"], task_binding_known=row["task_id"] is not None,
+                              agent=row["agent"])
                          for row in rows]
             if any(snapshot.get("state") in {"missing", "changed", "unavailable"} for snapshot in snapshots):
                 return {"status": "needs_evidence", "source_count": len(rows), "invocations": 0}
             identity = digest({"conversation": conversation, "workspace_key": checkout,
-                               "task_id": task["id"], "task_revision": task["revision"],
-                               "task_write_version": task["write_version"], "sources": snapshots})
+                               "task_id": task.get("id"), "task_revision": task.get("revision"), "sources": snapshots,
+                               "policy": settings, "host_scope": self._session_scope(),
+                               "session_epoch": self.session_epoch(), "governance_epoch": epoch})
             old = self.db.execute("SELECT problem_id,state FROM work_summary_links WHERE project=? "
                                   "AND host_scope=? AND source_digest=?",
                                   (project, self._session_scope(), identity)).fetchone()
@@ -122,20 +174,20 @@ class WorkSummaryMixin:
                                      {"purpose": "work_summary", "source_event_refs": [row["event_id"] for row in rows],
                                       "source_digest": identity, "source_count": len(rows),
                                       "validation_level": "reported", "publication_automatic": False},
-                                     event_id="work-summary:" + identity, task_id=task["id"],
-                                     task_revision=task["revision"], task_write_version=task["write_version"],
-                                     execution_epoch=task["execution_epoch"], outcome="reported")
-            title = "工作历史摘要（reported，非正式知识）：" + task["goal"][:240] + " [" + identity[:16] + "]"
-            refs = [row["event_id"] for row in rows]
-            roles = {ref: "observation" for ref in refs}
-            problem = self._problem(project, conversation, title, "project", refs, task_binding=task,
-                                    evidence_roles=roles)
+                                     event_id="work-summary:" + identity, task_id=task.get("id"),
+                                     task_revision=task.get("revision"), task_write_version=task.get("write_version"),
+                                     execution_epoch=task.get("execution_epoch"), outcome="reported")
+            goal = task.get("goal") or "会话阶段记录"
+            title = "工作历史摘要（reported，非正式知识）：" + goal[:240] + " [" + identity[:16] + "]"
+            # The request belongs to the task, while original observations retain their own binding.
+            problem = self._problem(project, conversation, title, "project", [request["id"]],
+                                    task_binding=task or {"id": None, "revision": None})
             now = time.time()
             self.db.execute("INSERT INTO work_summary_links(project,problem_id,conversation,task_id,task_revision,"
                             "task_write_version,workspace_key,source_digest,source_snapshots,source_record_ids,"
                             "policy_digest,host_scope,session_epoch,governance_epoch,state,created,updated) "
                             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
-                            (project, problem["id"], conversation, task["id"], task["revision"], task["write_version"],
+                            (project, problem["id"], conversation, task.get("id"), task.get("revision"), task.get("write_version"),
                              checkout, identity, encode(snapshots), encode([row["id"] for row in rows]),
                              digest(settings), self._session_scope(), self.session_epoch(), epoch, now, now))
             self._metric(project, "work_summary_requests")
@@ -151,10 +203,10 @@ class WorkSummaryMixin:
         link = _link(self, project, problem_id)
         if link is None:
             return None
-        if link["state"] != "pending" and not (accepted_call_id and link["state"] == "accepted"
+        if link["state"] != "pending" and not (accepted_call_id and link["state"] in {"accepted", "skipped"}
                                                  and link["call_id"] == accepted_call_id):
             raise ContractError("work_summary_not_pending")
-        settings = _settings(self)
+        settings = _settings(self, project)
         if not settings["summary_enabled"] or not self.admin_policy(project)["enabled"]:
             raise ContractError("work_summary_disabled")
         if link["host_scope"] != self._session_scope():
@@ -164,8 +216,8 @@ class WorkSummaryMixin:
         if link["policy_digest"] != digest(settings):
             raise ContractError("work_summary_policy_changed")
         task = self.task(project, link["conversation"])
-        if not task or (task["id"], task["revision"], task["write_version"]) != (
-                link["task_id"], link["task_revision"], link["task_write_version"]):
+        if link["task_id"] is not None and (not task or (task["id"], task["revision"]) != (
+                link["task_id"], link["task_revision"])):
             raise ContractError("work_summary_task_changed")
         for snapshot in json.loads(link["source_snapshots"]):
             current = self.work_source_snapshot(project, snapshot["event_id"])
@@ -173,8 +225,48 @@ class WorkSummaryMixin:
                     snapshot.get("capture_digest"), snapshot.get("source_version"), snapshot.get("state")):
                 raise ContractError("work_summary_source_changed")
         link["purpose"] = "work_summary"
+        link["scope"] = "task" if link["task_id"] else "conversation"
         link["instruction_version"] = SUMMARY_INSTRUCTION_VERSION
         return link
+
+    def work_summary_packet(self, project, problem_id, max_chars=None):
+        """Frozen visible projections have their own coverage contract, never formal publication evidence."""
+        from .runtime import ContractError
+        from .review_packet import review_instruction
+        limit = self.config["admin"]["max_input_chars"] if max_chars is None else max_chars
+        if type(limit) is not int or not 1000 <= limit <= 200000:
+            raise ContractError("invalid work summary input budget")
+        link = self.work_summary_guard(project, problem_id)
+        if link is None:
+            raise ContractError("work_summary_link_missing")
+        problem = dict(self.db.execute("SELECT * FROM problems WHERE project=? AND id=?", (project, problem_id)).fetchone())
+        snapshots = json.loads(link["source_snapshots"])
+        packet = {"problem": problem, "task": None, "purpose": "work_summary", "scope": link["scope"],
+                  "source_digest": link["source_digest"], "events": [], "evidence_count": len(snapshots),
+                  "related_knowledge": [], "related_candidates": [], "incomplete": False,
+                  "evidence_truncated": False, "coverage": "frozen_visible_projections", "omitted_count": 0}
+        for snapshot in snapshots:
+            projection = snapshot.get("projection")
+            if projection is None:
+                # Older requests recover their already stored work projection, not the full transcript.
+                row = self.db.execute("SELECT body FROM work_memories WHERE project=? AND event_id=?",
+                                      (project, snapshot["event_id"])).fetchone()
+                if row is None:
+                    packet["incomplete"] = True
+                    break
+                projection = json.loads(row["body"])
+            item = {"id": snapshot["event_id"], "type": "WorkObservation", "outcome": "reported",
+                    "role": "observation", "health": "valid", "current_tool_success": False,
+                    "payload": projection, "task_binding_known": snapshot.get("task_binding_known", False),
+                    "task_id": snapshot.get("task_id"), "task_revision": snapshot.get("task_revision")}
+            packet["events"].append(item)
+            packet["evidence_truncated"] |= bool(projection.get("coverage", {}).get("truncated"))
+            if len(SUMMARY_PREFIX + review_instruction(packet)) > limit:
+                packet["events"].pop()
+                packet["incomplete"] = True
+                break
+        packet["omitted_count"] = len(snapshots) - len(packet["events"])
+        return packet
 
     def work_summary_select(self, project, problem_id):
         """扫描阶段只本地检查；失效批次退出队列，禁用或异宿主批次仍保留。"""
@@ -210,11 +302,20 @@ class WorkSummaryMixin:
                   "applicability": clip(clean(body["applicability"]), 1000),
                   "task_write_version": link["task_write_version"], "purpose": "work_summary",
                   "administrator_call_id": call_id, "publication_automatic": False,
-                  "coverage": {"source_count": len(snapshots), "incomplete": False,
+                  "coverage": {"source_count": len(snapshots), "incomplete": any(
+                      snapshot.get("projection", {}).get("coverage", {}).get("truncated", False) for snapshot in snapshots),
+                               "scope": link["scope"], "projection_only": True,
                                "task_acceptance": "not_verified", "origin": "administrator_model"}}
         ident = digest([project, "work-summary", link["source_digest"]])[:32]
+        mixed = any(self.db.execute("SELECT task_id,task_revision FROM work_memories WHERE project=? AND event_id=?",
+                    (project, snapshot["event_id"])).fetchone()[:] != (link["task_id"], link["task_revision"])
+                    for snapshot in snapshots)
+        scope = "conversation" if mixed or link["task_id"] is None else "task"
+        record["scope"] = scope
+        record["coverage"]["scope"] = scope
         result = self.record_work_summary(project, ident, record, snapshots, link["conversation"],
-                                          task_id=link["task_id"], task_revision=link["task_revision"])
+                                          task_id=link["task_id"] if scope == "task" else None,
+                                          task_revision=link["task_revision"] if scope == "task" else None)
         memory_id = result.get("memory_id", result.get("id", ident))
         self.db.execute("UPDATE work_summary_links SET state='accepted',memory_id=?,call_id=?,updated=? "
                         "WHERE project=? AND problem_id=? AND state='pending'",
@@ -223,4 +324,19 @@ class WorkSummaryMixin:
         self._metric(project, "work_summaries_created")
         return {"purpose": "work_summary", "memory_id": memory_id,
                 "memory_revision": result.get("revision", 1), "validation_level": "model_reported",
+                "continuation": self._work_queue_summary(project, link["conversation"], None,
+                    expected_epoch=link["governance_epoch"], _checkout_key=link["workspace_key"], _continuation=True),
                 "publication": {"status": "not_published", "reason": "work history summary is not formal knowledge"}}
+
+    def work_summary_skip(self, project, problem_id, call_id):
+        """A validated no-value decision consumes this window without publishing anything."""
+        from .runtime import ContractError
+        link = self.work_summary_guard(project, problem_id)
+        if link is None:
+            raise ContractError("work_summary_link_missing")
+        self.db.execute("UPDATE work_summary_links SET state='skipped',call_id=?,updated=? "
+                        "WHERE project=? AND problem_id=? AND state='pending'",
+                        (call_id, time.time(), project, problem_id))
+        self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, problem_id))
+        return {"continuation": self._work_queue_summary(project, link["conversation"], None,
+                    expected_epoch=link["governance_epoch"], _checkout_key=link["workspace_key"], _continuation=True)}

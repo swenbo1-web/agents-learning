@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +73,36 @@ function extractTextFromBlocks(blocks) {
     }
   }
   return parts.join("\n");
+}
+
+const OBSERVABLE_TEXT_LIMIT = 65536;
+const CAPTURE_TURN_LIMIT = 128;
+const CAPTURE_MESSAGE_LIMIT = 512;
+
+function boundedPublicText(blocks, maximum = OBSERVABLE_TEXT_LIMIT) {
+  // The SDK's assembled message is public text plus explicitly typed blocks.
+  // Never stringify other blocks: reasoning and provider replay data are private.
+  const parts = typeof blocks === "string" ? [blocks] : Array.isArray(blocks)
+    ? blocks.filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text) : [];
+  let text = "";
+  let chars = 0;
+  for (const [index, part] of parts.entries()) {
+    const value = (index ? "\n" : "") + part;
+    chars += value.length;
+    if (text.length < maximum) text += value.slice(0, maximum - text.length);
+  }
+  return { text, chars, truncated: chars > maximum };
+}
+
+function recallMessage(text) {
+  // Matches the SDK's immutable, identified UserMessage contract without an
+  // extra package dependency in the exported Bundle.
+  return Object.freeze({
+    id: randomUUID(), role: "user",
+    source: Object.freeze({ kind: "plugin", plugin: "agent-learning", form: "recall" }),
+    content: Object.freeze([Object.freeze({ type: "text", text })]),
+  });
 }
 
 function debugStatusText(value) {
@@ -431,11 +462,30 @@ export function apply(ctx) {
   const sessionContexts = new Map();
   const sessionHandles = new Map();
   const sessionMeta = new Map();
+  const sessionStarts = new Map();
   const browserProcesses = new Map();
   const scopedAgentIds = new Set();
+  const capturedTurns = new Map();
   const activeDisposers = [];
   let sessionQueryService = null;
   let clientModulesDebug = "not_injected";
+
+  function captureTurn(sessionId, turn) {
+    if (typeof sessionId !== "string" || !sessionId || !Number.isSafeInteger(turn) || turn < 0) return null;
+    const key = JSON.stringify([sessionId, turn]);
+    if (!capturedTurns.has(key)) {
+      if (capturedTurns.size >= CAPTURE_TURN_LIMIT) capturedTurns.delete(capturedTurns.keys().next().value);
+      capturedTurns.set(key, { sessionId, seen: new Set(), reply: null, closed: false });
+    }
+    return capturedTurns.get(key);
+  }
+
+  function forgetSessionCapture(sessionId) {
+    for (const [key, state] of capturedTurns) {
+      if (state.sessionId === sessionId) capturedTurns.delete(key);
+    }
+  }
+  activeDisposers.push(() => { capturedTurns.clear(); sessionStarts.clear(); });
 
   if (typeof ctx.inject === "function") {
     ctx.inject(["sessionQuery"], (scope) => {
@@ -542,6 +592,7 @@ export function apply(ctx) {
   }
 
   async function ensureSessionBound(agentId, cwd, signal) {
+    await sessionStarts.get(agentId);
     if (!agentId || sessionHandles.has(agentId)) {
       return sessionHandles.get(agentId);
     }
@@ -1349,13 +1400,13 @@ export function apply(ctx) {
     });
   });
 
-  ctx.on("agent/created", async (payload) => {
+  ctx.on("agent/created", (payload) => {
     const agent = payload?.agent;
     if (!agent?.id) return;
     ensureAgentScopedTools(agent);
     const meta = sessionMeta.get(agent.id) || {};
     const eventKind = meta.origin === "subagent" ? "SubagentStart" : "SessionStart";
-    const result = await dispatchEvent(
+    const started = dispatchEvent(
       eventKind,
       {
         sessionId: meta.parentSession || agent.id,
@@ -1365,24 +1416,51 @@ export function apply(ctx) {
         requestContext: meta.requestContext,
       },
       payload.signal,
-    );
-    const additional = result?.hookSpecificOutput?.additionalContext;
-    if (additional) {
-      sessionContexts.set(agent.id, additional);
-      captureHandleFromText(agent.id, additional);
-    }
+    ).then((result) => {
+      if (sessionStarts.get(agent.id) !== started) return;
+      const additional = result?.hookSpecificOutput?.additionalContext;
+      if (additional) {
+        sessionContexts.set(agent.id, additional);
+        captureHandleFromText(agent.id, additional);
+      }
+    });
+    sessionStarts.set(agent.id, started);
+    started.finally(() => {
+      if (sessionStarts.get(agent.id) === started) sessionStarts.delete(agent.id);
+    });
+    return started;
   });
 
   ctx.on("agent/pre-step", async (payload, next) => {
     const agent = payload?.agent;
     if (agent?.id) {
       ensureAgentScopedTools(agent);
+      // The SDK does not await agent/created listeners. Serialize the pending
+      // startup Hook before retrieval so its late reply cannot replace this step.
+      await sessionStarts.get(agent.id);
     }
-    if (agent?.id && payload.step === 0) {
-      const meta = sessionMeta.get(agent.id) || {};
-      const promptText = Array.isArray(payload.messages)
-        ? payload.messages.map((m) => extractTextFromBlocks(m?.content)).filter(Boolean).join("\n")
-        : "";
+    // systemPrompt assembly and inbox claiming already happened before this
+    // waterfall. Its returned messages are the supported way to reach THIS step;
+    // agent.inject() or mutating the cached system context would arrive too late.
+    const decision = await next();
+    if (!agent?.id || decision?.kind !== "enter" || !Array.isArray(decision.messages)
+      || payload.signal?.aborted) return decision;
+    const state = captureTurn(agent.id, payload.turn);
+    if (!state || state.closed) return decision;
+    const humanMessages = [];
+    for (const message of decision.messages) {
+      if (message?.role !== "user" || message.source?.kind !== "user"
+        || typeof message.id !== "string" || !message.id || message.id.length > 200
+        || state.seen.has(message.id) || state.seen.size >= CAPTURE_MESSAGE_LIMIT) continue;
+      state.seen.add(message.id);
+      humanMessages.push(message);
+    }
+    if (humanMessages.length) {
+      const meta = await resolveSessionMeta(agent.id);
+      const prompt = boundedPublicText(humanMessages.flatMap((message) =>
+        typeof message.content === "string" ? [{ type: "text", text: message.content }]
+          : Array.isArray(message.content) ? message.content : []));
+      if (!prompt.text.trim()) return decision;
       const result = await dispatchEvent(
         "UserPromptSubmit",
         {
@@ -1390,18 +1468,25 @@ export function apply(ctx) {
           agentId: meta.origin === "subagent" ? agent.id : undefined,
           cwd: meta.cwd,
           turn: payload.turn,
-          prompt: promptText,
+          step: payload.step,
+          message_ids: humanMessages.map((message) => message.id),
+          prompt: prompt.text,
+          prompt_truncated: prompt.truncated,
+          prompt_chars: prompt.chars,
           requestContext: meta.requestContext,
         },
         payload.signal,
       );
       const additional = result?.hookSpecificOutput?.additionalContext;
-      if (additional) {
-        sessionContexts.set(agent.id, additional);
+      if (typeof additional === "string" && additional && !payload.signal?.aborted && !state.closed) {
+        // The recall now lives in the logged message history. Avoid republishing
+        // that same card in the next system-context snapshot as well.
+        sessionContexts.delete(agent.id);
         captureHandleFromText(agent.id, additional);
+        return { ...decision, messages: [...decision.messages, recallMessage(additional)] };
       }
     }
-    return next();
+    return decision;
   });
 
   const WORKER_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.map((s) => s.name));
@@ -1479,17 +1564,47 @@ export function apply(ctx) {
     if (event.type === "request/context" && event.data) {
       const prev = sessionMeta.get(session.id) || { cwd: session.header?.cwd };
       sessionMeta.set(session.id, { ...prev, requestContext: event.data });
+    } else if (event.type === "assistant/message" && event.data) {
+      const state = captureTurn(session.id, event.data.turn);
+      const message = event.data.message;
+      if (!state || state.closed || message?.role !== "assistant" || message.source?.kind !== "model"
+        || !Number.isSafeInteger(event.data.step) || event.data.step < 0
+        || (state.reply && state.reply.step > event.data.step)) return;
+      state.reply = {
+        ...boundedPublicText(message.content),
+        step: event.data.step,
+        interrupted: event.data.interrupted === true,
+      };
     } else if (event.type === "turn/end" && event.data) {
+      const state = captureTurn(session.id, event.data.turn);
+      if (!state || state.closed) return;
+      state.closed = true;
       const meta = sessionMeta.get(session.id) || { cwd: session.header?.cwd };
       const reasonKind = event.data.reason?.kind;
-      const hookEvent = reasonKind === "aborted" || reasonKind === "interrupted" ? "Interrupt" : "Stop";
-      void dispatchEvent(hookEvent, {
+      const complete = reasonKind === "completed" && state.reply?.interrupted !== true;
+      const reply = state.reply;
+      state.reply = null;
+      // A token ceiling, error, blocked step or canceled prefix is not a completed
+      // public delivery. Never promote those into Stop/delivered evidence.
+      return dispatchEvent(complete ? "Stop" : "Interrupt", {
         sessionId: meta.parentSession || session.id,
         agentId: meta.origin === "subagent" ? session.id : undefined,
         cwd: meta.cwd,
         turn: event.data.turn,
+        ...(complete && reply?.text ? {
+          last_assistant_message: reply.text,
+          last_assistant_message_truncated: reply.truncated,
+          last_assistant_message_chars: reply.chars,
+        } : {}),
         requestContext: meta.requestContext,
       });
+    }
+  });
+
+  ctx.on("session/disposed", (session) => {
+    if (session?.id) {
+      forgetSessionCapture(session.id);
+      sessionStarts.delete(session.id);
     }
   });
 }

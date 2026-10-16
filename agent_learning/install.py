@@ -38,7 +38,7 @@ ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/lear
                      "skills/learning-panel/SKILL.md", "skills/learning-panel/agents/openai.yaml",
                      "sidecars/control/sidecar.json", "sidecars/control/main.mjs", "sidecars/control/index.html")
 DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json",
-             "host/index.mjs", "client/index.js", "rules/learning.md",
+             "host/index.mjs", "client/index.js", "reviewer/runner.mjs", "rules/learning.md",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
              "skills/learning-history/SKILL.md", "skills/learning-browser/SKILL.md",
              "skills/learning-history/agents/openai.yaml",

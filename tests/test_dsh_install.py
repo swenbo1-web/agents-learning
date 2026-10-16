@@ -57,6 +57,9 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "package.json").is_file())
         self.assertTrue((self.target / "host/index.mjs").is_file())
         self.assertTrue((self.target / "client/index.js").is_file())
+        reviewer = "reviewer/runner.mjs"
+        self.assertEqual((self.target / reviewer).read_bytes(),
+                         (Path(result["runtime_directory"]) / "host_resources/dsh" / reviewer).read_bytes())
         self.assertTrue((self.target / "rules/learning.md").is_file())
         self.assertTrue((self.target / "skills/learning-worker/SKILL.md").is_file())
         self.assertTrue((self.target / "skills/learning-admin/SKILL.md").is_file())

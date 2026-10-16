@@ -416,12 +416,13 @@ class KnowledgeContextMixin:
                     work_used = 0
                     for work_item in self.work_validate_items(project, work_items, workspace=workspace):
                         card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
-                                "source_version": work_item.get("source_version", 0),
-                                "title": clip(work_item.get("title", ""), 70),
-                                "summary": clip(work_item.get("summary", ""), 100),
+                                "title": clip(work_item.get("title", ""), 50),
+                                "summary": clip(work_item.get("summary", ""), 80),
                                 "state": work_item.get("state", "reported"),
                                 "validation_level": work_item.get("validation_level", "reported"),
                                 "read_required": True}
+                        if work_item.get("completion", "complete") != "complete":
+                            card["completion"] = work_item["completion"]
                         if work_item.get("task_binding_known") is False:
                             card["task_binding_known"] = False
                         if work_item.get("task_affinity") == "context_only":

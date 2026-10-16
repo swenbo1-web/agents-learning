@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import closing
 import os
 from pathlib import Path
@@ -235,18 +236,28 @@ class HostIntegrationTests(unittest.TestCase):
                 limitations="Reported guidance; gameplay remains unverified.",
                 evidence_refs=[packet["events"][0]["id"]], validation_level="reported",
             )
-            runtime.publish(project, candidate["candidate_id"])
+            published = runtime.publish(project, candidate["candidate_id"])
         finally:
             runtime.close()
         first = self.dispatch("UserPromptSubmit", turn_id="first", prompt="compiler recovery")
         self.assertIn("compiler recovery", first["hookSpecificOutput"]["additionalContext"])
         repeat = self.dispatch("UserPromptSubmit", turn_id="second", prompt="compiler recovery")
-        self.assertNotIn("compiler recovery", repeat.get("hookSpecificOutput", {}).get("additionalContext", ""))
+        self.assertNotIn(published["knowledge_id"], repeat.get("hookSpecificOutput", {}).get("additionalContext", ""))
         restored = self.dispatch("SessionStart", source="compact")
         self.assertIn("compiler recovery", restored["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.rows("SELECT epoch FROM contexts")[0]["epoch"], 1)
         after = self.dispatch("UserPromptSubmit", turn_id="third", prompt="compiler recovery")
-        self.assertNotIn("compiler recovery", after.get("hookSpecificOutput", {}).get("additionalContext", ""))
+        self.assertNotIn(published["knowledge_id"], after.get("hookSpecificOutput", {}).get("additionalContext", ""))
+
+    def test_fork_start_matches_export_and_registers_context_before_a_new_prompt(self):
+        destination = self.workspace.parent / "fork plugin export"
+        install(destination, runtime_store=self.workspace.parent / "fork releases")
+        handlers = json.loads((destination / "hooks/hooks.json").read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+        self.assertTrue(any(re.fullmatch(handler["matcher"], "fork") for handler in handlers))
+        output = self.dispatch("SessionStart", source="fork")
+        self.assertIn("context_handle=", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(len(self.rows("SELECT * FROM contexts")), 1)
+        self.assertEqual(self.rows("SELECT model FROM admin_model_observations")[0]["model"], "host-contract-check")
 
     @unittest.skipUnless(os.name == "nt", "Windows Hook command contract")
     def test_exported_windows_command_accepts_json_stdin(self):

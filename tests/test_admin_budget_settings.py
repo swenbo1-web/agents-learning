@@ -33,7 +33,7 @@ class AdminBudgetSettingsTests(unittest.TestCase):
 
     def dispatch(self):
         token = "isolated-dispatch"
-        self.r.db.execute("INSERT INTO admin_dispatch VALUES(?,?,?,?,?)",
+        self.r.db.execute("INSERT INTO admin_dispatch(project,token,host_epoch,lease_until,created) VALUES(?,?,?,?,?)",
                           (self.p, token, self.r.host_epoch(), time.time() + 30, time.time()))
         return token
 
@@ -200,12 +200,12 @@ class AdminBudgetSettingsTests(unittest.TestCase):
                 self.assertEqual(result["stop_reason"], status)
                 self.assertIsNone(self.r.db.execute("SELECT 1 FROM admin_dispatch").fetchone())
 
-    def test_drain_invalid_allowance_still_releases_supplied_dispatch(self):
+    def test_drain_invalid_allowance_does_not_release_an_unclaimed_dispatch(self):
         self.enable()
         token = self.dispatch()
         with self.assertRaises(ContractError):
             admin_drain(self.r, self.p, dispatch_token=token, max_seconds=float("inf"))
-        self.assertIsNone(self.r.db.execute("SELECT 1 FROM admin_dispatch").fetchone())
+        self.assertEqual(self.r.db.execute("SELECT token FROM admin_dispatch").fetchone()[0], token)
 
 
 if __name__ == "__main__":

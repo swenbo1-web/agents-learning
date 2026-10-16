@@ -192,6 +192,11 @@ class AdminOptimizationTests(unittest.TestCase):
         self.assertIsNone(self.calls()[0]["started"])
         self.configure()
         self.runtime.config["admin"]["max_calls_per_day"] = 1
+        waiting = admin_once(self.runtime, self.project)
+        self.assertEqual(waiting["status"], "executor_not_ready")
+        self.assertEqual(len(self.calls()), 1)
+        # Advance the isolated executor cooldown without sleeping or spending another call.
+        self.runtime.db.execute("UPDATE admin_executor_failures SET next_try=0")
         self.assertEqual(admin_once(self.runtime, self.project)["status"], "candidate")
         self.assertEqual(sum(call["started"] is not None for call in self.calls()), 1)
 

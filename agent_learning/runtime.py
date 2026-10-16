@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(17)):
+        if version not in set(range(18)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -313,7 +313,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 install_work_summaries(self)
                 from .admin_control import install_control
                 install_control(self)
-                self.db.execute("PRAGMA user_version=16")
+                self.db.execute("PRAGMA user_version=17")
         except BaseException:
             self.db.close()
             raise
@@ -700,6 +700,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
 
     def status(self, project):
         from .admin_control import admission_enabled
+        from .admin_queue import dispatch_diagnostic
         from .admin_usage import admin_budget_status
         from .software_updates import update_status
         counts = {}
@@ -711,8 +712,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
         try:
             budget = admin_budget_status(self)
+            dispatch = dispatch_diagnostic(self, project)
         except ContractError:
             budget = {"admission_status": "invalid_configuration"}
+            dispatch = {"phase": "idle", "reason": "invalid_configuration", "next_due": None}
         return {"project_id": project, "home": str(self.home), "host_epoch": self.session_epoch(),
                 "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
@@ -722,6 +725,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_enabled": self.admin_policy(project)["enabled"],
                 "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),
+                "admin_dispatch_diagnostic": dispatch, "work_summary_policy": self.work_summary_policy(project),
                 "admin_budget": budget, "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
                 "history_import": self.history_status(project),
@@ -1037,8 +1041,26 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         return self._attach_software_update_notice(result, host=self.host) if update_notice_event else result
 
     def _launch_admin(self, workspace, dispatch_token=None):
-        self._launch_background(workspace, "admin-drain",
-                                ["--dispatch-token", dispatch_token] if dispatch_token else [])
+        import subprocess
+        from .admin_queue import release_dispatch, record_executor_failure, background_plan
+        project = self.project(workspace)
+        try:
+            process = self._launch_background(workspace, "admin-drain",
+                                    ["--dispatch-token", dispatch_token] if dispatch_token else [])
+            # This acknowledges only Python process survival, never model work.
+            # The worker must separately claim its short persistent reservation.
+            try:
+                code = process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                return {"status": "dispatched", "reason": "awaiting_worker_ack"}
+            if isinstance(code, int) and code != 0:
+                raise ChildProcessError("administrator background worker exited before acknowledgement")
+            return {"status": "dispatched", "reason": "worker_completed" if code == 0 else "awaiting_worker_ack"}
+        except (OSError, ValueError) as exc:
+            from .admin_providers import launch_error
+            release_dispatch(self, project, dispatch_token)
+            record_executor_failure(self, project, background_plan(self), "background_launch_failed", launch_error(exc))
+            raise
 
     def _launch_scheduler(self, workspace, worker_token):
         self._launch_background(workspace, "scheduler-run", ["--all", "--worker-token", worker_token])
@@ -1131,7 +1153,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             except (OSError, sqlite3.Error):
                 pass
         with log_path.open("ab") as log:
-            subprocess.Popen([sys.executable, "-B", str(entry),
+            return subprocess.Popen([sys.executable, "-B", str(entry),
                               "--host", self.host, "--host-instance", self.host_instance,
                               "--home", str(self.home), "--workspace",
                               str(workspace), command, *arguments], stdin=subprocess.DEVNULL,

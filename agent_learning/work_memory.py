@@ -128,7 +128,7 @@ class WorkMemoryMixin:
         if not _config(self)["enabled"]:
             return None
         event = self.db.execute("SELECT * FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
-        if not event or event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"}:
+        if not event or event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PublicMessageSegment"}:
             return None
         event = dict(event)
         self.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)",
@@ -181,22 +181,49 @@ class WorkMemoryMixin:
             response = payload.get("tool_response", payload.get("toolResult", payload.get("error", {})))
             text = clip(_json(response), 700)
             title = f"{stored_name or name or 'tool'}: {event['outcome']}"
+        elif event["type"] == "PublicMessageSegment":
+            text = payload.get("text", "")
+            kind = payload.get("memory_type", "public_summary")
+            title = payload.get("title", "公开工作说明")
         elif event["type"] == "Stop":
             text = payload.get("last_assistant_message", payload.get("message", ""))
             if not isinstance(text, str) or not text.strip():
                 return None
-            kind, title = "public_summary", "公开工作说明"
+            kind, title = "public_summary", "公开工作说明：" + text.strip().splitlines()[0][:85]
         else:
             text = payload.get("prompt", "")
-            if not _correction(text):
+            if not isinstance(text, str) or not text.strip():
                 return None
-            kind, title = "user_correction", "用户更正"
+            kind = "user_correction" if _correction(text) else "user_request"
+            title = ("用户更正：" if kind == "user_correction" else "用户要求：") + text.strip().splitlines()[0][:85]
+        if not isinstance(text, str) or not text.strip():
+            return None
+        public = kind in {"public_summary", "user_correction", "user_request"}
+        completion = payload.get("completion", raw.get("completion", "complete"))
+        coverage = payload.get("capture_coverage", raw.get("capture_coverage", {}))
+        if public and event["type"] != "PublicMessageSegment":
+            original = raw.get("last_assistant_message" if event["type"] == "Stop" else "prompt", text)
+            if isinstance(original, str) and len(original) > 1400:
+                self._work_capture_public_segments(project, event, workspace, clean(original), kind, title,
+                                                   completion, coverage, raw)
         body = {"type": kind, "title": clip(title, 160), "summary": clip(text, 1400),
-                "validation_level": "reported" if kind in {"public_summary", "user_correction"} else "tool_observed",
+                "validation_level": "reported" if public else "tool_observed",
                 "task_write_version": event.get("task_write_version"),
                 "assignment_id": event.get("assignment_id"),
                 "coverage": {"projection_only": True, "truncated": bool(payload.get("truncated"))
                              or len(text) > 1400, "full_original_available": not bool(payload.get("truncated"))}}
+        if public:
+            body.update(completion=completion, execution_authority=False,
+                        public_message_id=payload.get("public_message_id", event_id))
+            body["coverage"]["host"] = coverage
+            host_truncated = any(value.get("truncated") for value in coverage.values()
+                                 if isinstance(value, dict)) if isinstance(coverage, dict) else False
+            body["coverage"]["truncated"] |= bool(payload.get("message_truncated") or host_truncated
+                or raw.get("last_assistant_message_truncated") or raw.get("prompt_truncated"))
+            body["coverage"]["full_original_available"] &= not body["coverage"]["truncated"]
+            if event["type"] == "PublicMessageSegment":
+                body["coverage"].update(segment=payload["segment"], segments=payload["segments"],
+                                         message_chars=payload["message_chars"])
         memory_id = digest([project, "work_event", event_id])[:32]
         source_hash = event.get("capture_digest") or digest(payload)
         present = self.db.execute("SELECT source_hash,body FROM work_memories WHERE project=? AND id=?",
@@ -213,6 +240,27 @@ class WorkMemoryMixin:
                          source_hash, self.work_source_snapshot(project, event_id)["source_version"]))
         self._work_index(project, memory_id, body, links)
         return {"memory_id": memory_id, "indexed": True}
+
+    def _work_capture_public_segments(self, project, event, workspace, text, kind, title, completion, coverage, raw):
+        """Preserve bounded public message windows as evidence, without reading transcripts."""
+        from .runtime import digest
+        maximum, size = 65536, 1200
+        visible = text[:maximum]
+        total = (len(visible) + size - 1) // size
+        for index, start in enumerate(range(0, len(visible), size)):
+            payload = {"text": visible[start:start + size], "memory_type": kind,
+                       "title": title[:100] + f" [{index + 1}/{total}]", "public_message_id": event["id"],
+                       "segment": index, "segments": total, "completion": completion,
+                       "capture_coverage": coverage, "message_chars": len(text),
+                       "message_truncated": (len(text) > maximum or raw.get("last_assistant_message_truncated") is True
+                                             or raw.get("prompt_truncated") is True),
+                       "execution_authority": False}
+            segment, _ = self._event(project, event["conversation"], "PublicMessageSegment", payload,
+                event_id=["public-message", event["id"], digest(visible), index], outcome="reported",
+                task_id=event.get("task_id"), task_revision=event.get("task_revision"),
+                task_write_version=event.get("task_write_version"), execution_epoch=event.get("execution_epoch"),
+                agent_id=event.get("agent"), assignment_id=event.get("assignment_id"))
+            self._work_capture_event(project, segment["id"], workspace)
 
     def _work_index(self, project, memory_id, body, links):
         from .knowledge_index import terms
@@ -232,7 +280,7 @@ class WorkMemoryMixin:
         current = dict(operation) if operation else {}
         state = "conflicted" if current.get("conflict") or current.get("state") == "conflict" else (
             "denied" if current.get("decision") == "denied" else current.get("observation", event["outcome"]))
-        if event["type"] in {"Stop", "UserPromptSubmit"}:
+        if event["type"] in {"Stop", "UserPromptSubmit", "PublicMessageSegment"}:
             state = "reported"
         signature = {key: current.get(key) for key in ("decision", "observation", "conflict", "state", "last_event")}
         return {"event_id": event_id, "capture_digest": event.get("capture_digest") or digest(json.loads(event["payload"])),
@@ -274,6 +322,7 @@ class WorkMemoryMixin:
         return {"memory_id": row["id"], "revision": row["revision"],
                 "source_version": digest([row["revision"], row["body"], snapshots]), "state": state,
                 "type": body["type"], "title": body["title"], "summary": body["summary"][:240],
+                "completion": body.get("completion", "complete"), "execution_authority": False,
                 "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
                 "files": visible_files, "files_count": len(files), "coverage": body.get("coverage", {}),
                 "created": row["created"], "summary_only": True, "read_required": True,
@@ -315,8 +364,9 @@ class WorkMemoryMixin:
             if isinstance(task_state, dict) and task_state.get("assignment_id"):
                 clauses.append("json_extract(m.body,'$.assignment_id')=?")
                 params.append(task_state["assignment_id"])
+        ordering = " ORDER BY bm25(work_memory_fts),m.created DESC,m.id DESC" if joins else " ORDER BY m.created DESC,m.id DESC"
         rows = self.db.execute("SELECT m.* FROM work_memories m" + joins + " WHERE " + " AND ".join(clauses)
-                               + " ORDER BY m.created DESC,m.id DESC LIMIT ?", (*params, min(100, limit * 5))).fetchall()
+                               + ordering + " LIMIT ?", (*params, min(200, limit * 10))).fetchall()
         if query.strip():
             selected = normalized_query_plan(query)["terms"][:64]
             from .knowledge_index import terms
@@ -325,7 +375,17 @@ class WorkMemoryMixin:
                 values = set(terms(body["title"] + " " + body["summary"]))
                 return (sum(term in values for term in selected), row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
-        return rows[:limit]
+        selected_rows, counts = [], {}
+        for row in rows:
+            body = json.loads(row["body"])
+            parent = body.get("public_message_id", row["id"])
+            if counts.get(parent, 0) >= 2:
+                continue
+            counts[parent] = counts.get(parent, 0) + 1
+            selected_rows.append(row)
+            if len(selected_rows) == limit:
+                break
+        return selected_rows
 
     def work_search(self, project, query="", *, file_path=None, workspace=None, limit=5, max_chars=3000):
         _budget(max_chars)
@@ -508,9 +568,16 @@ class WorkMemoryMixin:
                 rows.extend(self._work_search_rows(project, query,
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit))
             if not links:
-                # 查询有关键词时跨会话相关召回，无关键词仅当前会话。
+                # 空查询先查当前会话；新会话可读取同checkout的公开交接索引。
                 rows = self._work_search_rows(project, query, limit=limit,
                     conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state)
+                if not rows and not query.strip() and not agent_id and workspace:
+                    rows = self.db.execute("SELECT * FROM work_memories WHERE project=? AND workspace_key=? "
+                        "AND agent IS NULL AND conversation!=? "
+                        "AND json_extract(body,'$.type') IN ('public_summary','user_request','user_correction','work_summary') "
+                        "AND COALESCE(json_extract(body,'$.completion'),'complete')='complete' "
+                        "ORDER BY created DESC,id DESC LIMIT ?",
+                        (project, checkout_key(workspace), conversation, limit * 4)).fetchall()
             seen = {item["memory_id"] for item in result}
             for row in rows:
                 item = self._work_item(project, row, workspace=workspace,
@@ -626,8 +693,10 @@ class WorkMemoryMixin:
                     raise ContractError("work summary source changed")
                 source = self.db.execute("SELECT * FROM work_memories WHERE project=? AND event_id=?",
                                          (project, snapshot["event_id"])).fetchone()
-                if (source is None or source["conversation"] != conversation or source["task_id"] != task_id
-                        or source["task_revision"] != task_revision):
+                conversation_scope = body.get("scope") == "conversation" and task_id is None and task_revision is None
+                if (source is None or source["conversation"] != conversation
+                        or conversation_scope and source["agent"] is not None
+                        or not conversation_scope and (source["task_id"] != task_id or source["task_revision"] != task_revision)):
                     raise ContractError("work summary source scope mismatch")
                 rows.append(source)
                 sources.append(current)
@@ -637,6 +706,9 @@ class WorkMemoryMixin:
                 "validation_level": "model_reported", "coverage": {"projection_only": True, "truncated": any(
                     json.loads(row["body"])["coverage"].get("truncated", False) for row in rows)},
                 "task_write_version": body.get("task_write_version")})
+            projected.update(scope="conversation" if body.get("scope") == "conversation" else "task",
+                             execution_authority=False, completion="complete")
+            projected["coverage"].update(body.get("coverage", {}))
             memory_id = digest([project, "work_summary", summary_id])[:32]
             fingerprint = digest([projected, sources])
             previous = self.db.execute("SELECT * FROM work_memories WHERE project=? AND id=?", (project, memory_id)).fetchone()

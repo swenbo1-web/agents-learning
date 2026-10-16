@@ -76,6 +76,27 @@ class AdminControlTests(unittest.TestCase):
         explicit = parser().parse_args(["history-run", "chosen-job", "--confirm", "--allow-review", "--max-calls", "2", "--max-seconds", "180"])
         self.assertEqual((explicit.max_calls, explicit.max_seconds), (2, 180))
 
+    def test_explicit_summary_choice_is_project_host_scoped_versioned_and_idempotent(self):
+        body = self.body(summary_enabled=True)
+        with patch("subprocess.Popen") as model:
+            response = apply_control(self.r, self.p, body)
+            self.assertEqual(apply_control(self.r, self.p, body), response)
+        self.assertTrue(response["settings"]["work_summary"]["enabled"])
+        self.assertFalse(self.r.config["work_memory"]["summary_enabled"])
+        self.assertEqual(self.r.status(self.p)["work_summary_policy"], response["settings"]["work_summary"])
+        self.assertEqual(self.r.status(self.p)["admin_dispatch_diagnostic"]["reason"], "ready")
+        model.assert_not_called()
+        other = Runtime(self.home, config={}, host="antigravity")
+        self.addCleanup(other.close)
+        self.assertFalse(other.work_summary_enabled(self.p))
+
+    def test_first_explicit_false_summary_choice_advances_control_version(self):
+        initial = apply_control(self.r, self.p, self.body())
+        before = initial["settings"]["settings_version"]
+        response = apply_control(self.r, self.p, self.body(request_id="explicit-summary-off", summary_enabled=False))
+        self.assertEqual(response["settings"]["settings_version"], before + 1)
+        self.assertTrue(response["settings"]["work_summary"]["configured"])
+
     def test_start_attempt_is_once_and_receipt_replays_exactly(self):
         body = self.body(start=True)
         with patch.object(self.r, "_launch_admin") as launch:
@@ -164,7 +185,7 @@ class AdminControlTests(unittest.TestCase):
     def test_stale_account_dispatch_does_not_prevent_a_new_explicit_wake(self):
         import time
         apply_control(self.r, self.p, self.body())
-        self.r.db.execute("INSERT INTO admin_dispatch VALUES(?,?,?,?,?)", (self.p, "old-dispatch", self.r.host_epoch(), time.time()+60, time.time()))
+        self.r.db.execute("INSERT INTO admin_dispatch(project,token,host_epoch,lease_until,created) VALUES(?,?,?,?,?)", (self.p, "old-dispatch", self.r.host_epoch(), time.time()+60, time.time()))
         self.r.account_changed()
         self.r.admin_observe_model(self.p, "new-root", "new-model")
         self.assertFalse(control_status(self.r, self.p)["runner"]["running"])

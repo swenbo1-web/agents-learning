@@ -54,13 +54,13 @@ def readonly_runtime(database, db, host, instance):
 
 
 def control_status(runtime, project):
-    from .admin_queue import eligible_query, scan_signature
+    from .admin_queue import eligible_query, scan_signature, dispatch_diagnostic
     from .admin_usage import admin_budget_policy, admin_budget_status
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     query, args = eligible_query(scan_signature(runtime, project),
         preflight_signature=scan_signature(runtime, project, include_candidates=False),
-        summary_enabled=bool(runtime.config["work_memory"]["enabled"] and runtime.config["work_memory"]["summary_enabled"]),
+        summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope())
     eligible = runtime.db.execute("SELECT COUNT(*) FROM (" + query + ")", (project, *args)).fetchone()[0]
     pending = runtime.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
@@ -70,15 +70,17 @@ def control_status(runtime, project):
     blocked = runtime.db.execute("SELECT COUNT(*) FROM admin_calls a WHERE a.project=? AND a.retry_allowed=0 "
         "AND a.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
         "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=a.project AND r.call_id=a.id)", (project,)).fetchone()[0]
-    active = runtime.db.execute("SELECT COUNT(*) FROM admin_calls WHERE project=? AND state IN ('reserved','launch_intent','started')", (project,)).fetchone()[0]
-    dispatch = runtime.db.execute("SELECT 1 FROM admin_dispatch WHERE project=? AND host_epoch=? AND lease_until>?", (project, runtime.host_epoch(), time.time())).fetchone()
+    diagnostic = dispatch_diagnostic(runtime, project)
+    running = diagnostic["phase"] in {"worker_claimed", "model_reserved", "model_launching", "model_started"}
     enabled = bool(policy["enabled"] and state["enabled"])
     return {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
         "governance_epoch": runtime.host_epoch(), "settings_version": state["version"], "policy": policy,
         "enabled": enabled, "routing": routing, "budget_policy": admin_budget_policy(runtime),
+        "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
         "usage": admin_budget_status(runtime),
         "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting, "blocked_calls": blocked, "history_excluded": history},
-        "runner": {"running": bool(active or dispatch), "state": "stopping" if not enabled and active else "running" if active or dispatch else "idle"},
+        "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
+                   "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
         "limitation": "Explicitly enabled, bounded local worker; a later supported event can resume pending daily work. Historical imports require their own approval."}
 
 
@@ -98,7 +100,9 @@ def apply_control(runtime, project, body, *, wake=False):
     required = {"request_id", "expected_policy_version", "expected_budget_version", "expected_settings_version",
                 "expected_session_epoch", "expected_governance_epoch"}
     configured = {"enabled", "model_mode", "model", "limits", "start"}
-    if not isinstance(body, dict) or set(body) != required | (set() if wake else configured):
+    optional = {"summary_enabled"} if not wake else set()
+    if (not isinstance(body, dict) or set(body) - optional != required | (set() if wake else configured)
+            or "summary_enabled" in body and not isinstance(body["summary_enabled"], bool)):
         raise ContractError("invalid administrator control fields")
     request_id = body["request_id"]
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
@@ -138,7 +142,12 @@ def apply_control(runtime, project, body, *, wake=False):
                     expected_policy_version=policy["policy_version"], expected_epoch=runtime.session_epoch())
             if body["limits"]:
                 configure_admin_budget(runtime, body["limits"], expected_version=budget["version"], expected_epoch=runtime.session_epoch())
-            if bool(state["enabled"]) != body["enabled"] or not state["version"]:
+            summary_prior = runtime.work_summary_policy(project)
+            summary_changed = "summary_enabled" in body and (not summary_prior["configured"]
+                or body["summary_enabled"] != summary_prior["enabled"])
+            if "summary_enabled" in body:
+                runtime.configure_work_summary(project, body["summary_enabled"])
+            if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed:
                 runtime.db.execute("INSERT INTO admin_control_state VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
                     "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
                     (project, runtime._session_scope(), int(body["enabled"]), state["version"] + 1, time.time()))
@@ -157,7 +166,7 @@ def apply_control(runtime, project, body, *, wake=False):
 
 
 def wake_admin(runtime, project, *, expected_session_epoch=None, expected_governance_epoch=None):
-    from .admin_queue import claim_dispatch, release_dispatch
+    from .admin_queue import claim_dispatch, release_dispatch, dispatch_diagnostic, record_dispatch_diagnostic
     from .runtime import ContractError
     try:
         runtime.assert_session_epoch(expected_session_epoch)
@@ -168,14 +177,15 @@ def wake_admin(runtime, project, *, expected_session_epoch=None, expected_govern
         return {"status": "waiting", "reason": "administrator_disabled"}
     existing = runtime.db.execute("SELECT 1 FROM admin_dispatch WHERE project=? AND host_epoch=? AND lease_until>?", (project, runtime.host_epoch(), time.time())).fetchone()
     if existing:
-        return {"status": "already_running"}
+        diagnostic = dispatch_diagnostic(runtime, project)
+        return {"status": "accepted" if diagnostic["phase"] == "worker_reserved" else "already_running", "reason": diagnostic["reason"]}
     try:
         token = claim_dispatch(runtime, project, expected_epoch=expected_governance_epoch,
                                _phase_guard=lambda: runtime.assert_session_epoch(expected_session_epoch))
     except ContractError:
         return {"status": "waiting", "reason": "reconnect_required"}
     if token is None:
-        return {"status": "waiting", "reason": "no_ready_work_or_executor_or_budget"}
+        return {"status": "waiting", "reason": dispatch_diagnostic(runtime, project)["reason"]}
     path = runtime.db.execute("SELECT path FROM project_paths WHERE project=? ORDER BY length(path),path LIMIT 1", (project,)).fetchone()
     try:
         runtime.assert_session_epoch(expected_session_epoch)
@@ -183,7 +193,10 @@ def wake_admin(runtime, project, *, expected_session_epoch=None, expected_govern
         if not path or not Path(path[0]).is_dir():
             raise OSError("project workspace unavailable")
         runtime._launch_admin(path[0], token)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
         release_dispatch(runtime, project, token)
+        from .admin_providers import launch_error
+        detail = launch_error(exc)
+        record_dispatch_diagnostic(runtime, project, "background_launch_failed", detail)
         return {"status": "waiting", "reason": "background_launch_failed"}
     return {"status": "accepted"}

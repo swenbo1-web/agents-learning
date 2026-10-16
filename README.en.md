@@ -18,7 +18,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 
 | Capability | What you get |
 |---|---|
-| Project memory and working history | Reuse project knowledge, tool failures, modifications, verification and public notes; find history for explicit files |
+| Project memory and working history | Reuse public requirements, analysis, work observations and file history without publication approval; long public replies retain searchable segments, sources and partial/truncation markers |
 | Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
 | Direct visual control and knowledge browser | A DSH composer button, Codex conversation card and Antigravity App side panel offer installation-scoped status, administrator presets and history archival; detailed knowledge and batch approval use the shared local WebUI |
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
@@ -94,6 +94,8 @@ cd agents-learning
 ```
 
 Already cloned it? Use that directory, check its version and skip `git clone`. Run the commands below from the repository, installing each host into its own export directory. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below. To pin the stable distribution, replace `main` with `v1.0.0` and use only the Codex or Antigravity instructions.
+
+**All three hosts share one codebase and project knowledge database.** Keep the same `ALP_HOME`, configuration and project path, but install separate `--host codex|antigravity|dsh` entry points into separate directories. Three host integrations do not require three knowledge databases.
 
 The [1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) also includes source, wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
 
@@ -190,6 +192,10 @@ In a new project conversation, use the visual button, select a skill, or send on
 | Absorb an existing project's history | Click **Absorb Project History Now** in the DSH **📖 Memory** popover, or say “Use `$learning-history` for my selected project sources; explain scope and review limits first” |
 
 Installation makes no administrator call and starts no historical scan. Observations, candidates and publication are separate; an initially empty knowledge base is normal. [Administrator usage](#optional-administrator-executor) · [Historical ingestion](#absorb-history-from-an-existing-project)
+
+**Conversation continuity:** Public requirements and final replies become searchable working history without publication approval. Long replies retain bounded segments. New conversations can receive a recent same-project, same-checkout handoff index without restoring old execution permissions. In Administrator settings, explicitly select **Organize conversation summaries** to review bounded windows using the shared model budget; an explicit task is no longer required. Summaries remain `model_reported` and do not publish formal knowledge. Partial output is not a completed delivery.
+
+**When review does not start:** Check the administrator diagnostic reason and phase: no increment, waiting for tools, unavailable CLI/model, shared budget, startup cooldown or an unknown prior call. A dispatch reservation is distinct from a started worker or model. Review currently launches the platform CLI; Antigravity's ordinary plugin works without `agy`, but its automatic administrator requires an available `agy` CLI.
 
 ## After installation
 
@@ -503,11 +509,11 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` uses database schema **16** and internal publication protocol **16**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution retains schema/protocol 15. Back up the external database before upgrading, then update and reload every shared-database host runtime. Older runtimes cannot open schema 16.
+Current `main` uses database schema **17** and internal publication protocol **17**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution retains schema/protocol 15. Back up the external database before upgrading, then update and reload every shared-database host runtime. Older runtimes cannot open schema 17.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
-Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation to the same compatible source version, and reload the hosts. Updating only part of the installations to current `main` leaves original v1.0.0 and older runtimes unable to open schema 16.
+Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation to the same compatible source version, and reload the hosts. Updating only part of the installations to current `main` leaves original v1.0.0 and older runtimes unable to open schema 17.
 
 ### Custom knowledge directory in Codex
 
@@ -534,7 +540,7 @@ Before sharing a database with older installations, stop the relevant runtimes, 
 
    [mcp_servers.agent_learning]
    command = 'C:/path/to/python.exe'
-   args = ['D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker']
+   args = ['-B', 'D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker', '--panel-installation', 'C:/path/to/agent-learning-plugins/codex']
 
    [mcp_servers.agent_learning.env]
    ALP_HOME = 'D:/AgentLearning'
@@ -749,7 +755,7 @@ Merge these defaults into your external configuration as needed. Administrators,
 }
 ```
 
-`automatic_context=false` disables work-index injection while retaining manual queries. AI work summaries require both `summary_enabled` and an enabled [administrator executor](#optional-administrator-executor) for the project/host. Installation alone makes no model call. By default, at least two valuable new records are required, with at most twelve per batch. Summaries reuse existing executors, budgets and call receipts; unknown calls are not automatically retried.
+`automatic_context=false` disables work-index injection while retaining manual queries. AI work summaries require an explicit project/host **Organize conversation summaries** setting (or `summary_enabled=true`) and an enabled [administrator executor](#optional-administrator-executor). Installation alone makes no model call. By default, two new work records start a frozen window of at most twelve records. An explicit task is optional; unbound tools retain their original identity. Accepted or skipped windows locally queue one next window, including a final single record. Calls still follow shared daily and runtime limits; remaining work persists when limits are reached. Policy or account changes recheck unstarted windows without automatically retrying unknown calls. Original working records remain searchable before AI organization.
 
 AI summaries are marked `model_reported` and describe visible attempts, results, public notes and unresolved questions. They create no knowledge candidates or governance actions. Published solutions still use the separate review/publication workflow.
 
@@ -801,7 +807,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**1.0.0 is the first stable release; its original distribution uses schema/internal protocol 15.** Current `main` adds visual administrator settings, first valid project-model binding, shared limits and bounded continuous organization, advancing schema/internal publication protocol to **16** without a new downloadable Release. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage; unknown old events do not become complete histories. Back up the database before updating and reloading all shared-database installations. Older runtimes reject schema 16; export backups do not replace database backups.
+**1.0.0 is the first stable release; its original distribution uses schema/internal protocol 15.** Current `main` adds visual administrator settings, first valid project-model binding, shared limits and bounded continuous organization, advancing schema/internal publication protocol to **17** without a new downloadable Release. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage; unknown old events do not become complete histories. Back up the database before updating and reloading all shared-database installations. Older runtimes reject schema 17; export backups do not replace database backups.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1058,7 +1064,7 @@ Trusted approval also freezes actual path roots in rules, the task and existing 
 
 ## Optional administrator executor
 
-**Off by default; users enable it themselves.** The administrator reviews knowledge sources, conditions and candidates. It does not run project tasks or perform product acceptance. Reviews run in separate CLI processes, so no permanent administrator conversation is required. Manual review can still use a separate administrator MCP interface.
+**Off by default; users enable it themselves.** The administrator reviews knowledge sources, conditions and candidates. It does not run project tasks or perform product acceptance. Reviews run in separate processes: Codex/Antigravity use their platform CLI; DSH uses a restricted platform SDK entry point. No permanent administrator conversation is required. Manual review can still use a separate administrator MCP interface.
 
 On `main`, invoke `$learning-review` for administrator settings, or run:
 
@@ -1068,7 +1074,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 
 Retain the installation's `--home` and select the actual Antigravity or DSH `--host` as needed. Opening the page makes no model call. The user chooses settings and clicks Save and enable to permit daily work for that project/host. Add `--review` to include candidate approval; those decisions remain separate. Settings persist across reopening. Disabling through the page prevents new calls while retaining the current call's result handling. Model changes wait for in-flight review to complete.
 
-The CLI can also explicitly configure the administrator. `--provider host` selects that host's CLI. The first configuration defaults to **`first`**; subsequent omitted routing arguments preserve the chosen model and command:
+The CLI can also explicitly configure the administrator. `--provider host` selects that host's review entry point. The first configuration defaults to **`first`**; subsequent omitted routing arguments preserve the chosen model and command:
 
 ```powershell
 # Codex
@@ -1089,11 +1095,11 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh ad
 | `first` (new default) | Atomically pins the first valid root-model observation in this project, host instance and account epoch; later conversations retain it | Wait for a valid observation; an account change requires the new epoch's observation, without guessing |
 | `current` | Codex Hook `model`, Antigravity `modelName` or DSH `requestContext/model`, from root observations in the same project, host, instance and epoch | Missing observations, ambiguity or a provider from another host prevent the call; no guessed fallback |
 | `fixed` | Explicit `--model MODEL_ID` | A model unavailable on that platform fails without silent substitution |
-| `default` | The independent CLI's default selection | It need not match the desktop selection or user-configured default; Codex review skips user config |
+| `default` | The independent CLI's default selection; DSH uses the SDK's explicitly saved default provider/model | It need not match the desktop selection; Codex review skips user config, and DSH refuses calls without a saved default |
 
 `first` keeps its selection across later conversations; Codex, Antigravity and DSH bind their own host identifiers separately. With `current`, background work still identifies the source conversation and historical jobs need one unambiguous active model. Use `--model-mode fixed --model "AVAILABLE_MODEL_ID"` for an explicit model or `--model-mode default` for the CLI default. Retain the explicit project and host. Direct CLI route changes keep existing in-flight invalidation rules; the page waits for completion first.
 
-The corresponding CLI must already be authenticated. Desktop login does not establish CLI authentication. The plugin does not read, copy or modify credentials or sign users in. Calls use the CLI account; its platform determines quotas and charges. A trusted custom command can be supplied as a JSON argument array through `--command-file FILE`, without credentials or model flags. [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
+The platform must already be authenticated. Desktop login does not establish CLI/SDK authentication. The Python Runtime does not handle credentials. DSH's platform SDK reads local platform settings and authentication; the reviewer blocks credential saving, deletion and refresh writeback, and does not sign users in. Calls use that platform account; quotas and charges follow its terms. DSH's `first/current/fixed` modes require an exact `PROVIDER/MODEL` identifier; missing identifiers cause a wait or explicit diagnosis. A trusted custom command can be supplied as a JSON argument array through `--command-file FILE`, without credentials or model flags. [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode) · [Antigravity Headless](https://antigravity.google/docs/cli/headless/)
 
 Once enabled, Codex/DSH `Stop` or Antigravity `fullyIdle=true` events reserve dispatch without making worker delivery wait. The default bounded `admin-drain` advances daily pending work in small batches; installations using the optional scheduler retain its bounded scheduling. Empty queues, unavailable model observations, work in flight, unknown results or exhausted limits stop processing. Later supported events can resume eligible daily work; this is not an always-running service while the application is closed. Manual commands retain the project and host:
 
@@ -1106,7 +1112,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host codex 
 
 For Antigravity, replace `--host codex` with `--host antigravity` (or `--host dsh` for DSH). Use `admin-once --problem ID` to select a problem. Historical review still requires its separate `history-run --confirm --allow-review`; enabling everyday review never starts historical ingestion.
 
-Both executors receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams.
+Reviewers receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams. DSH uses a fixed SDK module allowlist for one model request with no tools. It creates no Agent and loads no project Hooks, skills, rules or dynamic plugins. Its `--probe` checks SDK interfaces without initializing settings, authentication or a model.
 
 Antigravity CLI may still load trusted global Hooks, rules or plugins. Empty-tool initialization does not prove that those components did not execute. These CLI options do not provide full OS isolation. Use a separate controlled environment for stronger boundaries. Actual `agy` loading and model calls remain unverified.
 
@@ -1247,6 +1253,14 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity\|dsh`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset`, `dsh-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## main conversation continuity and administrator fixes (2026-10-16)
+
+Public requests and long final replies become working history with bounded message segments. Retrieval prioritizes relevance before presenting a limited index. Codex handles fork startup; Antigravity captures optional public fields with completion coverage; DSH captures user turns and final public text. Private reasoning is not read, and partial output is not treated as delivery.
+
+Optional AI summaries no longer require an explicit task. Accepted or skipped windows locally queue one next window under the shared budget. Fixes cover stale unstarted windows after policy changes, duplicate workers releasing dispatches, and Windows npm launchers. The UI separates reservations, worker claims and model-process startup, with startup backoff. DSH uses a fixed SDK module allowlist instead of unsupported CLI flags.
+
+The complete isolated Windows/Python 3.12 suite ran **1493 checks: 1490 passed, 3 platform-condition skips, no failures or errors**, in 420.115 seconds, treating `ResourceWarning` as an error. Another 11 actual Edge/local-server/isolated-SQLite UI checks passed; 145 Python files passed Python 3.10 syntax parsing. The real DSH SDK was used only for interface probing. These checks enable no live Hooks, call no paid models and modify no real project knowledge. Desktop loading and real model execution still require separate acceptance for each host.
 
 ## 1.0.0 checks (2026-10-13)
 

@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import threading
 
 
 MAX_STREAM_BYTES = 64 * 1024 * 1024
 MAX_EVENT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 50000
+_CAPABILITIES = {}
 _TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
 
 
@@ -38,13 +41,165 @@ def validate_model(model):
 
 
 def executor_availability(plan):
-    """只检查可信命令的首个可执行路径，不运行 CLI 或读取登录凭证。"""
-    command = validate_command(plan.get("command"))
-    executable = command[0]
-    path = Path(executable)
-    available = path.is_file() if path.is_absolute() else shutil.which(executable) is not None
-    return {"cli_available": available, "authentication": "provider_cli_managed_not_checked",
-            "reason": None if available else "cli_unavailable"}
+    """使用与 Popen 相同的静态解析；不运行模型、shell 或读取登录凭证。"""
+    try:
+        resolved = (dsh_sdk_launcher(plan.get("command")) if plan.get("provider") == "dsh" else None)
+        resolved = resolved or resolve_command(plan.get("command"))
+        return {"cli_available": True, "authentication": "provider_cli_managed_not_checked",
+                "reason": None, "launch_kind": resolved["launch_kind"]}
+    except (OSError, ValueError) as exc:
+        return {"cli_available": False, "authentication": "provider_cli_managed_not_checked",
+                "reason": getattr(exc, "launch_reason", "cli_unavailable")}
+
+
+def resolve_command(command, *, _windows=None):
+    """npm Windows shim 仅投影为已存在 node + 包脚本，绝不交给 cmd.exe。"""
+    command = validate_command(command)
+    candidate = Path(command[0])
+    executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
+    if not executable:
+        raise FileNotFoundError("administrator executable unavailable")
+    executable = Path(executable).resolve()
+    windows = os.name == "nt" if _windows is None else _windows
+    if windows and executable.suffix.lower() in {".ps1", ".py", ".js", ".mjs", ".cjs"}:
+        exc = ValueError("administrator script requires an explicit interpreter")
+        exc.launch_reason = "cli_shim_unsupported"
+        raise exc
+    if not windows or executable.suffix.lower() not in {".cmd", ".bat"}:
+        return {"args": [str(executable), *command[1:]], "launch_kind": "executable"}
+    def refuse():
+        exc = ValueError("administrator command shim is unsupported")
+        exc.launch_reason = "cli_shim_unsupported"
+        raise exc
+    if executable.stat().st_size > 32768:
+        refuse()
+    text = executable.read_text(encoding="utf-8-sig", errors="strict")
+    # npm uses %dp0% or %~dp0. Requiring the exact generated invocation
+    # avoids interpreting arbitrary batch variables, chains or wrapper commands.
+    matches = re.findall(r'(?im)^\s*(?:endLocal & goto \#_undefined_\# 2>NUL \|\| title %COMSPEC% & )?'
+                         r'"%_prog%"\s+"%(?:dp0%|~dp0)\\?([^"\r\n]+\.(?:[cm]?js))"\s+%\*\s*$', text)
+    if len(matches) != 1 or not re.search(r'(?im)set\s+"?_prog=node(?:\.exe)?"?\s*$', text):
+        refuse()
+    relative = matches[0].replace("\\", "/")
+    if relative.startswith("/") or ":" in relative or any(part in {"..", ""} for part in relative.split("/")):
+        refuse()
+    script = (executable.parent / relative).resolve()
+    try:
+        script.relative_to(executable.parent)
+    except ValueError:
+        refuse()
+    if not script.is_file() or not relative.startswith("node_modules/"):
+        refuse()
+    adjacent = executable.parent / "node.exe"
+    node = str(adjacent) if adjacent.is_file() else shutil.which("node.exe")
+    if not node:
+        raise FileNotFoundError("administrator node runtime unavailable")
+    return {"args": [str(Path(node).resolve()), str(script), *command[1:]], "launch_kind": "npm_node"}
+
+
+def launch_error(exc):
+    """公开固定原因与数字系统码，不复制异常文本、路径或凭证。"""
+    reason = getattr(exc, "launch_reason", None) or (
+        "cli_unavailable" if isinstance(exc, FileNotFoundError) else
+        "cli_permission_denied" if isinstance(exc, PermissionError) else "executor_launch_failed")
+    result = {"reason": reason, "error_type": type(exc).__name__}
+    for name in ("errno", "winerror"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            result[name] = value
+    return result
+
+
+def dsh_sdk_launcher(command):
+    """Resolve a standard DSH installation to our tool-free SDK runner.
+
+    Explicit custom launchers keep their public stream protocol. Package paths
+    derive exclusively from the configured executable, never project evidence.
+    """
+    command = validate_command(command)
+    direct = len(command) == 1 and Path(command[0]).stem.lower() == "dsh"
+    explicit_node = len(command) == 2 and Path(command[0]).stem.lower() == "node"
+    if not direct and not explicit_node:
+        return None
+    resolved = resolve_command(command)
+    args = resolved["args"]
+    if explicit_node:
+        anchor = Path(command[1]).resolve()
+    else:
+        anchor = Path(args[1]).resolve() if resolved["launch_kind"] == "npm_node" else Path(args[0]).resolve()
+    package = anchor.parent.parent
+    valid = (anchor.name == "bin.js" and anchor.parent.name == "lib" and package.name == "dsh"
+             and package.parent.name == "@deepseek-ai" and package.parent.parent.name == "node_modules"
+             and anchor.is_file())
+    if not valid and explicit_node:
+        return None
+    def refuse(reason):
+        exc = ValueError("restricted DSH SDK launcher unavailable")
+        exc.launch_reason = reason
+        raise exc
+    if not valid:
+        refuse("dsh_sdk_anchor_unsupported")
+    if resolved["launch_kind"] == "npm_node" or explicit_node:
+        node = args[0]
+    else:
+        node = shutil.which("node")
+    if not node:
+        refuse("cli_unavailable")
+    relative = Path("host_resources/dsh/reviewer/runner.mjs")
+    candidates = (Path(__file__).resolve().parents[1] / relative,
+                  Path(__file__).resolve().parent / "_plugin_resources" / relative)
+    runner = next((item for item in candidates if item.is_file()), None)
+    if runner is None:
+        refuse("dsh_reviewer_unavailable")
+    return {"args": [str(Path(node).resolve()), str(runner), "--sdk-anchor", str(anchor)],
+            "launch_kind": "dsh_sdk", "anchor": str(anchor), "runner": str(runner)}
+
+
+def executor_capability(plan):
+    """Background-only bounded help preflight for standard CLIs, without prompts.
+
+    Explicit custom launchers have their own contract. Help output is used only
+    to compare supported flags and is never persisted or exposed as evidence.
+    """
+    command = validate_command(plan["command"])
+    try:
+        sdk = dsh_sdk_launcher(command) if plan.get("provider") == "dsh" else None
+    except (OSError, ValueError) as exc:
+        return {"ready": False, "reason": launch_error(exc)["reason"], "checked": "sdk"}
+    if not sdk and Path(command[0]).stem.lower() not in {"codex", "agy", "dsh"}:
+        return {"ready": True, "reason": None, "checked": "explicit_launcher"}
+    from .admin_queue import executor_signature
+    key = executor_signature(plan)
+    if key in _CAPABILITIES:
+        return dict(_CAPABILITIES[key])
+    try:
+        resolved = sdk["args"] if sdk else resolve_command(command)["args"]
+        provider = plan["provider"]
+        required = ({"--ignore-user-config", "--ignore-rules", "--ephemeral", "--output-schema", "--output-last-message"}
+                    if provider == "codex" else {"--input-format", "--output-format", "--json-schema", "--agent", "--print-timeout"})
+        # Spooled output caps retained memory even if a broken CLI floods help.
+        import tempfile
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(resolved + (["--probe"] if sdk else ["exec", "--help"] if provider == "codex" else ["--help"]),
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL, timeout=8 if sdk else 3,
+                env=dict(os.environ, ALP_DISABLED="1"),
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+            output.seek(0)
+            text = output.read(65537).decode("utf-8", errors="replace")
+        if sdk:
+            value = json.loads(text) if len(text) <= 65536 else {}
+            good = result.returncode == 0 and isinstance(value, dict) and value.get("protocol") == "alp-dsh-sdk-v1" and value.get("ready") is True
+        else:
+            good = result.returncode == 0 and len(text) <= 65536 and all(flag in text for flag in required)
+        answer = {"ready": good, "reason": None if good else "dsh_sdk_unavailable" if sdk else "cli_protocol_unsupported", "checked": "sdk" if sdk else "help"}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        answer = {"ready": False, "reason": "cli_help_timeout" if isinstance(exc, subprocess.TimeoutExpired)
+                  else "dsh_sdk_unavailable" if sdk and isinstance(exc, ValueError) else launch_error(exc)["reason"],
+                  "checked": "sdk" if sdk else "help"}
+    if len(_CAPABILITIES) >= 64:
+        _CAPABILITIES.clear()
+    _CAPABILITIES[key] = answer
+    return dict(answer)
 
 
 def build_execution(command, provider, model, directory, schema, output, instruction, timeout,
@@ -61,6 +216,7 @@ def build_execution(command, provider, model, directory, schema, output, instruc
     if not isinstance(instruction, str) or not instruction:
         raise _error("administrator instruction must be nonempty")
     directory, schema, output = Path(directory), Path(schema), Path(output)
+    command_resolved = False
     if provider == "codex":
         args = command + ["exec", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--ephemeral",
                           "--skip-git-repo-check", "-C", str(directory), "--json", "--output-schema",
@@ -76,6 +232,14 @@ def build_execution(command, provider, model, directory, schema, output, instruc
         args.append("-")
         stdin = instruction.encode("utf-8")
     elif provider == "dsh":
+        sdk = dsh_sdk_launcher(command)
+        if sdk:
+            args = sdk["args"] + ["--model", model, "--selection-mode", selection_mode, "--timeout", str(timeout)]
+            schema_body = json.loads(schema.read_text(encoding="utf-8"))
+            stdin = (json.dumps({"event": "user", "message": {"content": instruction}, "response_schema": schema_body},
+                                ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+            return {"args": args, "stdin_data": stdin, "provider": provider, "model": model,
+                    "selection_mode": selection_mode, "command_resolved": True}
         preset = directory / ".dsh" / "presets" / "alp-review.json"
         preset.parent.mkdir(parents=True, exist_ok=True)
         preset.write_text(json.dumps({
@@ -110,7 +274,7 @@ def build_execution(command, provider, model, directory, schema, output, instruc
         stdin = (json.dumps({"event": "user", "message": {"content": instruction}}, ensure_ascii=False,
                             separators=(",", ":")) + "\n").encode("utf-8")
     return {"args": args, "stdin_data": stdin, "provider": provider,
-            "model": model, "selection_mode": selection_mode}
+            "model": model, "selection_mode": selection_mode, "command_resolved": command_resolved}
 
 
 def _events(log_path):

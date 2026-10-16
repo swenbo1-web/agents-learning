@@ -74,8 +74,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16}:
-        raise ContractError("browser requires database schema 11..16; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16, 17}:
+        raise ContractError("browser requires database schema 11..17; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -148,11 +148,11 @@ class BrowserServer(ThreadingHTTPServer):
         host_scope_key(runtime_host, runtime_instance)
         with contextlib.closing(_connection(self.database)) as db:
             _schema(db)
-            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16}
+            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16, 17}
                            or self.database.name != "runtime.sqlite3"):
-                raise ContractError("review mode requires an existing schema 15/16 runtime database")
-            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] != 16 or self.database.name != "runtime.sqlite3"):
-                raise ContractError("administrator control requires an explicitly upgraded schema 16 runtime database")
+                raise ContractError("review mode requires an existing schema 15..17 runtime database")
+            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] not in {16, 17} or self.database.name != "runtime.sqlite3"):
+                raise ContractError("administrator control requires an explicitly upgraded schema 16/17 runtime database")
             if not db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
                 raise ContractError("unknown browser project")
         self.project = project
@@ -491,7 +491,8 @@ def _read_api(db, project, route, params):
         items = []
         for row in rows:
             payload = clean(json.loads(row["payload"]))
-            summary = payload.get("summary", payload.get("prompt", payload.get("tool_response", "")))
+            summary = payload.get("summary", payload.get("prompt", payload.get("last_assistant_message",
+                                      payload.get("text", payload.get("tool_response", "")))))
             items.append({**{key: row[key] for key in row.keys() if key != "payload"},
                           "tool_name": str(payload.get("tool_name", ""))[:200],
                           "summary": (summary if isinstance(summary, str) else json.dumps(summary, ensure_ascii=False))[:1200]})
