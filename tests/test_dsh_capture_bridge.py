@@ -93,14 +93,14 @@ if (scenario === 'startup-race') {
   assert.equal(decision.messages[0],original);
   assert.equal(decision.messages.length,2);
   const recall = decision.messages[1];
-  assert.equal(recall.source.kind,'plugin'); assert.equal(recall.source.form,'recall');
-  assert.equal(recall.source.plugin,'agent-learning');
+  assert.equal(recall.source.kind,'plugin:agent-learning'); assert.equal(recall.source.form,'recall');
+  assert.equal('plugin' in recall.source, false);
   assert.match(recall.id,/^[0-9a-f-]{36}$/);
   assert.match(recall.content[0].text,/matched project knowledge/);
   assert.ok(Object.isFrozen(recall));
   assert.equal(systemSections[0].text({scope:{id:owner.id}}),'');
 } else if (scenario === 'source-dedup') {
-  const messages = [user('p','synthetic plugin',{kind:'plugin',plugin:'other'}),
+  const messages = [user('p','synthetic plugin',{kind:'plugin:other'}),
     user('t','tool result',{kind:'tool',callId:'tool'}),
     {...user('missing','missing provenance'),source:undefined},
     {...user('assistant','assistant text'),role:'assistant'},user('u','first requirement')];

@@ -100,7 +100,7 @@ function recallMessage(text) {
   // extra package dependency in the exported Bundle.
   return Object.freeze({
     id: randomUUID(), role: "user",
-    source: Object.freeze({ kind: "plugin", plugin: "agent-learning", form: "recall" }),
+    source: Object.freeze({ kind: "plugin:agent-learning", form: "recall" }),
     content: Object.freeze([Object.freeze({ type: "text", text })]),
   });
 }
@@ -459,6 +459,41 @@ export const name = "agent-learning";
 export const inject = ["tools", "systemPrompt", "agents"];
 
 export function apply(ctx) {
+  if (typeof globalThis.__ALP_DSH_DISPOSE__ === "function") {
+    try {
+      globalThis.__ALP_DSH_DISPOSE__();
+    } catch {}
+  }
+  // 清理同一进程内旧版热加载实例可能遗留在 Cordis _hooks 中的未注销监听器
+  const hooksTable = ctx?.events?._hooks;
+  if (hooksTable && typeof hooksTable === "object") {
+    for (const eventName of [
+      "session/created",
+      "agent/created",
+      "agent/pre-step",
+      "tools/pre-execute",
+      "tools/post-execute",
+      "session/event",
+      "session/disposed",
+    ]) {
+      const list = hooksTable[eventName];
+      if (!Array.isArray(list)) continue;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const cb = list[i]?.callback || list[i];
+        const src = typeof cb === "function" ? Function.prototype.toString.call(cb) : "";
+        if (
+          src.includes("captureTurn(") ||
+          src.includes("ensureAgentScopedTools(") ||
+          src.includes("WORKER_TOOL_NAMES") ||
+          src.includes("forgetSessionCapture(") ||
+          src.includes("sessionMeta.set(")
+        ) {
+          list.splice(i, 1);
+        }
+      }
+    }
+  }
+
   const sessionContexts = new Map();
   const sessionHandles = new Map();
   const sessionMeta = new Map();
@@ -469,6 +504,24 @@ export function apply(ctx) {
   const activeDisposers = [];
   let sessionQueryService = null;
   let clientModulesDebug = "not_injected";
+
+  const runAllDisposers = () => {
+    while (activeDisposers.length > 0) {
+      const dispose = activeDisposers.pop();
+      try {
+        if (typeof dispose === "function") dispose();
+      } catch {}
+    }
+  };
+  globalThis.__ALP_DSH_DISPOSE__ = runAllDisposers;
+
+  function onEvent(eventName, listener) {
+    const dispose = ctx.on(eventName, listener);
+    if (typeof dispose === "function") {
+      activeDisposers.push(dispose);
+    }
+    return dispose;
+  }
 
   function captureTurn(sessionId, turn) {
     if (typeof sessionId !== "string" || !sessionId || !Number.isSafeInteger(turn) || turn < 0) return null;
@@ -534,11 +587,9 @@ export function apply(ctx) {
   }
 
   ctx.effect(() => () => {
-    while (activeDisposers.length > 0) {
-      const dispose = activeDisposers.pop();
-      try {
-        if (typeof dispose === "function") dispose();
-      } catch {}
+    runAllDisposers();
+    if (globalThis.__ALP_DSH_DISPOSE__ === runAllDisposers) {
+      globalThis.__ALP_DSH_DISPOSE__ = undefined;
     }
   });
 
@@ -1417,7 +1468,7 @@ export function apply(ctx) {
     } catch {}
   }
 
-  ctx.on("session/created", (session) => {
+  onEvent("session/created", (session) => {
     if (!session || !session.header) return;
     sessionMeta.set(session.id, {
       cwd: session.header.cwd,
@@ -1427,7 +1478,7 @@ export function apply(ctx) {
     });
   });
 
-  ctx.on("agent/created", (payload) => {
+  onEvent("agent/created", (payload) => {
     const agent = payload?.agent;
     if (!agent?.id) return;
     ensureAgentScopedTools(agent);
@@ -1458,7 +1509,7 @@ export function apply(ctx) {
     return started;
   });
 
-  ctx.on("agent/pre-step", async (payload, next) => {
+  onEvent("agent/pre-step", async (payload, next) => {
     const agent = payload?.agent;
     if (agent?.id) {
       ensureAgentScopedTools(agent);
@@ -1472,10 +1523,17 @@ export function apply(ctx) {
     const decision = await next();
     if (!agent?.id || decision?.kind !== "enter" || !Array.isArray(decision.messages)
       || payload.signal?.aborted) return decision;
+    const cleanedMessages = decision.messages.filter(
+      (m) => !(m?.source?.kind === "plugin" && m?.source?.plugin === "agent-learning")
+        && m?.source?.kind !== "plugin:agent-learning",
+    );
+    const baseDecision = cleanedMessages.length === decision.messages.length
+      ? decision
+      : { ...decision, messages: cleanedMessages };
     const state = captureTurn(agent.id, payload.turn);
-    if (!state || state.closed) return decision;
+    if (!state || state.closed) return baseDecision;
     const humanMessages = [];
-    for (const message of decision.messages) {
+    for (const message of baseDecision.messages) {
       if (message?.role !== "user" || message.source?.kind !== "user"
         || typeof message.id !== "string" || !message.id || message.id.length > 200
         || state.seen.has(message.id) || state.seen.size >= CAPTURE_MESSAGE_LIMIT) continue;
@@ -1487,7 +1545,7 @@ export function apply(ctx) {
       const prompt = boundedPublicText(humanMessages.flatMap((message) =>
         typeof message.content === "string" ? [{ type: "text", text: message.content }]
           : Array.isArray(message.content) ? message.content : []));
-      if (!prompt.text.trim()) return decision;
+      if (!prompt.text.trim()) return baseDecision;
       const result = await dispatchEvent(
         "UserPromptSubmit",
         {
@@ -1510,15 +1568,15 @@ export function apply(ctx) {
         // that same card in the next system-context snapshot as well.
         sessionContexts.delete(agent.id);
         captureHandleFromText(agent.id, additional);
-        return { ...decision, messages: [...decision.messages, recallMessage(additional)] };
+        return { ...baseDecision, messages: [...baseDecision.messages, recallMessage(additional)] };
       }
     }
-    return decision;
+    return baseDecision;
   });
 
   const WORKER_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.map((s) => s.name));
 
-  ctx.on("tools/pre-execute", async (exec, next) => {
+  onEvent("tools/pre-execute", async (exec, next) => {
     const agent = exec?.agent;
     if (!agent?.id) return next();
     const meta = sessionMeta.get(agent.id) || {};
@@ -1552,7 +1610,7 @@ export function apply(ctx) {
     return next();
   });
 
-  ctx.on("tools/post-execute", async (exec, toolResult, next) => {
+  onEvent("tools/post-execute", async (exec, toolResult, next) => {
     const agent = exec?.agent;
     if (
       exec?.name &&
@@ -1586,7 +1644,7 @@ export function apply(ctx) {
     return next();
   });
 
-  ctx.on("session/event", (session, event) => {
+  onEvent("session/event", (session, event) => {
     if (!session?.id || !event) return;
     if (event.type === "request/context" && event.data) {
       const prev = sessionMeta.get(session.id) || { cwd: session.header?.cwd };
@@ -1628,7 +1686,7 @@ export function apply(ctx) {
     }
   });
 
-  ctx.on("session/disposed", (session) => {
+  onEvent("session/disposed", (session) => {
     if (session?.id) {
       forgetSessionCapture(session.id);
       sessionStarts.delete(session.id);
