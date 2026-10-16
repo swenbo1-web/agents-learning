@@ -361,6 +361,44 @@ class KnowledgeContextMixin:
                     item = latest
                 if item["source_health"] != "valid":
                     continue
+                # 防线：若某条正式知识的来源案例正属于当前同一个会话且案例已发生新变化（正在继续修改/重修中），
+                # 暂停将其作为定型正式知识反哺注入当前会话，防止模型拿上一轮的半成品当佐证自我锚定。
+                evolving_in_current_session = False
+                if item.get("problem_changed"):
+                    for src in item.get("sources", []):
+                        if src.get("problem_changed") and src.get("problem_id"):
+                            prob_conv = self.db.execute(
+                                "SELECT conversation,status FROM problems WHERE project=? AND id=?",
+                                (project, src["problem_id"]),
+                            ).fetchone()
+                            if prob_conv and prob_conv["conversation"] == conversation and prob_conv["status"] == "pending":
+                                evolving_in_current_session = True
+                                break
+                if evolving_in_current_session:
+                    continue
+                source_files_changed = False
+                if workspace and self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_file_links'").fetchone():
+                    from .work_files import current_file_version
+                    ev_ids = [ev["event_id"] for ev in item.get("evidence", []) if isinstance(ev, dict) and ev.get("event_id")]
+                    if ev_ids:
+                        marks = ",".join("?" for _ in ev_ids[:20])
+                        file_rows = self.db.execute(
+                            f"SELECT relative_path,version FROM work_file_links "
+                            f"WHERE project=? AND event_id IN ({marks}) LIMIT 16",
+                            (project, *ev_ids[:20]),
+                        ).fetchall()
+                        for f_row in file_rows:
+                            try:
+                                recorded_ver = json.loads(f_row["version"])
+                                current_ver = current_file_version(f_row["relative_path"], workspace)
+                                if (recorded_ver.get("status") == "stat_observed"
+                                        and (current_ver.get("status") != "stat_observed"
+                                             or current_ver.get("size") != recorded_ver.get("size")
+                                             or current_ver.get("mtime_ns") != recorded_ver.get("mtime_ns"))):
+                                    source_files_changed = True
+                                    break
+                            except Exception:
+                                pass
                 eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
@@ -371,6 +409,8 @@ class KnowledgeContextMixin:
                         "maturity": item.get("maturity", "candidate"),
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
+                if source_files_changed:
+                    card["source_files_changed"] = True
                 if item.get("pending_counterexample_count", 0):
                     card["pending_counterexample_count"] = item["pending_counterexample_count"]
                     card["feedback_status"] = "pending_counterexample"

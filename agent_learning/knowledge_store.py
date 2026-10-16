@@ -101,7 +101,13 @@ class KnowledgeStoreMixin:
         from .knowledge_lifecycle import record_action
         linked = self._link_knowledge_source(project, knowledge_id, revision, candidate, body)
         self.db.execute("UPDATE candidates SET status='published' WHERE project=? AND id=?", (project, candidate["id"]))
-        self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?", (project, body["problem_id"]))
+        self.db.execute(
+            "UPDATE problems SET status='reviewed', "
+            "knowledge_id=COALESCE(knowledge_id, ?), "
+            "knowledge_revision=CASE WHEN knowledge_id IS NULL OR knowledge_id=? THEN ? ELSE knowledge_revision END "
+            "WHERE project=? AND id=?",
+            (knowledge_id, knowledge_id, revision, project, body["problem_id"]),
+        )
         self.db.execute("UPDATE review_states SET state='published',updated=? WHERE project=? AND problem=? AND revision=?",
                         (time.time(), project, body["problem_id"], body["problem_revision"]))
         if changed or linked:

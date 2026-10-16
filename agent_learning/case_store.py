@@ -236,8 +236,19 @@ class CaseStoreMixin:
                                    agent_id=agent, outcome="reported", task_write_version=task.get("write_version") if task else None,
                                    execution_epoch=task.get("execution_epoch") if task else None,
                                    assignment_id=assignment["id"] if assignment else None)
+            roles = {event["id"]: "feedback"}
+            if kind == "observation" and resolution.strip():
+                for ref in refs:
+                    ev_row = self.db.execute(
+                        "SELECT e.type,e.outcome,o.conflict,o.decision FROM events e LEFT JOIN operations o "
+                        "ON o.project=e.project AND o.id=e.operation WHERE e.project=? AND e.id=?",
+                        (project, ref),
+                    ).fetchone()
+                    if (ev_row and ev_row["type"] == "PostToolUse" and ev_row["outcome"] == "succeeded"
+                            and not ev_row["conflict"] and ev_row["decision"] != "denied"):
+                        roles[ref] = "potential_recovery"
             result = self._problem(project, conversation_id, summary, category, refs + [event["id"]], knowledge_id,
-                                   task_binding=task, evidence_roles={event["id"]: "feedback"}, knowledge_revision=actual_revision)
+                                   task_binding=task, evidence_roles=roles, knowledge_revision=actual_revision)
             if kind == "counterexample":
                 self.db.execute("INSERT OR IGNORE INTO knowledge_feedback(project,knowledge_id,revision,problem_id,kind,created) VALUES(?,?,?,?,?,?)",
                                 (project, knowledge_id, actual_revision, result["id"], kind, time.time()))

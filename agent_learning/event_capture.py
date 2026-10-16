@@ -214,12 +214,39 @@ def _targets(value, prefix="", depth=0):
     return result
 
 
+_STOP_COMMAND_TOKENS = {
+    "pwsh", "powershell", "bash", "sh", "cmd", "exe", "bin", "usr", "env",
+    "true", "false", "null", "out", "echo", "write-output", "set-location", "cd",
+    "and", "or", "not", "the", "for", "with", "from", "import", "select-object",
+}
+_SCRIPT_SUFFIXES = (".py", ".mjs", ".js", ".cjs", ".ts", ".tsx", ".sh", ".ps1", ".json", ".yml", ".yaml", ".toml", ".sql")
+
+
+def _command_tokens(text):
+    import re
+    if not isinstance(text, str) or not text.strip():
+        return set(), set()
+    raw_tokens = re.findall(r"[A-Za-z0-9_./\\-]+", text.lower())
+    meaningful, scripts = set(), set()
+    for tok in raw_tokens:
+        base = tok.replace("\\", "/").strip("/.")
+        if not base or base in _STOP_COMMAND_TOKENS or base.isdigit() or len(base) < 3:
+            continue
+        meaningful.add(base)
+        leaf = base.rsplit("/", 1)[-1]
+        if leaf and leaf not in _STOP_COMMAND_TOKENS and not leaf.isdigit() and len(leaf) >= 3:
+            meaningful.add(leaf)
+            if leaf.endswith(_SCRIPT_SUFFIXES):
+                scripts.add(leaf)
+    return meaningful, scripts
+
+
 def _targets_compatible(first, second):
     a, b = _targets(first), _targets(second)
     common = a.keys() & b.keys()
     if any(a[key] != b[key] for key in common):
         return False
-    # 共享 cwd/workspace 不能证明两条命令相关；明确资源或相同命令才形成潜在恢复。
+    # 共享 cwd/workspace 不能证明两条命令相关；明确资源或相同/同目标命令才形成潜在恢复。
     if any(key.rsplit(".", 1)[-1].lower() not in {"workspace", "cwd", "project_path"}
            for key in common):
         return True
@@ -228,9 +255,18 @@ def _targets_compatible(first, second):
     if not isinstance(first, dict) or not isinstance(second, dict):
         return False
     for key in ("command", "cmd"):
-        command = first.get(key)
-        if isinstance(command, str) and command.strip() and command == second.get(key):
-            return True
+        c1, c2 = first.get(key), second.get(key)
+        if isinstance(c1, str) and c1.strip() and isinstance(c2, str) and c2.strip():
+            if c1.strip() == c2.strip():
+                return True
+            t1, s1 = _command_tokens(c1)
+            t2, s2 = _command_tokens(c2)
+            if s1 and s2:
+                return bool(s1 & s2)
+            if s1 or s2:
+                return bool((s1 | s2) & (t1 & t2)) and len(t1 & t2) >= 2
+            if len(t1 & t2) >= 2:
+                return True
     return False
 
 
@@ -256,8 +292,38 @@ class CaseCaptureMixin:
             refs = [item["id"] for item in attempts] + [event["id"]]
             roles = {item["id"]: "attempt" for item in attempts}
             roles[event["id"]] = "conflict" if outcome == "conflict" else "failure"
-            problem = self._problem(project, conversation, summary, "operation", refs,
-                                    task_binding=task_binding, evidence_roles=roles)
+            failure_input = raw.get("tool_input")
+            if failure_input is None and attempts:
+                failure_input = _payload(attempts[0]).get("tool_input")
+            prior_recovered = self.db.execute(
+                "SELECT p.id AS problem_id,e.* FROM problems p JOIN problem_events pe ON pe.problem=p.id "
+                "JOIN events e ON e.id=pe.event JOIN operations o ON o.project=e.project AND o.id=e.operation "
+                "WHERE p.project=? AND p.conversation=? AND p.task_id IS ? AND p.task_revision IS ? "
+                "AND (p.resolution_status='recovery_observed' OR p.knowledge_id IS NOT NULL) "
+                "AND e.type='PostToolUse' AND e.outcome='failed' AND e.agent IS ? "
+                "AND e.assignment_id IS ? AND o.host_epoch=? "
+                "AND json_extract(e.payload,'$.tool_name')=? "
+                "ORDER BY (p.knowledge_id IS NOT NULL) DESC,e.created DESC,e.id DESC LIMIT 10",
+                (project, conversation, event.get("task_id"), event.get("task_revision"),
+                 agent_id, event.get("assignment_id"), epoch, raw.get("tool_name")),
+            ).fetchall()
+            problem = None
+            for prior_row in prior_recovered:
+                prior_dict = dict(prior_row)
+                prior_input = _payload(prior_dict).get("tool_input")
+                if prior_input is None:
+                    prior_attempts = self._operation_attempts(project, prior_dict["operation"])
+                    if prior_attempts:
+                        prior_input = _payload(prior_attempts[0]).get("tool_input")
+                if _targets_compatible(prior_input, failure_input):
+                    regressed_refs = [(item["id"], "attempt") for item in attempts] + [
+                        (event["id"], "conflict" if outcome == "conflict" else "failure")
+                    ]
+                    problem = self._attach_case_evidence(prior_dict["problem_id"], regressed_refs, resolution_status="open")
+                    break
+            if problem is None:
+                problem = self._problem(project, conversation, summary, "operation", refs,
+                                        task_binding=task_binding, evidence_roles=roles)
             if outcome == "conflict" and operation:
                 affected = self.db.execute(
                     "SELECT DISTINCT pe.problem FROM problem_events pe JOIN events e ON e.id=pe.event "
@@ -266,18 +332,17 @@ class CaseCaptureMixin:
                     if item[0] != problem["id"]:
                         self._attach_case_evidence(item[0], [(event["id"], "conflict")])
             return
-        if outcome != "succeeded" or not event.get("task_id"):
+        if outcome != "succeeded":
             return
-        # 无已验证任务的孤儿结果不猜历史归属；身份、assignment 和宿主轮次都相同才比较。
         failures = self.db.execute(
             "SELECT p.id AS problem_id,e.* FROM problems p JOIN problem_events pe ON pe.problem=p.id "
             "JOIN events e ON e.id=pe.event JOIN operations o ON o.project=e.project AND o.id=e.operation "
-            "WHERE p.project=? AND p.conversation=? AND p.task_id=? AND p.task_revision=? "
+            "WHERE p.project=? AND p.conversation=? AND p.task_id IS ? AND p.task_revision IS ? "
             "AND e.type='PostToolUse' AND e.outcome='failed' AND e.agent IS ? "
             "AND e.assignment_id IS ? AND o.host_epoch=? "
             "AND json_extract(e.payload,'$.tool_name')=? "
             "ORDER BY e.created DESC,e.id DESC LIMIT 20",
-            (project, conversation, event["task_id"], event["task_revision"], agent_id,
+            (project, conversation, event.get("task_id"), event.get("task_revision"), agent_id,
              event.get("assignment_id"), epoch, raw.get("tool_name"))).fetchall()
         success_input = raw.get("tool_input")
         if success_input is None and attempts:
@@ -290,7 +355,6 @@ class CaseCaptureMixin:
                 failure_input = _payload(prior[0]).get("tool_input")
             if not _targets_compatible(failure_input, success_input):
                 continue
-            # 升级前的无目标成功可能被误关联；仅相关恢复才抑制后续证据。
             recoveries = self.db.execute(
                 "SELECT observed.* FROM problem_events recovery JOIN events observed ON observed.id=recovery.event "
                 "JOIN operations ro ON ro.project=observed.project AND ro.id=observed.operation "
@@ -300,6 +364,7 @@ class CaseCaptureMixin:
                 "ORDER BY observed.created DESC LIMIT 20",
                 (failure["problem_id"], failure["created"], agent_id, event.get("assignment_id"), epoch)).fetchall()
             related = False
+            latest_recovery_time = None
             for recovery in recoveries:
                 recovery = dict(recovery)
                 recovery_input = _payload(recovery).get("tool_input")
@@ -309,10 +374,32 @@ class CaseCaptureMixin:
                         recovery_input = _payload(recovery_attempts[0]).get("tool_input")
                 if _targets_compatible(failure_input, recovery_input):
                     related = True
+                    latest_recovery_time = recovery["created"]
                     break
-            if related:
-                continue
-            refs = [(item["id"], "attempt") for item in attempts] + [(event["id"], "potential_recovery")]
+            if related and latest_recovery_time is not None:
+                intervening_change = self.db.execute(
+                    "SELECT 1 FROM events e WHERE e.project=? AND e.conversation=? AND e.task_id IS ? AND e.task_revision IS ? "
+                    "AND e.agent IS ? AND e.created>=? AND e.id!=? AND ("
+                    "e.outcome IN ('failed','conflict') OR "
+                    "LOWER(COALESCE(json_extract(e.payload,'$.tool_name'),'')) IN ('edit','write','apply_patch','str_replace_editor')"
+                    ") LIMIT 1",
+                    (project, conversation, event.get("task_id"), event.get("task_revision"),
+                     agent_id, latest_recovery_time, event["id"]),
+                ).fetchone()
+                if not intervening_change:
+                    continue
+            since_time = latest_recovery_time if latest_recovery_time is not None else failure["created"]
+            edits = self.db.execute(
+                "SELECT e.id FROM events e WHERE e.project=? AND e.conversation=? AND e.task_id IS ? AND e.task_revision IS ? "
+                "AND e.agent IS ? AND e.type='PostToolUse' AND e.outcome IN ('succeeded','call_completed') "
+                "AND e.created>=? AND e.id!=? "
+                "AND LOWER(COALESCE(json_extract(e.payload,'$.tool_name'),'')) IN ('edit','write','apply_patch','str_replace_editor') "
+                "ORDER BY e.created DESC,e.id DESC LIMIT 3",
+                (project, conversation, event.get("task_id"), event.get("task_revision"),
+                 agent_id, since_time, event["id"]),
+            ).fetchall()
+            edit_refs = [(row["id"], "observation") for row in reversed(edits)]
+            refs = edit_refs + [(item["id"], "attempt") for item in attempts] + [(event["id"], "potential_recovery")]
             self._attach_case_evidence(failure["problem_id"], refs, resolution_status="recovery_observed")
             break
 

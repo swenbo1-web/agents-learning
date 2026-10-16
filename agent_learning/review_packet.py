@@ -367,23 +367,34 @@ class ReviewPacketMixin:
     def _review_related(self, project, problem_id, query):
         from .runtime import clean, clip
 
-        selected, meaningful = _query_terms(query)
-        if not selected:
-            return [], []
-        weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
-        denominator = sum(weights.values())
-        self.db.create_function("alp_packet_score", 1, lambda body: _rank(body, weights, denominator))
-        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
-        rows = self.db.execute(
-            "SELECT k.* FROM knowledge_fts JOIN active a ON knowledge_fts.project=a.project "
-            "AND knowledge_fts.id=a.id AND CAST(knowledge_fts.revision AS INTEGER)=a.revision "
-            "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-            "WHERE knowledge_fts MATCH ? AND a.project=? ORDER BY alp_packet_score(k.body) DESC,k.id LIMIT 6",
-            (match, project)).fetchall()
         knowledge = []
-        for row in rows:
-            info = _match_info(row["body"], weights, denominator, meaningful)
-            if not info["auto_eligible"]:
+        seen_kids = set()
+        # 1. 优先召回同源绑定知识或日后跨会话修改同一目标文件（write_target）的活跃正式知识
+        has_file_links = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_file_links'"
+        ).fetchone()
+        bound_sql = (
+            "SELECT k.* FROM problems p JOIN active a ON a.project=p.project AND a.id=p.knowledge_id "
+            "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+            "WHERE p.project=? AND p.id=? AND p.knowledge_id IS NOT NULL "
+        )
+        bound_args = [project, problem_id]
+        if has_file_links:
+            bound_sql += (
+                "UNION "
+                "SELECT DISTINCT k.* FROM problem_events pe "
+                "JOIN work_file_links wfl ON wfl.project=? AND wfl.event_id=pe.event "
+                "JOIN work_file_links kwfl ON kwfl.project=wfl.project AND kwfl.checkout_key=wfl.checkout_key AND kwfl.path_key=wfl.path_key "
+                "JOIN problem_events kpe ON kpe.event=kwfl.event_id "
+                "JOIN knowledge_sources ks ON ks.project=kwfl.project AND ks.problem_id=kpe.problem "
+                "JOIN active a ON a.project=ks.project AND a.id=ks.knowledge_id AND a.revision=ks.revision "
+                "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+                "WHERE pe.problem=? AND wfl.relation='write_target' AND kwfl.relation='write_target' "
+            )
+            bound_args.extend([project, problem_id])
+        bound_rows = self.db.execute(bound_sql + "LIMIT 3", tuple(bound_args)).fetchall()
+        for row in bound_rows:
+            if row["id"] in seen_kids:
                 continue
             item = self._public(project, row)
             knowledge.append({"knowledge_id": item["knowledge_id"], "revision": item["revision"],
@@ -391,8 +402,43 @@ class ReviewPacketMixin:
                               "applicability": clip(item["applicability"], 100),
                               "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
                               "current_tool_success": item["current_tool_success"]})
+            seen_kids.add(row["id"])
             if len(knowledge) == 3:
                 break
+
+        selected, meaningful = _query_terms(query)
+        if not selected and not knowledge:
+            return [], []
+        if selected and len(knowledge) < 3:
+            weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
+            denominator = sum(weights.values())
+            self.db.create_function("alp_packet_score", 1, lambda body: _rank(body, weights, denominator))
+            match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
+            rows = self.db.execute(
+                "SELECT k.* FROM knowledge_fts JOIN active a ON knowledge_fts.project=a.project "
+                "AND knowledge_fts.id=a.id AND CAST(knowledge_fts.revision AS INTEGER)=a.revision "
+                "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+                "WHERE knowledge_fts MATCH ? AND a.project=? ORDER BY alp_packet_score(k.body) DESC,k.id LIMIT 6",
+                (match, project)).fetchall()
+            for row in rows:
+                if row["id"] in seen_kids:
+                    continue
+                info = _match_info(row["body"], weights, denominator, meaningful)
+                if not info["auto_eligible"]:
+                    continue
+                item = self._public(project, row)
+                knowledge.append({"knowledge_id": item["knowledge_id"], "revision": item["revision"],
+                                  "title": clip(item["title"], 100), "content": clip(item["content"], 240),
+                                  "applicability": clip(item["applicability"], 100),
+                                  "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
+                                  "current_tool_success": item["current_tool_success"]})
+                seen_kids.add(row["id"])
+                if len(knowledge) == 3:
+                    break
+        if not selected:
+            return knowledge, []
+        weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
+        denominator = sum(weights.values())
         candidates = []
         rows = self.db.execute("SELECT id,body,status FROM candidates WHERE project=? AND problem<>? "
                                "AND status='candidate' ORDER BY created DESC,id LIMIT 128",

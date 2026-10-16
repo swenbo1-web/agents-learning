@@ -551,10 +551,61 @@ def _accept_response(runtime, project, reserved, response):
                       proposal_ids=[result["proposal_id"]] if result.get("proposal_id") else [])
     if (response["decision"] == "candidate" and runtime.admin_effective_config(project)["auto_publish"]
             and not reserved.get("history_job_id") and not summary_context):
-        reason = ("evidence truncated" if packet.get("evidence_truncated") else
+        prob_id = packet["problem"]["id"]
+        bound_kid = packet["problem"].get("knowledge_id")
+        target_kid = proposal.get("knowledge_id")
+        same_lineage_update = False
+        if proposal["action"] in {"update", "attach"} and target_kid:
+            has_unresolved_counterexample = runtime.db.execute(
+                "SELECT 1 FROM knowledge_feedback WHERE project=? AND knowledge_id=? AND disposition='unresolved' LIMIT 1",
+                (project, target_kid),
+            ).fetchone()
+            if not has_unresolved_counterexample:
+                # 1) 同源案例多轮演进升级 (v1 -> v2)
+                same_problem_source = (
+                    bound_kid == target_kid
+                    or runtime.db.execute(
+                        "SELECT 1 FROM knowledge_sources WHERE project=? AND knowledge_id=? AND problem_id=? LIMIT 1",
+                        (project, target_kid, prob_id),
+                    ).fetchone() is not None
+                )
+                # 2) 日后跨会话修改同一目标源码文件 (write_target) 的迭代升级
+                has_file_links = runtime.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_file_links'"
+                ).fetchone()
+                same_file_target = bool(
+                    not same_problem_source
+                    and has_file_links
+                    and runtime.db.execute(
+                        "SELECT 1 FROM problem_events pe "
+                        "JOIN work_file_links wfl ON wfl.project=? AND wfl.event_id=pe.event "
+                        "JOIN work_file_links kwfl ON kwfl.project=wfl.project AND kwfl.checkout_key=wfl.checkout_key AND kwfl.path_key=wfl.path_key "
+                        "JOIN problem_events kpe ON kpe.event=kwfl.event_id "
+                        "JOIN knowledge_sources ks ON ks.project=kwfl.project AND ks.problem_id=kpe.problem "
+                        "WHERE pe.problem=? AND ks.knowledge_id=? AND wfl.relation='write_target' AND kwfl.relation='write_target' LIMIT 1",
+                        (project, prob_id, target_kid),
+                    ).fetchone()
+                )
+                same_lineage_update = bool(same_problem_source or same_file_target)
+        # 振荡回退边界检查：若本案例在最后一次成功工具验证之后又发生了新的失败/冲突事件，禁止抢发半成品
+        latest_fail_seq = runtime.db.execute(
+            "SELECT COALESCE(MAX(e.rowid),0) FROM problem_events pe JOIN events e ON e.id=pe.event "
+            "WHERE pe.problem=? AND e.project=? AND (pe.role IN ('failure','conflict') OR e.outcome IN ('failed','conflict'))",
+            (prob_id, project),
+        ).fetchone()[0]
+        latest_succ_seq = runtime.db.execute(
+            "SELECT COALESCE(MAX(e.rowid),0) FROM problem_events pe JOIN events e ON e.id=pe.event "
+            "WHERE pe.problem=? AND e.project=? AND e.type='PostToolUse' AND e.outcome='succeeded'",
+            (prob_id, project),
+        ).fetchone()[0]
+        regressed = bool(latest_fail_seq and latest_succ_seq and latest_fail_seq > latest_succ_seq)
+        reason = ("evidence truncated" if packet.get("evidence_truncated") or packet.get("incomplete") else
                   "requires trusted tool-success evidence" if body["validation_level"] != "tool_success" else
+                  "latest observation is unresolved failure" if regressed else
                   "requires operation solution" if body["category"] != "operation" or body.get("knowledge_kind", "solution") != "solution" else
-                  "existing knowledge requires trusted governance" if proposal["action"] != "publish" or packet["problem"].get("knowledge_id") else None)
+                  "existing knowledge requires trusted governance" if not (
+                      (proposal["action"] == "publish" and not bound_kid) or same_lineage_update
+                  ) else None)
         if reason:
             result["publication"] = {"status": "not_published", "reason": reason}
         else:

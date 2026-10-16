@@ -203,6 +203,227 @@ class Module6IntegrationTests(unittest.TestCase):
             self.assertEqual(model.call_count, 2)
         self.assertEqual(len(get_reviews(self.r, self.p, duplicate["id"])["items"]), 2)
 
+    def test_multi_turn_evolution_suppresses_in_session_self_anchoring_and_auto_updates_revision(self):
+        self.r.config["admin"]["auto_publish"] = True
+        # 1. 第 1 轮：命令报错 -> 改参数后同目标脚本成功（且无关的 git status 不误触发恢复）
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t1", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --bad"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t1", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --bad"},
+            "tool_response": {"exit_code": 1, "output": "runner error"},
+        })
+        prob_row = self.r.db.execute("SELECT id,resolution_status FROM problems ORDER BY created DESC LIMIT 1").fetchone()
+        prob_id = prob_row["id"]
+        self.assertEqual(prob_row["resolution_status"], "open")
+
+        # 无关命令成功不应误关联为 test_runner.py 的恢复
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t-unrelated", "tool_name": "Bash", "tool_input": {"command": "git status -sb"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t-unrelated", "tool_name": "Bash", "tool_input": {"command": "git status -sb"},
+            "tool_response": {"exit_code": 0, "output": "clean"},
+        })
+        self.assertEqual(
+            self.r.db.execute("SELECT resolution_status FROM problems WHERE id=?", (prob_id,)).fetchone()[0],
+            "open",
+        )
+
+        # 同目标脚本改参数后执行成功 -> 自动关联为 recovery_observed
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t2", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --step1"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t2", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --step1"},
+            "tool_response": {"exit_code": 0, "output": "1 passed"},
+        })
+        self.assertEqual(
+            self.r.db.execute("SELECT resolution_status FROM problems WHERE id=?", (prob_id,)).fetchone()[0],
+            "recovery_observed",
+        )
+
+        # 第 1 轮管理员审核并自动发布 v1
+        base = fake_reviewer("candidate")
+        class PublishV1Reviewer(base):
+            def communicate(self, data=None, timeout=None):
+                super().communicate(data, timeout)
+                body = json.loads(self.output.read_text(encoding="utf-8"))
+                body["candidate"].update(
+                    title="runner pytest fix",
+                    content="Initial v1 fix for test_runner.py",
+                    validation_level="tool_success",
+                    knowledge_kind="solution",
+                )
+                self.output.write_text(json.dumps(body), encoding="utf-8")
+
+        with patch("agent_learning.admin.subprocess.Popen", PublishV1Reviewer):
+            res_v1 = admin_once(self.r, self.p, prob_id)
+        self.assertEqual(res_v1["publication"]["status"], "published")
+        kid = res_v1["publication"]["knowledge_id"]
+        self.assertEqual(res_v1["publication"]["revision"], 1)
+
+        # 2. 第 2 轮：模型深入测试时同一目标再次报错（振荡回退）
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t3", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --full"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t3", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --full"},
+            "tool_response": {"exit_code": 1, "output": "thinkingBudget error on full run"},
+        })
+        regressed_row = self.r.db.execute(
+            "SELECT status,resolution_status,knowledge_id FROM problems WHERE id=?", (prob_id,)
+        ).fetchone()
+        self.assertEqual(tuple(regressed_row), ("pending", "open", kid))
+
+        # 防反哺佐证验证：当前会话 chat 正在重修该问题时，自动检索不会把过时的 v1 注入回当前会话误导模型
+        h_chat = self.r.register_context(self.p, "chat")["context_handle"]
+        injected_in_same_session = self.r._context(
+            self.p, "chat", "runner pytest fix", context_handle=h_chat, workspace=str(self.workspace)
+        )
+        self.assertNotIn("Initial v1 fix for test_runner.py", injected_in_same_session)
+
+        # 振荡回退守卫验证：在未取得新的成功验证前，禁止把振荡失败中的案例自动发布
+        with patch("agent_learning.admin.subprocess.Popen", PublishV1Reviewer):
+            blocked_res = admin_once(self.r, self.p, prob_id)
+        self.assertEqual(blocked_res["publication"]["status"], "not_published")
+        self.assertEqual(blocked_res["publication"]["reason"], "latest observation is unresolved failure")
+
+        # 3. 第 3 轮：修改文件并重新通过完整测试 -> 自动将 v1 迭代升级为 v2
+        target_file = self.workspace / "runner.mjs"
+        target_file.write_text("export const v = 2;\n", encoding="utf-8")
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t4-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t4-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+            "tool_response": {"success": True, "output": "updated runner.mjs"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t5-ok", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --full"},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat", "cwd": str(self.workspace),
+            "tool_use_id": "t5-ok", "tool_name": "Bash", "tool_input": {"command": "pytest tests/test_runner.py --full"},
+            "tool_response": {"exit_code": 0, "output": "all full tests passed"},
+        })
+        self.assertEqual(
+            self.r.db.execute("SELECT resolution_status FROM problems WHERE id=?", (prob_id,)).fetchone()[0],
+            "recovery_observed",
+        )
+
+        class UpdateV2Reviewer(base):
+            def communicate(self, data=None, timeout=None):
+                super().communicate(data, timeout)
+                body = json.loads(self.output.read_text(encoding="utf-8"))
+                body["candidate"].update(
+                    title="runner pytest fix",
+                    content="Complete v2 fix with reasoningEfforts false for test_runner.py",
+                    validation_level="tool_success",
+                    knowledge_kind="solution",
+                )
+                body["proposal"] = {"action": "update", "knowledge_id": kid, "expected_revision": 1}
+                self.output.write_text(json.dumps(body), encoding="utf-8")
+
+        with patch("agent_learning.admin.subprocess.Popen", UpdateV2Reviewer):
+            res_v2 = admin_once(self.r, self.p, prob_id)
+        self.assertEqual(res_v2["publication"]["status"], "published")
+        self.assertEqual(res_v2["publication"]["knowledge_id"], kid)
+        self.assertEqual(res_v2["publication"]["revision"], 2)
+        self.assertEqual(self.r.read(self.p, kid)["revision"], 2)
+        self.assertIn("Complete v2 fix", self.r.read(self.p, kid)["content"])
+
+    def test_day_n_cross_session_file_modification_flags_file_drift_and_allows_same_file_auto_update(self):
+        self.r.config["admin"]["auto_publish"] = True
+        target_file = self.workspace / "service.py"
+        target_file.write_text("print('v1')\n", encoding="utf-8")
+
+        # Day 1 会话：修改 service.py 并发布 v1 正式知识
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat-day1", "cwd": str(self.workspace),
+            "tool_use_id": "d1-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat-day1", "cwd": str(self.workspace),
+            "tool_use_id": "d1-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+            "tool_response": {"exit_code": 0, "output": "edited service.py"},
+        })
+        ev_d1 = self.r.db.execute("SELECT id FROM events WHERE conversation='chat-day1' AND type='PostToolUse'").fetchone()[0]
+        prob_d1 = self.r.feedback(self.p, "chat-day1", "service startup config", category="operation",
+                                  resolution="Set v1 config", event_refs=[ev_d1])
+
+        base = fake_reviewer("candidate")
+        class Day1Reviewer(base):
+            def communicate(self, data=None, timeout=None):
+                super().communicate(data, timeout)
+                body = json.loads(self.output.read_text(encoding="utf-8"))
+                body["candidate"].update(
+                    title="service startup config",
+                    content="Day 1 v1 configuration for service.py",
+                    validation_level="tool_success",
+                    knowledge_kind="solution",
+                )
+                self.output.write_text(json.dumps(body), encoding="utf-8")
+
+        with patch("agent_learning.admin.subprocess.Popen", Day1Reviewer):
+            res1 = admin_once(self.r, self.p, prob_d1["id"])
+        self.assertEqual(res1["publication"]["status"], "published")
+        kid = res1["publication"]["knowledge_id"]
+
+        # Day N 全新会话 chat-day2：磁盘上的 service.py 发生修改后，检索卡片自动标记 source_files_changed: true
+        target_file.write_text("print('v2-modified-on-day-n')\n", encoding="utf-8")
+        h2 = self.r.register_context(self.p, "chat-day2")["context_handle"]
+        ctx_text = self.r._context(self.p, "chat-day2", "service startup config",
+                                   context_handle=h2, workspace=str(self.workspace))
+        self.assertIn('"source_files_changed":true', ctx_text)
+
+        # Day N 在 chat-day2 中对同一文件 service.py 完成新修改并通过验证，自动召回 K@v1 并升级为 K@v2
+        self.r.handle_hook({
+            "hook_event_name": "PreToolUse", "session_id": "chat-day2", "cwd": str(self.workspace),
+            "tool_use_id": "d2-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+        })
+        self.r.handle_hook({
+            "hook_event_name": "PostToolUse", "session_id": "chat-day2", "cwd": str(self.workspace),
+            "tool_use_id": "d2-edit", "tool_name": "edit", "tool_input": {"file_path": str(target_file)},
+            "tool_response": {"exit_code": 0, "output": "updated service.py to v2"},
+        })
+        ev_d2 = self.r.db.execute("SELECT id FROM events WHERE conversation='chat-day2' AND type='PostToolUse'").fetchone()[0]
+        prob_d2 = self.r.feedback(self.p, "chat-day2", "completely different wording on friday", category="operation",
+                                  resolution="Refined v2 config", event_refs=[ev_d2])
+        pkt_d2 = self.r.review_packet(self.p, prob_d2["id"])
+        related_ids = [item["knowledge_id"] for item in pkt_d2["related_knowledge"]]
+        self.assertIn(kid, related_ids)
+
+        class Day2UpdateReviewer(base):
+            def communicate(self, data=None, timeout=None):
+                super().communicate(data, timeout)
+                body = json.loads(self.output.read_text(encoding="utf-8"))
+                body["candidate"].update(
+                    title="service startup config",
+                    content="Day N v2 refined configuration for service.py",
+                    validation_level="tool_success",
+                    knowledge_kind="solution",
+                )
+                body["proposal"] = {"action": "update", "knowledge_id": kid, "expected_revision": 1}
+                self.output.write_text(json.dumps(body), encoding="utf-8")
+
+        with patch("agent_learning.admin.subprocess.Popen", Day2UpdateReviewer):
+            res2 = admin_once(self.r, self.p, prob_d2["id"])
+        self.assertEqual(res2["publication"]["status"], "published")
+        self.assertEqual(res2["publication"]["revision"], 2)
+        self.assertEqual(self.r.read(self.p, kid)["revision"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
