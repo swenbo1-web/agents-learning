@@ -1,6 +1,8 @@
 // One bounded SDK request. No profile loader, Agent, tools, Hooks or project files.
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PROTOCOL = "alp-dsh-sdk-v1";
@@ -61,6 +63,49 @@ async function loadSDK(anchor) {
   return sdk;
 }
 
+async function loadProfileConfigs(anchor) {
+  let piConfig = {};
+  let defaultModelConfig = { provider: "alp-unconfigured", model: "alp-unconfigured" };
+  let yamlMod;
+  try {
+    const require = createRequire(pathToFileURL(resolve(anchor)));
+    yamlMod = await import(pathToFileURL(require.resolve("yaml")).href);
+  } catch {
+    return { piConfig, defaultModelConfig };
+  }
+  if (typeof yamlMod?.parseDocument !== "function") {
+    return { piConfig, defaultModelConfig };
+  }
+  const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
+  for (const profile of ["desktop", "web", "default"]) {
+    const ymlPath = join(dshHome, "profiles", profile, "cordis.yml");
+    if (!existsSync(ymlPath)) continue;
+    try {
+      const doc = yamlMod.parseDocument(readFileSync(ymlPath, "utf8")).toJS();
+      if (!Array.isArray(doc)) continue;
+      const piEntry = doc.find((item) => item?.name === "@deepseek-ai/dsh-llm-pi-ai" && item?.config);
+      if (piEntry?.config?.providers && typeof piEntry.config.providers === "object") {
+        piConfig = structuredClone(piEntry.config);
+        for (const prov of Object.values(piConfig.providers || {})) {
+          if (Array.isArray(prov?.models)) {
+            for (const m of prov.models) {
+              if (m && typeof m === "object") {
+                m.reasoningEfforts = false;
+              }
+            }
+          }
+        }
+      }
+      const defEntry = doc.find((item) => item?.name === "@deepseek-ai/dsh-agent-default-model" && item?.config);
+      if (typeof defEntry?.config?.provider === "string" && typeof defEntry?.config?.model === "string") {
+        defaultModelConfig = { provider: defEntry.config.provider, model: defEntry.config.model };
+      }
+      if (Object.keys(piConfig).length) break;
+    } catch {}
+  }
+  return { piConfig, defaultModelConfig };
+}
+
 function readonlyClass(Base, methods) {
   class Readonly extends Base {}
   for (const name of methods) Object.defineProperty(Readonly.prototype, name, {
@@ -72,12 +117,13 @@ function readonlyClass(Base, methods) {
 async function createRuntime(sdk, config) {
   const ctx = new sdk.cordis.Context();
   try {
+    const { piConfig, defaultModelConfig } = await loadProfileConfigs(config.anchor);
     await ctx.plugin(readonlyClass(sdk.settings.default, ["persist", "prepareDocument"]), { watch: false });
     await ctx.plugin(readonlyClass(sdk.credentials.default, ["set", "unset", "modifyRecord", "deleteRecord"]), { watch: false });
     await ctx.plugin(sdk.llm.LlmRuntime);
     // Sentinels make an absent explicit platform default fail, instead of
     // silently selecting a different account, provider or shipped default model.
-    await ctx.plugin(sdk.defaults.default, { provider: "alp-unconfigured", model: "alp-unconfigured" });
+    await ctx.plugin(sdk.defaults.default, defaultModelConfig);
     const selected = ctx.get("agentDefaultModel").currentSelection();
     let provider, model;
     if (config.model) {
@@ -92,7 +138,7 @@ async function createRuntime(sdk, config) {
     }
     if (typeof provider !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(provider)
       || typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw refusal("model_binding_invalid");
-    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, {});
+    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, provider === "deepseek-official" ? {} : piConfig);
     const llm = ctx.get("llm");
     if (!llm || typeof llm.stream !== "function" || typeof llm.listProviders !== "function"
       || !llm.listProviders().some((item) => item.id === provider)) throw refusal("provider_unavailable");
@@ -179,7 +225,10 @@ async function generate(runtime, sdk, instruction, schema, signal) {
     // Reasoning and replay payloads never enter stdout or the stored response.
   }
   if (!terminal || signal.aborted) throw refusal("incomplete_model_response");
-  const response = JSON.parse([...parts].sort(([a], [b]) => a - b).map(([, value]) => value).join(""));
+  let rawText = [...parts].sort(([a], [b]) => a - b).map(([, value]) => value).join("").trim();
+  const fenceMatch = rawText.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenceMatch) rawText = fenceMatch[1].trim();
+  const response = JSON.parse(rawText);
   if (!response || typeof response !== "object" || Array.isArray(response)) throw refusal("invalid_response_object");
   return { status: "SUCCESS", structured_output: response, num_turns: 1, ...(usage ? { usage } : {}) };
 }
