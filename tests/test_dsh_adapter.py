@@ -527,6 +527,75 @@ class DshAdapterAndV1FeaturesTests(unittest.TestCase):
         })
         self.assertFalse(browser_bad["ok"])
 
+    def test_signal_terminated_and_null_exit_commands_are_not_recorded_as_succeeded(self):
+        self.adapter.handle("SessionStart", {"sessionId": "dsh-sig-1"})
+        self.adapter.handle("PreToolUse", {
+            "sessionId": "dsh-sig-1",
+            "callId": "call-sigterm",
+            "name": "pwsh",
+            "arguments": {"command": "Start-Sleep -Seconds 30"},
+        })
+        self.adapter.handle("PostToolUse", {
+            "sessionId": "dsh-sig-1",
+            "callId": "call-sigterm",
+            "name": "pwsh",
+            "arguments": {"command": "Start-Sleep -Seconds 30"},
+            "result": {"exitCode": None, "signal": "SIGTERM", "content": [{"type": "text", "text": "terminated"}]},
+        })
+        op_sig = self.r.db.execute(
+            "SELECT state, observation FROM operations WHERE project=? ORDER BY rowid DESC LIMIT 1", (self.p,)
+        ).fetchone()
+        self.assertEqual(tuple(op_sig), ("failed", "failed"))
+
+        self.adapter.handle("PreToolUse", {
+            "sessionId": "dsh-sig-1",
+            "callId": "call-null-exit",
+            "name": "pwsh",
+            "arguments": {"command": "unknown-exit"},
+        })
+        self.adapter.handle("PostToolUse", {
+            "sessionId": "dsh-sig-1",
+            "callId": "call-null-exit",
+            "name": "pwsh",
+            "arguments": {"command": "unknown-exit"},
+            "result": {"exitCode": None, "content": [{"type": "text", "text": "output without exit code"}]},
+        })
+        op_null = self.r.db.execute(
+            "SELECT state, observation FROM operations WHERE project=? ORDER BY rowid DESC LIMIT 1", (self.p,)
+        ).fetchone()
+        self.assertNotEqual(op_null["state"], "succeeded")
+        self.assertNotEqual(op_null["observation"], "succeeded")
+
+    def test_lost_tool_receipt_recovers_on_session_resume_and_stop_without_blocking_admin(self):
+        from agent_learning.admin_queue import dispatch_diagnostic
+
+        self.adapter.handle("SessionStart", {"sessionId": "dsh-orphan-1"})
+        self.adapter.handle("PreToolUse", {
+            "sessionId": "dsh-orphan-1",
+            "callId": "orphan-tool-1",
+            "name": "pwsh",
+            "arguments": {"command": "crash-before-post"},
+        })
+        self.assertEqual(
+            self.r.db.execute("SELECT state FROM operations WHERE project=?", (self.p,)).fetchone()[0],
+            "started",
+        )
+        # 模拟宿主崩溃丢失 PostToolUse 后恢复对话并完成新一轮回复
+        self.adapter.handle("SessionStart", {"sessionId": "dsh-orphan-1", "source": "resume"})
+        self.assertEqual(
+            self.r.db.execute("SELECT state FROM operations WHERE project=?", (self.p,)).fetchone()[0],
+            "unknown",
+        )
+        self.r.feedback(self.p, "dsh:default:dsh-orphan-1", "Observed issue after resume")
+        self.adapter.handle("Stop", {
+            "sessionId": "dsh-orphan-1",
+            "turn_id": "turn-after-resume",
+            "last_assistant_message": "已完成恢复后的回复",
+        })
+        self.r.admin_configure(self.p, True)
+        diag = dispatch_diagnostic(self.r, self.p)
+        self.assertNotEqual(diag["reason"], "awaiting_tool_completion")
+
 
 if __name__ == "__main__":
     unittest.main()

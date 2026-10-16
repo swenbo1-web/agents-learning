@@ -318,6 +318,43 @@ console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.in
         again = install(self.target, upgrade=True, host="dsh")
         self.assertEqual(again["workspaces"], [str(self.workspace.resolve()), str(second.resolve())])
 
+    @unittest.skipUnless(shutil.which("node"), "node is required for DSH bridge probe")
+    def test_dsh_enforce_mode_fails_closed_when_python_bridge_process_fails(self):
+        self.initial("enforce", bind_workspace=True)
+        receipt_path = self.target / "runtime-release.json"
+        receipt = read_json(receipt_path)
+        receipt["python"] = str(self.root / "nonexistent-python-binary.exe")
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        probe = """
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.argv[1]).href);
+const handlers = new Map();
+const ctx = {
+  tools: { register() { return () => {}; } },
+  agents: { list() { return []; } },
+  effect() {},
+  inject() {},
+  on(event, fn) { handlers.set(event, fn); },
+};
+mod.apply(ctx);
+const pre = handlers.get("tools/pre-execute");
+let downstream = 0;
+const verdict = await pre(
+  { agent: { id: "s1" }, callId: "c1", name: "pwsh", arguments: { command: "echo hi" } },
+  async () => { downstream += 1; return { kind: "allow" }; },
+);
+process.stdout.write(JSON.stringify({ verdict, downstream }));
+"""
+        response = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", probe, str(self.target / "host/index.mjs")],
+            cwd=self.workspace, capture_output=True, timeout=10,
+        )
+        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+        out = json.loads(response.stdout.decode("utf-8"))
+        self.assertEqual(out["downstream"], 0)
+        self.assertEqual(out["verdict"]["kind"], "deny")
+        self.assertIn("runtime_unavailable", out["verdict"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

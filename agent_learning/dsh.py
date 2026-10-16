@@ -273,12 +273,48 @@ class DshAdapter:
                     break
             if exit_code is not None:
                 break
+        termination_signal = None
+        for source in (response, meta, value):
+            sig = source.get("signal") or source.get("terminationSignal") or source.get("termSignal")
+            if isinstance(sig, str) and sig.strip():
+                termination_signal = sig.strip()[:80]
+                break
+            if isinstance(sig, int) and not isinstance(sig, bool) and sig > 0:
+                termination_signal = f"SIG({sig})"
+                break
+        aborted_flag = any(
+            source.get(flag) is True
+            for source in (response, meta, value)
+            for flag in ("timedOut", "timed_out", "killed", "aborted", "interrupted", "cancelled", "canceled")
+        ) or any(
+            isinstance(source.get("status"), str)
+            and source.get("status").strip().lower() in {
+                "failed", "error", "killed", "aborted", "interrupted",
+                "cancelled", "canceled", "timed_out", "timeout", "terminated",
+            }
+            for source in (response, meta, value)
+        )
+        if termination_signal is not None or aborted_flag:
+            reason = f"terminated by signal {termination_signal}" if termination_signal else "command terminated or timed out"
+            out = {"isError": True, "success": False, "error": (text or reason)[:4000]}
+            if termination_signal:
+                out["signal"] = termination_signal
+                out["error_code"] = f"SIGNAL_{termination_signal}"[:120]
+            if exit_code is not None:
+                out["exitCode"] = exit_code
+            return out
         if exit_code is None and (lower_name in _SHELL_EXEC_TOOLS or "pwsh" in lower_name or "bash" in lower_name):
             match = _EXIT_CODE_MARKER.search(text)
             if match:
                 exit_code = int(match.group(1))
             elif not tool_args.get("run_in_background"):
-                exit_code = 0
+                explicit_null_exit = any(
+                    key in source and source[key] is None
+                    for source in (response, meta, value)
+                    for key in ("exitCode", "exit_code")
+                )
+                if not explicit_null_exit:
+                    exit_code = 0
         if exit_code is not None:
             return {"exitCode": exit_code, "isError": exit_code != 0, "success": exit_code == 0, "output": text[:4000]}
         if response.get("success") is True or lower_name in _DETERMINISTIC_LOCAL_TOOLS:

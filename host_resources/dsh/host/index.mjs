@@ -551,12 +551,27 @@ export function apply(ctx) {
   }
 
   async function dispatchEvent(eventName, payload, signal) {
+    const envMode = process.env.ALP_HOOK_MODE;
+    const denyBridgeFailure = (code, detail) => ({
+      decision: "deny",
+      reason: `Agent Learning [${code}]: ${detail} The configured execution guard could not verify this call.`,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Agent Learning [${code}]: ${detail} The configured execution guard could not verify this call.`,
+      },
+    });
     let receipt;
     try {
       receipt = loadRuntimeReceipt();
     } catch {
+      if (eventName === "PreToolUse" && envMode !== "observe") {
+        return denyBridgeFailure("release_unverified", "the installed runtime release could not be verified.");
+      }
       return {};
     }
+    const effectiveMode = receipt.hook_mode || envMode;
+    const failClosedOnPre = eventName === "PreToolUse" && effectiveMode !== "observe";
     const dispatcher = join(receipt.runtime_directory, "hooks", "dsh_dispatch.py");
     const argv = ["-B", dispatcher, "--event", eventName];
     if (receipt.hook_mode) {
@@ -584,10 +599,22 @@ export function apply(ctx) {
         signal,
         10000,
       );
-      if (code !== 0 || !stdout.trim()) return {};
-      return JSON.parse(stdout.trim());
+      if (code !== 0 || !stdout.trim()) {
+        return failClosedOnPre
+          ? denyBridgeFailure("runtime_unavailable", "runtime processing failed; event persistence and policy could not be confirmed.")
+          : {};
+      }
+      const parsed = JSON.parse(stdout.trim());
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return failClosedOnPre
+          ? denyBridgeFailure("response_invalid", "runtime returned an invalid response; its result could not be confirmed.")
+          : {};
+      }
+      return parsed;
     } catch {
-      return {};
+      return failClosedOnPre
+        ? denyBridgeFailure("runtime_unavailable", "runtime processing failed; event persistence and policy could not be confirmed.")
+        : {};
     }
   }
 
