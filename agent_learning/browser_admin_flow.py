@@ -23,6 +23,13 @@ flowHistoryAccess:['Reconfirm this archived batch before reading its review text
 flowPublication:['Publication: {value}','发布去向：{value}'],
 flowPreview:['Check publication conditions (read only)','检查发布条件（只读）'],
 flowPreviewResult:['{title}: {reason}. Existing candidates still need explicit approval.','{title}：{reason}。现有候选仍需明确批准。'],
+flowCandidates:['Candidates from this review','本次审核生成的候选'],
+flowCandidatePreview:['Summary preview; open candidate review for full text and approval.','此处为摘要预览；完整内容与批准请进入候选审批列表。'],
+flowCandidateEvidence:['Evidence: {level} · references: {refs}','证据等级：{level} · 引用：{refs}'],
+flowCandidatesMore:['More candidates are available in the approval view.','其余候选请在审批列表查看。'],
+flowHistoryResume:['Continue this archived batch…','继续整理此归档批次…'],
+flowHistoryInterrupted:['This batch needs explicit continuation. Calls with unknown results remain blocked until checked.','此批次需要明确续做；结果未知的调用仍需核对，不会自动重试。'],
+superseded:['Previous account or governance request (inactive)','旧账户或治理轮次请求（已失效）'],
 flowPublicationOn:['Future verified operation solutions may publish automatically','后续通过验证的操作解法可自动发布'],
 flowPublicationOff:['Automatic publication is off; candidates await approval','自动发布关闭；候选等待批准'],
 autoPublishLabel:['Automatically publish future verified operation solutions for this project and host','为此项目、此宿主自动发布后续已验证的操作解法'],
@@ -54,6 +61,18 @@ eligible_future_review_only:['Evidence meets the narrow automatic publication ch
 'existing knowledge requires trusted governance':['The existing knowledge requires explicit governance approval','已有知识需明确治理批准'],
 local_preflight:['Local evidence check','本地证据检查'],result_unknown:['Result unknown; inspect before retrying','结果未知，重试前需核对']
 });
+function renderFlowCandidate(card,item){
+ const section=node('section',undefined,'history-item');section.append(node('strong',item.title||item.candidate_id));
+ section.append(node('p',item.candidate_id+' · '+label(item.status),'muted'));
+ if(item.content_summary)section.append(node('p',item.content_summary));
+ if(item.applicability)section.append(node('p',t('flowApplies',{value:item.applicability})));
+ if(item.limitations)section.append(node('p',t('flowLimits',{value:item.limitations}),'note'));
+ section.append(node('p',t('flowCandidatePreview'),'note'));
+ if(item.validation_level)section.append(node('p',t('flowCandidateEvidence',{level:label(item.validation_level),refs:(item.evidence_refs||[]).join(', ')+(item.evidence_refs_truncated?' …':'')}),'muted'));
+ if(item.publication)section.append(node('p',t('flowPublication',{value:label(item.publication.status)+(item.publication.knowledge_id?' · '+item.publication.knowledge_id+'@'+item.publication.revision:'')})));
+ if(item.status==='candidate'||item.status==='deferred'){const button=node('button',t('flowPreview'));button.disabled=state.busy||Boolean(state.adminPending);button.addEventListener('click',()=>run(async()=>{const result=await api('admin-control/publication-preview',{candidate_id:item.candidate_id});section.append(node('p',t('flowPreviewResult',{title:result.title,reason:label(result.reason)}),'note'));}));section.append(button);}
+ card.append(section);
+}
 function renderAdminFlow(data){
  const root=$('admin-flow');if(!root)return;root.replaceChildren();
  root.append(node('h3',t('flowHeading')),node('p',t('flowNote'),'note'));
@@ -74,13 +93,11 @@ function renderAdminFlow(data){
    const evidence=item.evidence||{};card.append(node('p',t('flowEvidence',{events:evidence.events??0,successes:evidence.successes??0,failures:evidence.failures??0,statements:evidence.public_statements??0})));
    if(item.reason)card.append(node('p',label(item.reason)));
    for(const missing of item.missing_evidence||[])card.append(node('p',t('flowMissing',{value:label(missing)}),'note'));
-   if(item.candidate_title)card.append(node('p',item.candidate_title));
-   if(item.candidate_summary)card.append(node('p',item.candidate_summary));
-   if(item.applicability)card.append(node('p',t('flowApplies',{value:item.applicability})));
-   if(item.limitations)card.append(node('p',t('flowLimits',{value:item.limitations}),'note'));
+   if(!item.history_access_required&&item.candidates?.length){card.append(node('h5',t('flowCandidates')));for(const candidate of item.candidates)renderFlowCandidate(card,candidate);}
+   else if(!item.history_access_required){if(item.candidate_title)card.append(node('p',item.candidate_title));if(item.candidate_summary)card.append(node('p',item.candidate_summary));if(item.applicability)card.append(node('p',t('flowApplies',{value:item.applicability})));if(item.limitations)card.append(node('p',t('flowLimits',{value:item.limitations}),'note'));}
+   if(item.candidates_truncated)card.append(node('p',t('flowCandidatesMore'),'note'));
    if(item.history_access_required)card.append(node('p',t('flowHistoryAccess'),'note'));
    if(item.publication)card.append(node('p',t('flowPublication',{value:label(item.publication.reason||item.publication.status)})));
-   if(item.candidate_ids?.[0]){const button=node('button',t('flowPreview'));button.disabled=state.busy||Boolean(state.adminPending);button.addEventListener('click',()=>run(async()=>{const result=await api('admin-control/publication-preview',{candidate_id:item.candidate_ids[0]});card.append(node('p',t('flowPreviewResult',{title:result.title,reason:label(result.reason)}),'note'));}));card.append(button);}
    root.append(card);
   }
  }
@@ -88,11 +105,12 @@ function renderAdminFlow(data){
 function addHistoryReviewControls(card,item){
  const counts=item.counts||{};card.append(node('p',t('flowHistoryCounts',{cases:counts.cases??0,reviewed:counts.reviewed_cases??0,candidates:counts.candidates??0,published:counts.published_candidates??0})));
  if(item.review_request)card.append(node('p',t('flowHistoryRequest',{state:label(item.review_request.state)}),'note'));
+ if(item.resume_required)card.append(node('p',t('flowHistoryInterrupted'),'note'));
  if(!item.can_review)return;
  for(const [field,key,value,max]of [['calls','flowHistoryCalls',5,20],['seconds','flowHistorySeconds',180,600]]){
   const id='history-review-'+field+'-'+item.id,input=node('input'),caption=node('label',t(key)),draftKey=state.epoch+':'+id;caption.htmlFor=id;input.id=id;input.type='number';input.min='1';input.max=String(max);input.step='1';input.value=historyReviewDrafts.get(draftKey)??String(value);input.addEventListener('input',()=>historyReviewDrafts.set(draftKey,input.value));card.append(caption,input);
  }
- const button=node('button',t('flowHistoryStart'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>confirmHistoryReview(item)));card.append(button);
+ const button=node('button',t(item.resume_required?'flowHistoryResume':'flowHistoryStart'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>confirmHistoryReview(item)));card.append(button);
 }
 async function confirmHistoryReview(item){
  if(!canAdmin()||state.adminDirty||state.adminPending)throw new Error(t('adminSaveBeforeWake'));

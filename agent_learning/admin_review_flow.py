@@ -69,6 +69,29 @@ def _case(runtime, project, problem_id):
                          "public_statements": sum(r["n"] for r in events if r["type"] not in {"PreToolUse", "PostToolUse"})}}
 
 
+def _candidate_previews(runtime, project, problem, revision, identities):
+    """Bounded per-candidate views, including later approval/publication status."""
+    items = []
+    for identity in identities[:5]:
+        row = runtime.db.execute("SELECT body,status FROM candidates WHERE project=? AND id=? "
+            "AND problem=? AND problem_revision=?", (project, identity, problem, revision)).fetchone()
+        if row is None:
+            items.append({"candidate_id": identity, "status": "unavailable"})
+            continue
+        body = json.loads(row["body"])
+        receipt = runtime.db.execute("SELECT response FROM publication_receipts WHERE project=? AND candidate_id=?",
+                                     (project, identity)).fetchone()
+        refs = body.get("evidence_refs", [])
+        items.append({"candidate_id": identity, "status": row["status"], "problem_revision": revision,
+            "title": body["title"][:200], "content_summary": body["content"][:400],
+            "applicability": body["applicability"][:200], "limitations": body["limitations"][:200],
+            "validation_level": body["validation_level"], "category": body["category"],
+            "knowledge_kind": body.get("knowledge_kind", "solution"),
+            "evidence_refs": refs[:6], "evidence_refs_truncated": len(refs) > 6,
+            "publication": json.loads(receipt[0]) if receipt else None})
+    return items
+
+
 def review_activity(runtime, project):
     from .admin_queue import eligible_query, executor_query, scan_signatures, REVIEW_ORDER
     signature, preflight = scan_signatures(runtime, project)
@@ -93,13 +116,17 @@ def review_activity(runtime, project):
             candidate_title=candidate.get("title", "")[:200], publication=body.get("publication"),
             candidate_summary=candidate.get("content", "")[:400],
             applicability=candidate.get("applicability", "")[:200], limitations=candidate.get("limitations", "")[:200])
+        item["candidates"] = _candidate_previews(runtime, project, row["problem"], row["revision"], item["candidate_ids"])
+        item["candidates_truncated"] = len(item["candidate_ids"]) > len(item["candidates"])
         if item["history_job_id"]:
             from .runtime import ContractError
+            from .candidate_review import history_result_guard
             try:
-                runtime.history_guard(project, row["problem"], item["history_job_id"])
+                history_result_guard(runtime, project, row["problem"])
             except ContractError:
                 for key in ("candidate_summary", "candidate_title", "reason", "applicability", "limitations"):
                     item[key] = ""
+                item["candidates"] = []
                 item["missing_evidence"], item["history_access_required"] = [], True
         recent.append(item)
     deferred = []

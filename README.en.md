@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.0 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.1 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -53,7 +53,7 @@ The panels passed isolated regressions, fixed-runtime checks and Edge checks wit
 
 ![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
 
-### Inspect review subjects and publication (1.1.0)
+### Inspect review subjects and publication (1.1.1)
 
 Open **Review & settings → Administrator settings** from any host control panel:
 
@@ -63,6 +63,8 @@ Open **Review & settings → Administrator settings** from any host control pane
 4. **Defer bare failures locally.** Daily cases containing only failed tools and no recovery or public explanation wait for more evidence without a model call. Relevant new evidence makes them eligible for reconsideration. Explicit per-case review remains available.
 
 These cards show public records and observable evidence, not internal model reasoning. Reported statements, tool success, candidates and formal publication remain distinct; tool success is not business correctness or user acceptance.
+
+1.1.1 restores explicit continuation after an interrupted history worker expires, using frozen sources. Requests from previous account or governance epochs no longer block current actions; calls with unknown outcomes still require inspection. Multiple candidates show separate summaries, conditions, limits, evidence references and current approval/publication states. Completed results remain readable after a normal budget pause; user pauses, cancellation and account boundaries retain their access checks. Database schema and protocol remain 19.
 
 ### 2. Local Visual Knowledge Browser, Candidate Review & Frequency Presets (All Hosts)
 

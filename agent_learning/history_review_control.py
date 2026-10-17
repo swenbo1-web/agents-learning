@@ -12,6 +12,20 @@ def _identity(runtime, project, request_id):
     return project, runtime._session_scope(), runtime.session_epoch(), request_id
 
 
+def current_history_request(runtime, project, job_id, *, active_only=False):
+    """Use the same account/governance boundary for admission and presentation."""
+    if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_review_requests' AND type='table'").fetchone():
+        return None
+    query = ("SELECT q.* FROM history_review_requests q JOIN host_scopes h "
+             "ON h.scope=q.host_scope AND h.epoch=q.session_epoch WHERE q.project=? AND q.job_id=? "
+             "AND json_extract(q.body,'$.expected_governance_epoch')=? ")
+    args = (project, job_id, runtime.host_epoch())
+    if active_only:
+        query += "AND q.state IN ('reserved','running') AND q.lease_until>? "
+        args += (time.time(),)
+    return runtime.db.execute(query + "ORDER BY q.created DESC,q.request_id DESC LIMIT 1", args).fetchone()
+
+
 def request_history_review(runtime, project, body):
     from .admin_control import control_status, request_receipt
     from .admin_recovery import _history, _version, _history_review_available
@@ -50,11 +64,7 @@ def request_history_review(runtime, project, body):
             raise ContractError("history batch changed or is unavailable")
         if row["host_epoch"] != runtime.host_epoch():
             raise ContractError("history batch requires explicit reauthorization")
-        if runtime.db.execute("SELECT 1 FROM history_review_requests q JOIN host_scopes h "
-            "ON h.scope=q.host_scope AND h.epoch=q.session_epoch WHERE q.project=? AND q.job_id=? "
-            "AND q.state IN ('reserved','running') AND q.lease_until>? "
-            "AND json_extract(q.body,'$.expected_governance_epoch')=?",
-            (project, row["id"], time.time(), runtime.host_epoch())).fetchone():
+        if current_history_request(runtime, project, row["id"], active_only=True):
             raise ContractError("history batch already has an active review request")
         plan = runtime.resolve_admin_executor(project, require_enabled=False)
         workspace = runtime.db.execute("SELECT workspace FROM history_jobs WHERE id=? AND project=?", (row["id"], project)).fetchone()[0]

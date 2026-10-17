@@ -12,11 +12,11 @@ BROWSER_CHECK = r'''
 const {script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const vm=require('node:vm'),assert=require('node:assert/strict');
 class Element {
- constructor(){this.children=[];this.value='';this.textContent='';this.dataset={};this.classList={toggle(){}};}
- addEventListener(){} append(...items){this.children.push(...items);} replaceChildren(...items){this.children=items;}
+ constructor(){this.children=[];this.value='';this.textContent='';this.dataset={};this.listeners={};this.classList={toggle(){}};}
+ addEventListener(name,fn){this.listeners[name]=fn;} append(...items){this.children.push(...items);} replaceChildren(...items){this.children=items;}
 }
 const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
-const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[],addEventListener(){},documentElement:{}},navigator:{language:'en'},location:{hash:''},URLSearchParams,crypto:{randomUUID:()=> 'test-request'},setTimeout(){},clearTimeout(){},console});
+const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[],addEventListener(){},documentElement:{},body:{setAttribute(){}}},navigator:{language:'en'},location:{hash:''},URLSearchParams,crypto:{randomUUID:()=> 'test-request'},setTimeout(){},clearTimeout(){},console});
 vm.runInContext(script,context);
 vm.runInContext(`
 state.session={admin_control_enabled:true};state.adminToken='local-capability';state.view='admin-control';
@@ -73,7 +73,23 @@ assert(flatten(get('admin-flow')).includes('Use the project build configuration'
 assert(flatten(get('admin-flow')).includes('Automatic publication is disabled'));
 assert(flatten(get('admin-flow')).includes('deferred locally without a model call'));
 vm.runInContext(`
+state.adminData.review_activity.recent[0].candidates=['first','second','third'].map((id,index)=>({candidate_id:id,status:index===2?'published':'candidate',title:'Title '+id,content_summary:'Summary '+id,applicability:'Applies '+id,limitations:'Limits '+id,validation_level:'reported',evidence_refs:['event-'+id]}));
+state.adminData.review_activity.recent[0].candidate_summary='Legacy duplicate text';renderAdminFlow(state.adminData);
+globalThis.previewRequests=[];api=async(path,params)=>{previewRequests.push({path,params});return {title:params.candidate_id,reason:'history_requires_approval'};};
+`,context);
+for(const id of ['first','second','third'])assert(flatten(get('admin-flow')).includes('Summary '+id));
+assert(!flatten(get('admin-flow')).includes('Legacy duplicate text'));
+const previews=[];function findPreviews(n){if(n.textContent==='Check publication conditions (read only)')previews.push(n);for(const c of n.children)findPreviews(c);}findPreviews(get('admin-flow'));
+assert.equal(previews.length,2);
+previews[1].listeners.click();
+assert.equal(context.previewRequests[0].params.candidate_id,'second');
+vm.runInContext(`state.busy=false;state.adminData.review_activity.recent[0].history_access_required=true;renderAdminFlow(state.adminData);`,context);
+assert(!flatten(get('admin-flow')).includes('Summary first'));
+vm.runInContext(`state.language='zh-CN';state.adminData.review_activity.recent[0].history_access_required=false;renderAdminFlow(state.adminData);state.language='en';`,context);
+assert(flatten(get('admin-flow')).includes('本次审核生成的候选'));
+vm.runInContext(`
 state.adminDirty=false;state.adminPending=null;state.adminData.recovery.history_jobs[0].can_review=true;
+state.adminData.recovery.history_jobs[0].resume_required=true;state.adminData.recovery.history_jobs[0].review_request={state:'superseded'};
 state.adminData.recovery.history_jobs[0].counts={cases:12,reviewed_cases:0,candidates:0,published_candidates:0};
 renderAdminRecovery(state.adminData);
 globalThis.historySubmission=null;sendAdminRequest=async(path,payload)=>{globalThis.historySubmission={path,payload};};
@@ -81,6 +97,8 @@ $('history-review-calls-old-batch').value='3';$('history-review-seconds-old-batc
 window.confirm=()=>false;confirmHistoryReview(state.adminData.recovery.history_jobs[0]);
 `,context);
 assert.equal(context.historySubmission,null);
+assert(flatten(get('admin-recovery')).includes('Continue this archived batch'));
+assert(flatten(get('admin-recovery')).includes('inactive'));
 vm.runInContext(`window.confirm=()=>true;confirmHistoryReview(state.adminData.recovery.history_jobs[0]);`,context);
 assert.equal(context.historySubmission.path,'admin-control/history-review');
 assert.equal(context.historySubmission.payload.max_calls,3);

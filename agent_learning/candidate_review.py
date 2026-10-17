@@ -47,8 +47,8 @@ def _history_rows(view, project, problem):
         "WHERE l.project=? AND l.problem_id=? ORDER BY j.created DESC,j.id", (project, problem))]
 
 
-def history_publication_guard(runtime, project, problem, expected_epoch=None):
-    """Permit only a completed review stopped by a known budget, never user pause."""
+def history_result_guard(runtime, project, problem, expected_epoch=None):
+    """Read completed results after known budget pauses without resuming execution."""
     from .history_import import ACCESS_STATES
 
     epoch = runtime.assert_host_epoch(expected_epoch)
@@ -68,6 +68,11 @@ def history_publication_guard(runtime, project, problem, expected_epoch=None):
     if row["state"] == "paused" and reason in BUDGET_PAUSES and not row["owner"]:
         return row
     raise ContractError("history job is paused or cancelled; explicit approval is unavailable")
+
+
+def history_publication_guard(runtime, project, problem, expected_epoch=None):
+    """Publication retains the same explicit history access boundary."""
+    return history_result_guard(runtime, project, problem, expected_epoch)
 
 
 class _ValidationView:

@@ -31,14 +31,14 @@ def _history(runtime, project, identity):
 def _history_available(row):
     if row["owner"] and (row["lease_until"] or 0) > time.time():
         return False
-    return row["state"] in {"materialized", "review_complete"} or (
+    return row["state"] in {"materialized", "review_complete", "materializing", "reviewing"} or (
         row["state"] == "paused" and json.loads(row["last_result"]).get("reason") in BUDGET_PAUSES)
 
 
 def _history_review_available(row):
-    """A new, explicitly confirmed run may resume a user pause or failed batch."""
+    """Explicit runs may resume pauses or interrupted frozen work, never live owners."""
     return (not row["owner"] or (row["lease_until"] or 0) <= time.time()) and row["state"] in {
-        "materialized", "review_complete", "paused"}
+        "materialized", "review_complete", "paused", "materializing", "reviewing"}
 
 
 def recovery_status(runtime, project):
@@ -82,14 +82,18 @@ def recovery_status(runtime, project):
         unsupported = sum(isinstance(value, dict) and value.get("reason") == "unparsed_file_type" for value in pending)
         progress = runtime.history_status(project, row["id"])["job"]
         review_request = None
+        from .history_review_control import current_history_request
+        active_request = current_history_request(runtime, project, row["id"], active_only=True)
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='history_review_requests' AND type='table'").fetchone():
-            request = db.execute("SELECT state,lease_until,result FROM history_review_requests WHERE project=? AND job_id=? "
-                "ORDER BY created DESC LIMIT 1", (project, row["id"])).fetchone()
+            request = active_request or current_history_request(runtime, project, row["id"])
+            current = request is not None
+            request = request or db.execute("SELECT state,lease_until,result FROM history_review_requests WHERE project=? AND job_id=? "
+                "ORDER BY created DESC,request_id DESC LIMIT 1", (project, row["id"])).fetchone()
             if request:
-                review_request = {"state": "result_unknown" if request["state"] in {"reserved", "running"}
+                review_request = {"current": current, "state": "superseded" if not current else
+                    "result_unknown" if request["state"] in {"reserved", "running"}
                     and (request["lease_until"] or 0) <= time.time() else request["state"],
                     "result": json.loads(request["result"])}
-        request_active = review_request and review_request["state"] in {"reserved", "running"}
         history.append({"id": row["id"], "version": _version(row), "state": row["state"],
             "epoch_matches": row["host_epoch"] == runtime.host_epoch(),
             "review_enabled": bool(row["review_enabled"]), "remaining_calls": row["remaining_calls"],
@@ -99,8 +103,9 @@ def recovery_status(runtime, project):
                                         for value in plan.get("extra_sources", [])),
             "can_reauthorize": _history_available(row) and row["host_epoch"] != runtime.host_epoch(),
             "counts": progress["counts"], "review_request": review_request,
+            "resume_required": progress["resume_required"],
             "can_review": _history_review_available(row) and row["host_epoch"] == runtime.host_epoch()
-                and not request_active and progress["coverage"]["review"]["ready_cases"] > 0,
+                and not active_request and progress["resume"]["explicit_run_required"],
             "publication_automatic": False})
     return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
                 "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},

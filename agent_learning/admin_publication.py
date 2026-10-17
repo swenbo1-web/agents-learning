@@ -13,7 +13,7 @@ def publication_preview(runtime, project, candidate_id):
     body = json.loads(row["body"])
     policy = publication_policy(runtime, project)
     reason = None
-    if row["status"] != "candidate":
+    if row["status"] not in {"candidate", "deferred"}:
         reason = "candidate_not_pending"
     elif runtime.db.execute("SELECT 1 FROM history_case_links WHERE project=? AND problem_id=?", (project, row["problem"])).fetchone():
         reason = "history_requires_approval"
