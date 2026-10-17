@@ -231,7 +231,7 @@ function readonlyClass(Base, methods) {
   return Readonly;
 }
 
-async function createRuntime(sdk, config, observed) {
+async function mountRuntime(sdk, config, observed, pruneCompat) {
   const ctx = new sdk.cordis.Context();
   try {
     observed.phase = "profile";
@@ -263,7 +263,8 @@ async function createRuntime(sdk, config, observed) {
     selection.current = { provider, model };
     if (needsGoogleCompatibility(provider, model) && typeof sdk.settings.default.prototype.register !== "function")
       throw refusal("model_compatibility_unavailable");
-    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, entries.get(adapterName));
+    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi,
+      provider === "deepseek-official" || !pruneCompat ? entries.get(adapterName) : withoutCompat(entries.get(adapterName)));
     const llm = ctx.get("llm");
     if (!llm || typeof llm.stream !== "function" || typeof llm.listProviders !== "function"
       || !llm.listProviders().some((item) => item.id === provider)) throw refusal("provider_unavailable");
@@ -274,6 +275,45 @@ async function createRuntime(sdk, config, observed) {
   } catch (error) {
     try { await ctx.fiber.dispose(); } catch { /* Keep the original safe failure. */ }
     throw error;
+  }
+}
+
+function withoutCompat(config) {
+  // A newer host materializes compat defaults (for example chatTemplateArgs)
+  // that an older anchored SDK does not declare. Dropping the derived compat
+  // blocks keeps the reviewer mountable; a refused route still fails loudly.
+  if (!config || typeof config !== "object" || Array.isArray(config)) return config;
+  const copy = structuredClone(config);
+  const providers = copy.providers && typeof copy.providers === "object" && !Array.isArray(copy.providers)
+    ? copy.providers : {};
+  let changed = false;
+  for (const route of Object.values(providers)) {
+    if (!route || typeof route !== "object" || Array.isArray(route)) continue;
+    if (route.compat !== undefined) { delete route.compat; changed = true; }
+    for (const model of Array.isArray(route.models) ? route.models : []) {
+      if (model && typeof model === "object" && !Array.isArray(model) && model.compat !== undefined) {
+        delete model.compat;
+        changed = true;
+      }
+    }
+  }
+  return changed ? copy : config;
+}
+
+function compatRefused(error) {
+  // Only this adapter's unknown-compat refusal justifies one retry; every other
+  // failure (schema, credentials, capability) keeps its original outcome.
+  return Boolean(error) && !error.safeCode && typeof error.message === "string"
+    && /\bcompat\b/i.test(error.message);
+}
+
+async function createRuntime(sdk, config, observed) {
+  try {
+    return await mountRuntime(sdk, config, observed, false);
+  } catch (error) {
+    if (!compatRefused(error)) throw error;
+    observed.phase = "runtime";
+    return mountRuntime(sdk, config, observed, true);
   }
 }
 

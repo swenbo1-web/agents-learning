@@ -469,6 +469,33 @@ const WORKER_TOOL_SPECS = [
 export const name = "agent-learning";
 export const inject = ["tools", "systemPrompt", "agents"];
 
+const PROFILE_CONFIG_DEPTH = 8;
+
+function plainProfileConfig(value, depth = 0) {
+  // This DSH version marks model configuration fields as schemastery
+  // `volatile`, so a plugin's resolved config holds reference objects whose
+  // JSON form is `{}`. Snapshotting that literal shape would erase the provider
+  // and default-model values, and the reviewer could not mount its adapter.
+  // Resolve such references here, inside the trusted host tree, and keep only
+  // plain JSON data.
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= PROFILE_CONFIG_DEPTH) return undefined;
+  if (typeof value.get === "function" && typeof value.then !== "function") {
+    let resolved;
+    try { resolved = value.get(); } catch { return undefined; }
+    return plainProfileConfig(resolved, depth + 1);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => plainProfileConfig(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  const output = {};
+  for (const [key, item] of Object.entries(value)) {
+    const plain = plainProfileConfig(item, depth + 1);
+    if (plain !== undefined) output[key] = plain;
+  }
+  return output;
+}
+
 export function reviewProfileEnvironment(ctx) {
   // Only the trusted, already-composed loader tree supplies model configuration.
   // Event payloads, workspace files and the global process environment cannot
@@ -491,9 +518,9 @@ export function reviewProfileEnvironment(ctx) {
       const name = entry?.options?.name;
       if (!allowed.has(name) || entry.disabled) continue;
       const config = entry.fiber?.config;
-      if (!config || typeof config !== "object" || Array.isArray(config) || names.has(name)) return unavailable;
+      const frozen = plainProfileConfig(config);
+      if (!frozen || typeof frozen !== "object" || Array.isArray(frozen) || names.has(name)) return unavailable;
       names.add(name);
-      const frozen = { ...config };
       if (name === "@deepseek-ai/dsh-settings-file" || name === "@deepseek-ai/dsh-credentials-local") {
         // These SDK modules resolve relative paths against invocation cwd,
         // not loader.baseUrl. Freeze that path before moving to review cwd.
