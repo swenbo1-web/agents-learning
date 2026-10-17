@@ -212,7 +212,7 @@ class DshCaptureBridgeTests(unittest.TestCase):
         self.plugin = self.root / "plugin"
         (self.plugin / "host").mkdir(parents=True)
         self.bridge = self.plugin / "host/index.mjs"
-        shutil.copyfile(BRIDGE, self.bridge)
+        shutil.copytree(BRIDGE.parent, self.bridge.parent, dirs_exist_ok=True)
         (self.plugin / "runtime-release.json").write_text(json.dumps({
             "python": "synthetic-python", "runtime_directory": str(self.root / "runtime"),
             "workspace": str(self.workspace), "home": str(self.root / "home"), "hook_mode": "observe",

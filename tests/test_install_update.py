@@ -333,6 +333,25 @@ class InstallUpdateTests(unittest.TestCase):
         self.assertEqual(extra.read_bytes(), b"user code")
         self.assertFalse(list(self.root.glob(".alp-backup-*")))
 
+    def test_known_host_extra_adoption_is_limited_by_host_path_and_content(self):
+        from agent_learning.install_update import preserve_extra_files
+        previous_root, staging = self.root / "previous", self.root / "staging"
+        for area in (previous_root, staging):
+            (area / "host").mkdir(parents=True)
+        path = "host/google-thinking.mjs"
+        old = b"// published old implementation\r\n"
+        (previous_root / path).write_bytes(old)
+        (staging / path).write_bytes(b"// current managed implementation\n")
+        previous = {"target": previous_root, "target_host": "dsh", "extra_files": [path],
+                    "snapshot": snapshot(previous_root)}
+        known = hashlib.sha256(old.replace(b"\r\n", b"\n")).hexdigest()
+        with patch("agent_learning.install_update.DSH_HOST_ADOPTION", {path: {known}}):
+            self.assertEqual(preserve_extra_files(previous, staging), [path])
+            self.assertEqual((previous_root / path).read_bytes(), old)
+            previous["target_host"] = "codex"
+            with self.assertRaisesRegex(ContractError, "conflicts"):
+                preserve_extra_files(previous, staging)
+
     def test_preparation_failure_preserves_target(self):
         self.initial()
         before = snapshot(self.target)

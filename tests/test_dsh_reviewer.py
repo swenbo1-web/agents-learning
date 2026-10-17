@@ -36,7 +36,17 @@ export class Context {
       const service=new Plugin(this,config);
       this.services[Plugin.serviceName]=service;
       record({mount:Plugin.serviceName});
-    } else {record({mount:'adapter'});await Plugin.apply(this,config);}
+    } else {
+      record({mount:'adapter'});
+      if(scenario==='strict-compat-materialized') {
+        config=structuredClone(config);
+        for(const route of Object.values(config.providers||{})) {
+          for(const entry of [route,...route.models||[],...Object.values(route.modelOverrides||{})])
+            entry.compat={...entry.compat,chatTemplateArgs:{}};
+        }
+      }
+      await Plugin.apply(this,config);
+    }
   }
 }
 export class Settings {
@@ -44,10 +54,11 @@ export class Settings {
   constructor(_ctx,config) {if(config.watch!==false)throw new Error('watch must be off');record({create:'settings'});}
   persist() {record({unsafe:'settings_write'});}
   prepareDocument() {record({unsafe:'settings_create'});}
-  register(namespace,_schema,{base}) {
+  register(namespace,_schema,{base,validate}) {
     let value=structuredClone(base);
     // Model the SDK's user-settings layer overriding its composition base.
     if(namespace==='llm-pi-ai'&&process.env.ALP_FAKE_SETTINGS)value=JSON.parse(process.env.ALP_FAKE_SETTINGS);
+    if(validate)validate(value);
     return {get:()=>value,watch(){},marker:'settings-scope'};
   }
 }
@@ -101,7 +112,19 @@ export class LlmRuntime {
 export function apply(ctx,config) {
   record({adapterConfig:config});
   if(scenario==='private-error')throw new Error('PRIVATE_TOKEN_FAILURE');
-  const resolved=ctx.get('settings').register('llm-pi-ai',null,{base:config}).get();
+  if(scenario==='compat-private-error')throw new Error('PRIVATE compat credential unavailable');
+  const checkCompat=value=>{
+    for(const route of Object.values(value?.providers||{})) {
+      for(const entry of [route,...route.models||[],...Object.values(route.modelOverrides||{})]) {
+        if(entry.compat && ('chatTemplateArgs' in entry.compat || 'unknownSwitch' in entry.compat))
+          throw new Error('llm-pi-ai: unsupported compat key');
+      }
+    }
+  };
+  const strict=scenario==='strict-compat'||scenario==='strict-compat-materialized';
+  if(strict)checkCompat(config);
+  const resolved=ctx.get('settings').register('llm-pi-ai',null,{base:config,...strict?{validate:checkCompat}:{}}).get();
+  if(strict)checkCompat(resolved);
   record({resolvedAdapterConfig:resolved});
   if(scenario==='settings-compatibility') {
     const p=process.env.ALP_FAKE_PROVIDER||'google';
@@ -192,6 +215,47 @@ class DshReviewerTests(unittest.TestCase):
         config = next(row["adapterConfig"] for row in records if "adapterConfig" in row)
         self.assertEqual(config, self.profile["entries"][1]["config"])
         self.assertEqual(events[0]["init"]["model"], "custom-route/frozen-model")
+
+    def test_empty_derived_compat_defaults_preserve_explicit_switches_in_all_layers(self):
+        for settings_layer in (False, True, "schema"):
+            with self.subTest(settings_layer=settings_layer):
+                self.log.unlink(missing_ok=True)
+                compat = {"chatTemplateArgs": {}, "chatTemplateKwargs": {},
+                          "supportsDeveloperRole": False, "maxTokensField": "max_tokens"}
+                route = {"compat": compat, "models": [{"id": "frozen-model", "compat": compat}],
+                         "modelOverrides": {"frozen-model": {"compat": compat}}}
+                original = {"providers": {"custom-route": route}}
+                self.profile["entries"][1]["config"] = original
+                self.env["ALP_DSH_REVIEW_PROFILE"] = json.dumps(self.profile)
+                if settings_layer:
+                    self.env["ALP_FAKE_SETTINGS"] = json.dumps(original)
+                before = self.env["ALP_DSH_REVIEW_PROFILE"]
+                response, _, records = self.run_runner("strict-compat-materialized" if settings_layer == "schema"
+                                                       else "strict-compat", model="custom-route/frozen-model")
+                self.assertEqual(response.returncode, 0, response.stderr.decode())
+                self.assertEqual(len([row for row in records if "adapterConfig" in row]), 1)
+                self.assertEqual(len([row for row in records if "request" in row]), 1)
+                resolved = next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row)
+                effective = resolved["providers"]["custom-route"]
+                for entry in (effective, effective["models"][0], effective["modelOverrides"]["frozen-model"]):
+                    self.assertEqual(entry["compat"], {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"})
+                self.assertEqual(self.env["ALP_DSH_REVIEW_PROFILE"], before)
+
+    def test_nonempty_or_unknown_compat_and_unrelated_errors_never_trigger_remount(self):
+        for compat, scenario in (({"chatTemplateArgs": {"enable_thinking": True}}, "strict-compat"),
+                                  ({"unknownSwitch": False}, "strict-compat"),
+                                  ({"supportsDeveloperRole": False}, "compat-private-error")):
+            with self.subTest(compat=compat, scenario=scenario):
+                self.log.unlink(missing_ok=True)
+                self.profile["entries"][1]["config"] = {"providers": {"custom-route": {
+                    "modelOverrides": {"frozen-model": {"compat": compat}}}}}
+                self.env["ALP_DSH_REVIEW_PROFILE"] = json.dumps(self.profile)
+                response, events, records = self.run_runner(scenario, model="custom-route/frozen-model")
+                self.assertEqual(response.returncode, 1)
+                self.assertEqual(len([row for row in records if "adapterConfig" in row]), 1)
+                self.assertFalse(any("request" in row for row in records))
+                self.assertFalse(events[-1]["result"]["diagnostic"]["stream_invoked"])
+                self.assertNotIn("PRIVATE", response.stdout.decode())
 
     def google_profile(self, provider="google", *, catalog=False):
         route = {"reasoning": "low", "thinkingBudgets": {"low": 2048}}

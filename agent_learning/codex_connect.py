@@ -132,8 +132,9 @@ def _statements(text):
 
 def _document(text):
     section, sections, entries = (), {}, {}
-    # 数组表每个元素都是独立表：同名键属于不同元素，不能按重复字段处理。
-    arrays = 0
+    # Array instances also own their ordinary/nested subtables. Include every
+    # enclosing instance in the key so sibling elements never share fields.
+    arrays, instances = 0, {}
     for start, end, raw in _statements(text):
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
@@ -141,15 +142,25 @@ def _document(text):
         if stripped.startswith("["):
             # Headers cannot contain multiline strings. A table array is kept
             # distinct so it cannot masquerade as one of our ordinary tables.
-            match = re.fullmatch(r"(\[\[?)(.*?)\]\]?\s*(?:#[^\n]*)?", stripped)
-            if not match:
+            match = re.fullmatch(r"(\[\[?)(.*?)(\]\]?)\s*(?:#[^\n]*)?", stripped)
+            if not match or len(match[1]) != len(match[3]):
                 raise ContractError("unsupported Codex table header; configuration preserved")
-            section = _key(match[2].strip())
-            if match[1] == "[[":
-                arrays += 1
-                section = ("@array", arrays, *section)
-            if section in sections and section in {SERVER, ENV, PLUGIN}:
-                raise ContractError("duplicate Agent Learning table; configuration preserved")
+            logical = _key(match[2].strip())
+            is_array = match[1] == "[["
+            if is_array and any(logical == target[:len(logical)] for target in (SERVER, ENV, PLUGIN)):
+                raise ContractError("array Agent Learning configuration requires manual wiring; preserved")
+            path = []
+            for index, part in enumerate(logical):
+                path.append(part)
+                parent = tuple(path)
+                if is_array and index == len(logical) - 1:
+                    arrays += 1
+                    instances[parent] = arrays
+                if parent in instances:
+                    path.extend(("@array", instances[parent]))
+            section = tuple(path)
+            if section in sections:
+                raise ContractError("duplicate Codex configuration table; configuration preserved")
             sections[section] = end
             continue
         match = re.match(r"\s*((?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[A-Za-z0-9_-]+)(?:\s*\.\s*(?:\"(?:\\.|[^\"\\])*\"|'[^']*'|[A-Za-z0-9_-]+))*)\s*=", raw)

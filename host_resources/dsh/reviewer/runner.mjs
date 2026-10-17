@@ -121,15 +121,20 @@ function compatibleResolvedConfig(value, selection) {
 function readonlySettings(Base, selection) {
   class ReadonlySettings extends readonlyClass(Base, ["persist", "prepareDocument"]) {
     register(namespace, ...args) {
+      if (namespace === "llm-pi-ai" && args[1] && typeof args[1] === "object") {
+        const options = args[1];
+        args[1] = { ...options, base: withoutEmptyCompatDefaults(options.base),
+          ...(typeof options.validate === "function"
+            ? { validate: value => options.validate(withoutEmptyCompatDefaults(value)) } : {}) };
+      }
       const scope = super.register(namespace, ...args);
       if (namespace !== "llm-pi-ai") return scope;
       const cache = new WeakMap();
       return new Proxy(scope, { get(target, key) {
         if (key === "get") return () => {
           const value = target.get();
-          if (!selection.current || !needsGoogleCompatibility(selection.current.provider, selection.current.model)) return value;
           if (!value || typeof value !== "object") throw refusal("model_compatibility_invalid");
-          if (!cache.has(value)) cache.set(value, compatibleResolvedConfig(value, selection.current));
+          if (!cache.has(value)) cache.set(value, compatibleResolvedConfig(withoutEmptyCompatDefaults(value), selection.current));
           return cache.get(value);
         };
         const value = Reflect.get(target, key, target);
@@ -231,7 +236,7 @@ function readonlyClass(Base, methods) {
   return Readonly;
 }
 
-async function mountRuntime(sdk, config, observed, pruneCompat) {
+async function createRuntime(sdk, config, observed) {
   const ctx = new sdk.cordis.Context();
   try {
     observed.phase = "profile";
@@ -263,8 +268,13 @@ async function mountRuntime(sdk, config, observed, pruneCompat) {
     selection.current = { provider, model };
     if (needsGoogleCompatibility(provider, model) && typeof sdk.settings.default.prototype.register !== "function")
       throw refusal("model_compatibility_unavailable");
-    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi,
-      provider === "deepseek-official" || !pruneCompat ? entries.get(adapterName) : withoutCompat(entries.get(adapterName)));
+    // Cordis may materialize dictionary defaults during Config validation.
+    // Clean again at apply time so those absent values cannot reappear before
+    // the adapter validates its initial, pre-settings snapshot.
+    const adapter = provider === "deepseek-official" ? sdk.deepseek : { ...sdk.pi,
+      apply: (context, resolved) => sdk.pi.apply(context, withoutEmptyCompatDefaults(resolved)) };
+    await ctx.plugin(adapter,
+      provider === "deepseek-official" ? entries.get(adapterName) : withoutEmptyCompatDefaults(entries.get(adapterName)));
     const llm = ctx.get("llm");
     if (!llm || typeof llm.stream !== "function" || typeof llm.listProviders !== "function"
       || !llm.listProviders().some((item) => item.id === provider)) throw refusal("provider_unavailable");
@@ -278,43 +288,35 @@ async function mountRuntime(sdk, config, observed, pruneCompat) {
   }
 }
 
-function withoutCompat(config) {
-  // A newer host materializes compat defaults (for example chatTemplateArgs)
-  // that an older anchored SDK does not declare. Dropping the derived compat
-  // blocks keeps the reviewer mountable; a refused route still fails loudly.
+function withoutEmptyCompatDefaults(config) {
+  // Only these known, empty dictionary defaults are semantically absent.
+  // Preserve explicit switches and unknown/nonempty fields: an unsupported
+  // configuration must fail rather than silently change the outgoing request.
   if (!config || typeof config !== "object" || Array.isArray(config)) return config;
   const copy = structuredClone(config);
   const providers = copy.providers && typeof copy.providers === "object" && !Array.isArray(copy.providers)
     ? copy.providers : {};
   let changed = false;
-  for (const route of Object.values(providers)) {
-    if (!route || typeof route !== "object" || Array.isArray(route)) continue;
-    if (route.compat !== undefined) { delete route.compat; changed = true; }
-    for (const model of Array.isArray(route.models) ? route.models : []) {
-      if (model && typeof model === "object" && !Array.isArray(model) && model.compat !== undefined) {
-        delete model.compat;
+  const clean = (entry) => {
+    const compat = entry?.compat;
+    if (!compat || typeof compat !== "object" || Array.isArray(compat)) return;
+    for (const key of ["chatTemplateArgs", "chatTemplateKwargs"]) {
+      const value = compat[key];
+      if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) {
+        delete compat[key];
         changed = true;
       }
     }
+    if (Object.keys(compat).length === 0) delete entry.compat;
+  };
+  for (const route of Object.values(providers)) {
+    if (!route || typeof route !== "object" || Array.isArray(route)) continue;
+    clean(route);
+    for (const model of Array.isArray(route.models) ? route.models : []) clean(model);
+    if (route.modelOverrides && typeof route.modelOverrides === "object" && !Array.isArray(route.modelOverrides))
+      for (const model of Object.values(route.modelOverrides)) clean(model);
   }
   return changed ? copy : config;
-}
-
-function compatRefused(error) {
-  // Only this adapter's unknown-compat refusal justifies one retry; every other
-  // failure (schema, credentials, capability) keeps its original outcome.
-  return Boolean(error) && !error.safeCode && typeof error.message === "string"
-    && /\bcompat\b/i.test(error.message);
-}
-
-async function createRuntime(sdk, config, observed) {
-  try {
-    return await mountRuntime(sdk, config, observed, false);
-  } catch (error) {
-    if (!compatRefused(error)) throw error;
-    observed.phase = "runtime";
-    return mountRuntime(sdk, config, observed, true);
-  }
 }
 
 async function readInput() {

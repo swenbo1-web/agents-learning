@@ -39,6 +39,8 @@ ANTIGRAVITY_FILES = ("plugin.json", "mcp_config.json", "hooks.json", "rules/lear
                      "sidecars/control/sidecar.json", "sidecars/control/main.mjs", "sidecars/control/index.html")
 DSH_FILES = ("plugin.json", "package.json", "cordis.patch.yml", "mcp_config.json", "hooks.json",
              "host/index.mjs", "client/index.js", "reviewer/runner.mjs", "rules/learning.md",
+             "host/extensions.mjs", "host/fetch-compat.mjs", "host/delegation-policy.mjs",
+             "host/google-thinking.mjs", "host/messages-compat.mjs", "host/net-tune.mjs",
              "skills/learning-worker/SKILL.md", "skills/learning-admin/SKILL.md",
              "skills/learning-history/SKILL.md", "skills/learning-browser/SKILL.md",
              "skills/learning-history/agents/openai.yaml",
@@ -475,9 +477,9 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 (staging / "runtime-release.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 _validate_resources(staging, host)
                 write_installation_manifest(staging, release["release_id"], host)
-                backup = None
+                backup, adopted_extra_files = None, []
                 if previous is not None:
-                    preserve_extra_files(previous, staging)
+                    adopted_extra_files = preserve_extra_files(previous, staging)
                     backup = switch_installation(previous, staging)
                 else:
                     if target.exists():
@@ -511,7 +513,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                                 "next_step": "首次接入项目可明确选择吸收或稍后；安装和升级均不会读取历史或调用模型。"}
     if previous is not None:
         result.update({"previous_release_id": previous["release"]["release_id"], "backup_directory": str(backup),
-                       "preserved_extra_files": previous["extra_files"], "knowledge_and_config": "external_untouched",
+                       "preserved_extra_files": [name for name in previous["extra_files"] if name not in adopted_extra_files],
+                       "adopted_extra_files": adopted_extra_files, "knowledge_and_config": "external_untouched",
                        "host_reload_required": True, "hook_review_required": True,
                        "next_step": "重新加载或重新安装宿主缓存中的插件，并审阅Hook路径变化；旧目录与固定副本保留，可用于恢复。"})
     return result

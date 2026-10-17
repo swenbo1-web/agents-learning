@@ -201,6 +201,30 @@ dsh plugin --profile "$learningProfile" add "$learningPlugin"
 
 **Restart that DSH profile → open a conversation in the target project.** The full Bundle loads the host bridge, the project-scoped **📖 Memory / 知识库** button in the composer toolbar, skills, commands, Hooks and MCP. Attaching only MCP/Hooks does not load all native components. To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
+<details>
+<summary>Optional DSH compatibility and delegation settings (off by default)</summary>
+
+The standard Bundle includes all four optional host modules and loads them through its main entry. If needed, set the following **config value** on the `agent-learning` entry in your active DSH profile, then reload that plugin. This is not a new plugin entry or Python `config.json`; do not edit the exported files or pinned runtime:
+
+```yaml
+extensions:
+  googleThinking: true       # Adapt legacy budget fields for the selected Google / Vertex Gemini 4 request
+  messagesCompat: false      # Remove empty text blocks beside DeepSeek Messages tool calls
+  netTune: false             # Per-request transport ceilings; no global dispatcher changes
+  thinkingLanguage: 'off'    # Optional zh-CN guidance for identified DeepSeek routes only
+  delegation:
+    enabled: false
+    provider: ''             # Empty means inherit; otherwise model is also required
+    model: ''
+    maxAgents: 2
+```
+
+All switches default to off and do not enable the administrator or call models. Prompt guidance and request patches apply only to projects explicitly bound in the installation receipt. Unknown projects or request origins pass through unchanged; unbound dynamic installations cannot use these patches. Delegation remains subject to user authorization and host tool permissions, with no fixed vendor. Wire edits require a recognized JSON POST. Transport tuning preserves proxy, TLS, explicit dispatchers and cancellation; it does not extend model-call budgets or disable SDK idle watchdogs. Unload or hot reload stops the old patches.
+
+If older configurations mounted these modules separately, switch to the main entry's `extensions` to avoid duplicate mounting. Upgrades can adopt byte-identical or recognized previous host scripts, report them in `adopted_extra_files`, and retain a complete backup. Unknown custom scripts stop the upgrade and remain intact; compare and explicitly resolve those conflicts without deleting knowledge data.
+
+</details>
+
 ## Check the installation
 
 In a new target-project conversation, click the DSH **📖 Memory / 知识库** button, select **Agent Learning 调试** from the Codex input skill menu, or send:
@@ -1149,6 +1173,8 @@ For Antigravity, replace `--host codex` with `--host antigravity` (or `--host ds
 Reviewers receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams. DSH uses a fixed SDK module allowlist for one model request with no tools. It creates no Agent and loads no project Hooks, skills, rules or dynamic plugins. Its `--probe` checks SDK interfaces without initializing settings, authentication or a model.
 
 **DSH profile configuration:** The updated native bridge captures the active host's merged, allowlisted model settings and passes them through a dedicated child-process environment. It never guesses Desktop/Web profiles or puts configuration contents into knowledge or review evidence. Execution freezes the directory and digest and rechecks the same snapshot before startup. Independent terminals and old bridges without that environment report `dsh_profile_unavailable`: upgrade/reload the native plugin or set `admin.dsh_profile` in trusted configuration to an absolute private JSON snapshot path. Project `first/current/fixed/default` policy still selects the model. Later host reloads require a new bridge event; already running workers do not track subsequent in-memory changes.
+
+The reviewer removes only known empty dictionary defaults from route, `models` and `modelOverrides` compatibility settings. Explicit switches and nonempty or unknown fields remain intact. Invalid configurations fail without deleting complete compatibility blocks or remounting adapters to change request semantics. Source profiles and platform settings are unchanged.
 
 When one project uses multiple DSH profiles, native conversations receive an immutable origin binding from trusted configuration. Everyday SDK review checks that origin before queue selection and startup; identical model names cannot select another profile's service settings. Legacy DSH cases without a binding report `dsh_profile_source_unbound` until a subsequent trusted native event supplies it; mismatches report `dsh_profile_source_mismatch`. Ordinary capture and retrieval do not require administrator configuration to be ready. Explicit historical jobs and cross-provider policies for non-DSH source conversations retain their existing entry points.
 

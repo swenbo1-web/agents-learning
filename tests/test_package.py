@@ -1,5 +1,6 @@
 import json
 import importlib.util
+from functools import wraps
 import os
 from pathlib import Path
 import shutil
@@ -24,8 +25,32 @@ from agent_learning.runtime import ContractError
 STARTUP_TIMEOUT = 20
 
 
+def isolated_build_resource(method):
+    """Build tooling owns distutils in a fresh interpreter, as real wheel builds do.
+
+    Python 3.10 still ships stdlib distutils. Imports earlier in a large suite
+    must not decide which distutils setuptools sees, nor mask a real failure.
+    The child executes the same assertions and starts with setuptools loaded.
+    """
+    @wraps(method)
+    def run(self):
+        if os.environ.get("ALP_BUILD_RESOURCE_TEST") == method.__name__:
+            return method(self)
+        source = Path(__file__).resolve().parents[1]
+        environment = dict(os.environ, ALP_BUILD_RESOURCE_TEST=method.__name__,
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(source))
+        code = ("import setuptools; import unittest; "
+                "unittest.main(module='tests.test_package', defaultTest="
+                + repr("BuildResourceTests." + method.__name__) + ", verbosity=2)")
+        result = subprocess.run([sys.executable, "-B", "-c", code], cwd=source, env=environment,
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode("utf-8", "replace"))
+    return run
+
+
 @unittest.skipUnless(importlib.util.find_spec("setuptools"), "Offline build tools are optional")
 class BuildResourceTests(unittest.TestCase):
+    @isolated_build_resource
     def test_reused_build_replaces_only_generated_resources(self):
         from build_support import PluginBuildPy
         from setuptools import Distribution
@@ -53,6 +78,7 @@ class BuildResourceTests(unittest.TestCase):
                 self.assertEqual((resources / relative).read_bytes(), (source / relative).read_bytes())
             self.assertFalse(any(resources.rglob("*.pyc")))
 
+    @isolated_build_resource
     def test_linked_build_output_is_rejected_before_copy_or_cleanup(self):
         from build_support import PluginBuildPy
         from setuptools import Distribution

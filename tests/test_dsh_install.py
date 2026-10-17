@@ -1,5 +1,6 @@
 """DSH (DeepSeek Harness) 宿主导出、固定运行副本共用与覆盖升级的隔离保护检查。"""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,10 @@ class DshInstallTests(unittest.TestCase):
         self.assertTrue((self.target / "plugin.json").is_file())
         self.assertTrue((self.target / "package.json").is_file())
         self.assertTrue((self.target / "host/index.mjs").is_file())
+        for name in ("extensions", "fetch-compat", "delegation-policy", "google-thinking", "messages-compat", "net-tune"):
+            relative = "host/" + name + ".mjs"
+            self.assertEqual((self.target / relative).read_bytes(),
+                             (Path(result["runtime_directory"]) / "host_resources/dsh" / relative).read_bytes())
         self.assertTrue((self.target / "client/index.js").is_file())
         reviewer = "reviewer/runner.mjs"
         self.assertEqual((self.target / reviewer).read_bytes(),
@@ -308,6 +313,57 @@ console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.in
         self.assertEqual(updated["preserved_extra_files"], ["notes/custom.txt"])
         self.assertEqual((self.target / "notes/custom.txt").read_text(encoding="utf-8"), "user custom file")
         self.assertTrue(Path(updated["backup_directory"]).is_dir())
+
+    def _old_release_with_unmanaged_modules(self):
+        """Synthetic pinned old release whose optional scripts were extra files."""
+        from agent_learning.install_update import DSH_HOST_ADOPTION, dsh_hooks, mcp_document, payload_mapping
+        from agent_learning.release import manifest_for
+        first = self.initial()
+        runtime = Path(first["runtime_directory"])
+        for name in (*DSH_HOST_ADOPTION, "host/extensions.mjs", "host/fetch-compat.mjs"):
+            (runtime / "host_resources/dsh" / name).unlink()
+        for name in ("host/extensions.mjs", "host/fetch-compat.mjs"):
+            (self.target / name).unlink()
+        manifest = manifest_for(runtime)
+        (runtime / "release.json").write_text(json.dumps(manifest), encoding="utf-8")
+        renamed = self.store / manifest["release_id"]
+        runtime.rename(renamed)
+        receipt = read_json(self.target / "runtime-release.json")
+        receipt.update({key: manifest[key] for key in ("version", "protocol_version", "content_digest", "release_id")})
+        receipt["runtime_directory"] = str(renamed)
+        (self.target / "runtime-release.json").write_text(json.dumps(receipt), encoding="utf-8")
+        mcp = mcp_document(renamed, receipt["python"], "dsh", receipt["workspace"], receipt["home"])
+        hooks = dsh_hooks(renamed, receipt["python"], receipt["hook_mode"], _hook_commands,
+                          receipt["workspace"], receipt["home"])
+        for name, document in (("mcp_config.json", mcp), ("hooks.json", hooks)):
+            (self.target / name).write_text(json.dumps(document), encoding="utf-8")
+        old_manifest = read_json(self.target / INSTALL_MANIFEST)
+        old_manifest.update(release_id=manifest["release_id"], files={
+            name: hashlib.sha256((self.target / name).read_bytes()).hexdigest()
+            for name in (*payload_mapping(manifest["files"], "dsh"), "runtime-release.json")})
+        (self.target / INSTALL_MANIFEST).write_text(json.dumps(old_manifest), encoding="utf-8")
+        inspect_installation(self.target, _hook_commands, target_host="dsh")
+
+    def test_upgrade_adopts_identical_dsh_modules_and_keeps_original_backup(self):
+        from agent_learning.install_update import DSH_HOST_ADOPTION
+        self._old_release_with_unmanaged_modules()
+        before = snapshot(self.target)
+        result = install(self.target, upgrade=True, host="dsh")
+        self.assertEqual(result["adopted_extra_files"], sorted(DSH_HOST_ADOPTION))
+        self.assertEqual(result["preserved_extra_files"], [])
+        self.assertEqual(snapshot(Path(result["backup_directory"])), before)
+        self.assertTrue(set(DSH_HOST_ADOPTION) <= set(read_json(self.target / INSTALL_MANIFEST)["files"]))
+        inspect_installation(self.target, _hook_commands, target_host="dsh")
+        self.assertEqual(install(self.target, upgrade=True, host="dsh")["adopted_extra_files"], [])
+
+    def test_upgrade_refuses_custom_host_module_without_changing_old_tree(self):
+        self._old_release_with_unmanaged_modules()
+        (self.target / "host/google-thinking.mjs").write_text("// custom implementation", encoding="utf-8")
+        before = snapshot(self.target)
+        with self.assertRaisesRegex(ContractError, "user file conflicts"):
+            install(self.target, upgrade=True, host="dsh")
+        self.assertEqual(snapshot(self.target), before)
+        self.assertFalse(list(self.root.glob(".alp-backup-*")))
 
     def test_dsh_upgrade_with_second_workspace_preserves_both_projects(self):
         self.initial("observe", bind_workspace=True)

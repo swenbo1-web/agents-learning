@@ -50,12 +50,27 @@ class CodexConnectionDocumentTests(unittest.TestCase):
         result = _patch(text, {SERVER: {"command": "python", "args": ["serve"]}}, {})
         self.assertTrue(result.startswith(text))
         self.assertEqual(result.count('[[profiles]]'), 2)
-        import tomllib
-        parsed = tomllib.loads(result)
-        self.assertEqual(parsed["profiles"], [{"name": "a"}, {"name": "b"}])
+        self.assertEqual([entry[2] for path, entry in _document(result)[1].items()
+                          if path[0] == "profiles" and path[-1] == "name"], ['"a"', '"b"'])
         # 同一元素内的真实重复仍必须拒绝。
         with self.assertRaises(ContractError):
             _patch('[[profiles]]\nname = "a"\nname = "b"\n', {SERVER: {"command": "python"}}, {})
+
+    def test_array_subtables_and_nested_arrays_keep_their_parent_instance(self):
+        text = ('[[profiles]]\nname="a"\n[profiles.env]\nFOO="a"\n'
+                '[[profiles.actions]]\nname="run"\n[profiles.actions.env]\nFOO="run"\n'
+                '[[profiles.actions]]\nname="test"\n[profiles.actions.env]\nFOO="test"\n'
+                '[[profiles]]\nname="b"\n[profiles.env]\nFOO="b"\n'
+                '[[profiles.actions]]\nname="build"\n[profiles.actions.env]\nFOO="build"\n')
+        result = _patch(text, {SERVER: {"command": "python", "args": ["serve"]}}, {})
+        self.assertTrue(result.startswith(text))
+        fields = _document(result)[1]
+        self.assertEqual(len([path for path in fields if path[-1] == "FOO"]), 5)
+        for duplicate in ('[[profiles]]\n[profiles.env]\nx=1\nx=2\n',
+                          '[[profiles]]\n[profiles.env]\nx=1\n[profiles.env]\ny=2\n',
+                          '[[mcp_servers]]\nname="foreign"\n', '[broken]]\nx=1\n'):
+            with self.subTest(configuration=duplicate), self.assertRaises(ContractError):
+                _patch(duplicate, {SERVER: {"command": "python"}}, {})
 
 
 class CodexConnectTests(unittest.TestCase):

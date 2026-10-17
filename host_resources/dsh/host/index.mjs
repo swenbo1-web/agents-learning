@@ -4,6 +4,7 @@ import { readFileSync, realpathSync, statSync, existsSync } from "node:fs";
 import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { applyExtensions, extensionConfig } from "./extensions.mjs";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -469,31 +470,33 @@ const WORKER_TOOL_SPECS = [
 export const name = "agent-learning";
 export const inject = ["tools", "systemPrompt", "agents"];
 
-const PROFILE_CONFIG_DEPTH = 8;
+const PROFILE_CONFIG_DEPTH = 16;
 
-function plainProfileConfig(value, depth = 0) {
+function plainProfileConfig(value, depth = 0, ancestors = new WeakSet(), size = { nodes: 0 }) {
   // This DSH version marks model configuration fields as schemastery
   // `volatile`, so a plugin's resolved config holds reference objects whose
   // JSON form is `{}`. Snapshotting that literal shape would erase the provider
   // and default-model values, and the reviewer could not mount its adapter.
   // Resolve such references here, inside the trusted host tree, and keep only
   // plain JSON data.
+  if (++size.nodes > 10000) throw new Error("profile_snapshot_limit");
   if (value === null || typeof value !== "object") return value;
-  if (depth >= PROFILE_CONFIG_DEPTH) return undefined;
-  if (typeof value.get === "function" && typeof value.then !== "function") {
-    let resolved;
-    try { resolved = value.get(); } catch { return undefined; }
-    return plainProfileConfig(resolved, depth + 1);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => plainProfileConfig(item, depth + 1)).filter((item) => item !== undefined);
-  }
-  const output = {};
-  for (const [key, item] of Object.entries(value)) {
-    const plain = plainProfileConfig(item, depth + 1);
-    if (plain !== undefined) output[key] = plain;
-  }
-  return output;
+  // A partial snapshot can erase an explicit model or compatibility setting.
+  // Refuse the snapshot as a whole rather than silently pruning that branch.
+  if (depth >= PROFILE_CONFIG_DEPTH || ancestors.has(value)) throw new Error("profile_snapshot_limit");
+  ancestors.add(value);
+  try {
+    if (typeof value.get === "function" && typeof value.then !== "function")
+      return plainProfileConfig(value.get(), depth + 1, ancestors, size);
+    if (Array.isArray(value))
+      return value.map(item => plainProfileConfig(item, depth + 1, ancestors, size));
+    const output = Object.create(null);
+    for (const [key, item] of Object.entries(value)) {
+      const plain = plainProfileConfig(item, depth + 1, ancestors, size);
+      if (plain !== undefined) output[key] = plain;
+    }
+    return output;
+  } finally { ancestors.delete(value); }
 }
 
 export function reviewProfileEnvironment(ctx) {
@@ -537,7 +540,8 @@ export function reviewProfileEnvironment(ctx) {
   } catch { return unavailable; }
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  const extensions = extensionConfig(config.extensions);
   const hostEnvironment = () => reviewProfileEnvironment(ctx);
   const runPythonProcess = (python, args, input, cwd, signal, timeout = 15000) =>
     baseRunPythonProcess(python, args, input, cwd, signal, timeout, hostEnvironment());
@@ -584,6 +588,13 @@ export function apply(ctx) {
   const scopedAgentIds = new Set();
   const capturedTurns = new Map();
   const activeDisposers = [];
+  activeDisposers.push(applyExtensions(ctx, extensions, ({ agent, sessionId }) => {
+    try {
+      if (agent?.id && sessionId && agent.id !== sessionId) return false;
+      const cwd = agent?.session?.header?.cwd || sessionMeta.get(sessionId)?.cwd;
+      return Boolean(matchInstalledWorkspace(cwd, loadRuntimeReceipt()));
+    } catch { return false; }
+  }));
   let sessionQueryService = null;
   let clientModulesDebug = "not_injected";
 

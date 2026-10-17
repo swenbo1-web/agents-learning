@@ -1,91 +1,31 @@
-/**
- * Google wire-format compatibility: budget-based thinking → level-based thinking.
- *
- * The bundled `@earendil-works/pi-ai` chooses the Google thinking wire format by
- * matching the model id against a fixed list (`google-shared.js`):
- *
- *   /gemini-3(?:\.\d+)?-(?:pro|flash)/ | gemini-flash-latest |
- *   gemini-flash-lite-latest | /gemma-?4/
- *
- * `gemini-4-argon` matches none of them, so the adapter sends
- * `generationConfig.thinkingConfig.thinkingBudget`, which Gemini 4 rejects:
- *
- *   400 INVALID_ARGUMENT "Thinking budget is not supported for this model.
- *   Use thinking level instead."
- *
- * This wrapper rewrites only that case — a `gemini-4*` request that carries a
- * thinking budget and no thinking level — into the equivalent discrete level
- * (`MINIMAL` / `LOW` / `MEDIUM` / `HIGH`). Everything else passes untouched, so
- * budget-based Gemini 2.5 models keep working exactly as before.
- */
+/** Optional Gemini 4 wire compatibility, only inside a bound model request. */
+import { jsonPost, registerFetchTransform, requestUrl } from "./fetch-compat.mjs";
 
-const MARK = "__alpGoogleThinkingCompat";
-const ORIGINAL = "__alpGoogleThinkingOriginalFetch";
-const LEVEL_MODEL = /gemini-3(?:\.\d+)?-(?:pro|flash)|gemini-flash-latest|gemini-flash-lite-latest|gemma-?4/;
-
-function toLevel(budget) {
-  if (typeof budget !== "number" || !Number.isFinite(budget)) return undefined;
-  if (budget >= 16384) return "HIGH";
-  if (budget >= 8192) return "MEDIUM";
-  if (budget >= 2048) return "LOW";
-  return "MINIMAL";
-}
-
-function modelIdOf(url) {
-  const match = /models\/([^:/?]+)/.exec(url);
-  return match ? match[1].toLowerCase() : "";
-}
-
-function rewrite(body, modelId) {
-  const config = body?.generationConfig;
-  const thinking = config?.thinkingConfig;
-  if (!thinking || typeof thinking !== "object") return false;
-  if (thinking.thinkingLevel !== undefined) return false;
-  if (thinking.thinkingBudget === undefined) return false;
-
-  if (thinking.thinkingBudget <= 0) {
-    delete config.thinkingConfig;
-    return true;
-  }
-  const level = toLevel(thinking.thinkingBudget);
-  if (level === undefined) return false;
+function rewrite(body) {
+  const thinking = body?.generationConfig?.thinkingConfig;
+  if (!thinking || typeof thinking !== "object" || thinking.thinkingLevel !== undefined
+    || typeof thinking.thinkingBudget !== "number" || !Number.isFinite(thinking.thinkingBudget)) return false;
+  const budget = thinking.thinkingBudget;
   delete thinking.thinkingBudget;
-  thinking.thinkingLevel = level;
+  // A nonpositive budget leaves the provider default intact; retain other fields.
+  if (budget > 0) thinking.thinkingLevel = budget >= 16384 ? "HIGH" : budget >= 8192 ? "MEDIUM"
+    : budget >= 2048 ? "LOW" : "MINIMAL";
+  if (!Object.keys(thinking).length) delete body.generationConfig.thinkingConfig;
   return true;
 }
 
-export function apply(ctx) {
-  const current = globalThis.fetch;
-  if (typeof current !== "function" || current[MARK] === true) return;
-
-  const base = current[ORIGINAL] || current;
-
-  const wrapped = function fetch(input, init) {
-    try {
-      const url = typeof input === "string" ? input : input?.url ? String(input.url) : "";
-      if (
-        init?.method === "POST" &&
-        typeof init?.body === "string" &&
-        /:streamGenerateContent|:generateContent/.test(url)
-      ) {
-        const modelId = modelIdOf(url);
-        if (modelId.startsWith("gemini-4") && !LEVEL_MODEL.test(modelId)) {
-          const body = JSON.parse(init.body);
-          if (body && rewrite(body, modelId)) {
-            init = { ...init, body: JSON.stringify(body) };
-            globalThis.__alpGoogleThinkingCompat = { applied: true, modelId, at: Date.now() };
-          }
-        }
-      }
-    } catch {}
-    return base.call(this, input, init);
-  };
-
-  wrapped[MARK] = true;
-  wrapped[ORIGINAL] = base;
-  globalThis.fetch = wrapped;
-
-  ctx.effect(() => () => {
-    if (globalThis.fetch === wrapped) globalThis.fetch = base;
-  }, "agent-learning: restore global fetch for google thinking");
+export function apply(ctx, { enabled = false, requestScope = () => null } = {}) {
+  if (!enabled) return;
+  const dispose = registerFetchTransform((input, init) => {
+    const scope = requestScope(), url = requestUrl(input);
+    if (!scope || !["google", "google-vertex"].includes(scope.provider)
+      || !/^gemini-4(?:[.-]|$)/i.test(scope.model) || !jsonPost(input, init) || !url
+      || !["http:", "https:"].includes(url.protocol)
+      || !/:streamGenerateContent$|:generateContent$/.test(url.pathname)) return init;
+    const model = /\/models\/([^/:]+):/.exec(url.pathname)?.[1];
+    if (!model || decodeURIComponent(model).toLowerCase() !== scope.model.toLowerCase()) return init;
+    const body = JSON.parse(init.body);
+    return rewrite(body) ? { ...init, body: JSON.stringify(body) } : init;
+  });
+  ctx.effect(() => dispose, "agent-learning: Google request compatibility");
 }

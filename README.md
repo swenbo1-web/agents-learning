@@ -194,6 +194,30 @@ dsh plugin --profile "$learningProfile" add "$learningPlugin"
 
 **重新启动同一个 DSH profile → 在目标项目开启新对话。** 完整 Bundle 会加载宿主事件桥接、聊天框左下角的「📖 知识库」实体按键（仅在已绑定的目标项目中显示）、技能、命令、Hooks 与 MCP；仅手动挂接 MCP／Hooks 不包含完整原生接入。升级先使用同宿主 `install --upgrade`，再更新该 profile 中的插件。[DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
+<details>
+<summary>DSH 可选宿主兼容与委派设置（默认关闭）</summary>
+
+四个宿主模块随标准 Bundle 安装，由主入口统一加载。需要时，在所用 profile 的 `agent-learning` 插件条目中设置以下 **config 值**，再重载该插件；不要修改导出目录或固定运行副本。下面不是新增插件条目，也不是 Python 的 `config.json`：
+
+```yaml
+extensions:
+  googleThinking: true       # 为选中的 Google / Vertex Gemini 4 请求适配旧预算字段
+  messagesCompat: false      # DeepSeek Messages 中移除工具回复旁的空文本块
+  netTune: false             # 按请求放宽传输层等待，不修改全局 dispatcher
+  thinkingLanguage: 'off'    # 可选 zh-CN，仅对已识别 DeepSeek 路由提供中文说明偏好
+  delegation:
+    enabled: false
+    provider: ''             # 留空继承模型；指定时必须同时提供 model
+    model: ''
+    maxAgents: 2
+```
+
+这些开关默认均关闭，不开启管理员或调用模型。提示规则及请求补丁只作用于安装回执绑定的项目，无法确认项目或请求来源时保持原样；未绑定的动态安装不能使用这些补丁。委派仍受用户任务和宿主工具权限约束，不固定供应商。请求修改只针对可识别的 JSON POST；其他请求保持原样。网络选项保留宿主代理、TLS、自定义 dispatcher 和取消信号，不延长模型调用预算或关闭 SDK 的空闲超时。卸载／热重载后停止旧补丁。
+
+若旧版曾单独挂载这几个模块，改用主入口的 `extensions`，避免重复挂载。覆盖升级会接管内容一致或已知旧版的同名脚本，并在 `adopted_extra_files` 中报告，原目录仍完整备份；不认识的自定义脚本会保留并停止升级，需先比较后明确处理冲突，不要删除知识库。
+
+</details>
+
 ## 安装是否成功
 
 在目标项目开启新对话，点击 DSH 左下角「📖 知识库」按键、选择 Codex 输入框技能菜单的 **Agent Learning 调试**，或发送：
@@ -1097,6 +1121,8 @@ Antigravity 将上方 `--host codex` 改为 `--host antigravity`，DSH 改为 `-
 审核入口在临时目录接收有限审核包，以结构化输出返回候选，并设置 `ALP_DISABLED=1` 避免插件递归。Codex 跳过用户配置和 execpolicy 规则，关闭支持的 Hooks、应用、插件、命令及多 Agent 能力，使用只读沙箱；只读不等于全部工具为零。Antigravity 使用空工具 Agent，确认 `init.tools=[]` 和 `permission_mode=request-review` 后才发送审核材料；严格核对终态，丢弃 thinking 和中途文本流。DSH 使用固定 SDK 模块白名单，只进行一次无工具的模型请求，不创建 Agent 或加载项目 Hooks、技能、规则及动态插件；`--probe` 仅检查 SDK 接口，不初始化平台设置、认证或模型。
 
 **DSH profile 配置：** 更新后的原生桥从当前已加载宿主取得合并后的白名单模型配置，以专属子进程环境传递；不按 Desktop／Web 顺序猜配置，不将配置正文写入知识库或审核材料。执行计划冻结目录及摘要，启动前核对同一快照。独立终端或旧桥没有这份环境时报告 `dsh_profile_unavailable`，可更新并重载原生插件，或在受信配置的 `admin.dsh_profile` 指定私有 JSON 快照绝对路径。模型仍按项目的 `first/current/fixed/default` 策略选择。宿主重载后的配置需由后续桥事件重新传递；已启动工作器不会实时追踪宿主内存变化。
+
+审核器只清除 `compat` 中已知且为空的字典默认值，覆盖路由、`models` 和 `modelOverrides`；保留显式兼容开关与非空／未知字段。无效配置会报告失败，不通过整块删除配置或重新挂载来改变请求语义。源 profile 和平台设置保持原样。
 
 同项目在多个 DSH profile 中使用时，原生会话通过受信配置建立不可变来源绑定；SDK 日常审核在排队和启动前都核对该来源，模型名称相同也不能跨 profile 取用服务配置。旧 DSH 案例没有绑定时显示 `dsh_profile_source_unbound`，等该原生会话后续受信事件补齐；不匹配显示 `dsh_profile_source_mismatch`。普通记录和检索不依赖管理员配置就绪；用户明确启动的历史批次及非 DSH 来源的显式跨平台模型策略保留原有入口。
 

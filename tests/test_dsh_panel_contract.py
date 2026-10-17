@@ -150,7 +150,7 @@ const flush=()=>new Promise(resolve=>setTimeout(resolve,10));
         plugin = self.root / "bundle"
         (plugin / "host").mkdir(parents=True)
         host_source = Path(__file__).resolve().parents[1] / "host_resources/dsh/host/index.mjs"
-        shutil.copy2(host_source, plugin / "host/index.mjs")
+        shutil.copytree(host_source.parent, plugin / "host", dirs_exist_ok=True)
         receipt = {"workspace": str(self.workspace), "runtime_directory": str(self.root / "runtime"),
                    "home": str(self.root / "home"), "python": "fake-python", "release_id": "isolated-v1"}
         (plugin / "runtime-release.json").write_text(json.dumps(receipt), encoding="utf-8")

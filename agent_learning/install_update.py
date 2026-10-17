@@ -18,6 +18,17 @@ from .release import PROTOCOL_VERSION, filesystem_path
 INSTALL_MANIFEST = "installation-manifest.json"
 INSTALL_SCHEMA = 2
 TARGET_HOSTS = ("codex", "antigravity", "dsh")
+# Published host scripts that were previously distributed as unmanaged extras.
+# Hash normalized line endings so Git's Windows checkout does not change identity.
+# Unknown/custom content is never adopted automatically; the old tree is backed up.
+DSH_HOST_ADOPTION = {
+    "host/delegation-policy.mjs": frozenset({
+        "4a857b0d5f814d073ccb45a45e29367357ae493a423910b3c5ff89f446bad7e9",
+        "18df01c59b916652a036e4b7ae653ed79286e5cbf35cb37431c2904d370739da"}),
+    "host/google-thinking.mjs": frozenset({"bc6f3f95860a514d23fef7497d7d980473411d1a3dbbe925ee1822a3b1236ab0"}),
+    "host/messages-compat.mjs": frozenset({"0a47516917723cbc23cf966b45b87aec8b35e201cadd8366dbc2fd5966de1afd"}),
+    "host/net-tune.mjs": frozenset({"12a8304058964ae68c79758775ca9612718f588efae388e98185fb7618c064fd"}),
+}
 _VERSION = re.compile(r"^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$")
 _PROTOCOL = re.compile(r"^[1-9][0-9]{0,8}$")
 
@@ -388,15 +399,25 @@ def write_installation_manifest(root, release_id, target_host="codex"):
 def preserve_extra_files(previous, staging):
     """新清单先写，再复制额外文件，避免把个人文件归入插件管理范围。"""
     fresh = snapshot(staging)
+    adopted = []
     for name in previous["snapshot"]["directories"]:
         if name in fresh["files"]:
             raise ContractError("user directory conflicts with a new managed plugin path: " + name)
     for name in previous["extra_files"]:
         path = Path(name)
+        if (previous["target_host"] == "dsh" and name in DSH_HOST_ADOPTION and name in fresh["files"]):
+            old = (previous["target"] / name).read_bytes()
+            normalized = hashlib.sha256(old.replace(b"\r\n", b"\n")).hexdigest()
+            if (previous["snapshot"]["files"][name] == fresh["files"][name]
+                    or normalized in DSH_HOST_ADOPTION[name]):
+                adopted.append(name)
+                continue
         if (name in fresh["files"] or name in fresh["directories"]
                 or any(parent.as_posix() in fresh["files"] for parent in path.parents if parent != Path("."))):
             raise ContractError("user file conflicts with a new managed plugin path: " + name)
     for name in previous["extra_files"]:
+        if name in adopted:
+            continue
         destination = staging / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(previous["target"] / name, destination)
@@ -404,6 +425,7 @@ def preserve_extra_files(previous, staging):
         destination = staging / name
         if not destination.exists():
             destination.mkdir(parents=True, exist_ok=True)
+    return adopted
 
 
 @contextmanager
