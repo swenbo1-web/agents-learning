@@ -179,6 +179,10 @@ class PanelControl:
                 "work_summary_enabled": state.get("work_summary", {}).get("enabled", False),
                 "counts": {"active": count("active"), "work_memory": count("work_memories"),
                            "pending_problems": count("problems", " AND status='pending'"),
+                           "pending_review_cases": state["queue"]["workload"]["stages"]["pending_review"],
+                           "awaiting_evidence_cases": state["queue"]["workload"]["stages"]["awaiting_evidence"] + state["queue"]["workload"]["stages"]["local_deferred"],
+                           "awaiting_approval_cases": state["queue"]["workload"]["stages"]["awaiting_approval"],
+                           "historical_pending_units": state["queue"]["workload"]["history_pending_units"],
                            "candidates": count("candidates", " AND status IN ('candidate','deferred')")},
                 "expected": expected}
 

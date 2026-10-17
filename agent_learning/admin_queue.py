@@ -8,7 +8,14 @@ import uuid
 # A known executor failure must not permanently pin the oldest problem at the
 # head of every bounded scan. Unknown/paid calls remain excluded by eligibility.
 REVIEW_ORDER = ("ORDER BY COALESCE((SELECT MAX(c.finished) FROM admin_calls c WHERE c.project=p.project "
-                "AND c.problem=p.id AND c.revision=p.revision AND c.state='not_started'),0),p.created,p.id ")
+                "AND c.problem=p.id AND c.revision=p.revision AND c.state='not_started'),0),"
+                "CASE WHEN p.knowledge_id IS NOT NULL THEN 0 "
+                "WHEN p.resolution_status='recovery_observed' THEN 1 "
+                "WHEN EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
+                "WHERE pe.problem=p.id AND e.project=p.project AND e.type='PostToolUse' AND e.outcome='succeeded') THEN 2 "
+                "WHEN EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
+                "WHERE pe.problem=p.id AND e.project=p.project AND e.type NOT IN ('PreToolUse','PostToolUse')) THEN 3 "
+                "ELSE 4 END,p.created,p.id ")
 
 
 def install_queue(runtime):

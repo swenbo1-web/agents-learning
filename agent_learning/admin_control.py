@@ -59,6 +59,7 @@ def control_status(runtime, project):
     from .admin_presets import PRESETS
     from .admin_recovery import recovery_status
     from .admin_review_flow import publication_policy, review_activity
+    from .admin_workload import workload_summary
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
@@ -79,6 +80,7 @@ def control_status(runtime, project):
     enabled = bool(policy["enabled"] and state["enabled"])
     admission = admin_admission_status(runtime, project)
     project_usage, global_usage = admission["project_usage"], admission["global_usage"]
+    workload = workload_summary(runtime.db, project)
     return {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
         "governance_epoch": runtime.host_epoch(), "settings_version": state["version"], "policy": policy,
         "enabled": enabled, "routing": routing, "budget_policy": global_usage["budget_policy"],
@@ -89,7 +91,8 @@ def control_status(runtime, project):
         "recovery": recovery_status(runtime, project),
         "publication_policy": publication_policy(runtime, project), "review_activity": review_activity(runtime, project),
         "usage": global_usage,
-        "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting, "blocked_calls": blocked, "history_excluded": history},
+        "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting,
+                  "blocked_calls": blocked, "history_excluded": history, "workload": workload},
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
                    "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
         "limitation": "Explicitly enabled, bounded local worker; a later supported event can resume pending daily work. Historical imports require their own approval."}

@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
         subtitle: "查看项目知识、工作历史、候选审批与管理员设置",
         knowledge: "正式知识",
         workMemory: "工作观察",
-        pendingCases: "待审案例",
+        pendingCases: "待审核案例",
         admin: "自动管理员",
         adminOn: "已开启",
         adminOff: "已关闭",
@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
         subtitle: "Inspect knowledge, work history, candidate review and administrator settings",
         knowledge: "Published Knowledge",
         workMemory: "Work Observations",
-        pendingCases: "Pending Cases",
+        pendingCases: "Awaiting Review",
         admin: "Administrator",
         adminOn: "Enabled",
         adminOff: "Disabled",
@@ -378,7 +378,7 @@ window.__ModuleLoader__.load({
                 },
                 statCell(t.knowledge, summary.active_knowledge ?? 0),
                 statCell(t.workMemory, summary.work_memories ?? 0),
-                statCell(t.pendingCases, summary.pending_problems ?? 0),
+                statCell(t.pendingCases, summary.pending_review_cases ?? "—"),
                 statCell(
                   t.admin,
                   summary.admin_admission_enabled ? t.adminOn : t.adminOff

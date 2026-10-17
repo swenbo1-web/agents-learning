@@ -748,6 +748,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                       "review_receipts", "governance_proposals", "knowledge_actions", "knowledge_releases", "knowledge_sync_dirty"):
             counts[table] = self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE project=?", (project,)).fetchone()[0]
         counts["pending_problems"] = self.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
+        from .admin_workload import workload_summary
+        workload = workload_summary(self.db, project)
+        counts.update(pending_review_cases=workload["stages"]["pending_review"],
+                      awaiting_evidence_cases=workload["stages"]["awaiting_evidence"] + workload["stages"]["local_deferred"],
+                      awaiting_approval_cases=workload["stages"]["awaiting_approval"],
+                      historical_pending_units=workload["history_pending_units"])
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
         try:
@@ -767,6 +773,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
+                "workload": workload,
                 "admin_enabled": self.admin_policy(project)["enabled"],
                 "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),

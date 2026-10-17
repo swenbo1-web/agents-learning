@@ -263,6 +263,21 @@ class KnowledgeBrowserTests(unittest.TestCase):
         self.assertTrue(data["items"][0]["review_current"])
         self.assertNotIn("body", data["items"][0]["candidates"][0])
 
+    def test_grouped_queue_http_is_readonly_scoped_and_validates_filters(self):
+        problem, _ = self.source()
+        self.source(project=self.other, title="Foreign candidate")
+        before = self.r.db.total_changes
+        data = self.get("/api/admin-groups?stage=awaiting_approval")
+        self.assertEqual(data["total_cases"], 1)
+        group = data["items"][0]
+        self.assertEqual(group["members"][0]["id"], problem["id"])
+        members = self.get("/api/admin-groups?view=cases&group_id=" + group["group_id"])
+        self.assertEqual(members["total"], 1)
+        self.assertEqual(self.r.db.total_changes, before)
+        self.assertEqual(self.request("/api/admin-groups", headers={"Authorization": "Bearer wrong"})[0], 401)
+        for query in ("stage=invalid", "group_id=invalid", "view=invalid", "stage=all&stage=blocked"):
+            self.assertEqual(self.request("/api/admin-groups?" + query)[0], 400)
+
     def test_xss_is_data_and_frontend_has_no_html_execution_sink(self):
         attack = '<img src=x onerror="window.pwned=1"><script>alert(1)</script>'
         item = self.publish(title=attack, content=attack)
@@ -283,7 +298,7 @@ class KnowledgeBrowserTests(unittest.TestCase):
         item = self.publish()
         tables = ("context_exposures", "learning_exposures", "knowledge_adoptions", "admin_calls", "review_receipts", "metrics", "cache")
         before = {table: self.r.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in tables}
-        for path in ("/api/stats", "/api/knowledge-list", "/api/admin", "/api/events",
+        for path in ("/api/stats", "/api/knowledge-list", "/api/admin", "/api/admin-groups", "/api/events",
                      "/api/knowledge?knowledge_id=" + item["knowledge_id"]):
             self.get(path)
         self.assertEqual(before, {table: self.r.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in tables})

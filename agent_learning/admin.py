@@ -386,6 +386,11 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             skipped.append(selected["id"])
             continue
         evidence = _fingerprint(packet)
+        if problem_id is None and not history_job_id and not summary_context:
+            from .admin_workload import hold_unchanged_review
+            if hold_unchanged_review(runtime, project, packet, evidence):
+                remember_check(runtime, project, selected, signature)
+                continue
         review = review_signature(packet, review_cfg, evidence)
         reason = ("packet exceeds configured input limit; no invocation reserved" if packet["incomplete"]
                   else "input exceeds configured limit; no invocation reserved"

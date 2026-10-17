@@ -129,10 +129,11 @@ vm.runInNewContext(script.replace('exports.apply = apply;','exports.buildControl
 const plugin=factory(()=>({}));
 const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),useState:value=>[value,()=>{}],useCallback:fn=>fn,useEffect(){}};
 const Panel=plugin.buildControlPanel(react,null);
-const summary={project_id:'hefe',admin_admission_enabled:true,max_calls_per_day:999,remaining_calls:999,project_usage:{scope:'project',project_id:'hefe',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,max_calls_per_day:15},global_usage:{counted_attempts:32,remaining_calls:68}};
+const summary={project_id:'hefe',pending_problems:1617,pending_review_cases:2,admin_admission_enabled:true,max_calls_per_day:999,remaining_calls:999,project_usage:{scope:'project',project_id:'hefe',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,max_calls_per_day:15},global_usage:{counted_attempts:32,remaining_calls:68}};
 const flatten=n=>n==null?'':typeof n==='object'?n.children.map(flatten).join(' '):String(n);
 let tree=Panel({initialSummary:summary}),output=flatten(tree);
 assert(output.includes('Project attempts today 0'));
+assert(output.includes('Awaiting Review 2'));assert(!output.includes('1617'));
 assert(output.includes('All-project attempts today: 32'));
 assert(output.includes('Project allowance left 15/15'));
 assert(!output.includes('999'));

@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.1 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.2 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -53,7 +53,7 @@ The panels passed isolated regressions, fixed-runtime checks and Edge checks wit
 
 ![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
 
-### Inspect review subjects and publication (1.1.1)
+### Inspect review subjects and publication (1.1.2)
 
 Open **Review & settings → Administrator settings** from any host control panel:
 
@@ -65,6 +65,10 @@ Open **Review & settings → Administrator settings** from any host control pane
 These cards show public records and observable evidence, not internal model reasoning. Reported statements, tool success, candidates and formal publication remain distinct; tool success is not business correctness or user acceptance.
 
 1.1.1 restores explicit continuation after an interrupted history worker expires, using frozen sources. Requests from previous account or governance epochs no longer block current actions; calls with unknown outcomes still require inspection. Multiple candidates show separate summaries, conditions, limits, evidence references and current approval/publication states. Completed results remain readable after a normal budget pause; user pauses, cancellation and account boundaries retain their access checks. Database schema and protocol remain 19.
+
+1.1.2 separates daily work into awaiting review, reviewing, reviewed but awaiting evidence, locally deferred, awaiting approval, failed or unknown, skipped and completed stages. Historical pending counts represent text units and remain separate. All three host panels show awaiting-review cases rather than every stored `pending` row. The detailed browser filters stages, groups related reports and pages through their members. Grouping retains project, host, task scope, error text and provenance, normalizing only named transport fields. It does not establish a shared root cause or reuse approval or verification. Grouping scans at most the first 2,000 filtered cases with an explicit limit notice; the individual view still pages through all daily records.
+
+Automatic selection prioritizes knowledge feedback, recovery observations and successful tool evidence, then public explanations, while preserving executor backoff. An awaiting-evidence case is not automatically reviewed again merely because the model changed when its evidence, actual comparison dependencies and explicit review context are unchanged. Explicit case review remains available; new evidence, source health or relevant knowledge changes trigger reconsideration. Historical batches retain separate consent. Schema and protocol remain 19; existing cases and user budgets are preserved.
 
 ### 2. Local Visual Knowledge Browser, Candidate Review & Frequency Presets (All Hosts)
 

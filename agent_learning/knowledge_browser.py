@@ -368,6 +368,7 @@ def _read_api(db, project, route, params):
         "/api/actions": {"knowledge_id", "offset", "limit"},
         "/api/events": {"knowledge_id", "offset", "limit"},
         "/api/admin": {"offset", "limit"},
+        "/api/admin-groups": {"view", "stage", "group_id", "offset", "limit"},
         "/api/candidates": {"status", "q", "offset", "limit"},
         "/api/candidate": {"candidate_id", "section", "offset", "limit", "evidence_offset", "evidence_limit"},
         "/api/review-receipt": {"request_id"},
@@ -377,6 +378,12 @@ def _read_api(db, project, route, params):
     if set(params) - contracts[route]:
         raise ContractError("unsupported query parameter")
     model = _ReadModel(db)
+    if route == "/api/admin-groups":
+        from .admin_workload import workload_page
+        return workload_page(db, project, view=_text(params, "view", "groups"), stage=_text(params, "stage", "all"),
+                             group_id=_text(params, "group_id", maximum=32),
+                             offset=_integer(params, "offset", 0, MAX_OFFSET),
+                             limit=_integer(params, "limit", 20, MAX_PAGE, 1))
     if route == "/api/review-receipt":
         from .runtime import digest
         request_id = _text(params, "request_id", maximum=200)
@@ -402,6 +409,7 @@ def _read_api(db, project, route, params):
             evidence_offset=_integer(params, "evidence_offset", 0, MAX_OFFSET),
             evidence_limit=_integer(params, "evidence_limit", 10, 20, 1))
     if route == "/api/stats":
+        from .admin_workload import workload_summary
         count = lambda table, suffix="": db.execute(
             "SELECT COUNT(*) FROM " + table + " WHERE project=?" + suffix, (project,)).fetchone()[0]
         states = lambda table, column: {row[0]: row[1] for row in db.execute(
@@ -418,7 +426,8 @@ def _read_api(db, project, route, params):
                 "knowledge_revisions": count("knowledge"), "events": count("events"),
                 "tool_success_observations": count("events", " AND type='PostToolUse' AND outcome='succeeded'"),
                 "problems": states("problems", "status"), "candidates": states("candidates", "status"),
-                "review_states": states("review_states", "state"), "administrator_calls": states("admin_calls", "state")}
+                "review_states": states("review_states", "state"), "administrator_calls": states("admin_calls", "state"),
+                "workload": workload_summary(db, project)}
     offset = _integer(params, "offset", 0, MAX_OFFSET if route != "/api/knowledge" else 1000000)
     limit = _integer(params, "limit", 20 if route != "/api/knowledge" else MAX_FIELD_PAGE,
                      MAX_PAGE if route != "/api/knowledge" else MAX_FIELD_PAGE, 1)
