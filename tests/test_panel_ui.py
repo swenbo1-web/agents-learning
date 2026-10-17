@@ -44,6 +44,22 @@ if(scenario==='bootstrap'){
  const promise=element('debug').onclick(),request=http.at(-1);assert.equal(request.url,'/api/action');assert.equal(request.body.ui_session_id,opening.body.ui_session_id);assert.equal(request.body.action,'debug');assert.equal(request.body.capability,'private-direct-capability');assert.equal(request.body.context_handle,undefined);assert.equal(request.body.workspace,undefined);request.resolve({ok:true,json:async()=>directResult(false)._meta.agentLearningPanel});await promise;assert.equal(element('controls').hidden,false);assert.equal(sent.length,0);assert.equal(http.length,2);
 }else if(scenario==='project_usage'){
  await boot();assert.match(element('budget').textContent,/Project review attempts: 0/);assert.match(element('budget').textContent,/Valid review results: 0/);assert.match(element('budget').textContent,/Project calls remaining: 15 \/ 15/);assert.match(element('budget').textContent,/All-project attempts: 32/);
+}else if(scenario==='preset_refresh'){
+ const local=script.includes("const launchMode='local'"),direct=!script.includes("const launchMode='legacy'");
+ if(local){http[0].resolve({ok:true,json:async()=>directResult()._meta.agentLearningPanel});await flush();}
+ else if(direct){const init=sent.find(m=>m.method==='ui/initialize');respond(init,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();respond(sent.filter(m=>m.method==='tools/call').at(-1),directResult());await flush();}
+ else await boot();
+ async function refresh(value){const promise=element('refresh').onclick();if(local)http.at(-1).resolve({ok:true,json:async()=>directResult(false,value)._meta.agentLearningPanel});else respond(sent.filter(m=>m.method==='tools/call').at(-1),direct?directResult(false,value):result(false,value));await promise;await flush();}
+ const limits={minimal:{max_calls_per_day:5,max_calls_per_batch:1,max_batch_seconds:90,max_run_seconds:180},light:{max_calls_per_day:15,max_calls_per_batch:2,max_batch_seconds:120,max_run_seconds:300},balanced:{max_calls_per_day:100,max_calls_per_batch:5,max_batch_seconds:180,max_run_seconds:600},active:{max_calls_per_day:300,max_calls_per_batch:10,max_batch_seconds:300,max_run_seconds:1200}};
+ assert.equal(element('preset').value,'off');
+ for(const [name,values]of Object.entries(limits)){await refresh({...snapshot,admin_admission_enabled:true,project_budget_policy:{scope:'project',project_id:'p1',values},reason:'ready'});assert.equal(element('preset').value,name);assert.match(element('admin').textContent,/Administrator enabled/);assert.match(element('admin').textContent,/codex:default/);assert.equal(element('apply').disabled,false);}
+ // A custom configuration must not be relabeled Off, or inferred from its daily cap alone.
+ await refresh({...snapshot,admin_admission_enabled:true,project_budget_policy:{scope:'project',project_id:'p1',values:{...limits.balanced,max_calls_per_batch:2}}});assert.equal(element('preset').value,'custom');assert.equal(element('apply').disabled,true);
+ element('preset').value='light';element('preset').onchange();assert.equal(element('apply').disabled,false);element('language').onchange({target:{value:'zh-CN'}});assert.equal(element('preset').value,'light');assert.match(element('admin').textContent,/管理员已开启/);
+ element('apply').onclick();assert.equal(element('preset').value,'light');assert.equal(element('confirmBox').hidden,false);element('cancel').onclick();
+ await refresh(snapshot);assert.equal(element('preset').value,'off');assert.match(element('admin').textContent,/管理员已关闭/);
+ assert(!sent.some(m=>m.method==='tools/call'&&!['status','learning_panel_open'].includes(m.params.arguments.action||m.params.name)));assert(!http.some(r=>r.url==='/api/action'&&r.body.action!=='status'));
+ assert(!sent.some(m=>['ui/message','ui/update-model-context'].includes(m.method)));
 }else if(scenario==='legacy_usage'||scenario==='foreign_project_usage'){
  const value=JSON.parse(JSON.stringify(snapshot));if(scenario==='legacy_usage'){delete value.project_usage;delete value.expected.expected_project_budget_version;value.expected.expected_budget_version=99;}else value.project_usage.project_id='other-project';
  const init=sent.find(m=>m.method==='ui/initialize');respond(init,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result(true,value)});await flush();assert.equal(element('controls').hidden,false);assert.match(element('budget').textContent,/Project usage unavailable/);assert(!element('budget').textContent.includes('Project calls remaining: 100'));assert.equal(element('apply').disabled,true);const before=sent.length;element('apply').onclick();assert.equal(element('confirmBox').hidden,true);assert.equal(sent.length,before);
@@ -130,6 +146,9 @@ class PanelUITests(unittest.TestCase):
     def test_menu_project_switch_invalidates_buttons(self): self.scenario("menu_project_switch", html=DIRECT_HTML)
     def test_local_console_uses_same_origin_http_and_memory_session_only(self): self.scenario("local_http", html=local_panel_html())
     def test_project_counts_are_distinct_from_global_counts(self): self.scenario("project_usage")
+    def test_card_refresh_reflects_saved_preset_and_preserves_unsaved_language_change(self): self.scenario("preset_refresh")
+    def test_native_menu_refresh_reflects_all_presets_and_custom_limits(self): self.scenario("preset_refresh", html=DIRECT_HTML)
+    def test_local_console_refresh_reflects_all_presets_without_model_calls(self): self.scenario("preset_refresh", html=local_panel_html())
     def test_old_runtime_does_not_relabel_global_counts_as_project_usage(self): self.scenario("legacy_usage")
     def test_foreign_project_usage_cannot_enable_project_settings(self): self.scenario("foreign_project_usage")
     def test_missing_host_tool_capability_keeps_controls_hidden(self): self.scenario("missing_tools")
