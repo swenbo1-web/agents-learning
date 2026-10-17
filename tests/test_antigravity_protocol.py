@@ -153,7 +153,7 @@ class AntigravityProtocolTests(unittest.TestCase):
         self.assertEqual(self.ag.task(self.project, self.ag.host_conversation("current"))["goal"], "correct native task")
         self.assertIsNone(self.ag.task(self.project, self.ag.host_conversation("ambient")))
 
-    def test_schema11_upgrade_preserves_shared_knowledge_and_legacy_handle(self):
+    def test_schema11_upgrade_preserves_shared_knowledge_and_requires_handle_rebind(self):
         item = self.published()
         handle = self.codex.register_context(self.project, "legacy-reader")["context_handle"]
         self.ag.close()
@@ -165,9 +165,12 @@ class AntigravityProtocolTests(unittest.TestCase):
             db.execute("PRAGMA user_version=11")
         upgraded = Runtime(self.ag.home, config={})
         try:
-            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 17)
+            self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 18)
             self.assertEqual(upgraded.read(self.project, item["knowledge_id"])["revision"], 1)
-            self.assertEqual(upgraded.access_context(self.project, handle)["conversation_id"], "legacy-reader")
+            with self.assertRaises(ContractError):
+                upgraded.access_context(self.project, handle)
+            rebound = upgraded.register_context(self.project, "legacy-reader")["context_handle"]
+            self.assertEqual(upgraded.access_context(self.project, rebound)["conversation_id"], "legacy-reader")
         finally:
             upgraded.close()
 

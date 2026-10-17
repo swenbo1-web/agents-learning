@@ -20,7 +20,7 @@ vm.runInNewContext(script,context);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const dispatch=(message,source=parent)=>{for(const callback of listeners.get('message')||[])callback({source,data:message});};
 const respond=(request,result)=>dispatch({jsonrpc:'2.0',id:request.id,result});
-const snapshot={project_id:'p1',project_name:'Sample project',workspace:'/project',host_scope:'codex:default',admin_admission_enabled:false,model_mode:'first',model:null,remaining_calls:100,max_calls_per_day:100,counts:{active:1,work_memory:2,pending_problems:3,candidates:4},budget_scope:'ALP_HOME',reason:'disabled',expected:{expected_policy_version:1,expected_budget_version:2,expected_settings_version:3,expected_session_epoch:0,expected_governance_epoch:0}};
+const snapshot={project_id:'p1',project_name:'Sample project',workspace:'/project',host_scope:'codex:default',admin_admission_enabled:false,model_mode:'first',model:null,remaining_calls:100,max_calls_per_day:100,counts:{active:1,work_memory:2,pending_problems:3,candidates:4},budget_scope:'project',project_usage:{scope:'project',project_id:'p1',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,max_calls_per_day:15},global_usage:{counted_attempts:32,remaining_calls:68},reason:'disabled',expected:{expected_policy_version:1,expected_project_budget_version:2,expected_settings_version:3,expected_session_epoch:0,expected_governance_epoch:0}};
 const result=(bootstrap=true,summary=snapshot)=>({content:[{type:'text',text:'public'}],structuredContent:{visible:true,summary},_meta:{agentLearningPanel:{visible:true,summary,context_handle:'real-handle',...(bootstrap?{capability:'private-capability'}:{})}}});
 async function boot(tools=true){assert.equal(element('controls').hidden,true);const initialize=sent.find(m=>m.method==='ui/initialize');assert(initialize);respond(initialize,{protocolVersion:'2026-01-26',hostCapabilities:tools?{serverTools:{}}:{},hostContext:{}});await flush();dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-input',params:{arguments:{context_handle:'real-handle'}}});dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result()});await flush();}
 async function clickAndRespond(id){const before=sent.length,promise=element(id).onclick();const request=sent.slice(before).find(m=>m.method==='tools/call');assert(request);respond(request,result(false));await promise;await flush();return request;}
@@ -28,6 +28,11 @@ async function clickAndRespond(id){const before=sent.length,promise=element(id).
 if(scenario==='bootstrap'){
  const spoof={jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result()};dispatch(spoof,{});assert.equal(element('controls').hidden,true);
  const initialize=sent.find(m=>m.method==='ui/initialize');dispatch(spoof);assert.equal(element('controls').hidden,true);respond(initialize,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();assert.equal(element('controls').hidden,false);assert.equal(element('project').textContent,'Sample project');assert.equal(element('active').textContent,'1');assert(![...nodes.values()].some(n=>n.textContent.includes('private-capability')));
+}else if(scenario==='project_usage'){
+ await boot();assert.match(element('budget').textContent,/Project review attempts: 0/);assert.match(element('budget').textContent,/Valid review results: 0/);assert.match(element('budget').textContent,/Project calls remaining: 15 \/ 15/);assert.match(element('budget').textContent,/All-project attempts: 32/);
+}else if(scenario==='legacy_usage'||scenario==='foreign_project_usage'){
+ const value=JSON.parse(JSON.stringify(snapshot));if(scenario==='legacy_usage'){delete value.project_usage;delete value.expected.expected_project_budget_version;value.expected.expected_budget_version=99;}else value.project_usage.project_id='other-project';
+ const init=sent.find(m=>m.method==='ui/initialize');respond(init,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result(true,value)});await flush();assert.equal(element('controls').hidden,false);assert.match(element('budget').textContent,/Project usage unavailable/);assert(!element('budget').textContent.includes('Project calls remaining: 100'));assert.equal(element('apply').disabled,true);const before=sent.length;element('apply').onclick();assert.equal(element('confirmBox').hidden,true);assert.equal(sent.length,before);
 }else if(scenario==='missing_tools'){
  await boot(false);assert.equal(element('controls').hidden,true);assert(!sent.some(m=>m.method==='tools/call'));
 }else if(scenario==='direct_actions'){
@@ -77,6 +82,9 @@ class PanelUITests(unittest.TestCase):
         self.assertTrue(json.loads(result.stdout)["passed"])
 
     def test_only_verified_host_bootstrap_displays_controls(self): self.scenario("bootstrap")
+    def test_project_counts_are_distinct_from_global_counts(self): self.scenario("project_usage")
+    def test_old_runtime_does_not_relabel_global_counts_as_project_usage(self): self.scenario("legacy_usage")
+    def test_foreign_project_usage_cannot_enable_project_settings(self): self.scenario("foreign_project_usage")
     def test_missing_host_tool_capability_keeps_controls_hidden(self): self.scenario("missing_tools")
     def test_buttons_call_mcp_directly_without_a_model_message(self): self.scenario("direct_actions")
     def test_setting_change_requires_confirmation_and_frozen_expected_versions(self): self.scenario("confirmation")

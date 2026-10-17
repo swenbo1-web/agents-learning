@@ -117,7 +117,9 @@ function debugStatusText(value) {
   const routing = object(data.admin_routing);
   const policy = object(routing.policy);
   const executor = object(routing.executor);
-  const budget = object(data.admin_budget);
+  const budget = object(data.project_usage);
+  const globalUsage = object(data.global_usage);
+  const admission = object(data.admission);
   const mode = text(executor.model_mode || policy.model_mode, 24);
   const model = text(executor.model || (mode === "fixed" ? policy.model : ""));
   const resolvedModel = model === "unknown" && mode === "default" && routing.routing_ready === true
@@ -129,19 +131,20 @@ function debugStatusText(value) {
   const reasons = [];
   if (data.admin_admission_enabled === false) reasons.push("administrator_disabled");
   if (typeof routing.reason === "string" && routing.reason.trim()) reasons.push(text(routing.reason));
-  if (typeof budget.admission_status === "string" && budget.admission_status !== "available") {
-    reasons.push(text(budget.admission_status));
+  if (typeof admission.admission_status === "string" && admission.admission_status !== "available") {
+    reasons.push(text(admission.admission_status));
   }
   if (routing.ready === false && !routing.reason) reasons.push("administrator_route_unavailable");
   const blocking = reasons.length ? [...new Set(reasons)].join(" / ")
-    : routing.ready === true && budget.admission_status === "available" ? "无" : "unknown";
+    : routing.ready === true && admission.admission_status === "available" ? "无" : "unknown";
   return [
     "### Agent Learning 调试（只读）",
     `- 项目：\`${text(data.project_id)}\``,
     `- 知识目录：\`${text(data.home, 384)}\``,
     `- 宿主：\`${text(data.host_scope)}\``,
     `- 管理员实际准入：${enabled} | 模式：\`${mode}\` | 模型：\`${resolvedModel}\``,
-    `- 剩余审核调用：${remaining}（同 ALP_HOME 共享的插件预算，不代表平台额度）`,
+    `- 项目剩余审核额度：${budget.scope === "project" && budget.project_id === data.project_id ? remaining : "项目统计暂不可用"}（项目独立、宿主共用，不代表平台额度）`,
+    `- 所有项目合计尝试：${Number.isSafeInteger(globalUsage.counted_attempts) ? globalUsage.counted_attempts : "unknown"} | 全局保护剩余：${Number.isSafeInteger(globalUsage.remaining_calls) ? globalUsage.remaining_calls : "unknown"}`,
     `- 阻塞原因：\`${blocking}\``,
     "- 会话 / Hook：未验证；此命令未绑定当前对话，不能据此确认 Hooks 已连接。",
     "- 详细核对使用 learning-debug 技能；知识库与审批使用 learning-browser / learning-review 技能。",
@@ -1286,10 +1289,12 @@ export function apply(ctx) {
                 send(200, { ok: true, installed: false, reason: "workspace_not_registered" });
                 return;
               }
-              const data = parsed?.ok ? parsed.result?.data || {} : {};
+              if (!parsed?.ok || !parsed.result?.data) throw new Error(parsed?.error || "project status unavailable");
+              const data = parsed.result.data;
               const browserStat = await manageBrowser("status", {}, workspace).catch(() => ({ running: false }));
               const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
-              const budgetValues = data.admin_budget?.budget_policy?.values || {};
+              const projectUsage = data.project_usage?.scope === "project" && data.project_usage.project_id === data.project_id ? data.project_usage : null;
+              const budgetValues = data.project_budget_policy?.values || {};
               send(200, {
                 ok: true,
                 installed: true,
@@ -1304,9 +1309,14 @@ export function apply(ctx) {
                 work_memories: data.work_memory?.memories ?? 0,
                 file_relations: data.work_memory?.file_relations ?? 0,
                 admin_admission_enabled: Boolean(data.admin_admission_enabled ?? data.admin_enabled),
-                remaining_calls: data.admin_budget?.remaining_calls ?? 0,
-                max_calls_per_day: budgetValues.max_calls_per_day ?? data.admin_budget?.max_calls_per_day ?? 100,
-                max_calls_per_batch: budgetValues.max_calls_per_batch ?? 5,
+                remaining_calls: projectUsage?.remaining_calls ?? null,
+                max_calls_per_day: projectUsage?.max_calls_per_day ?? null,
+                max_calls_per_batch: budgetValues.max_calls_per_batch ?? null,
+                project_usage: projectUsage,
+                global_usage: data.global_usage || null,
+                project_budget_policy: data.project_budget_policy || null,
+                global_budget_policy: data.global_budget_policy || null,
+                admission: data.admission || null,
                 onboarding: data.history_import?.onboarding?.state || "unoffered",
                 browser_running: Boolean(browserStat?.running),
               });

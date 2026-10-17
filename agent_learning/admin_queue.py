@@ -193,7 +193,7 @@ def unrouted_reason(runtime, project, query, args, fallback):
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
-    from .admin_usage import admin_budget_status
+    from .admin_usage import admin_admission_status
     cfg = runtime.admin_effective_config(project)
     if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0:
         return None
@@ -217,7 +217,7 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
                               (project, *ACTIVE_STATES)).fetchone():
             return None
-        budget = admin_budget_status(runtime, now=now)
+        budget = admin_admission_status(runtime, project, now=now)
         if budget["admission_status"] != "available":
             return None
         # 已在审核的派发与调用占同一槽，不能重复计算并发占用。
@@ -285,9 +285,13 @@ def claim_dispatch_worker(runtime, project, token, seconds):
 def record_dispatch_diagnostic(runtime, project, reason, details=None, *, host_scope=None):
     from .runtime import encode
     # details must be fixed fields; never persist CLI stderr/exception messages.
+    numeric = {"errno", "winerror", "returncode", "failures", "next_try"}
+    labels = {"error_type", "phase", "reason_code"}
+    flags = {"input_submission_attempted", "terminal_observed"}
     details = {key: value for key, value in (details or {}).items()
-               if key in {"error_type", "errno", "winerror", "returncode", "failures", "next_try"}
-               and (isinstance(value, (int, float)) or key == "error_type" and isinstance(value, str) and value.isidentifier())}
+               if (key in numeric and type(value) in {int, float})
+               or (key in labels and isinstance(value, str) and len(value) <= 80 and value.isidentifier())
+               or (key in flags and type(value) is bool)}
     runtime.db.execute("INSERT INTO admin_dispatch_diagnostics VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) "
                        "DO UPDATE SET reason=excluded.reason,details=excluded.details,updated=excluded.updated",
                        (project, host_scope or runtime._session_scope(), reason, encode(details), time.time()))
@@ -304,8 +308,12 @@ def executor_signature(plan):
                  for item in command if not item.startswith("-") and Path(item).is_file()]
     except (OSError, ValueError):
         command, files = plan.get("command"), []
-    return digest({"command": command, "files": files, "provider": plan.get("provider"),
-                   "model": plan.get("model"), "session_epoch": plan.get("session_epoch")})
+    identity = {"command": command, "files": files, "provider": plan.get("provider"),
+                "model": plan.get("model"), "session_epoch": plan.get("session_epoch")}
+    if plan.get("provider") == "dsh" and isinstance(plan.get("dsh_profile"), dict):
+        profile = plan["dsh_profile"]
+        identity["profile"] = {key: profile.get(key) for key in ("source", "profile_directory", "sha256")}
+    return digest(identity)
 
 
 def executor_backoff(runtime, project, plan):
@@ -347,7 +355,7 @@ def dispatch_diagnostic(runtime, project):
 
 def _dispatch_diagnostic(runtime, project):
     """Read-only admission/worker/model observation, shared by all hosts and UI."""
-    from .admin_usage import admin_budget_status
+    from .admin_usage import admin_admission_status
     from .admin_providers import executor_availability
     now = time.time()
     detail = {"phase": "idle", "reason": "no_increment", "next_due": None}
@@ -385,9 +393,10 @@ def _dispatch_diagnostic(runtime, project):
         if runtime.db.execute("SELECT 1 FROM admin_preflights WHERE project=? LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="awaiting_evidence")
         return detail
-    budget = admin_budget_status(runtime)
+    budget = admin_admission_status(runtime, project)
     if budget["admission_status"] != "available":
-        return dict(detail, reason=budget["admission_status"], next_due=budget.get("next_reset_at"))
+        return dict(detail, reason=budget["admission_status"], next_due=budget.get("next_reset_at"),
+                    blocking_scope=budget.get("blocking_scope"))
     worker_backoff = executor_backoff(runtime, project, background_plan(runtime))
     if worker_backoff:
         return dict(detail, reason="worker_launch_backoff", next_due=worker_backoff["next_try"],

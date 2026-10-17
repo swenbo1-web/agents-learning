@@ -21,9 +21,9 @@ METADATA = schema({key: S for key in sorted(METADATA_KEYS)})
 CATEGORY = {"type": "string", "enum": sorted(CATEGORIES)}
 KNOWLEDGE_KIND = {"type": "string", "enum": sorted(KNOWLEDGE_KINDS)}
 PANEL_EXPECTED = schema({key: {"type": "integer", "minimum": 0} for key in (
-    "expected_policy_version", "expected_budget_version", "expected_settings_version",
+    "expected_policy_version", "expected_project_budget_version", "expected_settings_version",
     "expected_session_epoch", "expected_governance_epoch")}, (
-    "expected_policy_version", "expected_budget_version", "expected_settings_version",
+    "expected_policy_version", "expected_project_budget_version", "expected_settings_version",
     "expected_session_epoch", "expected_governance_epoch"))
 PANEL_TOOLS = [
     ("learning_panel", "打开当前已安装项目的轻量控制卡；仅展示状态，不开启管理员或历史吸收。需要本轮真实会话句柄；不支持UI时使用learning-debug。",

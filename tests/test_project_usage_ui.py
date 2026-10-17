@@ -1,0 +1,91 @@
+"""Execute shipped UI consumers with conflicting project/global usage; no host or models."""
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import unittest
+
+from agent_learning.browser_ui import JAVASCRIPT
+
+
+BROWSER_CHECK = r'''
+const {script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const vm=require('node:vm'),assert=require('node:assert/strict');
+class Element {
+ constructor(){this.children=[];this.value='';this.textContent='';this.dataset={};this.classList={toggle(){}};}
+ addEventListener(){} append(...items){this.children.push(...items);} replaceChildren(...items){this.children=items;}
+}
+const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[],addEventListener(){},documentElement:{}},navigator:{language:'en'},location:{hash:''},URLSearchParams,crypto:{randomUUID:()=> 'test-request'},setTimeout(){},clearTimeout(){},console});
+vm.runInContext(script,context);
+vm.runInContext(`
+state.session={admin_control_enabled:true};state.adminToken='local-capability';state.view='admin-control';
+state.adminData={project_id:'hefe',host_scope:'codex:default',enabled:false,policy:{policy_version:1,model_mode:'first'},project_budget_policy:{scope:'project',project_id:'hefe',version:2,values:{max_calls_per_day:15,max_calls_per_batch:2,max_batch_seconds:120,max_run_seconds:300}},budget_policy:{version:99,values:{max_calls_per_day:999}},project_usage:{scope:'project',project_id:'hefe',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,usage_unknown_attempts:1,reported_tokens:0,accounted_tokens:100,utc_day:'2026-10-17'},global_usage:{counted_attempts:32,remaining_calls:68},admission:{admission_status:'available',blocking_scope:null},settings_version:3,session_epoch:0,governance_epoch:0};
+hydrateAdminForm(state.adminData);renderAdminState();
+globalThis.payload=adminConfiguration('save');
+`,context);
+const flatten=n=>[n.textContent,...n.children.map(flatten)].join(' ');
+const cards=flatten(get('admin-status-cards')),details=flatten(get('admin-usage-details'));
+assert(cards.includes('Project review attempts today 0'));
+assert(cards.includes('Project calls remaining today 15'));
+assert(!cards.includes('32'));
+assert(details.includes('All-project review attempts today 32'));
+assert(details.includes('Unknown (some attempts did not report usage)'));
+assert.equal(context.payload.expected_project_budget_version,2);
+assert.equal(context.payload.project_limits.max_calls_per_day,15);
+assert.equal(context.payload.expected_budget_version,undefined);
+assert.equal(context.payload.limits,undefined);
+vm.runInContext(`state.adminData.global_budget_policy={scope:'ALP_HOME',version:99,values:{max_calls_per_day:100}};$('admin-global-calls').value='200';globalThis.globalPayload=adminGlobalConfiguration();`,context);
+assert.equal(context.globalPayload.expected_budget_version,99);
+assert.equal(context.globalPayload.limits.max_calls_per_day,200);
+assert.equal(context.globalPayload.project_limits,undefined);
+assert.equal(context.globalPayload.expected_project_budget_version,undefined);
+assert.equal(context.globalPayload.start,false);
+vm.runInContext(`delete state.adminData.project_usage;delete state.adminData.project_budget_policy;renderAdminState();`,context);
+assert(flatten(get('admin-readiness')).includes('Project usage unavailable'));
+assert.equal(get('admin-save').disabled,true);
+assert(!flatten(get('admin-status-cards')).includes('32'));
+console.log('ok');
+'''
+
+
+DSH_CHECK = r'''
+let {script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const vm=require('node:vm'),assert=require('node:assert/strict');
+let factory;
+vm.runInNewContext(script.replace('exports.apply = apply;','exports.buildControlPanel = buildControlPanel; exports.apply = apply;'),{window:{__ModuleLoader__:{load:x=>{factory=x.factory;}}},navigator:{language:'en'}});
+const plugin=factory(()=>({}));
+const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),useState:value=>[value,()=>{}],useCallback:fn=>fn,useEffect(){}};
+const Panel=plugin.buildControlPanel(react,null);
+const summary={project_id:'hefe',admin_admission_enabled:true,max_calls_per_day:999,remaining_calls:999,project_usage:{scope:'project',project_id:'hefe',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,max_calls_per_day:15},global_usage:{counted_attempts:32,remaining_calls:68}};
+const flatten=n=>n==null?'':typeof n==='object'?n.children.map(flatten).join(' '):String(n);
+let tree=Panel({initialSummary:summary}),output=flatten(tree);
+assert(output.includes('Project attempts today 0'));
+assert(output.includes('All-project attempts today: 32'));
+assert(output.includes('Project allowance left 15/15'));
+assert(!output.includes('999'));
+delete summary.project_usage;tree=Panel({initialSummary:summary});output=flatten(tree);
+assert(output.includes('Project usage unavailable'));
+assert(!output.includes('999'));
+const buttons=[];function walk(n){if(!n||typeof n!=='object')return;if(n.type==='button')buttons.push(n);for(const c of n.children)walk(c);}walk(tree);
+for(const b of buttons.filter(b=>/^(Off|Minimal|Light|Balanced|Active)/.test(flatten(b))))assert.equal(b.props.disabled,true);
+console.log('ok');
+'''
+
+
+class ProjectUsageUITests(unittest.TestCase):
+    def check(self, script, harness):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for UI contract checks")
+        result = subprocess.run([node, "-e", harness], input=json.dumps({"script": script}),
+                                text=True, encoding="utf-8", capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_browser_project_form_and_unknown_tokens_are_scoped(self):
+        self.check(JAVASCRIPT, BROWSER_CHECK)
+
+    def test_dsh_project_counts_never_fall_back_to_shared_allowance(self):
+        root = Path(__file__).resolve().parents[1]
+        self.check((root / "host_resources/dsh/client/index.js").read_text(encoding="utf-8"), DSH_CHECK)

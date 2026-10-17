@@ -529,8 +529,12 @@ def main(argv=None):
                         "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
                         (project, runtime._session_scope(), int(args.enabled == "on"), state["version"] + 1, time.time()))
         elif args.command == "admin-status":
-            from .admin_usage import admin_budget_status
-            result = {**runtime.admin_routing_status(project, args.conversation), "budget": admin_budget_status(runtime)}
+            from .admin_usage import admin_admission_status
+            admission = admin_admission_status(runtime, project)
+            result = {**runtime.admin_routing_status(project, args.conversation), "budget": admission["global_usage"],
+                      "project_usage": admission["project_usage"], "global_usage": admission["global_usage"],
+                      "project_budget_policy": admission["project_usage"]["budget_policy"],
+                      "global_budget_policy": admission["global_usage"]["budget_policy"], "admission": admission}
         elif args.command == "admin-retry":
             from .admin_lifecycle import retry_call
             result = retry_call(runtime, project, args.call_id, args.reason)

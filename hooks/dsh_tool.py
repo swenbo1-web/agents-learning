@@ -120,7 +120,6 @@ def _handle_learning_history(runtime, project, workspace, args):
 
 def _handle_slash_command(runtime, project, workspace, command_name, raw_input):
     from agent_learning.admin import admin_batch, admin_once
-    from agent_learning.admin_usage import admin_budget_status
 
     tokens = (raw_input or "").strip().split()
     if tokens and tokens[0].lstrip("/").lower() == command_name.lower():
@@ -202,16 +201,21 @@ def _handle_slash_command(runtime, project, workspace, command_name, raw_input):
         sub = tokens[0].lower() if tokens else "status"
         if sub == "status":
             routing = runtime.admin_routing_status(project)
-            budget = admin_budget_status(runtime)
+            from agent_learning.admin_control import control_status
+            control = control_status(runtime, project)
+            budget = control["project_usage"]
+            global_usage = control["global_usage"]
             p = routing["policy"]
             return {
                 "text": (
                     f"### DSH 管理员状态\n"
                     f"- **启用状态**: `{'on' if p['enabled'] else 'off'}` | **Provider**: `{p['provider']}` | **模型模式**: `{p['model_mode']}` | **模型**: `{p['model'] or '(默认/跟随会话)'}`\n"
                     f"- **路由就绪 (`routing_ready`)**: `{routing['routing_ready']}`（原因：`{routing['reason'] or '就绪'}`）\n"
-                    f"- **今日剩余调用额度**: `{budget['remaining_calls']}/{budget['used_calls'] + budget['remaining_calls']}` 次"
+                    f"- **项目今日审核尝试 / 有效结论 / 失败**: `{budget['counted_attempts']} / {budget['completed_reviews']} / {budget['failed_attempts']}`\n"
+                    f"- **项目剩余额度**: `{budget['remaining_calls']}/{budget['max_calls_per_day']}` 次（项目独立，各宿主共用）\n"
+                    f"- **所有项目合计尝试 / 全局保护剩余**: `{global_usage['counted_attempts']} / {global_usage['remaining_calls']}`"
                 ),
-                "data": {**routing, "budget": budget},
+                "data": {**routing, "budget": control["usage"], "project_usage": budget, "global_usage": global_usage, "admission": control["admission"]},
             }
         if sub == "off":
             policy = runtime.admin_policy(project)
@@ -307,19 +311,14 @@ def main():
             import uuid
             from agent_learning.admin_control import apply_control, control_status
             preset_name = str(payload["admin_preset"]).lower()
-            presets = {
-                "light": {"max_calls_per_day": 15, "max_calls_per_batch": 2, "max_batch_seconds": 120, "max_run_seconds": 300},
-                "balanced": {"max_calls_per_day": 100, "max_calls_per_batch": 5, "max_batch_seconds": 180, "max_run_seconds": 600},
-                "active": {"max_calls_per_day": 300, "max_calls_per_batch": 10, "max_batch_seconds": 300, "max_run_seconds": 1200},
-                "minimal": {"max_calls_per_day": 5, "max_calls_per_batch": 1, "max_batch_seconds": 90, "max_run_seconds": 180},
-            }
+            from agent_learning.admin_presets import PRESETS as presets
             if preset_name != "off" and preset_name not in presets:
                 _emit({"ok": False, "error": "unsupported admin preset"})
                 return 0
             st = control_status(runtime, project)
             enabled = preset_name != "off"
             limits = presets.get(preset_name) or {
-                k: st["budget_policy"]["values"][k]
+                k: st["project_budget_policy"]["values"][k]
                 for k in ("max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds")
             }
             mode = st["policy"]["model_mode"] if st["policy"]["policy_version"] else "first"
@@ -327,18 +326,18 @@ def main():
             req_body = {
                 "request_id": uuid.uuid4().hex,
                 "expected_policy_version": st["policy"]["policy_version"],
-                "expected_budget_version": st["budget_policy"]["version"],
+                "expected_project_budget_version": st["project_budget_policy"]["version"],
                 "expected_settings_version": st["settings_version"],
                 "expected_session_epoch": st["session_epoch"],
                 "expected_governance_epoch": st["governance_epoch"],
                 "enabled": enabled,
                 "model_mode": mode,
                 "model": model,
-                "limits": limits,
+                "project_limits": limits,
                 "start": enabled,
             }
             applied = apply_control(runtime, project, req_body)
-            _emit({"ok": True, "result": {"preset": preset_name, "enabled": enabled, "limits": limits, "applied": applied}})
+            _emit({"ok": True, "result": {"preset": preset_name, "enabled": enabled, "project_limits": limits, "applied": applied}})
             return 0
 
         tool_name = payload.get("tool")

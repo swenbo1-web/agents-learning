@@ -149,6 +149,9 @@ class HistoryOptimizationTests(unittest.TestCase):
         def timeout(packet, process):
             raise subprocess.TimeoutExpired("controlled reviewer", 1)
         self.run_history(job, callback=timeout, max_calls=1)
+        # Independent units resume only after the unhealthy executor's cooldown;
+        # the unknown original unit remains blocked for explicit reconciliation.
+        self.r.db.execute("UPDATE admin_executor_failures SET next_try=0")
         seen = []
         def observe(packet, _):
             seen.append(Path(self.source(packet)["source"]["path"]).name)
@@ -168,6 +171,10 @@ class HistoryOptimizationTests(unittest.TestCase):
         first, calls = self.run_history(job, callback=timeout, max_calls=1)
         call = first["resume"]["blocked_calls"][0]
         retry_call(self.r, self.p, call["call_id"], "User inspected the uncertain prior execution")
+        waiting, waiting_calls = self.run_history(job, max_calls=1)
+        self.assertEqual(waiting_calls, 0)
+        self.assertEqual(waiting["state"], "paused")
+        self.r.db.execute("UPDATE admin_executor_failures SET next_try=0")
         result, new_calls = self.run_history(job, max_calls=1)
         self.assertEqual((calls, new_calls), (1, 1))
         self.assertEqual(result["state"], "review_complete")

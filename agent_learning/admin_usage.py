@@ -14,6 +14,10 @@ ADMIN_BUDGET_DEFAULTS = {
     "max_concurrent_calls": 1, "max_reported_tokens_per_day": None,
     "token_reservation_per_call": 4000,
 }
+PROJECT_BUDGET_FIELDS = frozenset({
+    "max_calls_per_day", "max_calls_per_batch", "max_cases_per_batch", "max_batch_seconds",
+    "max_run_seconds", "timeout_seconds", "max_reported_tokens_per_day",
+})
 _BUDGET_RANGES = {
     "max_calls_per_day": (0, 100000), "max_calls_per_batch": (1, 20),
     "max_cases_per_batch": (1, 100), "max_batch_seconds": (1, 600),
@@ -62,6 +66,73 @@ def admin_budget_config(runtime):
     result = dict(runtime.config["admin"])
     result.update(admin_budget_policy(runtime)["values"])
     return result
+
+
+@contextlib.contextmanager
+def _read_snapshot(runtime):
+    """Keep the two budget scopes in one read snapshot, without initializing state."""
+    if runtime.db.in_transaction:
+        yield
+        return
+    runtime.db.execute("BEGIN")
+    try:
+        yield
+        runtime.db.execute("COMMIT")
+    except BaseException:
+        runtime.db.execute("ROLLBACK")
+        raise
+
+
+def _require_project(runtime, project):
+    if (not isinstance(project, str) or not project.strip()
+            or not runtime.db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone()):
+        raise ContractError("unknown administrator budget project")
+
+
+def project_budget_policy(runtime, project):
+    """Project defaults inherit configuration, never another project's shared override."""
+    _require_project(runtime, project)
+    values = {key: runtime.config["admin"].get(key, ADMIN_BUDGET_DEFAULTS[key])
+              for key in PROJECT_BUDGET_FIELDS}
+    _validate_budget_values(values)
+    version, updated, configured = 0, None, False
+    if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_project_budget_policies'").fetchone():
+        row = runtime.db.execute("SELECT version,body,updated FROM admin_project_budget_policies WHERE project=?",
+                                 (project,)).fetchone()
+        if row:
+            try:
+                stored = json.loads(row["body"])
+            except (TypeError, ValueError) as exc:
+                raise ContractError("administrator project budget policy could not be read") from exc
+            if not isinstance(stored, dict) or set(stored) != PROJECT_BUDGET_FIELDS:
+                raise ContractError("administrator project budget policy is incomplete")
+            _validate_budget_values(stored)
+            values.update(stored)
+            version, updated, configured = row["version"], row["updated"], True
+    return {"scope": "project", "project_id": project, "version": version,
+            "configured": configured, "values": values, "updated": updated}
+
+
+def configure_project_budget(runtime, project, values, *, expected_version, expected_epoch=None):
+    """CAS-update this project's limits across hosts; leave the shared guard and ledger intact."""
+    if not isinstance(values, dict) or not values or set(values) - PROJECT_BUDGET_FIELDS:
+        raise ContractError("unsupported administrator project budget fields")
+    _validate_budget_values(values)
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+        raise ContractError("administrator expected project budget version must be nonnegative")
+    with contextlib.nullcontext() if runtime.db.in_transaction else runtime.transaction():
+        runtime.assert_session_epoch(expected_epoch)
+        current = project_budget_policy(runtime, project)
+        if current["version"] != expected_version:
+            raise ContractError("administrator project budget changed; reread before configuring")
+        merged = dict(current["values"], **values)
+        changed = merged != current["values"] or not current["configured"]
+        if changed:
+            runtime.db.execute(
+                "INSERT INTO admin_project_budget_policies(project,version,body,updated) VALUES(?,?,?,?) "
+                "ON CONFLICT(project) DO UPDATE SET version=excluded.version,body=excluded.body,updated=excluded.updated",
+                (project, current["version"] + 1, encode(merged), time.time()))
+        return dict(project_budget_policy(runtime, project), changed=changed)
 
 
 def configure_admin_budget(runtime, values, *, expected_version, expected_epoch=None):
@@ -152,6 +223,9 @@ def install_budget(runtime):
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_runtime_settings("
                        "id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL CHECK(version>=1),"
                        "body TEXT NOT NULL,updated REAL NOT NULL)")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_project_budget_policies("
+                       "project TEXT PRIMARY KEY,version INTEGER NOT NULL CHECK(version>=1),"
+                       "body TEXT NOT NULL,updated REAL NOT NULL,FOREIGN KEY(project) REFERENCES projects(id))")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_call_budgets("
                        "call_id TEXT PRIMARY KEY,reserved_tokens INTEGER NOT NULL,reported_tokens INTEGER NOT NULL DEFAULT 0,"
                        "completeness TEXT NOT NULL DEFAULT 'unknown',conflict INTEGER NOT NULL DEFAULT 0,updated REAL NOT NULL)")
@@ -159,6 +233,7 @@ def install_budget(runtime):
                        "call_id TEXT NOT NULL,observation_id TEXT NOT NULL,payload TEXT NOT NULL,created REAL NOT NULL,"
                        "PRIMARY KEY(call_id,observation_id))")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS admin_calls_daily_budget ON admin_calls(day,state)")
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS admin_calls_project_daily_budget ON admin_calls(project,day,state)")
     reservation = budget_settings(runtime)["token_reservation_per_call"]
     for row in runtime.db.execute("SELECT id,usage FROM admin_calls WHERE state!='deduplicated' AND "
                                   "NOT EXISTS(SELECT 1 FROM admin_call_budgets b WHERE b.call_id=admin_calls.id)").fetchall():
@@ -211,23 +286,44 @@ def record_usage(runtime, call_id, usage):
     return result
 
 
-def admin_budget_status(runtime, *, now=None):
-    """只读当前 UTC 日全局账；调度器回收后读取，查询本身不释放未知额度。"""
-    policy = admin_budget_policy(runtime)
+def _usage_status(runtime, policy, settings, *, now=None, project=None):
+    """Derive counters from the same call ledger; no duplicate debit or stored totals."""
     cfg = policy["values"]
-    settings = {key: cfg[key] for key in ("max_concurrent_calls", "token_reservation_per_call", "max_reported_tokens_per_day")}
     current = time.time() if now is None else now
     day = time.strftime("%Y-%m-%d", time.gmtime(current))
     next_reset = (int(current) // 86400 + 1) * 86400
-    rows = runtime.db.execute("SELECT c.state,b.* FROM admin_calls c LEFT JOIN admin_call_budgets b ON b.call_id=c.id "
-                              "WHERE c.day=? AND c.state NOT IN ('not_started','deduplicated')", (day,)).fetchall()
+    receipts_exist = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_receipts'").fetchone()
+    accepted = ("EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.problem=c.problem "
+                "AND r.revision=c.revision AND r.call_id=c.id AND r.decision=c.state AND r.duplicate_of IS NULL)"
+                if receipts_exist else "0")
+    rows = runtime.db.execute("SELECT c.state,c.started," + accepted + " AS accepted_review,b.* "
+                              "FROM admin_calls c LEFT JOIN admin_call_budgets b ON b.call_id=c.id "
+                              "WHERE c.day=?" + (" AND c.project=?" if project is not None else ""),
+                              (day, project) if project is not None else (day,)).fetchall()
     active = runtime.db.execute("SELECT COUNT(*) FROM admin_calls WHERE state IN ('reserved','launch_intent','started')").fetchone()[0]
+    project_active = (runtime.db.execute("SELECT COUNT(*) FROM admin_calls WHERE project=? "
+                                       "AND state IN ('reserved','launch_intent','started')", (project,)).fetchone()[0]
+                      if project is not None else None)
     usage_states = {"complete": 0, "partial": 0, "unknown": 0, "conflict": 0}
     reported, reservations, accounted = 0, 0, 0
+    counts = {key: 0 for key in ("counted_attempts", "started_attempts", "completed_reviews", "failed_attempts",
+                                "result_unknown_attempts", "usage_unknown_attempts", "active_attempts",
+                                "not_started_attempts", "deduplicated_attempts")}
     for row in rows:
+        if row["state"] in {"not_started", "deduplicated"}:
+            counts[row["state"] + "_attempts"] += 1
+            continue
+        counts["counted_attempts"] += 1
+        counts["started_attempts"] += int(row["started"] is not None)
+        counts["completed_reviews"] += int(row["state"] in {"candidate", "needs_evidence", "skip", "governance"}
+                                           and bool(row["accepted_review"]))
+        counts["failed_attempts"] += int(row["state"] == "failed")
+        counts["result_unknown_attempts"] += int(row["state"] in {"timeout_unknown", "account_changed_unknown", "orphaned_unknown"})
+        counts["active_attempts"] += int(row["state"] in {"reserved", "launch_intent", "started"})
         completeness = row["completeness"] or "unknown"
         usage_states[completeness] += 1
         usage_states["conflict"] += int(bool(row["conflict"]))
+        counts["usage_unknown_attempts"] += int(completeness == "unknown")
         known = row["reported_tokens"] or 0
         reserved = row["reserved_tokens"] if row["reserved_tokens"] is not None else settings["token_reservation_per_call"]
         pending = row["state"] in {"reserved", "launch_intent", "started", "timeout_unknown",
@@ -235,16 +331,59 @@ def admin_budget_status(runtime, *, now=None):
         reported += known
         reservations += reserved if pending else 0
         accounted += max(reserved, known) if pending else known
-    maximum = settings["max_reported_tokens_per_day"]
+    maximum = cfg["max_reported_tokens_per_day"]
     remaining = None if maximum is None else max(0, maximum - accounted)
-    remaining_calls = max(0, cfg["max_calls_per_day"] - len(rows))
+    remaining_calls = max(0, cfg["max_calls_per_day"] - counts["counted_attempts"])
     admission = ("budget_exhausted" if remaining_calls == 0 else
-                 "concurrency_limited" if active >= settings["max_concurrent_calls"] else
+                 "concurrency_limited" if project is None and active >= settings["max_concurrent_calls"] else
                  "token_budget_exhausted" if remaining is not None and remaining < settings["token_reservation_per_call"] else "available")
-    return {"utc_day": day, "used_calls": len(rows), "remaining_calls": remaining_calls,
-            "next_reset_at": next_reset, "global_active_calls": active, **settings,
+    scope = "project" if project is not None else "ALP_HOME"
+    return {"utc_day": day, "used_calls": counts["counted_attempts"], "remaining_calls": remaining_calls,
+            "next_reset_at": next_reset, "global_active_calls": active, **settings, **counts,
+            "max_reported_tokens_per_day": maximum,
             "reported_tokens": reported, "token_reservations": reservations, "accounted_tokens": accounted,
             "remaining_reported_tokens": remaining, "usage_states": usage_states, "admission_status": admission,
-            "budget_scope": "ALP_HOME", "budget_policy": policy,
+            "scope": scope, "budget_scope": scope, "budget_policy": policy,
+            **({"project_id": project, "project_active_calls": project_active} if project is not None else {}),
             "max_calls_per_day": cfg["max_calls_per_day"],
-            "limitation": "reported usage admission; executor token or fee cap is not guaranteed"}
+            "limitation": "Counted attempts are not confirmed paid model requests. Reported usage admission does not guarantee an executor token or fee cap."}
+
+
+def admin_budget_status(runtime, *, now=None):
+    """Read the unchanged ALP_HOME budget scope; unknown usage remains reserved."""
+    with _read_snapshot(runtime):
+        policy = admin_budget_policy(runtime)
+        settings = {key: policy["values"][key] for key in
+                    ("max_concurrent_calls", "token_reservation_per_call", "max_reported_tokens_per_day")}
+        return _usage_status(runtime, policy, settings, now=now)
+
+
+def admin_project_budget_status(runtime, project, *, now=None):
+    """Read this project's own ledger and daily cap, summed across every host."""
+    with _read_snapshot(runtime):
+        policy = project_budget_policy(runtime, project)
+        global_policy = admin_budget_policy(runtime)
+        settings = {key: global_policy["values"][key] for key in
+                    ("max_concurrent_calls", "token_reservation_per_call")}
+        return _usage_status(runtime, policy, settings, now=now, project=project)
+
+
+def admin_admission_status(runtime, project, *, now=None):
+    """Both scopes must admit the same call; legacy terminal status names stay stable."""
+    current = time.time() if now is None else now
+    with _read_snapshot(runtime):
+        project_usage = admin_project_budget_status(runtime, project, now=current)
+        global_usage = admin_budget_status(runtime, now=current)
+        if project_usage["admission_status"] != "available":
+            status, scope = project_usage["admission_status"], "project"
+        elif global_usage["admission_status"] != "available":
+            status, scope = global_usage["admission_status"], "ALP_HOME"
+        else:
+            status, scope = "available", None
+        token_remaining = [usage["remaining_reported_tokens"] for usage in (project_usage, global_usage)
+                           if usage["remaining_reported_tokens"] is not None]
+        return dict(global_usage, admission_status=status, blocking_scope=scope,
+                    admission_scope="project_and_ALP_HOME", project_id=project,
+                    remaining_calls=min(project_usage["remaining_calls"], global_usage["remaining_calls"]),
+                    remaining_reported_tokens=min(token_remaining) if token_remaining else None,
+                    project_usage=project_usage, global_usage=global_usage)

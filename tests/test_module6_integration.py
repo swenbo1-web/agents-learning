@@ -114,6 +114,9 @@ class Module6IntegrationTests(unittest.TestCase):
         self.r.task_update(self.p, "other", "compilerprobe")
         other = self.r.feedback(self.p, "other", "compilerprobe", category="operation")
         with patch("agent_learning.admin.subprocess.Popen", side_effect=fake_reviewer("skip")) as model:
+            self.assertEqual(admin_once(self.r, self.p, other["id"])["status"], "executor_not_ready")
+            self.assertEqual(model.call_count, 0)
+            self.r.db.execute("UPDATE admin_executor_failures SET next_try=0")
             self.assertEqual(admin_once(self.r, self.p, other["id"])["status"], "review_required")
             self.assertEqual(model.call_count, 0)
             retry_call(self.r, self.p, failed["call_id"], "reviewed failure; allow one retry")
@@ -185,7 +188,7 @@ class Module6IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Runtime(home)
         with contextlib.closing(Runtime(home)) as recovered:
-            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 17)
+            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 18)
 
     def test_duplicate_origin_new_evidence_invalidates_without_losing_history(self):
         original = self.problem()

@@ -74,8 +74,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16, 17}:
-        raise ContractError("browser requires database schema 11..17; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16, 17, 18}:
+        raise ContractError("browser requires database schema 11..18; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -148,11 +148,11 @@ class BrowserServer(ThreadingHTTPServer):
         host_scope_key(runtime_host, runtime_instance)
         with contextlib.closing(_connection(self.database)) as db:
             _schema(db)
-            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16, 17}
+            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16, 17, 18}
                            or self.database.name != "runtime.sqlite3"):
-                raise ContractError("review mode requires an existing schema 15..17 runtime database")
-            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] not in {16, 17} or self.database.name != "runtime.sqlite3"):
-                raise ContractError("administrator control requires an explicitly upgraded schema 16/17 runtime database")
+                raise ContractError("review mode requires an existing schema 15..18 runtime database")
+            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] not in {16, 17, 18} or self.database.name != "runtime.sqlite3"):
+                raise ContractError("administrator control requires an explicitly upgraded schema 16..18 runtime database")
             if not db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
                 raise ContractError("unknown browser project")
         self.project = project

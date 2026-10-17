@@ -70,11 +70,11 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
         "ORDER BY created,id LIMIT 1", (project,)).fetchone()
     if active:
         return {"status": "waiting_for_review", "call_id": active["id"], "active_state": active["state"]}
-    from .admin_usage import admin_budget_status, reserve_usage
+    from .admin_usage import admin_admission_status, reserve_usage
     current = time.time()
-    budget = admin_budget_status(runtime, now=current)
+    budget = admin_admission_status(runtime, project, now=current)
     if budget["admission_status"] != "available":
-        return {"status": budget["admission_status"], "budget": budget}
+        return {"status": budget["admission_status"], "blocking_scope": budget["blocking_scope"], "budget": budget}
     day = budget["utc_day"]
     call_id, owner = str(uuid.uuid4()), str(uuid.uuid4())
     lease_until = current + timeout + 30

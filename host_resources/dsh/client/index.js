@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
         admin: "自动管理员",
         adminOn: "已开启",
         adminOff: "已关闭",
+        attempts: "项目今日审核尝试", completed: "有效审核结论", failedAttempts: "失败尝试", remaining: "项目剩余额度", globalCalls: "所有项目今日合计尝试", globalRemaining: "全局保护剩余", projectUnavailable: "项目统计暂不可用，请更新运行端", scopeNote: "项目额度独立、同项目各宿主共用；另受全局保护限制", reset: "按 UTC 日统计；本地重置", unknown: "未知",
         freqTitle: "管理员调用频率方案（一键切换）",
         freqOff: "关闭",
         freqMinimal: "按需 (5/天)",
@@ -54,6 +55,7 @@ window.__ModuleLoader__.load({
         admin: "Administrator",
         adminOn: "Enabled",
         adminOff: "Disabled",
+        attempts: "Project attempts today", completed: "Valid review results", failedAttempts: "Failed attempts", remaining: "Project allowance left", globalCalls: "All-project attempts today", globalRemaining: "Global protection left", projectUnavailable: "Project usage unavailable; update the runtime", scopeNote: "Independent project allowance across hosts; global protection also applies", reset: "UTC day; local reset", unknown: "Unknown",
         freqTitle: "Administrator Frequency Preset",
         freqOff: "Off",
         freqMinimal: "Minimal (5/d)",
@@ -148,7 +150,7 @@ window.__ModuleLoader__.load({
 
     function currentPresetOf(summary) {
       if (!summary || !summary.admin_admission_enabled) return "off";
-      var daily = summary.max_calls_per_day;
+      var daily = summary.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage.max_calls_per_day : null;
       if (daily === 5) return "minimal";
       if (daily === 15) return "light";
       if (daily === 100) return "balanced";
@@ -257,6 +259,9 @@ window.__ModuleLoader__.load({
           );
         };
 
+        var projectUsage = summary?.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage : null;
+        var globalUsage = summary?.global_usage || {};
+        var display = function (value) { return value ?? t.unknown; };
         var activePreset = currentPresetOf(summary);
         var presetChips = [
           ["off", t.freqOff],
@@ -338,19 +343,24 @@ window.__ModuleLoader__.load({
                 statCell(t.pendingCases, summary.pending_problems ?? 0),
                 statCell(
                   t.admin,
-                  (summary.admin_admission_enabled ? t.adminOn : t.adminOff) +
-                    " (" +
-                    (summary.remaining_calls ?? "-") +
-                    "/" +
-                    (summary.max_calls_per_day ?? "-") +
-                    ")"
-                )
+                  summary.admin_admission_enabled ? t.adminOn : t.adminOff
+                ),
+                statCell(t.attempts, display(projectUsage?.counted_attempts)),
+                statCell(t.completed, display(projectUsage?.completed_reviews)),
+                statCell(t.failedAttempts, display(projectUsage?.failed_attempts)),
+                statCell(t.remaining, projectUsage ? display(projectUsage.remaining_calls) + "/" + display(projectUsage.max_calls_per_day) : t.unknown)
               )
             : h(
                 "div",
                 { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.8))" } },
                 t.loading
               ),
+          summary ? h("div", { style: { fontSize: "11.5px", opacity: 0.85, whiteSpace: "pre-wrap" } },
+            (projectUsage ? t.scopeNote : t.projectUnavailable) + "\n" +
+            t.globalCalls + ": " + display(globalUsage.counted_attempts ?? globalUsage.used_calls) + " · " +
+            t.globalRemaining + ": " + display(globalUsage.remaining_calls) +
+            (projectUsage?.next_reset_at ? "\n" + t.reset + ": " + new Date(projectUsage.next_reset_at * 1000).toLocaleString(activeLocale || undefined) : "") +
+            (summary.admission?.blocking_scope ? "\n" + summary.admission.blocking_scope : "")) : null,
           h(
             "div",
             { style: { display: "flex", flexDirection: "column", gap: "5px" } },
@@ -371,8 +381,9 @@ window.__ModuleLoader__.load({
                   {
                     key: key,
                     type: "button",
-                    disabled: busy,
+                    disabled: busy || !projectUsage,
                     onClick: function () {
+                      if (!projectUsage) return;
                       trigger(
                         "set_admin_preset",
                         t.opening,

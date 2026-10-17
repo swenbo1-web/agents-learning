@@ -375,9 +375,10 @@ class AdminRoutingMixin:
         provider = self.host if policy["provider"] == "host" else policy["provider"]
         configuration = validate_admin_routing_config(self.config["admin"])
         command = policy["command"] or _default_provider_command(configuration, provider)
-        from .admin_usage import admin_budget_config
+        from .admin_usage import admin_budget_config, project_budget_policy
         from .admin_control import admission_enabled
         result = json.loads(_encode(admin_budget_config(self)))
+        result.update(project_budget_policy(self, project)["values"])
         result.update(enabled=policy["enabled"] and admission_enabled(self, project), command=validate_executor_command(command), provider=provider,
                       model_mode=policy["model_mode"], model=policy["model"])
         # 全局排队／预算配置不能因无会话的 current 歧义而读取失败；实际认领

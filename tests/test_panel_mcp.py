@@ -11,13 +11,13 @@ from agent_learning.panel_ui import MIME_TYPE, RESOURCE_URI, UI_EXTENSION
 from agent_learning.runtime import ContractError
 
 
-EXPECTED = {key: 0 for key in ("expected_policy_version", "expected_budget_version",
+EXPECTED = {key: 0 for key in ("expected_policy_version", "expected_project_budget_version",
     "expected_settings_version", "expected_session_epoch", "expected_governance_epoch")}
 SUMMARY = {"project_id": "project", "project_name": "Project", "workspace": "project-path",
            "host_scope": "codex:default", "admin_admission_enabled": False,
            "model_mode": "first", "model": None, "remaining_calls": 100, "max_calls_per_day": 100,
            "counts": {"active": 2, "work_memory": 3, "pending_problems": 4, "candidates": 5},
-           "budget_scope": "ALP_HOME", "reason": "disabled", "expected": EXPECTED}
+           "budget_scope": "project", "reason": "disabled", "expected": EXPECTED}
 
 
 class FakeRuntime:
@@ -106,6 +106,9 @@ class PanelMCPTests(unittest.TestCase):
         self.assertEqual(tools["learning_panel"]["_meta"]["ui"]["resourceUri"], RESOURCE_URI)
         action = tools["learning_panel_action"]
         self.assertEqual(action["_meta"]["ui"], {"visibility": ["app"]})
+        expected = action["inputSchema"]["properties"]["expected"]
+        self.assertEqual(set(expected["required"]), set(EXPECTED))
+        self.assertNotIn("expected_budget_version", expected["properties"])
         for name, tool in tools.items():
             if name not in {"learning_panel", "learning_panel_action"}:
                 self.assertNotIn("_meta", tool)

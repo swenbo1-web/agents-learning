@@ -25,6 +25,8 @@ class RoutingRuntime(AdminRoutingMixin, HostSessionMixin):
             self.config["admin"].update(copy.deepcopy(config))
         self.db = sqlite3.connect(database, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY)")
+        self.db.execute("INSERT OR IGNORE INTO projects VALUES('project-one')")
         self.db.execute("CREATE TABLE IF NOT EXISTS host_state(id INTEGER PRIMARY KEY,epoch INTEGER NOT NULL)")
         self.db.execute("INSERT OR IGNORE INTO host_state VALUES(1,0)")
         self.db.execute("CREATE TABLE IF NOT EXISTS host_scopes(scope TEXT PRIMARY KEY,epoch INTEGER NOT NULL)")

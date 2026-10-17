@@ -18,19 +18,14 @@ import time
 from urllib.parse import unquote, urlsplit
 
 from .runtime import ContractError, digest, encode
+from .admin_presets import PRESETS
 
 
 PANEL_SECONDS = 300
 MAX_PANELS = 64
 MAX_REQUESTS = 128
 MAX_PANEL_MESSAGE = 32768
-PRESETS = {
-    "minimal": {"max_calls_per_day": 5, "max_calls_per_batch": 1, "max_batch_seconds": 90, "max_run_seconds": 180},
-    "light": {"max_calls_per_day": 15, "max_calls_per_batch": 2, "max_batch_seconds": 120, "max_run_seconds": 300},
-    "balanced": {"max_calls_per_day": 100, "max_calls_per_batch": 5, "max_batch_seconds": 180, "max_run_seconds": 600},
-    "active": {"max_calls_per_day": 300, "max_calls_per_batch": 10, "max_batch_seconds": 300, "max_run_seconds": 1200},
-}
-EXPECTED_FIELDS = {"expected_policy_version", "expected_budget_version", "expected_settings_version",
+EXPECTED_FIELDS = {"expected_policy_version", "expected_project_budget_version", "expected_settings_version",
                    "expected_session_epoch", "expected_governance_epoch"}
 ACTIONS = {"status", "open_browser", "open_review", "set_admin_preset", "archive_history"}
 
@@ -152,14 +147,15 @@ class PanelControl:
     def _summary(self):
         from .admin_control import control_status
         state = control_status(self.runtime, self.project)
-        routing, usage = state["routing"], state["usage"]
+        routing = state["routing"]
+        usage = state.get("project_usage") or {}
         executor = routing.get("executor") or {}
         policy = state["policy"]
         def count(table, where=""):
             return self.runtime.db.execute("SELECT COUNT(*) FROM " + table + " WHERE project=?" + where,
                                            (self.project,)).fetchone()[0]
         expected = {"expected_policy_version": policy["policy_version"],
-                    "expected_budget_version": state["budget_policy"]["version"],
+                    "expected_project_budget_version": state["project_budget_policy"]["version"],
                     "expected_settings_version": state["settings_version"],
                     "expected_session_epoch": state["session_epoch"],
                     "expected_governance_epoch": state["governance_epoch"]}
@@ -168,8 +164,13 @@ class PanelControl:
                 "host_scope": state["host_scope"], "admin_admission_enabled": state["enabled"],
                 "model_mode": policy["model_mode"], "model": executor.get("model"),
                 "remaining_calls": usage.get("remaining_calls"), "max_calls_per_day": usage.get("max_calls_per_day"),
-                "budget_scope": "ALP_HOME", "reason": state.get("diagnostic", {}).get("reason")
-                    or routing.get("reason") or usage.get("admission_status"),
+                "budget_scope": "project", "project_usage": state.get("project_usage"),
+                "global_usage": state.get("global_usage"),
+                "project_budget_policy": state.get("project_budget_policy"),
+                "global_budget_policy": state.get("global_budget_policy"),
+                "admission": state.get("admission"),
+                "reason": state.get("diagnostic", {}).get("reason")
+                    or routing.get("reason") or state.get("admission", {}).get("admission_status"),
                 "admin_phase": state.get("diagnostic", {}).get("phase", "idle"),
                 "work_summary_enabled": state.get("work_summary", {}).get("enabled", False),
                 "counts": {"active": count("active"), "work_memory": count("work_memories"),
@@ -291,11 +292,11 @@ class PanelControl:
         elif action == "set_admin_preset":
             from .admin_control import apply_control, control_status
             state = control_status(self.runtime, self.project)
-            limits = PRESETS.get(preset) or {key: state["budget_policy"]["values"][key] for key in next(iter(PRESETS.values()))}
+            limits = PRESETS.get(preset) or {key: state["project_budget_policy"]["values"][key] for key in next(iter(PRESETS.values()))}
             policy = state["policy"]
             body = {"request_id": request_id, **expected, "enabled": preset != "off",
                     "model_mode": policy["model_mode"], "model": policy["model"] if policy["model_mode"] == "fixed" else "",
-                    "limits": dict(limits), "start": preset != "off"}
+                    "project_limits": dict(limits), "start": preset != "off"}
             apply_control(self.runtime, self.project, body)
             result["preset"] = preset
         else:

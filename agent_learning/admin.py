@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,18 @@ import uuid
 from .mcp import CANDIDATE, validate
 from .runtime import ContractError, clean, digest, encode
 from .review_packet import PACKET_FORMAT, REVIEW_PREFIX as _REVIEW_PREFIX, review_instruction
+
+
+class ReviewStateChanged(ContractError):
+    """A valid response lost its frozen local context; not an executor failure."""
+
+
+@contextlib.contextmanager
+def _review_state_guard():
+    try:
+        yield
+    except ContractError as exc:
+        raise ReviewStateChanged("administrator review context changed before commit") from exc
 
 
 def _strict_schema(contract):
@@ -230,7 +243,7 @@ def _usage(log_path, elapsed):
             "log_tail_truncated": truncated}
 
 
-def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None):
+def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *, execution=None):
     from .admin_lifecycle import UNKNOWN_STATES, finish_call
     from .admin_providers import antigravity_usage
     elapsed = time.monotonic() - started_at
@@ -240,6 +253,10 @@ def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None):
     if provider_plan:
         usage["executor"] = {key: provider_plan.get(key) for key in
                              ("provider", "model", "model_source", "model_mode", "host", "host_scope", "policy_version", "executor_signature")}
+    if execution is not None:
+        # Only adapter-owned scalar observations survive temporary log cleanup.
+        # Input submission does not establish model receipt or paid inference.
+        usage["execution"] = dict(execution)
     summary = runtime.db.execute("SELECT source_digest FROM work_summary_links WHERE call_id=?", (call_id,)).fetchone()
     if summary:
         usage.update(purpose="work_summary", work_source_digest=summary["source_digest"])
@@ -471,34 +488,35 @@ def _accept_response(runtime, project, reserved, response):
         raise ContractError("invalid history candidate batch")
     if history_job_id and len(encode(response).encode("utf-8")) > 40000:
         raise ContractError("history response exceeds total output budget")
-    validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
-    runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
-                                           require_enabled=reserved.get("history_job_id") is None)
-    if reserved.get("history_job_id"):
-        runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
-                              require_review=True, expected_epoch=reserved["host_epoch"])
-    summary_context = runtime.work_summary_guard(project, packet["problem"]["id"])
-    if bool(summary_context) != bool(reserved.get("summary_context")):
-        raise ContractError("administrator review purpose changed")
-    if summary_context and summary_context["source_digest"] != reserved["summary_context"]["source_digest"]:
-        raise ContractError("work summary source identity changed")
-    revision = runtime.db.execute("SELECT revision FROM problems WHERE project=? AND id=?",
-                                  (project, packet["problem"]["id"])).fetchone()
-    if not revision or revision[0] != packet["problem"]["revision"]:
-        raise ContractError("reviewed problem changed")
-    current_packet = (_history_packet(runtime, project, packet["problem"]["id"], history_job_id) if history_job_id else
-                      runtime.work_summary_packet(project, packet["problem"]["id"],
-                          max_chars=runtime.admin_effective_config(project)["max_input_chars"] - 800) if summary_context else
-                      runtime.review_packet(project, packet["problem"]["id"]))
-    if summary_context:
-        current_packet["purpose"] = "work_summary"
-    review_cfg = _review_configuration(runtime.admin_effective_config(project), reserved["provider_plan"])
-    if history_job_id:
-        review_cfg.update(review_purpose="history_review", history_instruction_version=1)
-    if summary_context:
-        review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
-    if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
-        raise ContractError("review evidence or comparison context changed")
+    with _review_state_guard():
+        validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+        runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
+                                               require_enabled=reserved.get("history_job_id") is None)
+        if reserved.get("history_job_id"):
+            runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
+                                  require_review=True, expected_epoch=reserved["host_epoch"])
+        summary_context = runtime.work_summary_guard(project, packet["problem"]["id"])
+        if bool(summary_context) != bool(reserved.get("summary_context")):
+            raise ContractError("administrator review purpose changed")
+        if summary_context and summary_context["source_digest"] != reserved["summary_context"]["source_digest"]:
+            raise ContractError("work summary source identity changed")
+        revision = runtime.db.execute("SELECT revision FROM problems WHERE project=? AND id=?",
+                                      (project, packet["problem"]["id"])).fetchone()
+        if not revision or revision[0] != packet["problem"]["revision"]:
+            raise ContractError("reviewed problem changed")
+        current_packet = (_history_packet(runtime, project, packet["problem"]["id"], history_job_id) if history_job_id else
+                          runtime.work_summary_packet(project, packet["problem"]["id"],
+                              max_chars=runtime.admin_effective_config(project)["max_input_chars"] - 800) if summary_context else
+                          runtime.review_packet(project, packet["problem"]["id"]))
+        if summary_context:
+            current_packet["purpose"] = "work_summary"
+        review_cfg = _review_configuration(runtime.admin_effective_config(project), reserved["provider_plan"])
+        if history_job_id:
+            review_cfg.update(review_purpose="history_review", history_instruction_version=1)
+        if summary_context:
+            review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
+        if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
+            raise ContractError("review evidence or comparison context changed")
     result = {"status": response["decision"], "reason": clean(response["reason"])[:1000], "call_id": call_id,
               "problem_id": packet["problem"]["id"], "missing_evidence": missing}
     if summary_context:
@@ -659,16 +677,17 @@ def _accept_response(runtime, project, reserved, response):
                            (project, packet["problem"]["id"], packet["problem"]["revision"]))
     from .admin_queue import scan_signature
     remember_check(runtime, project, reserved["selected"], scan_signature(runtime, project))
-    # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
-    validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
-    runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
-                                           require_enabled=reserved.get("history_job_id") is None)
-    if reserved.get("history_job_id"):
-        runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
-                              require_review=True, expected_epoch=reserved["host_epoch"])
-    if summary_context:
-        runtime.work_summary_guard(project, packet["problem"]["id"],
-                                   accepted_call_id=call_id if response["decision"] in {"candidate", "skip", "needs_evidence"} else None)
+    with _review_state_guard():
+        # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
+        validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+        runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
+                                               require_enabled=reserved.get("history_job_id") is None)
+        if reserved.get("history_job_id"):
+            runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
+                                  require_review=True, expected_epoch=reserved["host_epoch"])
+        if summary_context:
+            runtime.work_summary_guard(project, packet["problem"]["id"],
+                                       accepted_call_id=call_id if response["decision"] in {"candidate", "skip", "needs_evidence"} else None)
     return result
 
 
@@ -698,13 +717,16 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
     provider_plan = reserved["provider_plan"]
     context = {"scanned_count": reserved["scanned_count"],
                **({"skipped_problem_ids": reserved["skipped_problem_ids"]} if reserved["skipped_problem_ids"] else {})}
-    log_path, temporary, output_thread = None, None, None
+    log_path, temporary, output_thread, output_state = None, None, None, None
+    execution_state = {"phase": "capability", "input_submission_attempted": False,
+                       "terminal_observed": False}
     try:
         capability = executor_capability(provider_plan)
         if not capability["ready"]:
             record_executor_failure(runtime, project, provider_plan, capability["reason"])
             usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan)
             return {"status": "not_started", "reason": capability["reason"], "call_id": call_id, "usage": usage, **context}
+        execution_state["phase"] = "build_execution"
         temporary = tempfile.TemporaryDirectory(prefix="agent-learning-review-")
         temp = temporary.name
         directory = Path(temp)
@@ -762,8 +784,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 record_executor_failure(runtime, project, provider_plan, detail["reason"], detail)
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **detail, **context}
             mark_started(runtime, call_id, reserved["owner"], getattr(process, "pid", None))
-            clear_executor_failure(runtime, project, provider_plan)
             record_dispatch_diagnostic(runtime, project, "model_started")
+            execution_state["phase"] = "initialization" if stream_mode else "execution"
             if stream_mode:
                 stdout_stream, process.stdout = process.stdout, None
                 output_thread, output_state = collect_antigravity_stream(stdout_stream, log_path, process.kill,
@@ -776,32 +798,65 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                     if not output_state["init_safe"] or output_state["error"]:
                         raise ContractError("administrator did not confirm a tool-free initialization")
                     output_state["mark_input_sent"]()
+                execution_state.update(phase="execution", input_submission_attempted=True)
                 process.communicate(execution["stdin_data"], timeout=max(0.001, process_deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
                 if output_thread:
                     output_thread.join(timeout=5)
-                usage = _finish(runtime, call_id, "timeout_unknown", log_path, started_at, provider_plan)
+                execution_state["reason_code"] = "executor_timeout"
+                if output_state is not None:
+                    execution_state["terminal_observed"] = bool(output_state.get("terminal"))
+                record_executor_failure(runtime, project, provider_plan, "executor_timeout", execution_state)
+                usage = _finish(runtime, call_id, "timeout_unknown", log_path, started_at, provider_plan,
+                                execution=execution_state)
                 return {"status": runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0],
                         "call_id": call_id, "usage": usage, **context}
             if output_thread:
+                execution_state["phase"] = "output_collection"
                 output_thread.join(timeout=5)
+                execution_state["terminal_observed"] = bool(output_state.get("terminal"))
                 if output_thread.is_alive() or output_state["error"]:
                     raise ContractError("administrator output could not be collected completely")
+        execution_state["phase"] = "process_exit"
+        if isinstance(process.returncode, int) and not isinstance(process.returncode, bool):
+            execution_state["returncode"] = process.returncode
         if process.returncode != 0:
             raise ContractError("administrator produced no usable response")
+        execution_state["phase"] = "response_validation"
         response = read_response(provider_plan["provider"], output, log_path)
+        execution_state.update(phase="decision_commit", terminal_observed=True)
         with runtime.transaction():
             result = _accept_response(runtime, project, reserved, response)
-            result["usage"] = _finish(runtime, call_id, response["decision"], log_path, started_at, provider_plan)
+            result["usage"] = _finish(runtime, call_id, response["decision"], log_path, started_at, provider_plan,
+                                      execution=execution_state)
             actual = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
             if actual != response["decision"]:
                 # 同一事务回滚候选、治理提议、回执和错误终态；异常路径补真实未知结果。
                 raise ContractError("administrator decision could not commit with its call state")
+            # A spawned process is not a healthy executor. Reset accumulated
+            # failures only with the committed, validated administrator decision.
+            clear_executor_failure(runtime, project, provider_plan)
         return dict(result, **context)
     except (OSError, ValueError, TypeError, ContractError) as exc:
-        usage = _finish(runtime, call_id, "not_started" if process is None else "failed", log_path, started_at, provider_plan)
+        execution_state["reason_code"] = {
+            "capability": "executor_capability_failed", "build_execution": "executor_preparation_failed",
+            "initialization": "executor_initialization_failed", "execution": "executor_execution_failed",
+            "output_collection": "executor_output_failed", "process_exit": "executor_nonzero_exit",
+            "response_validation": "executor_response_invalid", "decision_commit": "executor_decision_uncommitted",
+        }[execution_state["phase"]]
+        execution_state["error_type"] = type(exc).__name__
+        if output_state is not None:
+            execution_state["terminal_observed"] = bool(output_state.get("terminal"))
+        if process is not None and isinstance(process.returncode, int) and not isinstance(process.returncode, bool):
+            execution_state["returncode"] = process.returncode
+        if isinstance(exc, ReviewStateChanged):
+            execution_state["reason_code"] = "review_context_changed"
+        else:
+            record_executor_failure(runtime, project, provider_plan, execution_state["reason_code"], execution_state)
+        usage = _finish(runtime, call_id, "not_started" if process is None else "failed", log_path, started_at, provider_plan,
+                        execution=execution_state)
         state = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
         return {"status": state, "error_type": type(exc).__name__, "call_id": call_id, "usage": usage, **context}
     finally:
@@ -901,7 +956,7 @@ def admin_drain(runtime, project, *, dispatch_token=None, expected_epoch=None, m
     """Drain authorized daily work in small batches within one finite dispatch lease."""
     import math
     from .admin_queue import claim_dispatch, release_dispatch, claim_dispatch_worker, dispatch_diagnostic
-    from .admin_usage import admin_budget_status
+    from .admin_usage import admin_admission_status
 
     started = time.monotonic()
     token = dispatch_token
@@ -921,7 +976,7 @@ def admin_drain(runtime, project, *, dispatch_token=None, expected_epoch=None, m
         if token is None:
             token = claim_dispatch(runtime, project, expected_epoch=epoch)
             if token is None:
-                budget = admin_budget_status(runtime)
+                budget = admin_admission_status(runtime, project)
                 diagnostic = dispatch_diagnostic(runtime, project)
                 return {"status": budget["admission_status"] if budget["admission_status"] != "available" else "idle", "reason": diagnostic["reason"],
                         "batches": 0, "invocations": 0, "items": []}

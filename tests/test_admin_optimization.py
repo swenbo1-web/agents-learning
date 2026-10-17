@@ -348,4 +348,9 @@ class AdminOptimizationTests(unittest.TestCase):
         self.assertEqual(first["usage"]["token_usage"], [])
         self.assertEqual(admin_once(self.runtime, self.project)["status"], "idle")
         self.problem(summary="Another issue")
-        self.assertEqual(admin_once(self.runtime, self.project)["status"], "budget_exhausted")
+        # Executor health is checked before reserving a different case; the
+        # timeout's used allowance is still retained independently.
+        self.assertEqual(admin_once(self.runtime, self.project)["status"], "executor_not_ready")
+        from agent_learning.admin_usage import admin_admission_status
+        self.assertEqual(admin_admission_status(self.runtime, self.project)["admission_status"], "budget_exhausted")
+        self.assertEqual(len(self.calls()), 1)

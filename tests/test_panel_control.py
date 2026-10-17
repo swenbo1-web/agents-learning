@@ -184,7 +184,7 @@ class PanelControlTests(unittest.TestCase):
                 self.action(opened, "set_admin_preset", preset="light", request_id="not-confirmed", **extra)
         self.assertEqual(self.runtime.db.total_changes, before)
 
-    def test_preset_uses_shared_budget_and_exact_replay_launches_once(self):
+    def test_preset_uses_project_budget_and_exact_replay_launches_once(self):
         self.runtime.config["admin"]["command"] = [sys.executable]
         self.runtime.admin_observe_model(self.project, "current-chat", "observed-model")
         self.runtime.task_update(self.project, "current-chat", "project work")
@@ -199,7 +199,8 @@ class PanelControlTests(unittest.TestCase):
         self.assertEqual(first, repeated)
         self.assertTrue(first["summary"]["admin_admission_enabled"])
         self.assertEqual(first["summary"]["max_calls_per_day"], 15)
-        self.assertEqual(first["summary"]["budget_scope"], "ALP_HOME")
+        self.assertEqual(first["summary"]["budget_scope"], "project")
+        self.assertEqual(first["summary"]["global_usage"]["max_calls_per_day"], 100)
         with self.assertRaises(ContractError):
             self.action(opened, "set_admin_preset", **dict(args, preset="active"))
 

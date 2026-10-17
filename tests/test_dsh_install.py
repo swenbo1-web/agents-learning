@@ -167,7 +167,10 @@ const statusData = {
     executor: {model_mode: 'fixed', model: 'resolved-model'},
     ready: false, reason: 'synthetic_route_blocked',
   },
-  admin_budget: {remaining_calls: 7, admission_status: 'concurrency_limited'},
+  admin_budget: {remaining_calls: 999, admission_status: 'available'},
+  project_usage: {scope:'project', project_id:'synthetic-project', counted_attempts:0, remaining_calls:7},
+  global_usage: {counted_attempts:32, remaining_calls:68},
+  admission: {admission_status:'concurrency_limited'},
   history_import: {body: historyMarker.repeat(2000)},
   work_memory: {evidence: historyMarker.repeat(2000)},
 };
@@ -231,7 +234,7 @@ console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.in
             self.assertLess(len(output["text"]), 2000)
             for expected in ("synthetic-project", "synthetic-knowledge-home", "dsh:synthetic-host",
                              "已关闭", "fixed", "resolved-model", "7", "synthetic_route_blocked",
-                             "concurrency_limited", "不能据此确认 Hooks 已连接"):
+                             "concurrency_limited", "所有项目合计尝试：32", "项目剩余审核额度：7", "不能据此确认 Hooks 已连接"):
                 self.assertIn(expected, output["text"])
             self.assertNotIn("configured-model", output["text"])
             self.assertNotIn("PRIVATE_HISTORY_SHOULD_NOT_RENDER", output["text"])

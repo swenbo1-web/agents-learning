@@ -20,6 +20,7 @@ SCHEDULER_DEFAULTS = {
     "max_sync_items": 20, "max_sync_seconds": 30,
 }
 KINDS = ("admin", "release", "sync")
+_ADMIN_RETRY_STOPS = {"failed", "not_started", "timeout_unknown", "account_changed_unknown", "orphaned_unknown"}
 
 
 def validate_scheduler_config(config):
@@ -122,7 +123,7 @@ class SchedulerMixin:
 
     def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
         from .admin_queue import eligible_query, scan_signature, ready_executor, dispatch_diagnostic
-        from .admin_usage import admin_budget_status
+        from .admin_usage import admin_admission_status
         from .runtime import digest
         with self._scheduler_host_scope(target_scope):
             signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
@@ -158,7 +159,7 @@ class SchedulerMixin:
             if not ready_executor(self, project, query, args):
                 diagnostic = dispatch_diagnostic(self, project)
                 return signature, "waiting", diagnostic.get("next_due"), diagnostic["reason"]
-            budget = admin_budget_status(self)
+            budget = admin_admission_status(self, project)
             admission = budget["admission_status"]
             if admission != "available":
                 due = now + cfg["poll_seconds"] if admission == "concurrency_limited" else budget["next_reset_at"]
@@ -238,9 +239,15 @@ class SchedulerMixin:
                       self._scheduler_release_state(project, cfg, prior) if kind == "release" else
                       self._scheduler_sync_state(project, cfg))
             signature, state, due, reason = result
+            # A failed administrator batch remains cooled down when other case
+            # material changes. Otherwise every prompt can select a fresh case
+            # against the same unhealthy executor before its retry deadline.
+            prior_summary = json.loads(prior["summary"]) if prior and kind == "admin" else {}
+            execution_failed = prior_summary.get("stop_reason") in _ADMIN_RETRY_STOPS
             # 未变化的启动失败采用有限退避；材料变化允许提前重新检查。
-            if state != "disabled" and prior and prior["signature"] == signature and prior["wait_reason"] == "retry_backoff" and prior["next_due"] is not None and prior["next_due"] > now:
-                state, due, reason = "waiting", prior["next_due"], "retry_backoff"
+            if (state != "disabled" and prior and (prior["signature"] == signature or execution_failed)
+                    and prior["wait_reason"] == "retry_backoff" and prior["next_due"] is not None and prior["next_due"] > now):
+                state, due, reason = "waiting", max(prior["next_due"], due or 0), "retry_backoff"
             elif state == "ready" and prior and prior["signature"] == signature and prior["state"] == "ready" and prior["next_due"] is not None and prior["next_due"] > now:
                 # 单批剩余工作等待下次轮询；无增量的重复 Hook 不提前耗尽批次。
                 due = prior["next_due"]
@@ -384,9 +391,15 @@ class SchedulerMixin:
                 self.db.execute("UPDATE scheduler_jobs SET state='idle',owner=NULL,lease_until=NULL,last_run=?,updated=?,summary=?,wait_reason='' "
                                 "WHERE project=? AND kind=? AND owner=?", (now, now, encode(summary), identifier, kind, owner))
                 self._scheduler_refresh(identifier, cfg)
-                if result.get("status") in {"failed", "not_started", "time_exhausted"} or result.get("stop_reason") == "not_started":
+                if (result.get("status") in {"failed", "not_started", "time_exhausted"}
+                        or kind == "admin" and result.get("stop_reason") in _ADMIN_RETRY_STOPS):
+                    refreshed = self.db.execute("SELECT next_due FROM scheduler_jobs WHERE project=? AND kind=?",
+                                                (identifier, kind)).fetchone()
+                    # Do not shorten an executor circuit or a budget reset wait
+                    # to the scheduler's ordinary retry interval.
+                    retry_due = max(now + cfg["retry_seconds"], refreshed["next_due"] or 0)
                     self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='retry_backoff' WHERE project=? AND kind=?",
-                                    (now + cfg["retry_seconds"], identifier, kind))
+                                     (retry_due, identifier, kind))
                 elif kind == "release":
                     # 输出完成后的新变化不能被本次成功覆盖；保留执行前签名。
                     self.db.execute("UPDATE scheduler_jobs SET state='idle',signature=?,next_due=NULL,wait_reason='no_release_increment' WHERE project=? AND kind=?",

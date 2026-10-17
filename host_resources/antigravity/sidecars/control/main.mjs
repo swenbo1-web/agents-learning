@@ -10,7 +10,7 @@ const MAX_BODY = 16384;
 const MAX_OUTPUT = 131072;
 const ACTIONS = new Set(["status", "open_browser", "open_review", "set_admin_preset", "archive_history"]);
 const PRESETS = new Set(["off", "minimal", "light", "balanced", "active"]);
-const EXPECTED = new Set(["expected_policy_version", "expected_budget_version", "expected_settings_version", "expected_session_epoch", "expected_governance_epoch"]);
+const EXPECTED = new Set(["expected_policy_version", "expected_project_budget_version", "expected_settings_version", "expected_session_epoch", "expected_governance_epoch"]);
 
 function plain(value) {
   return value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;

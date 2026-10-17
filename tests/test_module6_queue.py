@@ -261,6 +261,15 @@ class Module6QueueTests(unittest.TestCase):
             self.assertEqual(admin_once(self.r, self.p)["status"], "idle")
         popen.assert_not_called()
         retry_call(self.r, self.p, failed["call_id"], "Explicit controlled retry")
+        # Re-authorizing this case does not establish executor recovery or
+        # bypass the shared executor cooldown for other cases.
+        with patch("agent_learning.admin.subprocess.Popen") as popen:
+            cooling = admin_once(self.r, self.p, problem["id"])
+        self.assertEqual(cooling["status"], "executor_not_ready")
+        self.assertEqual(cooling["reason"], "executor_backoff")
+        popen.assert_not_called()
+        self.assertEqual(self.call_count(), 1)
+        self.r.db.execute("UPDATE admin_executor_failures SET next_try=0")
         with patch("agent_learning.admin.subprocess.Popen", fake_reviewer()):
             retried = admin_once(self.r, self.p, problem["id"])
         self.assertEqual(retried["status"], "skip")

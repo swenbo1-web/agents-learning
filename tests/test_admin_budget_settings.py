@@ -9,7 +9,7 @@ from agent_learning.admin import (_fingerprint, _review_configuration, admin_bat
 from agent_learning.admin_decisions import review_signature
 from agent_learning.admin_lifecycle import claim_call, finish_call
 from agent_learning.admin_usage import (admin_budget_config, admin_budget_policy, admin_budget_status,
-                                        configure_admin_budget)
+                                        configure_admin_budget, configure_project_budget, project_budget_policy)
 from agent_learning.runtime import ContractError, Runtime
 
 
@@ -27,6 +27,11 @@ class AdminBudgetSettingsTests(unittest.TestCase):
     def configure(self, **values):
         return configure_admin_budget(self.r, values, expected_version=admin_budget_policy(self.r)["version"],
                                       expected_epoch=self.r.session_epoch())
+
+    def configure_project(self, **values):
+        return configure_project_budget(self.r, self.p, values,
+                                        expected_version=project_budget_policy(self.r, self.p)["version"],
+                                        expected_epoch=self.r.session_epoch())
 
     def enable(self):
         self.r.config["admin"]["enabled"] = True
@@ -134,10 +139,10 @@ class AdminBudgetSettingsTests(unittest.TestCase):
 
     def test_batch_stops_at_updated_persistent_call_limit(self):
         self.enable()
-        self.configure(max_calls_per_batch=5)
+        self.configure_project(max_calls_per_batch=5)
 
         def reviewed(*args, **kwargs):
-            self.configure(max_calls_per_batch=1)
+            self.configure_project(max_calls_per_batch=1)
             return {"status": "skip", "call_id": "fake-only", "usage": {}, "scanned_count": 1}
 
         with patch("agent_learning.admin.admin_once", side_effect=reviewed) as review:
@@ -148,7 +153,7 @@ class AdminBudgetSettingsTests(unittest.TestCase):
 
     def test_unknown_at_call_limit_retains_unknown_stop_reason(self):
         self.enable()
-        self.configure(max_calls_per_batch=1)
+        self.configure_project(max_calls_per_batch=1)
         with patch("agent_learning.admin.admin_once", return_value={
                 "status": "timeout_unknown", "call_id": "fake-only", "usage": {}, "scanned_count": 1}):
             result = admin_batch(self.r, self.p)

@@ -75,7 +75,7 @@ assert.equal(good.params.workspace_uris, undefined);
     def test_write_actions_require_explicit_confirmation_and_snapshot(self):
         self.run_node("""
 const base = {workspace_uris:[pathToFileURL(installation.receipt.workspace).href],conversation_id:'native-chat',capability:'memory-only',action:'set_admin_preset',preset:'balanced',request_id:'click-1'};
-const expected = {expected_policy_version:1,expected_budget_version:1,expected_settings_version:1,expected_session_epoch:0,expected_governance_epoch:0};
+const expected = {expected_policy_version:1,expected_project_budget_version:1,expected_settings_version:1,expected_session_epoch:0,expected_governance_epoch:0};
 assert.throws(() => api.validateInput('action', base));
 assert.throws(() => api.validateInput('action', {...base,confirm:true}));
 assert.throws(() => api.validateInput('action', {...base,confirm:true,expected:{...expected,rogue:0}}));
@@ -167,7 +167,7 @@ const {runInNewContext} = await import('node:vm');
 const html=readFileSync(new URL('./index.html',pathToFileURL(process.env.ALP_PANEL_MODULE)),'utf8');
 const script=[...html.matchAll(/<script>([\\s\\S]*?)<\\/script>/g)].at(-1)[1];
 class Element {
-  constructor(){this.hidden=false;this.children=[];this.events={};this.value='';this.textContent='';}
+  constructor(){this.dataset={};this.hidden=false;this.children=[];this.events={};this.value='';this.textContent='';}
   addEventListener(name,fn){this.events[name]=fn;}
   append(...nodes){this.children.push(...nodes);}
   replaceChildren(){this.children=[];}
@@ -188,7 +188,7 @@ assert.equal(elements.panel.hidden,true);assert.equal(elements.project.textConte
 changed([uri]);
 requests[1].resolve({ok:true,json:async()=>({visible:true,capability:'new-capability',summary:{project_name:'current',counts:{active:2}}})});
 await new Promise(resolve=>setImmediate(resolve));
-assert.equal(elements.panel.hidden,false);assert.equal(elements.project.textContent,'current');
+assert.equal(elements.panel.hidden,false);assert.equal(elements.project.textContent,'current');assert.match(elements.admin.textContent,/Project usage unavailable/);
 elements.browser.events.click();assert.equal(requests[2].body.capability,'new-capability');
 changed([]);assert.equal(elements.panel.hidden,true);
 requests[2].resolve({ok:true,json:async()=>({visible:true,summary:{project_name:'stale action'}})});

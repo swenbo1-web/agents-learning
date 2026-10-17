@@ -55,7 +55,8 @@ def readonly_runtime(database, db, host, instance):
 
 def control_status(runtime, project):
     from .admin_queue import eligible_query, scan_signature, dispatch_diagnostic
-    from .admin_usage import admin_budget_policy, admin_budget_status
+    from .admin_usage import admin_admission_status
+    from .admin_presets import PRESETS
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     query, args = eligible_query(scan_signature(runtime, project),
@@ -73,11 +74,16 @@ def control_status(runtime, project):
     diagnostic = dispatch_diagnostic(runtime, project)
     running = diagnostic["phase"] in {"worker_claimed", "model_reserved", "model_launching", "model_started"}
     enabled = bool(policy["enabled"] and state["enabled"])
+    admission = admin_admission_status(runtime, project)
+    project_usage, global_usage = admission["project_usage"], admission["global_usage"]
     return {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
         "governance_epoch": runtime.host_epoch(), "settings_version": state["version"], "policy": policy,
-        "enabled": enabled, "routing": routing, "budget_policy": admin_budget_policy(runtime),
+        "enabled": enabled, "routing": routing, "budget_policy": global_usage["budget_policy"],
+        "project_budget_policy": project_usage["budget_policy"], "global_budget_policy": global_usage["budget_policy"],
+        "project_usage": project_usage, "global_usage": global_usage, "admission": admission,
+        "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
-        "usage": admin_budget_status(runtime),
+        "usage": global_usage,
         "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting, "blocked_calls": blocked, "history_excluded": history},
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
                    "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
@@ -96,18 +102,24 @@ def request_receipt(runtime, project, request_id):
 def apply_control(runtime, project, body, *, wake=False):
     """Commit settings and an idempotent receipt before a single launch attempt."""
     from .runtime import ContractError, digest, encode
-    from .admin_usage import admin_budget_policy, configure_admin_budget
-    required = {"request_id", "expected_policy_version", "expected_budget_version", "expected_settings_version",
+    from .admin_usage import admin_budget_policy, configure_admin_budget, project_budget_policy, configure_project_budget
+    required = {"request_id", "expected_policy_version", "expected_settings_version",
                 "expected_session_epoch", "expected_governance_epoch"}
-    configured = {"enabled", "model_mode", "model", "limits", "start"}
-    optional = {"summary_enabled"} if not wake else set()
-    if (not isinstance(body, dict) or set(body) - optional != required | (set() if wake else configured)
+    configured = {"enabled", "model_mode", "model", "start"}
+    versions = {"expected_budget_version", "expected_project_budget_version"}
+    optional = {"summary_enabled", "limits", "project_limits"} if not wake else set()
+    mandatory = required | (set() if wake else configured)
+    if (not isinstance(body, dict) or not mandatory <= set(body) or set(body) - (mandatory | versions | optional)
+            or not versions.intersection(body)
+            or not wake and not {"limits", "project_limits"}.intersection(body)
+            or "limits" in body and "expected_budget_version" not in body
+            or "project_limits" in body and "expected_project_budget_version" not in body
             or "summary_enabled" in body and not isinstance(body["summary_enabled"], bool)):
         raise ContractError("invalid administrator control fields")
     request_id = body["request_id"]
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
         raise ContractError("invalid administrator request identity")
-    for key in required - {"request_id"}:
+    for key in (required | versions.intersection(body)) - {"request_id"}:
         if isinstance(body[key], bool) or not isinstance(body[key], int) or body[key] < 0:
             raise ContractError("administrator versions must be nonnegative integers")
     fingerprint = digest(["wake" if wake else "configure", body])
@@ -121,15 +133,26 @@ def apply_control(runtime, project, body, *, wake=False):
             if prior["request_digest"] != fingerprint:
                 raise ContractError("administrator request identity reused with different settings")
             return json.loads(prior["response"])
-        policy, state, budget = runtime.admin_policy(project), control_state(runtime, project), admin_budget_policy(runtime)
-        if (policy["policy_version"] != body["expected_policy_version"] or budget["version"] != body["expected_budget_version"]
+        policy, state = runtime.admin_policy(project), control_state(runtime, project)
+        budget, project_budget = admin_budget_policy(runtime), project_budget_policy(runtime, project)
+        check_global = "limits" in body or wake and "expected_project_budget_version" not in body
+        check_project = "project_limits" in body or wake and "expected_project_budget_version" in body
+        if (policy["policy_version"] != body["expected_policy_version"]
+                or check_global and budget["version"] != body["expected_budget_version"]
+                or check_project and project_budget["version"] != body["expected_project_budget_version"]
                 or state["version"] != body["expected_settings_version"]):
             raise ContractError("administrator settings changed; refresh before saving")
         if not wake:
             if not isinstance(body["enabled"], bool) or not isinstance(body["start"], bool):
                 raise ContractError("administrator enable and start flags must be booleans")
-            if not isinstance(body["limits"], dict) or set(body["limits"]) - {"max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds"}:
+            if ("limits" in body and (not isinstance(body["limits"], dict)
+                    or set(body["limits"]) - {"max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds"})):
                 raise ContractError("invalid visual administrator budget fields")
+            if "project_limits" in body:
+                from .admin_usage import PROJECT_BUDGET_FIELDS, _validate_budget_values
+                if not isinstance(body["project_limits"], dict) or set(body["project_limits"]) - PROJECT_BUDGET_FIELDS:
+                    raise ContractError("invalid visual administrator project budget fields")
+                _validate_budget_values(body["project_limits"])
             mode, model = body["model_mode"], body["model"]
             changed_model = mode != policy["model_mode"] or model != policy["model"]
             active = runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN ('reserved','launch_intent','started') LIMIT 1", (project,)).fetchone()
@@ -140,8 +163,11 @@ def apply_control(runtime, project, body, *, wake=False):
             if changed_model or body["enabled"] and not policy["enabled"]:
                 runtime.admin_configure(project, policy["enabled"] or body["enabled"], policy["provider"], mode, model,
                     expected_policy_version=policy["policy_version"], expected_epoch=runtime.session_epoch())
-            if body["limits"]:
+            if body.get("limits"):
                 configure_admin_budget(runtime, body["limits"], expected_version=budget["version"], expected_epoch=runtime.session_epoch())
+            if body.get("project_limits"):
+                configure_project_budget(runtime, project, body["project_limits"], expected_version=project_budget["version"],
+                                         expected_epoch=runtime.session_epoch())
             summary_prior = runtime.work_summary_policy(project)
             summary_changed = "summary_enabled" in body and (not summary_prior["configured"]
                 or body["summary_enabled"] != summary_prior["enabled"])

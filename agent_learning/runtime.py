@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(18)):
+        if version not in set(range(19)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -313,7 +313,17 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 install_work_summaries(self)
                 from .admin_control import install_control
                 install_control(self)
-                self.db.execute("PRAGMA user_version=17")
+                if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 18:
+                    # Older live connections must not keep admitting calls with
+                    # global-only limits after project budgets become authoritative.
+                    boundary = max(self.host_epoch(), self.db.execute(
+                        "SELECT COALESCE(MAX(epoch),0) FROM host_scopes").fetchone()[0]) + 1
+                    self.db.execute("UPDATE host_state SET epoch=? WHERE id=1", (boundary,))
+                    self.db.execute("UPDATE host_scopes SET epoch=?", (boundary,))
+                    self.db.execute("UPDATE admin_calls SET state='orphaned_unknown',"
+                                    "finished=COALESCE(finished,?),lease_until=NULL "
+                                    "WHERE state IN ('reserved','launch_intent','started')", (time.time(),))
+                self.db.execute("PRAGMA user_version=18")
         except BaseException:
             self.db.close()
             raise
@@ -701,7 +711,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def status(self, project):
         from .admin_control import admission_enabled
         from .admin_queue import dispatch_diagnostic
-        from .admin_usage import admin_budget_status
+        from .admin_usage import admin_admission_status
         from .software_updates import update_status
         counts = {}
         for table in ("events", "tasks", "problems", "candidates", "active", "outbox", "knowledge_sources", "publication_receipts",
@@ -711,10 +721,15 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
         try:
-            budget = admin_budget_status(self)
+            admission = admin_admission_status(self, project)
+            budget = admission["global_usage"]
+            project_usage = admission["project_usage"]
             dispatch = dispatch_diagnostic(self, project)
         except ContractError:
             budget = {"admission_status": "invalid_configuration"}
+            project_usage = {"admission_status": "invalid_configuration"}
+            admission = {"admission_status": "invalid_configuration", "blocking_scope": None,
+                         "project_usage": project_usage, "global_usage": budget}
             dispatch = {"phase": "idle", "reason": "invalid_configuration", "next_due": None}
         return {"project_id": project, "home": str(self.home), "host_epoch": self.session_epoch(),
                 "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
@@ -726,7 +741,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),
                 "admin_dispatch_diagnostic": dispatch, "work_summary_policy": self.work_summary_policy(project),
-                "admin_budget": budget, "scheduler": self.scheduler_status(project),
+                "admin_budget": budget, "global_usage": budget, "project_usage": project_usage,
+                "global_budget_policy": budget.get("budget_policy"),
+                "project_budget_policy": project_usage.get("budget_policy"), "admission": admission,
+                "scheduler": self.scheduler_status(project),
                 "software_updates": update_status(self.home, self.config["software_updates"]),
                 "history_import": self.history_status(project),
                 "work_memory": self.work_memory_status(project),
