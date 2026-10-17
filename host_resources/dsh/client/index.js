@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
         archiving: "正在扫描并归档项目历史…",
         archivedPrefix: "历史吸收完成：已归档案例 ",
         failed: "操作失败",
+        confirmAdmin: "开启管理员会使用平台模型额度，是否应用此频率？",
+        unresolved: "上次设置结果待核对；再次点击可用相同请求重试。",
       },
       en: {
         button: "Memory",
@@ -77,6 +79,8 @@ window.__ModuleLoader__.load({
         archiving: "Scanning and archiving project history...",
         archivedPrefix: "History archived: total cases ",
         failed: "Operation failed",
+        confirmAdmin: "Enabling the administrator uses platform model quota. Apply this preset?",
+        unresolved: "Previous settings result is unconfirmed. Click again to retry the same request.",
       },
     };
 
@@ -141,7 +145,9 @@ window.__ModuleLoader__.load({
       }).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
-            throw new Error((body && body.error) || "action error");
+            var error = new Error((body && body.error) || "action error");
+            error.status = r.status;
+            throw error;
           }
           return body;
         });
@@ -169,6 +175,7 @@ window.__ModuleLoader__.load({
         var statePair = react.useState(props && props.initialSummary ? props.initialSummary : null);
         var notePair = react.useState("");
         var busyPair = react.useState(false);
+        var requestCell = react.useState({ current: null, busy: false })[0];
         var summary = statePair[0];
         var setSummary = statePair[1];
         var note = notePair[0];
@@ -197,17 +204,48 @@ window.__ModuleLoader__.load({
         );
 
         function trigger(action, startMsg, doneFn, extra) {
+          if (requestCell.busy || !summary || !summary.project_id) return;
+          extra = Object.assign({project_id: summary.project_id,
+            installation_id: summary.panel_snapshot?.installation_id}, extra || {});
+          if (action === "set_admin_preset") {
+            if (!summary.panel_snapshot) { setNote(t.projectUnavailable); return; }
+            if (requestCell.current) {
+              if (requestCell.current.preset !== extra.preset) { setNote(t.unresolved); return; }
+              extra = requestCell.current;
+            } else {
+              if (extra.preset !== "off" && !window.confirm(t.confirmAdmin)) return;
+              extra = Object.assign(extra, {
+                panel_snapshot: JSON.parse(JSON.stringify(summary.panel_snapshot)), confirm: true,
+                request_id: window.crypto?.randomUUID ? window.crypto.randomUUID() : "panel-" + Date.now() + "-" + Math.random().toString(16).slice(2),
+              });
+              requestCell.current = extra;
+            }
+          }
+          requestCell.busy = true;
           setBusy(true);
           setNote(startMsg);
           postAction(action, cwd, sessionId, extra)
             .then(function (res) {
+              requestCell.busy = false;
+              if (action === "set_admin_preset") requestCell.current = null;
               setBusy(false);
               setNote(doneFn(res));
               reload();
             })
             .catch(function (err) {
+              requestCell.busy = false;
               setBusy(false);
               setNote(String((err && err.message) || t.failed));
+              if (action === "set_admin_preset") {
+                postAction("admin_receipt", cwd, sessionId, {project_id: extra.project_id,
+                  installation_id: extra.installation_id, request_id: extra.request_id})
+                  .then(function (receipt) {
+                    if (receipt.found) { requestCell.current = null; setNote(doneFn(receipt.response)); reload(); }
+                    else if (err.status === 400 || err.status === 409) {
+                      requestCell.current = null; setNote(String(err.message || t.failed)); reload();
+                    } else { setNote(t.unresolved); reload(); }
+                  }).catch(function () { setNote(t.unresolved); });
+              }
             });
         }
 
@@ -381,7 +419,7 @@ window.__ModuleLoader__.load({
                   {
                     key: key,
                     type: "button",
-                    disabled: busy || !projectUsage,
+                    disabled: busy || !projectUsage || !summary.panel_snapshot,
                     onClick: function () {
                       if (!projectUsage) return;
                       trigger(

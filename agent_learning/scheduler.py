@@ -20,7 +20,6 @@ SCHEDULER_DEFAULTS = {
     "max_sync_items": 20, "max_sync_seconds": 30,
 }
 KINDS = ("admin", "release", "sync")
-_ADMIN_RETRY_STOPS = {"failed", "not_started", "timeout_unknown", "account_changed_unknown", "orphaned_unknown"}
 
 
 def validate_scheduler_config(config):
@@ -239,15 +238,12 @@ class SchedulerMixin:
                       self._scheduler_release_state(project, cfg, prior) if kind == "release" else
                       self._scheduler_sync_state(project, cfg))
             signature, state, due, reason = result
-            # A failed administrator batch remains cooled down when other case
-            # material changes. Otherwise every prompt can select a fresh case
-            # against the same unhealthy executor before its retry deadline.
-            prior_summary = json.loads(prior["summary"]) if prior and kind == "admin" else {}
-            execution_failed = prior_summary.get("stop_reason") in _ADMIN_RETRY_STOPS
-            # 未变化的启动失败采用有限退避；材料变化允许提前重新检查。
-            if (state != "disabled" and prior and (prior["signature"] == signature or execution_failed)
+            # Executor failures and configuration blocks come from the current
+            # executor, not a project-wide stale deadline. Only an unclassified
+            # scheduling exception retains its short unchanged-signature retry.
+            if (state == "ready" and prior and prior["signature"] == signature
                     and prior["wait_reason"] == "retry_backoff" and prior["next_due"] is not None and prior["next_due"] > now):
-                state, due, reason = "waiting", max(prior["next_due"], due or 0), "retry_backoff"
+                state, due, reason = "waiting", prior["next_due"], "retry_backoff"
             elif state == "ready" and prior and prior["signature"] == signature and prior["state"] == "ready" and prior["next_due"] is not None and prior["next_due"] > now:
                 # 单批剩余工作等待下次轮询；无增量的重复 Hook 不提前耗尽批次。
                 due = prior["next_due"]
@@ -313,10 +309,21 @@ class SchedulerMixin:
         keys = ("status", "state", "stop_reason", "processed", "invocations", "scanned_count", "elapsed_seconds", "budget_exhausted", "host_scope")
         return {k: result[k] for k in keys if k in result and isinstance(result[k], (bool, int, float, str))}
 
-    def _scheduler_tick(self, project, max_jobs, deadline, token, epoch):
+    def _scheduler_admin_run_deadline(self, project, scope, limits):
+        """One project allowance per finite runner, shared by all host scopes."""
+        with self._scheduler_host_scope(scope):
+            seconds = self.admin_effective_config(project).get("max_run_seconds", 600)
+        now = time.monotonic()
+        limit = limits.setdefault(project, {"started": now, "deadline": now + seconds})
+        limit["deadline"] = min(limit["deadline"], limit["started"] + seconds)
+        return limit["deadline"]
+
+    def _scheduler_tick(self, project, max_jobs, deadline, token, epoch, _admin_run_limits=None):
         from .admin import admin_batch
         from .runtime import ContractError, encode
         cfg, items = self._scheduler_config(), []
+        run_limits = {} if _admin_run_limits is None else _admin_run_limits
+        exhausted = set()
         with self.transaction():
             if not self._scheduler_worker_valid(token, epoch):
                 raise ContractError("scheduler worker ownership changed")
@@ -346,10 +353,19 @@ class SchedulerMixin:
                             attempted.add(key)
                             self._scheduler_refresh(candidate["project"], cfg)
                             continue
+                        run_deadline = self._scheduler_admin_run_deadline(candidate["project"], selection[4], run_limits)
+                        if run_deadline <= time.monotonic():
+                            attempted.add(key)
+                            exhausted.add(candidate["project"])
+                            self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=NULL,"
+                                "wait_reason='run_time_exhausted' WHERE project=? AND kind='admin'",
+                                (candidate["project"],))
+                            continue
                         from .admin_queue import scan_signature
                         with self._scheduler_host_scope(selection[4]):
                             admin_plan = {"host_scope": selection[4], "session_epoch": self.session_epoch(),
-                                          "signature": scan_signature(self, candidate["project"])}
+                                          "signature": scan_signature(self, candidate["project"]),
+                                          "run_deadline": run_deadline}
                     selected = candidate
                     break
                 if selected is None:
@@ -371,7 +387,8 @@ class SchedulerMixin:
                         with self.transaction():
                             self.assert_session_epoch(admin_plan["session_epoch"])
                             valid_plan = scan_signature(self, identifier) == admin_plan["signature"]
-                        result = (admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
+                        project_deadline = self._scheduler_admin_run_deadline(identifier, admin_plan["host_scope"], run_limits)
+                        result = (admin_batch(self, identifier, expected_epoch=epoch, _deadline=min(deadline, project_deadline))
                                   if valid_plan else {"status": "state_changed", "invocations": 0})
                         result["host_scope"] = admin_plan["host_scope"]
                 elif kind == "release":
@@ -391,15 +408,12 @@ class SchedulerMixin:
                 self.db.execute("UPDATE scheduler_jobs SET state='idle',owner=NULL,lease_until=NULL,last_run=?,updated=?,summary=?,wait_reason='' "
                                 "WHERE project=? AND kind=? AND owner=?", (now, now, encode(summary), identifier, kind, owner))
                 self._scheduler_refresh(identifier, cfg)
-                if (result.get("status") in {"failed", "not_started", "time_exhausted"}
-                        or kind == "admin" and result.get("stop_reason") in _ADMIN_RETRY_STOPS):
-                    refreshed = self.db.execute("SELECT next_due FROM scheduler_jobs WHERE project=? AND kind=?",
+                if result.get("status") in {"failed", "not_started", "time_exhausted"}:
+                    refreshed = self.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind=?",
                                                 (identifier, kind)).fetchone()
-                    # Do not shorten an executor circuit or a budget reset wait
-                    # to the scheduler's ordinary retry interval.
-                    retry_due = max(now + cfg["retry_seconds"], refreshed["next_due"] or 0)
-                    self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='retry_backoff' WHERE project=? AND kind=?",
-                                     (retry_due, identifier, kind))
+                    if refreshed["state"] == "ready":
+                        self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='retry_backoff' WHERE project=? AND kind=?",
+                                         (now + cfg["retry_seconds"], identifier, kind))
                 elif kind == "release":
                     # 输出完成后的新变化不能被本次成功覆盖；保留执行前签名。
                     self.db.execute("UPDATE scheduler_jobs SET state='idle',signature=?,next_due=NULL,wait_reason='no_release_increment' WHERE project=? AND kind=?",
@@ -407,7 +421,9 @@ class SchedulerMixin:
                 elif self.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind=?", (identifier, kind)).fetchone()[0] == "ready":
                     self.db.execute("UPDATE scheduler_jobs SET next_due=? WHERE project=? AND kind=?", (now + cfg["poll_seconds"], identifier, kind))
             items.append({"project_id": identifier, "kind": kind, **summary})
-        return {"status": "completed", "items": items, "processed": len(items), "budget_exhausted": len(items) >= max_jobs or time.monotonic() >= deadline}
+        return {"status": "completed", "items": items, "processed": len(items),
+                "admin_run_exhausted_projects": sorted(exhausted),
+                "budget_exhausted": len(items) >= max_jobs or time.monotonic() >= deadline}
 
     def scheduler_tick(self, project=None, max_jobs=None, max_seconds=None, expected_epoch=None):
         from .runtime import ContractError
@@ -448,6 +464,8 @@ class SchedulerMixin:
         if not token:
             return {"status": "busy", "processed": 0, "ticks": 0}
         started, processed, ticks = time.monotonic(), 0, 0
+        admin_run_limits = {}
+        exhausted = set()
         try:
             self._scheduler_start_worker(token, seconds)
         except Exception:
@@ -457,16 +475,20 @@ class SchedulerMixin:
         try:
             epoch, deadline = self.host_epoch(), started + seconds
             while time.monotonic() < deadline:
-                result = self._scheduler_tick(project, cfg["max_jobs_per_tick"], min(deadline, time.monotonic() + cfg["max_tick_seconds"]), token, epoch)
+                result = self._scheduler_tick(project, cfg["max_jobs_per_tick"], min(deadline, time.monotonic() + cfg["max_tick_seconds"]),
+                                              token, epoch, _admin_run_limits=admin_run_limits)
                 processed += result["processed"]
                 ticks += 1
+                exhausted.update(result["admin_run_exhausted_projects"])
+                exclusions = (" AND (kind!='admin' OR project NOT IN (" + ",".join("?" for _ in exhausted) + "))") if exhausted else ""
                 next_due = self.db.execute("SELECT MIN(next_due) FROM scheduler_jobs WHERE state IN ('ready','waiting') "
-                                           "AND (? IS NULL OR project=?)", (project, project)).fetchone()[0]
+                                           "AND (? IS NULL OR project=?)" + exclusions, (project, project, *sorted(exhausted))).fetchone()[0]
                 remaining = deadline - time.monotonic()
                 if next_due is None or next_due - time.time() >= remaining or remaining <= 0:
                     break
                 time.sleep(min(cfg["poll_seconds"], max(0.01, next_due - time.time()), remaining))
             return {"status": "completed", "processed": processed, "ticks": ticks,
+                    "admin_run_exhausted_projects": sorted(exhausted),
                     "elapsed_seconds": round(time.monotonic() - started, 3), "budget_exhausted": time.monotonic() >= deadline}
         finally:
             self.release_scheduler_worker(token)

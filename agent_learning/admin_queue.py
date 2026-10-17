@@ -300,6 +300,7 @@ def record_dispatch_diagnostic(runtime, project, reason, details=None, *, host_s
 def executor_signature(plan):
     from .runtime import digest
     from .admin_providers import resolve_command, dsh_sdk_launcher
+    sdk = None
     try:
         sdk = dsh_sdk_launcher(plan["command"]) if plan.get("provider") == "dsh" else None
         command = sdk["args"] if sdk else resolve_command(plan["command"])["args"]
@@ -313,6 +314,20 @@ def executor_signature(plan):
     if plan.get("provider") == "dsh" and isinstance(plan.get("dsh_profile"), dict):
         profile = plan["dsh_profile"]
         identity["profile"] = {key: profile.get(key) for key in ("source", "profile_directory", "sha256")}
+        from .dsh_profile import configuration_identity
+        identity["configuration"] = configuration_identity(profile)
+    if sdk:
+        # Updating the trusted adapter must invalidate its old configuration
+        # failure, even when the CLI and reviewer paths stay the same.
+        from pathlib import Path
+        package = Path(sdk["anchor"]).parent.parent
+        names = ("@deepseek-ai/dsh-llm-pi-ai", "@earendil-works/pi-ai", "@deepseek-ai/dsh-settings-file")
+        packages = [package / "package.json", *(package / "node_modules" / name / "package.json" for name in names)]
+        try:
+            identity["sdk_versions"] = [(str(path), path.stat().st_mtime_ns, path.stat().st_size)
+                                        for path in packages if path.is_file()]
+        except OSError:
+            identity["sdk_versions"] = "unavailable"
     return digest(identity)
 
 
@@ -320,9 +335,19 @@ def executor_backoff(runtime, project, plan):
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_executor_failures'").fetchone():
         return None
     row = runtime.db.execute("SELECT failures,next_try,reason FROM admin_executor_failures "
-        "WHERE project=? AND host_scope=? AND signature=? AND next_try>?",
+        "WHERE project=? AND host_scope=? AND signature=? AND (next_try>? OR reason='configuration_change_required')",
         (project, runtime._session_scope(), executor_signature(plan), time.time())).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    if result["reason"] == "configuration_change_required":
+        result["next_try"] = None
+    return result
+
+
+def executor_wait_reason(backoff):
+    return ("configuration_change_required" if backoff["reason"] == "configuration_change_required" else
+            "executor_circuit_open" if backoff["failures"] >= 3 else "executor_backoff")
 
 
 def record_executor_failure(runtime, project, plan, reason, details=None):
@@ -331,10 +356,11 @@ def record_executor_failure(runtime, project, plan, reason, details=None):
                             (project, runtime._session_scope(), key)).fetchone()
     failures = min(30, (row[0] if row else 0) + 1)
     delay = 30 if failures == 1 else 120 if failures == 2 else 900
+    next_try = 0 if reason == "configuration_change_required" else now + delay
     runtime.db.execute("INSERT INTO admin_executor_failures VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,host_scope,signature) "
                        "DO UPDATE SET failures=excluded.failures,next_try=excluded.next_try,reason=excluded.reason,updated=excluded.updated",
-                       (project, runtime._session_scope(), key, failures, now + delay, reason, now))
-    record_dispatch_diagnostic(runtime, project, reason, dict(details or {}, failures=failures, next_try=now + delay))
+                       (project, runtime._session_scope(), key, failures, next_try, reason, now))
+    record_dispatch_diagnostic(runtime, project, reason, dict(details or {}, failures=failures, next_try=next_try))
 
 
 def clear_executor_failure(runtime, project, plan):
@@ -413,7 +439,7 @@ def _dispatch_diagnostic(runtime, project):
             continue
         backoff = executor_backoff(runtime, project, plan)
         if backoff:
-            last = dict(detail, reason="executor_circuit_open" if backoff["failures"] >= 3 else "executor_backoff",
+            last = dict(detail, reason=executor_wait_reason(backoff),
                         next_due=backoff["next_try"], failure_reason=backoff["reason"])
             continue
         return dict(detail, reason="ready")

@@ -294,8 +294,10 @@ class PanelControl:
             state = control_status(self.runtime, self.project)
             limits = PRESETS.get(preset) or {key: state["project_budget_policy"]["values"][key] for key in next(iter(PRESETS.values()))}
             policy = state["policy"]
+            mode = ("first" if preset != "off" and policy["policy_version"] == 0
+                    and policy["model_mode"] == "default" else policy["model_mode"])
             body = {"request_id": request_id, **expected, "enabled": preset != "off",
-                    "model_mode": policy["model_mode"], "model": policy["model"] if policy["model_mode"] == "fixed" else "",
+                    "model_mode": mode, "model": policy["model"] if mode == "fixed" else "",
                     "project_limits": dict(limits), "start": preset != "off"}
             apply_control(self.runtime, self.project, body)
             result["preset"] = preset

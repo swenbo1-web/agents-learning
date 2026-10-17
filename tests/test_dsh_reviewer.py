@@ -44,6 +44,12 @@ export class Settings {
   constructor(_ctx,config) {if(config.watch!==false)throw new Error('watch must be off');record({create:'settings'});}
   persist() {record({unsafe:'settings_write'});}
   prepareDocument() {record({unsafe:'settings_create'});}
+  register(namespace,_schema,{base}) {
+    let value=structuredClone(base);
+    // Model the SDK's user-settings layer overriding its composition base.
+    if(namespace==='llm-pi-ai'&&process.env.ALP_FAKE_SETTINGS)value=JSON.parse(process.env.ALP_FAKE_SETTINGS);
+    return {get:()=>value,watch(){},marker:'settings-scope'};
+  }
 }
 export class Credentials {
   static serviceName='credentials';
@@ -57,25 +63,37 @@ export class Credentials {
 export class DefaultModel {
   static serviceName='agentDefaultModel';
   constructor(_ctx,config) {this.config=config;}
-  currentSelection() {return scenario==='missing-default' ? this.config : {provider:'deepseek-official',model:'platform-model'};}
+  currentSelection() {return ['missing-default','google-default'].includes(scenario) ? this.config : {provider:'deepseek-official',model:'platform-model'};}
 }
 export function createUserMessage(message) {return {...message,role:'user',id:'fake-user'};}
 export class LlmRuntime {
   static serviceName='llm';
   constructor(ctx) {this.ctx=ctx;}
-  listProviders() {return [{id:'deepseek-official'},{id:'custom-route'}];}
+  listProviders() {return ['deepseek-official','custom-route','google','google-vertex'].map(id=>({id}));}
   async *stream(options) {
     record({request:{...options,signal:!!options.signal}});
+    if(scenario==='sdk-budget-error') {
+      yield {type:'finish',reason:{kind:'error',failure:{code:'INVALID_REQUEST',
+        message:'PRIVATE_HEADER 400: Thinking budget is not supported for this model'}}};return;
+    }
+    if(scenario==='http-400-parameter'||scenario==='http-400-unrelated'||scenario==='private-stream-error'||scenario==='hostile-diagnostic') {
+      const error=new Error('PRIVATE_TOKEN_FAILURE thinkingBudget 400');
+      if(scenario!=='private-stream-error'){error.status=400;error.code='INVALID_REQUEST';}
+      if(scenario==='http-400-parameter')error.param='thinkingBudget';
+      if(scenario==='hostile-diagnostic'){error.code='constructor';error.param='constructor';}
+      throw error;
+    }
     if(scenario==='tool') {yield {type:'tool-call-delta',index:0,name:'shell',argumentsDelta:'PRIVATE_COMMAND'};return;}
     if(scenario==='incomplete') {yield {type:'text-delta',index:0,text:'{}'};yield {type:'finish',reason:{kind:'max-tokens'}};return;}
     if(scenario==='missing-finish') {yield {type:'text-delta',index:0,text:'{}'};return;}
-    const answer=JSON.stringify({decision:'skip',reason:'supported evidence only',candidate:null});
+    const answer=scenario==='invalid-json'?'PRIVATE_INVALID_JSON':JSON.stringify({decision:'skip',reason:'supported evidence only',candidate:null});
     yield {type:'reasoning-delta',index:1,text:'PRIVATE_REASONING'};
     yield {type:'block-end',index:1,block:{type:'reasoning',text:'PRIVATE_REASONING'}};
     if(scenario==='large') yield {type:'text-delta',index:0,text:'x'.repeat(50001)};
     else yield {type:'text-delta',index:0,text:answer};
     yield {type:'block-end',index:0,block:{type:'text',text:answer}};
     if(scenario!=='no-usage')yield {type:'usage',usage:{inputTokens:10,outputTokens:5,cacheReadTokens:3,cacheWriteTokens:2}};
+    if(scenario==='finish-error'){yield {type:'finish',reason:{kind:'error',failure:{code:'INVALID_REQUEST',status:400,param:'thinkingLevel',message:'PRIVATE_TOKEN_FAILURE'}}};return;}
     yield {type:'finish',reason:{kind:'stop'},replayState:{private:'PRIVATE_PROVIDER_REPLAY'}};
     if(scenario==='after-finish')yield {type:'text-delta',index:0,text:'late'};
   }
@@ -83,6 +101,14 @@ export class LlmRuntime {
 export function apply(ctx,config) {
   record({adapterConfig:config});
   if(scenario==='private-error')throw new Error('PRIVATE_TOKEN_FAILURE');
+  const resolved=ctx.get('settings').register('llm-pi-ai',null,{base:config}).get();
+  record({resolvedAdapterConfig:resolved});
+  if(scenario==='settings-compatibility') {
+    const p=process.env.ALP_FAKE_PROVIDER||'google';
+    const model='gemini-4-argon';const route=resolved.providers[p];
+    const entry=route.models?.find(m=>m.id===model)||route.modelOverrides?.[model];
+    record({wire:{thinkingConfig:entry?.reasoningEfforts===false?null:{thinkingBudget:0}}});
+  }
   if(scenario==='readonly') {
     for(const [service,methods] of [['settings',['persist','prepareDocument']],['credentials',['set','unset','modifyRecord','deleteRecord']]]) {
       for(const method of methods) {let refused=false;try{ctx.get(service)[method]();}catch{refused=true;}if(!refused)throw new Error('unsafe write allowed');}
@@ -90,6 +116,7 @@ export function apply(ctx,config) {
   }
   if(scenario==='unexpected-capability')ctx.services.tools={};
 }
+if(scenario==='missing-settings-register')Settings.prototype.register=undefined;
 """
 
 
@@ -165,6 +192,132 @@ class DshReviewerTests(unittest.TestCase):
         config = next(row["adapterConfig"] for row in records if "adapterConfig" in row)
         self.assertEqual(config, self.profile["entries"][1]["config"])
         self.assertEqual(events[0]["init"]["model"], "custom-route/frozen-model")
+
+    def google_profile(self, provider="google", *, catalog=False):
+        route = {"reasoning": "low", "thinkingBudgets": {"low": 2048}}
+        if catalog:
+            route["modelOverrides"] = {"unrelated-model": {"reasoningEfforts": {"low": "low"}}}
+        else:
+            route["models"] = [{"id": "gemini-4-argon", "reasoningEfforts": {"low": "LOW", "high": "HIGH"}},
+                               {"id": "gemini-3.1-pro", "reasoningEfforts": {"low": "LOW"}}]
+        config = {"providers": {provider: route, "other": {"models": [{"id": "other-model", "reasoningEfforts": {"high": "HIGH"}}]}}}
+        self.profile["entries"][1]["config"] = config
+        self.env["ALP_DSH_REVIEW_PROFILE"] = json.dumps(self.profile)
+        return config
+
+    def test_google4_compatibility_applies_after_user_settings_without_mutating_profile(self):
+        base = self.google_profile()
+        effective = json.loads(json.dumps(base))
+        effective["providers"]["google"]["models"][0]["reasoningEfforts"] = {"medium": "MEDIUM"}
+        self.env["ALP_FAKE_SETTINGS"] = json.dumps(effective)
+        before = self.env["ALP_DSH_REVIEW_PROFILE"]
+        response, events, records = self.run_runner("settings-compatibility", model="google/gemini-4-argon")
+        self.assertEqual(response.returncode, 0, response.stderr.decode())
+        source = next(row["adapterConfig"] for row in records if "adapterConfig" in row)
+        resolved = next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row)
+        self.assertEqual(source, base)
+        self.assertFalse(resolved["providers"]["google"]["models"][0]["reasoningEfforts"])
+        self.assertEqual(resolved["providers"]["google"]["models"][1], effective["providers"]["google"]["models"][1])
+        self.assertEqual(resolved["providers"]["other"], effective["providers"]["other"])
+        self.assertNotIn("reasoning", resolved["providers"]["google"])
+        self.assertIsNone(next(row["wire"] for row in records if "wire" in row)["thinkingConfig"])
+        self.assertEqual(before, self.env["ALP_DSH_REVIEW_PROFILE"])
+        self.assertEqual(events[-1]["result"]["status"], "SUCCESS")
+
+    def test_google4_modes_and_vertex_use_only_the_selected_model(self):
+        for provider in ("google", "google-vertex"):
+            for mode in ("first", "current", "fixed", "default"):
+                with self.subTest(provider=provider, mode=mode):
+                    self.log.unlink(missing_ok=True)
+                    self.google_profile(provider)
+                    self.profile["entries"] = [entry for entry in self.profile["entries"] if entry["name"] != "@deepseek-ai/dsh-agent-default-model"]
+                    self.profile["entries"].append({"name": "@deepseek-ai/dsh-agent-default-model", "config": {"provider": provider, "model": "gemini-4-argon"}})
+                    self.env["ALP_DSH_REVIEW_PROFILE"] = json.dumps(self.profile)
+                    self.env["ALP_FAKE_PROVIDER"] = provider
+                    response, events, records = self.run_runner("google-default" if mode == "default" else "settings-compatibility",
+                        model="" if mode == "default" else provider + "/gemini-4-argon", mode=mode)
+                    self.assertEqual(response.returncode, 0, response.stderr.decode())
+                    resolved = next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row)
+                    self.assertFalse(resolved["providers"][provider]["models"][0]["reasoningEfforts"])
+                    requests = [row["request"] for row in records if "request" in row]
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual((requests[0]["provider"], requests[0]["model"]), (provider, "gemini-4-argon"))
+
+    def test_google4_catalog_override_keeps_other_model_metadata(self):
+        original = self.google_profile(catalog=True)
+        response, _, records = self.run_runner(model="google/gemini-4-argon")
+        self.assertEqual(response.returncode, 0)
+        resolved = next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row)
+        self.assertEqual(resolved["providers"]["google"]["modelOverrides"]["unrelated-model"],
+                         original["providers"]["google"]["modelOverrides"]["unrelated-model"])
+        self.assertEqual(resolved["providers"]["google"]["modelOverrides"]["gemini-4-argon"], {"reasoningEfforts": False})
+
+    def test_google4_without_post_merge_settings_support_refuses_before_stream(self):
+        self.google_profile()
+        response, events, records = self.run_runner("missing-settings-register", model="google/gemini-4-argon")
+        self.assertEqual(response.returncode, 1)
+        self.assertFalse(any("request" in row for row in records))
+        self.assertEqual(events[-1]["result"]["diagnostic"]["reason_code"], "model_compatibility_unavailable")
+        self.assertFalse(events[-1]["result"]["diagnostic"]["stream_invoked"])
+
+    def test_google_label_with_non_google_protocol_is_not_rewritten(self):
+        original = self.google_profile()
+        original["providers"]["google"]["api"] = "openai-completions"
+        self.env["ALP_DSH_REVIEW_PROFILE"] = json.dumps(self.profile)
+        response, _, records = self.run_runner(model="google/gemini-4-argon")
+        self.assertEqual(response.returncode, 0)
+        self.assertEqual(next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row), original)
+
+    def test_google3_and_non_google_models_keep_exact_reasoning_configuration(self):
+        original = self.google_profile()
+        response, _, records = self.run_runner(model="google/gemini-3.1-pro")
+        self.assertEqual(response.returncode, 0)
+        self.assertEqual(next(row["resolvedAdapterConfig"] for row in records if "resolvedAdapterConfig" in row), original)
+
+    def test_error_diagnostics_are_fixed_safe_fields_without_guessing_http_status(self):
+        for scenario, status, parameter, retry in (("http-400-parameter", 400, "thinking_budget", "configuration_change"),
+                ("http-400-unrelated", 400, None, "no_automatic_retry"),
+                ("private-stream-error", None, None, "no_automatic_retry"),
+                ("hostile-diagnostic", 400, None, "no_automatic_retry")):
+            with self.subTest(scenario=scenario):
+                response, events, _ = self.run_runner(scenario)
+                self.assertEqual(response.returncode, 1)
+                result = events[-1]["result"]
+                diagnostic = result["diagnostic"]
+                self.assertEqual(diagnostic["version"], 1)
+                self.assertEqual(diagnostic["phase"], "stream")
+                self.assertEqual(diagnostic["http_status"], status)
+                self.assertEqual(diagnostic["parameter_code"], parameter)
+                self.assertEqual(diagnostic["retry_policy"], retry)
+                self.assertTrue(diagnostic["stream_invoked"])
+                self.assertEqual(diagnostic["http_response_observed"], status is not None)
+                self.assertFalse(diagnostic["usage_observed"])
+                self.assertNotIn("PRIVATE_", response.stdout.decode())
+                self.assertEqual(response.stderr, b"")
+
+    def test_failure_after_usage_keeps_observed_counts_and_reason(self):
+        for scenario, reason in (("invalid-json", "invalid_response_json"), ("finish-error", "invalid_request_parameter")):
+            with self.subTest(scenario=scenario):
+                response, events, _ = self.run_runner(scenario)
+                self.assertEqual(response.returncode, 1)
+                result = events[-1]["result"]
+                self.assertEqual(result["usage"]["total_tokens"], 20)
+                self.assertTrue(result["diagnostic"]["usage_observed"])
+                self.assertEqual(result["diagnostic"]["reason_code"], reason)
+                self.assertNotIn("PRIVATE_", response.stdout.decode())
+
+    def test_sdk_reduced_budget_error_is_classified_without_inventing_http_observation(self):
+        from agent_learning.admin_diagnostics import safe_diagnostic
+        response, events, _ = self.run_runner("sdk-budget-error")
+        self.assertEqual(response.returncode, 1)
+        diagnostic = events[-1]["result"]["diagnostic"]
+        self.assertEqual(diagnostic["reason_code"], "unsupported_reasoning_effort")
+        self.assertEqual(diagnostic["parameter_code"], "thinking_budget")
+        self.assertEqual(diagnostic["retry_policy"], "configuration_change")
+        self.assertIsNone(diagnostic["http_status"])
+        self.assertFalse(diagnostic["http_response_observed"])
+        self.assertIsNotNone(safe_diagnostic(diagnostic))
+        self.assertNotIn("PRIVATE", response.stdout.decode())
 
     def test_profile_default_uses_only_current_snapshot_not_another_directory(self):
         self.profile["entries"].append({"name": "@deepseek-ai/dsh-agent-default-model",

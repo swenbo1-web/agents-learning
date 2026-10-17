@@ -33,6 +33,113 @@ function refusal(code) {
   return error;
 }
 
+const REASONS = new Set([
+  "invalid_arguments", "sdk_unavailable", "sdk_incompatible", "dsh_profile_unavailable", "dsh_profile_changed",
+  "dsh_profile_invalid", "qualified_model_required", "default_model_unavailable", "model_binding_invalid",
+  "provider_unavailable", "readonly_host_configuration", "unexpected_host_capability", "model_compatibility_unavailable",
+  "model_compatibility_invalid", "invalid_input", "input_limit_exceeded", "invalid_response_schema", "model_request_failed",
+  "invalid_request_parameter", "unsupported_reasoning_effort", "provider_quota_exceeded", "invalid_credential",
+  "model_timeout", "invalid_output_stream", "invalid_output_block", "invalid_output_text", "output_limit_exceeded",
+  "output_block_mismatch", "tool_output_refused", "incomplete_model_response", "invalid_response_json",
+  "invalid_response_object", "model_cleanup_failed",
+]);
+const FAILURE_CODES = Object.freeze({
+  INVALID_REQUEST: "invalid_request_parameter", UNSUPPORTED_REASONING_EFFORT: "unsupported_reasoning_effort",
+  QUOTA_EXCEEDED: "provider_quota_exceeded", AUTH: "invalid_credential", INVALID_CREDENTIAL: "invalid_credential",
+  MISSING_CREDENTIAL: "invalid_credential", TIMEOUT: "model_timeout", ABORTED: "model_timeout",
+});
+
+function diagnostic(error, observed) {
+  // Only bounded structural fields and fixed enums cross the process boundary.
+  // Invoking stream does not establish that an HTTP request was sent.
+  const candidates = [error, error?.failure, error?.cause, error?.response, error?.cause?.response];
+  const status = candidates.flatMap((item) => [item?.status, item?.statusCode]).find((value) =>
+    Number.isInteger(value) && value >= 100 && value <= 599) ?? null;
+  const parameterNames = { thinkingBudget: "thinking_budget", thinking_budget: "thinking_budget",
+    thinkingLevel: "thinking_level", thinking_level: "thinking_level", reasoningEffort: "reasoning_effort",
+    reasoning_effort: "reasoning_effort" };
+  let parameter = candidates.flatMap((item) => [item?.param, item?.parameter, item?.parameter_code,
+    item?.error?.param, item?.details?.parameter]).map((value) =>
+    typeof value === "string" && Object.hasOwn(parameterNames, value) ? parameterNames[value] : null).find(Boolean) ?? null;
+  const sdkReason = candidates.map((item) => typeof item?.code === "string" && Object.hasOwn(FAILURE_CODES, item.code)
+    ? FAILURE_CODES[item.code] : null).find(Boolean);
+  // This SDK reduces pi-ai errors to a failure code plus message. Recognize
+  // only the specific incompatibility in memory; never retain that message or
+  // infer an HTTP response from digits in arbitrary error text.
+  const budgetRefused = observed.phase === "stream" && sdkReason === "invalid_request_parameter"
+    && candidates.some((item) => typeof item?.message === "string"
+      && /thinking[_ ]?budget is not supported for this model/i.test(item.message));
+  if (budgetRefused) parameter = "thinking_budget";
+  const fallback = observed.phase === "sdk_load" ? "sdk_unavailable" : observed.phase === "input" ? "invalid_input"
+    : observed.phase === "response" ? "invalid_response_json" : "model_request_failed";
+  const configurationError = (status === 400 && parameter || budgetRefused) && observed.phase === "stream" && observed.streamInvoked;
+  const reason = budgetRefused ? "unsupported_reasoning_effort"
+    : configurationError ? (sdkReason === "unsupported_reasoning_effort" ? sdkReason : "invalid_request_parameter")
+    : REASONS.has(error?.safeCode) ? error.safeCode : sdkReason || fallback;
+  return { version: 1, phase: observed.phase, reason_code: reason, http_status: status, parameter_code: parameter,
+    retry_policy: configurationError ? "configuration_change" : "no_automatic_retry",
+    stream_invoked: observed.streamInvoked, http_response_observed: status !== null,
+    usage_observed: observed.usageObserved };
+}
+
+function needsGoogleCompatibility(provider, model) {
+  return ["google", "google-vertex"].includes(provider) && /^gemini-4(?:[.-]|$)/i.test(model);
+}
+
+function frozenCopy(value) {
+  const freeze = (item) => {
+    if (!item || typeof item !== "object" || Object.isFrozen(item)) return item;
+    for (const child of Object.values(item)) freeze(child);
+    return Object.freeze(item);
+  };
+  return freeze(value);
+}
+
+function compatibleResolvedConfig(value, selection) {
+  if (!selection || !needsGoogleCompatibility(selection.provider, selection.model)) return value;
+  const original = value?.providers?.[selection.provider];
+  if (!original || typeof original !== "object") throw refusal("model_compatibility_unavailable");
+  if (original.api !== undefined && !["google-generative-ai", "google-vertex"].includes(original.api)) return value;
+  // This is a detached, request-local view AFTER the SDK merged user settings.
+  // The source profile, its hash and other models' capability declarations stay intact.
+  const copy = structuredClone(value), route = copy.providers[selection.provider];
+  if (Array.isArray(route.models) && route.models.length) {
+    const entry = route.models.find((item) => item?.id === selection.model);
+    if (!entry) throw refusal("model_compatibility_unavailable");
+    entry.reasoningEfforts = false;
+  } else {
+    route.modelOverrides = { ...route.modelOverrides,
+      [selection.model]: { ...route.modelOverrides?.[selection.model], reasoningEfforts: false } };
+  }
+  // The reviewer sends only this selected route/model. A saved route-wide effort
+  // would reject its temporary non-reasoning descriptor before provider I/O.
+  delete route.reasoning;
+  delete route.thinkingBudgets;
+  return frozenCopy(copy);
+}
+
+function readonlySettings(Base, selection) {
+  class ReadonlySettings extends readonlyClass(Base, ["persist", "prepareDocument"]) {
+    register(namespace, ...args) {
+      const scope = super.register(namespace, ...args);
+      if (namespace !== "llm-pi-ai") return scope;
+      const cache = new WeakMap();
+      return new Proxy(scope, { get(target, key) {
+        if (key === "get") return () => {
+          const value = target.get();
+          if (!selection.current || !needsGoogleCompatibility(selection.current.provider, selection.current.model)) return value;
+          if (!value || typeof value !== "object") throw refusal("model_compatibility_invalid");
+          if (!cache.has(value)) cache.set(value, compatibleResolvedConfig(value, selection.current));
+          return cache.get(value);
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    }
+  }
+  return ReadonlySettings;
+}
+
 function options(argv) {
   const result = { model: "", mode: "default", timeout: 180, probe: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -124,11 +231,14 @@ function readonlyClass(Base, methods) {
   return Readonly;
 }
 
-async function createRuntime(sdk, config) {
+async function createRuntime(sdk, config, observed) {
   const ctx = new sdk.cordis.Context();
   try {
+    observed.phase = "profile";
     const entries = loadProfileConfigs(config);
-    await ctx.plugin(readonlyClass(sdk.settings.default, ["persist", "prepareDocument"]), { ...entries.get(MODULES.settings), watch: false });
+    observed.phase = "runtime";
+    const selection = { current: null };
+    await ctx.plugin(readonlySettings(sdk.settings.default, selection), { ...entries.get(MODULES.settings), watch: false });
     await ctx.plugin(readonlyClass(sdk.credentials.default, ["set", "unset", "modifyRecord", "deleteRecord", "migrateFlatDocument"]), { ...entries.get(MODULES.credentials), watch: false });
     await ctx.plugin(sdk.llm.LlmRuntime);
     // Sentinels make an absent explicit platform default fail, instead of
@@ -150,6 +260,9 @@ async function createRuntime(sdk, config) {
       || typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw refusal("model_binding_invalid");
     const adapterName = provider === "deepseek-official" ? MODULES.deepseek : MODULES.pi;
     if (!entries.has(adapterName)) throw refusal("provider_unavailable");
+    selection.current = { provider, model };
+    if (needsGoogleCompatibility(provider, model) && typeof sdk.settings.default.prototype.register !== "function")
+      throw refusal("model_compatibility_unavailable");
     await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, entries.get(adapterName));
     const llm = ctx.get("llm");
     if (!llm || typeof llm.stream !== "function" || typeof llm.listProviders !== "function"
@@ -159,7 +272,7 @@ async function createRuntime(sdk, config) {
     }
     return { ctx, llm, provider, model };
   } catch (error) {
-    await ctx.fiber.dispose();
+    try { await ctx.fiber.dispose(); } catch { /* Keep the original safe failure. */ }
     throw error;
   }
 }
@@ -196,13 +309,15 @@ function usageValue(raw) {
     cached_input_tokens: raw.cacheReadTokens ?? 0, total_tokens: total };
 }
 
-async function generate(runtime, sdk, instruction, schema, signal) {
+async function generate(runtime, sdk, instruction, schema, signal, observed) {
   const parts = new Map();
   let bytes = 0, chunks = 0, terminal = false, usage, usageCount = 0;
   const indexOf = (value) => {
     if (!Number.isSafeInteger(value) || value < 0 || value > 63) throw refusal("invalid_output_block");
     return value;
   };
+  observed.phase = "stream";
+  observed.streamInvoked = true;
   for await (const chunk of runtime.llm.stream({
     provider: runtime.provider, model: runtime.model,
     system: SYSTEM + "\nResponse JSON Schema (supplied by the trusted local reviewer):\n" + JSON.stringify(schema),
@@ -230,17 +345,28 @@ async function generate(runtime, sdk, instruction, schema, signal) {
     } else if (chunk.type === "usage") {
       usageCount += 1;
       usage = usageCount === 1 ? usageValue(chunk.usage) : undefined;
+      observed.usageObserved = true;
+      observed.usage = usage;
     } else if (chunk.type === "finish") {
+      if (chunk.reason?.kind === "error") {
+        const code = chunk.reason.failure?.code;
+        const error = refusal(typeof code === "string" && Object.hasOwn(FAILURE_CODES, code)
+          ? FAILURE_CODES[code] : "model_request_failed");
+        error.failure = chunk.reason.failure;
+        throw error;
+      }
       if (chunk.reason?.kind !== "stop") throw refusal("incomplete_model_response");
       terminal = true;
     }
     // Reasoning and replay payloads never enter stdout or the stored response.
   }
   if (!terminal || signal.aborted) throw refusal("incomplete_model_response");
+  observed.phase = "response";
   let rawText = [...parts].sort(([a], [b]) => a - b).map(([, value]) => value).join("").trim();
   const fenceMatch = rawText.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   if (fenceMatch) rawText = fenceMatch[1].trim();
-  const response = JSON.parse(rawText);
+  let response;
+  try { response = JSON.parse(rawText); } catch { throw refusal("invalid_response_json"); }
   if (!response || typeof response !== "object" || Array.isArray(response)) throw refusal("invalid_response_object");
   return { status: "SUCCESS", structured_output: response, num_turns: 1, ...(usage ? { usage } : {}) };
 }
@@ -250,25 +376,42 @@ async function main() {
     process.stdout.write("Agent Learning DSH SDK reviewer: --sdk-anchor PATH --model PROVIDER/MODEL --selection-mode MODE --timeout SECONDS; --probe\n");
     return;
   }
-  let config, runtime, timer;
+  let config, runtime, timer, result;
+  const observed = { phase: "arguments", streamInvoked: false, usageObserved: false, usage: undefined };
   try {
     config = options(process.argv.slice(2));
+    observed.phase = "sdk_load";
     const sdk = await loadSDK(config.anchor);
     if (config.probe) { write({ protocol: PROTOCOL, ready: true }); return; }
-    runtime = await createRuntime(sdk, config);
+    runtime = await createRuntime(sdk, config, observed);
     write({ event: "init", init: { tools: [], permission_mode: "request-review", agent: "alp-review",
       model: config.model || `${runtime.provider}/${runtime.model}` } });
     const controller = new AbortController();
     timer = setTimeout(() => controller.abort(), config.timeout * 1000);
+    observed.phase = "input";
     const input = await readInput();
-    write({ event: "result", result: await generate(runtime, sdk, input.instruction, input.schema, controller.signal) });
+    result = await generate(runtime, sdk, input.instruction, input.schema, controller.signal, observed);
   } catch (error) {
-    if (config?.probe) write({ protocol: PROTOCOL, ready: false, reason: error?.safeCode || "sdk_unavailable" });
-    else write({ event: "result", result: { status: "ERROR", error: true, num_turns: 0 } });
+    if (config?.probe) write({ protocol: PROTOCOL, ready: false,
+      reason: REASONS.has(error?.safeCode) ? error.safeCode : "sdk_unavailable" });
+    else result = { status: "ERROR", error: true, num_turns: 0, diagnostic: diagnostic(error, observed),
+      ...(observed.usage ? { usage: observed.usage } : {}) };
     process.exitCode = 1;
   } finally {
     clearTimeout(timer);
-    if (runtime) await runtime.ctx.fiber.dispose();
+    if (runtime) {
+      try { await runtime.ctx.fiber.dispose(); }
+      catch {
+        if (!result || result.status !== "ERROR") {
+          observed.phase = "cleanup";
+          result = { status: "ERROR", error: true, num_turns: 0,
+            diagnostic: diagnostic(refusal("model_cleanup_failed"), observed),
+            ...(observed.usage ? { usage: observed.usage } : {}) };
+          process.exitCode = 1;
+        }
+      }
+    }
+    if (result) write({ event: "result", result });
   }
 }
 

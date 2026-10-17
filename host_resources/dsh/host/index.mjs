@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { randomUUID, createHash } from "node:crypto";
+import { readFileSync, realpathSync, statSync, existsSync } from "node:fs";
+import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -47,17 +47,24 @@ function loadAllowedWorkspaces(receipt) {
 function matchInstalledWorkspace(candidateCwd, receipt) {
   const allowed = loadAllowedWorkspaces(receipt);
   const cand = String(candidateCwd || "").trim();
-  if (!allowed.length) {
-    return cand || null;
-  }
-  if (!cand) {
-    return receipt?.workspace || allowed[0];
-  }
+  if (!allowed.length || !cand || !isAbsolute(cand)) return null;
   const sorted = [...allowed].sort((a, b) => b.length - a.length);
   for (const root of sorted) {
-    if (isWithinWorkspace(cand, root)) {
-      return root;
-    }
+    try {
+      if (!isAbsolute(root)) continue;
+      const actual = realpathSync.native(cand), bound = realpathSync.native(root);
+      if (!statSync(actual).isDirectory() || !statSync(bound).isDirectory()) continue;
+      const delta = relative(bound, actual);
+      if (isAbsolute(delta) || delta === ".." || delta.startsWith(".." + sep)) continue;
+      let cursor = actual, nested = false;
+      while (relative(bound, cursor)) {
+        if (existsSync(join(cursor, ".git"))) { nested = true; break; }
+        const parent = dirname(cursor);
+        if (parent === cursor) { nested = true; break; }
+        cursor = parent;
+      }
+      if (!nested) return bound;
+    } catch {}
   }
   return null;
 }
@@ -1201,7 +1208,7 @@ export function apply(ctx) {
         {
           name: "learning-admin",
           description: "配置或触发当前项目的 DSH 管理员知识审核与工作摘要整理",
-          hint: "[status | on [current|fixed|default] [model_id] | off | once | batch]",
+          hint: "[status | on [first|current|fixed|default] [model_id] | off | once | batch]",
         },
         {
           name: "learning-browser",
@@ -1245,6 +1252,7 @@ export function apply(ctx) {
             send(500, { ok: false, error: "runtime receipt unavailable" });
             return;
           }
+          const installationId = createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
           const reqUrl = new URL(req.url || "/agent-learning/panel", "http://127.0.0.1");
           let requestedCwd = (reqUrl.searchParams.get("cwd") || "").trim();
           const requestedSessionId = (reqUrl.searchParams.get("sessionId") || "").trim();
@@ -1258,11 +1266,11 @@ export function apply(ctx) {
           const matchedWorkspace = matchInstalledWorkspace(requestedCwd, receipt);
 
           if (req.method === "GET") {
-            if (allowedList.length > 0 && requestedCwd && !matchedWorkspace) {
+            if (!matchedWorkspace) {
               send(200, { ok: true, installed: false, reason: "outside_bound_workspace" });
               return;
             }
-            const workspace = matchedWorkspace || requestedCwd;
+            const workspace = requestedCwd;
             if (!workspace) {
               send(200, { ok: true, installed: false, reason: "no_workspace" });
               return;
@@ -1272,9 +1280,8 @@ export function apply(ctx) {
               const inputPayload = JSON.stringify({
                 home: receipt.home || null,
                 workspace,
-                check_registered_only: allowedList.length === 0,
-                slash_command: "learning-status",
-                raw_input: "/learning-status",
+                panel_bound_workspace: matchedWorkspace,
+                panel_status: true,
               });
               const { code, stdout } = await runPythonProcess(
                 receipt.python,
@@ -1316,6 +1323,8 @@ export function apply(ctx) {
                 global_usage: data.global_usage || null,
                 project_budget_policy: data.project_budget_policy || null,
                 global_budget_policy: data.global_budget_policy || null,
+                panel_snapshot: data.panel_snapshot ? { ...data.panel_snapshot, installation_id: installationId } : null,
+                diagnostic: data.panel_snapshot?.diagnostic || null,
                 admission: data.admission || null,
                 onboarding: data.history_import?.onboarding?.state || "unoffered",
                 browser_running: Boolean(browserStat?.running),
@@ -1351,19 +1360,43 @@ export function apply(ctx) {
               if (meta?.cwd) bodyCwd = String(meta.cwd).trim();
             }
             const matchedPostWorkspace = matchInstalledWorkspace(bodyCwd, receipt);
-            if (allowedList.length > 0 && bodyCwd && !matchedPostWorkspace) {
+            if (!matchedPostWorkspace) {
               send(403, { ok: false, error: "project is not bound to this Agent Learning installation" });
               return;
             }
-            const workspace = matchedPostWorkspace || bodyCwd || receipt.workspace || process.cwd();
+            const workspace = bodyCwd;
             const toolScript = join(receipt.runtime_directory, "hooks", "dsh_tool.py");
+            if (body.installation_id !== installationId) {
+              send(409, { ok: false, error: "Agent Learning installation changed; reopen the panel" });
+              return;
+            }
+            // Recheck the logical project in Python before every panel action.
+            // Path membership alone cannot resolve configured project aliases.
+            if (typeof body.project_id !== "string" || !body.project_id) {
+              send(409, { ok: false, error: "panel project unavailable; refresh before continuing" });
+              return;
+            }
+            const checked = await runPythonProcess(receipt.python, ["-B", toolScript], JSON.stringify({
+              home: receipt.home || null, workspace, panel_bound_workspace: matchedPostWorkspace,
+              panel_project_id: body.project_id, panel_status: true,
+            }), workspace, undefined, 15000);
+            const checkedResult = checked.code === 0 && checked.stdout.trim() ? JSON.parse(checked.stdout.trim()) : null;
+            if (!checkedResult?.ok) {
+              send(409, { ok: false, error: "panel project changed or unavailable; refresh before continuing" });
+              return;
+            }
 
             if (action === "set_admin_preset") {
               const preset = String(body?.preset || "").toLowerCase();
               const inputPayload = JSON.stringify({
                 home: receipt.home || null,
                 workspace,
+                panel_bound_workspace: matchedPostWorkspace,
+                panel_project_id: body.project_id,
                 admin_preset: preset,
+                panel_snapshot: body.panel_snapshot,
+                request_id: body.request_id,
+                confirm: body.confirm,
               });
               const { code, stdout, stderr } = await runPythonProcess(
                 receipt.python,
@@ -1379,6 +1412,17 @@ export function apply(ctx) {
                 return;
               }
               send(200, { ok: true, ...parsed.result });
+              return;
+            }
+
+            if (action === "admin_receipt") {
+              const checked = await runPythonProcess(receipt.python, ["-B", toolScript], JSON.stringify({
+                home: receipt.home || null, workspace, panel_bound_workspace: matchedPostWorkspace,
+                panel_project_id: body.project_id, panel_receipt: true, request_id: body.request_id,
+              }), workspace, undefined, 15000);
+              const result = checked.code === 0 && checked.stdout.trim() ? JSON.parse(checked.stdout.trim()) : null;
+              if (!result?.ok) { send(400, { ok: false, error: "request receipt unavailable" }); return; }
+              send(200, { ok: true, ...result.result });
               return;
             }
 
@@ -1409,6 +1453,8 @@ export function apply(ctx) {
               const inputPayload = JSON.stringify({
                 home: receipt.home || null,
                 workspace,
+                panel_bound_workspace: matchedPostWorkspace,
+                panel_project_id: body.project_id,
                 tool: "learning_history",
                 args: { action: "auto", confirm: true },
               });

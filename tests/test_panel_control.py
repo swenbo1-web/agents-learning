@@ -198,11 +198,44 @@ class PanelControlTests(unittest.TestCase):
         launch.assert_called_once()
         self.assertEqual(first, repeated)
         self.assertTrue(first["summary"]["admin_admission_enabled"])
+        self.assertEqual(self.runtime.admin_policy(self.project)["model_mode"], "first")
+        self.assertEqual(first["summary"]["model"], "observed-model")
         self.assertEqual(first["summary"]["max_calls_per_day"], 15)
         self.assertEqual(first["summary"]["budget_scope"], "project")
         self.assertEqual(first["summary"]["global_usage"]["max_calls_per_day"], 100)
         with self.assertRaises(ContractError):
             self.action(opened, "set_admin_preset", **dict(args, preset="active"))
+
+    def test_first_enable_waits_for_project_model_instead_of_using_cli_default(self):
+        opened = self.bootstrap()
+        with patch.object(self.runtime, "_launch_admin") as launch:
+            result = self.action(opened, "set_admin_preset", preset="light", request_id="no-model-yet", confirm=True,
+                                 expected=opened["summary"]["expected"])
+        self.assertEqual(self.runtime.admin_policy(self.project)["model_mode"], "first")
+        self.assertIsNone(result["summary"]["model"])
+        launch.assert_not_called()
+
+    def test_explicit_model_modes_survive_preset_changes(self):
+        for mode in ("first", "current", "default", "fixed"):
+            with self.subTest(mode=mode):
+                self.runtime.admin_configure(self.project, True, model_mode=mode,
+                                             model="selected-model" if mode == "fixed" else "")
+                opened = self.bootstrap()
+                with patch.object(self.runtime, "_launch_admin"):
+                    self.action(opened, "set_admin_preset", preset="light", request_id="preserve-mode-" + mode,
+                                confirm=True, expected=opened["summary"]["expected"])
+                self.assertEqual(self.runtime.admin_policy(self.project)["model_mode"], mode)
+                if mode == "fixed":
+                    self.assertEqual(self.runtime.admin_policy(self.project)["model"], "selected-model")
+
+    def test_turning_off_unconfigured_administrator_keeps_default_model_mode(self):
+        opened = self.bootstrap()
+        with patch.object(self.runtime, "_launch_admin") as launch:
+            self.action(opened, "set_admin_preset", preset="off", request_id="unconfigured-off", confirm=True,
+                        expected=opened["summary"]["expected"])
+        self.assertEqual(self.runtime.admin_policy(self.project)["model_mode"], "default")
+        self.assertEqual(self.runtime.admin_policy(self.project)["policy_version"], 0)
+        launch.assert_not_called()
 
     def test_request_budget_is_per_panel_and_expired_panels_are_cleaned(self):
         opened = self.bootstrap()

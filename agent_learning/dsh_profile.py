@@ -87,6 +87,36 @@ def profile_key(snapshot):
     return os.path.normcase(str(Path(snapshot["profile_directory"]).resolve()))
 
 
+def configuration_identity(snapshot):
+    """Settings file metadata for failure invalidation, without reading its contents.
+
+    A snapshot may refer to a mutable settings file. Its own hash cannot tell
+    whether that file changed. Credentials never enter this derived identity.
+    Normal launch guards remain responsible for validating the actual snapshot.
+    """
+    try:
+        if snapshot.get("source") == "operator_file":
+            with Path(snapshot["path"]).open("rb") as stream:
+                raw = stream.read(MAX_BYTES + 1)
+        else:
+            raw = os.environ.get(ENVIRONMENT, "").encode("utf-8")
+        if len(raw) > MAX_BYTES or hashlib.sha256(raw).hexdigest() != snapshot.get("sha256"):
+            return {"snapshot": "changed"}
+        document = json.loads(raw)
+        entry = next((item for item in document["entries"]
+                      if item.get("name") == "@deepseek-ai/dsh-settings-file"), {})
+        config = entry.get("config", {})
+        home = config.get("dshHome") or os.environ.get("DSH_HOME", "").strip() or str(Path.home() / ".dsh")
+        path = Path(config.get("path") or Path(home).expanduser() / "settings.yaml").expanduser().resolve()
+        try:
+            stat = path.stat()
+            return {"settings": [str(path), stat.st_mtime_ns, stat.st_size]}
+        except FileNotFoundError:
+            return {"settings": [str(path), "missing"]}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {"snapshot": "unavailable"}
+
+
 def _binding_id(project, conversation):
     from .runtime import digest
     return digest([project, "dsh-profile-origin:" + conversation])

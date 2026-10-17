@@ -172,11 +172,14 @@ class SchedulerExecutionFailureTests(unittest.TestCase):
         for reason in ("failed", "timeout_unknown", "account_changed_unknown", "orphaned_unknown", "not_started"):
             with self.subTest(reason=reason):
                 self.r.db.execute("DELETE FROM scheduler_jobs")
-                with patch("agent_learning.admin.admin_batch", return_value={
-                        "status": "batch_complete", "stop_reason": reason, "invocations": 1, "scanned_count": 1}) as batch:
+                self.r.db.execute("DELETE FROM admin_executor_failures")
+                def fail(runtime, project, **kwargs):
+                    record_executor_failure(runtime, project, runtime.resolve_admin_executor(project, "chat"), "executor_execution_failed")
+                    return {"status": "batch_complete", "stop_reason": reason, "invocations": 1, "scanned_count": 1}
+                with patch("agent_learning.admin.admin_batch", side_effect=fail) as batch:
                     self.assertEqual(self.r.scheduler_tick(self.p)["processed"], 1)
                     first = self.job()
-                    self.assertEqual(first["wait_reason"], "retry_backoff")
+                    self.assertEqual(first["wait_reason"], "executor_backoff")
                     self.assertGreater(first["next_due"], time.time() + 25)
                     self.r.feedback(self.p, "chat", "Changed material " + reason)
                     self.r.scheduler_wake(self.p)

@@ -226,8 +226,8 @@ def _handle_slash_command(runtime, project, workspace, command_name, raw_input):
             return {"text": "已关闭当前项目的 DSH 自动管理员审核。", "data": res}
         if sub == "on":
             policy = runtime.admin_policy(project)
-            mode = tokens[1].lower() if len(tokens) > 1 and tokens[1].lower() in {"current", "fixed", "default"} else (
-                policy["model_mode"] if policy["policy_version"] else "current"
+            mode = tokens[1].lower() if len(tokens) > 1 and tokens[1].lower() in {"first", "current", "fixed", "default"} else (
+                policy["model_mode"] if policy["policy_version"] else "first"
             )
             model = tokens[2] if len(tokens) > 2 and mode == "fixed" else (policy["model"] if mode == "fixed" else "")
             res = runtime.admin_configure(
@@ -244,7 +244,7 @@ def _handle_slash_command(runtime, project, workspace, command_name, raw_input):
         if sub == "batch":
             res = admin_batch(runtime, project)
             return {"text": f"批量管理员审核执行结果：`status={res.get('status')}`", "data": res}
-        return {"text": "用法：`/learning-admin [status | on [current|fixed|default] [model_id] | off | once [problem_id] | batch]`"}
+        return {"text": "用法：`/learning-admin [status | on [first|current|fixed|default] [model_id] | off | once [problem_id] | batch]`"}
 
     return {"text": f"未知命令：{command_name}"}
 
@@ -296,7 +296,27 @@ def main():
                 _emit({"ok": True, "result": {"registered": False}})
                 return 0
         runtime = Runtime(home=payload.get("home"), host="dsh")
-        project = runtime.project(workspace)
+        if "panel_bound_workspace" in payload:
+            from agent_learning.dsh_panel import bound_project
+            project = bound_project(runtime, workspace, payload["panel_bound_workspace"])
+            if payload.get("panel_project_id") is not None and payload["panel_project_id"] != project:
+                raise ValueError("panel project changed; refresh before continuing")
+        else:
+            project = runtime.project(workspace)
+
+        if payload.get("panel_status") is True:
+            from agent_learning.dsh_panel import snapshot
+            data = runtime.status(project)
+            data["panel_snapshot"] = snapshot(runtime, project)
+            _emit({"ok": True, "result": {"data": data}})
+            return 0
+
+        if payload.get("panel_receipt") is True:
+            if "panel_bound_workspace" not in payload:
+                raise ValueError("panel installation binding required")
+            from agent_learning.admin_control import request_receipt
+            _emit({"ok": True, "result": request_receipt(runtime, project, payload.get("request_id"))})
+            return 0
 
         if "slash_command" in payload:
             cmd_res = _handle_slash_command(
@@ -308,36 +328,10 @@ def main():
             return 0
 
         if "admin_preset" in payload:
-            import uuid
-            from agent_learning.admin_control import apply_control, control_status
-            preset_name = str(payload["admin_preset"]).lower()
-            from agent_learning.admin_presets import PRESETS as presets
-            if preset_name != "off" and preset_name not in presets:
-                _emit({"ok": False, "error": "unsupported admin preset"})
-                return 0
-            st = control_status(runtime, project)
-            enabled = preset_name != "off"
-            limits = presets.get(preset_name) or {
-                k: st["project_budget_policy"]["values"][k]
-                for k in ("max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds")
-            }
-            mode = st["policy"]["model_mode"] if st["policy"]["policy_version"] else "first"
-            model = st["policy"]["model"] if mode == "fixed" else ""
-            req_body = {
-                "request_id": uuid.uuid4().hex,
-                "expected_policy_version": st["policy"]["policy_version"],
-                "expected_project_budget_version": st["project_budget_policy"]["version"],
-                "expected_settings_version": st["settings_version"],
-                "expected_session_epoch": st["session_epoch"],
-                "expected_governance_epoch": st["governance_epoch"],
-                "enabled": enabled,
-                "model_mode": mode,
-                "model": model,
-                "project_limits": limits,
-                "start": enabled,
-            }
-            applied = apply_control(runtime, project, req_body)
-            _emit({"ok": True, "result": {"preset": preset_name, "enabled": enabled, "project_limits": limits, "applied": applied}})
+            if "panel_bound_workspace" not in payload:
+                raise ValueError("panel installation binding required")
+            from agent_learning.dsh_panel import apply_preset
+            _emit({"ok": True, "result": apply_preset(runtime, project, payload)})
             return 0
 
         tool_name = payload.get("tool")

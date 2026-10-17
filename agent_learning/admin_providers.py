@@ -374,7 +374,7 @@ def read_response(provider, output, log_path):
 def collect_antigravity_stream(stream, destination, terminate=None, expected_model=""):
     """持续排空 stdout，只写公开协议控制字段、终态 schema 和用量，丢弃思考及文本流。"""
     state = {"error": False, "bytes_read": 0, "initialized": threading.Event(), "init_safe": False,
-             "input_sent": False, "terminal": False, "writer": None}
+             "input_sent": False, "terminal": False, "writer": None, "diagnostic": None}
     lock = threading.RLock()
 
     def emit(value):
@@ -457,6 +457,19 @@ def collect_antigravity_stream(stream, destination, terminate=None, expected_mod
                             state["init_safe"] = True
                             state["initialized"].set()
                         elif not state["init_safe"]:
+                            # A runner may refuse before safe initialization. Keep
+                            # its typed failure, but never open the input gate.
+                            from .admin_diagnostics import safe_diagnostic
+                            result = event.get("result") if kind == "result" else None
+                            diagnostic = safe_diagnostic(result.get("diagnostic")) if isinstance(result, dict) else None
+                            if (diagnostic and result.get("status") == "ERROR" and result.get("error") is True
+                                    and diagnostic["stream_invoked"] is False):
+                                state["diagnostic"] = diagnostic
+                                state["terminal"] = True
+                                emit({"event": "result", "result": {"status": "ERROR", "error": True,
+                                      "num_turns": 0, "diagnostic": diagnostic}})
+                                refuse()
+                                continue
                             emit({"event": "adapter_protocol_error"})
                             refuse()
                         elif kind == "result":
@@ -468,6 +481,15 @@ def collect_antigravity_stream(stream, destination, terminate=None, expected_mod
                             filtered = {"event": "result", "result": {key: result[key] for key in
                                         ("status", "structured_output", "usage", "num_turns") if key in result}}
                             filtered["result"].update(error=bool(result.get("error")), denied_actions=bool(result.get("denied_actions")))
+                            if "diagnostic" in result:
+                                from .admin_diagnostics import safe_diagnostic
+                                diagnostic = safe_diagnostic(result["diagnostic"])
+                                if diagnostic is None or result.get("status") != "ERROR" or not result.get("error"):
+                                    emit({"event": "adapter_protocol_error"})
+                                    refuse()
+                                    continue
+                                state["diagnostic"] = diagnostic
+                                filtered["result"]["diagnostic"] = diagnostic
                             emit(filtered)
                             state["terminal"] = True
                         elif kind != "step_update":
@@ -521,6 +543,7 @@ def _token_values(usage):
 def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
     """终态 usage 为累计会话值，缓存输入属于输入量；step usage 不重复累加。"""
     totals, complete, terminals, truncated = {}, True, 0, False
+    terminal_turns, diagnostic = None, None
     if log_path is not None:
         try:
             for event in _events(log_path):
@@ -530,6 +553,12 @@ def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
                     continue
                 result = event.get("result")
                 terminals += 1
+                if isinstance(result, dict):
+                    turns = result.get("num_turns")
+                    if type(turns) is int and turns >= 0:
+                        terminal_turns = turns if terminals == 1 else None
+                    from .admin_diagnostics import safe_diagnostic
+                    diagnostic = safe_diagnostic(result.get("diagnostic")) if terminals == 1 else None
                 values, valid = _token_values(result.get("usage") if isinstance(result, dict) else None)
                 complete &= valid and terminals == 1
                 for key, value in values.items():
@@ -538,8 +567,13 @@ def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
             truncated, complete = True, False
     else:
         complete = False
+    observations = {"terminal_observed": terminals == 1, "terminal_reported_turns": terminal_turns,
+                    "usage_observed": bool(totals)}
+    if diagnostic:
+        observations["provider_diagnostic"] = diagnostic
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": [totals] if totals else [],
             "token_totals": totals, "reported_turns": int(bool(totals)), "preview_truncated": False,
+            "observations": observations,
             "completeness": "complete" if complete and terminals == 1 and totals else "partial" if totals else "unknown",
             "log_tail_truncated": truncated, "provider": provider, "usage_scope": "single_session_terminal"}
 

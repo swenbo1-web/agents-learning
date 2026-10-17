@@ -314,19 +314,45 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 from .admin_control import install_control
                 install_control(self)
                 if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 18:
-                    # Older live connections must not keep admitting calls with
-                    # global-only limits after project budgets become authoritative.
-                    boundary = max(self.host_epoch(), self.db.execute(
-                        "SELECT COALESCE(MAX(epoch),0) FROM host_scopes").fetchone()[0]) + 1
-                    self.db.execute("UPDATE host_state SET epoch=? WHERE id=1", (boundary,))
-                    self.db.execute("UPDATE host_scopes SET epoch=?", (boundary,))
-                    self.db.execute("UPDATE admin_calls SET state='orphaned_unknown',"
-                                    "finished=COALESCE(finished,?),lease_until=NULL "
-                                    "WHERE state IN ('reserved','launch_intent','started')", (time.time(),))
+                    self._fence_project_budget_upgrade()
                 self.db.execute("PRAGMA user_version=18")
         except BaseException:
             self.db.close()
             raise
+
+    def _fence_project_budget_upgrade(self):
+        """Fence old executors without interpreting a protocol upgrade as an account change."""
+        if not self.db.in_transaction:
+            raise ContractError("project budget upgrade requires a write transaction")
+        prior_governance = self.host_epoch()
+        boundary = max(prior_governance, self.db.execute(
+            "SELECT COALESCE(MAX(epoch),0) FROM host_scopes").fetchone()[0]) + 1
+        # Only the current account epoch of each host can be carried forward.
+        # Old account bindings remain historical and must never become active.
+        self.db.execute(
+            "INSERT INTO admin_first_models(project,host_scope,session_epoch,conversation,model,observed,version) "
+            "SELECT m.project,m.host_scope,?,m.conversation,m.model,m.observed,m.version "
+            "FROM admin_first_models m JOIN host_scopes h ON h.scope=m.host_scope AND h.epoch=m.session_epoch",
+            (boundary,))
+        self.db.execute(
+            "UPDATE admin_model_observations SET session_epoch=? WHERE EXISTS(SELECT 1 FROM host_scopes h "
+            "WHERE h.scope=admin_model_observations.host_scope AND h.epoch=admin_model_observations.session_epoch)",
+            (boundary,))
+        # A valid uncompleted window keeps its original identity and evidence.
+        # Existing failed/unknown call locks are untouched. The regular guard
+        # still checks policy, task identity and source versions before review.
+        self.db.execute(
+            "UPDATE work_summary_links SET session_epoch=?,governance_epoch=? "
+            "WHERE state IN ('pending','awaiting_evidence') AND governance_epoch=? "
+            "AND EXISTS(SELECT 1 FROM host_scopes h WHERE h.scope=work_summary_links.host_scope "
+            "AND h.epoch=work_summary_links.session_epoch)", (boundary, boundary, prior_governance))
+        self.db.execute("UPDATE host_state SET epoch=? WHERE id=1", (boundary,))
+        self.db.execute("UPDATE host_scopes SET epoch=?", (boundary,))
+        self.db.execute(
+            "UPDATE admin_calls SET state=CASE WHEN state='reserved' AND owner IS NOT NULL AND owner!='' "
+            "AND launch_intent IS NULL AND started IS NULL THEN 'not_started' ELSE 'orphaned_unknown' END,"
+            "finished=COALESCE(finished,?),lease_until=NULL "
+            "WHERE state IN ('reserved','launch_intent','started')", (time.time(),))
 
     def _migrate_admin_storage(self):
         from .admin_lifecycle import install_lifecycle

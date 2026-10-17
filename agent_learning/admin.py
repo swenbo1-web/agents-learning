@@ -290,7 +290,8 @@ def _settings(cfg):
 def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch, history_job_id=None):
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
-    from .admin_queue import eligible_query, executor_query, remember_check, scan_signature, executor_backoff, REVIEW_ORDER
+    from .admin_queue import (eligible_query, executor_query, remember_check, scan_signature,
+                              executor_backoff, executor_wait_reason, REVIEW_ORDER)
     from .admin_providers import executor_availability
     cfg = runtime.admin_effective_config(project)
     if history_job_id is None and not cfg["enabled"]:
@@ -344,7 +345,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             continue
         backoff = executor_backoff(runtime, project, provider_plan)
         if backoff:
-            routing_skipped.append({"problem_id": selected["id"], "reason": "executor_circuit_open" if backoff["failures"] >= 3 else "executor_backoff"})
+            routing_skipped.append({"problem_id": selected["id"], "reason": executor_wait_reason(backoff)})
             continue
         review_cfg = _review_configuration(cfg, provider_plan)
         if summary_context:
@@ -702,6 +703,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
     if _history_job_id is not None:
         runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
     _, timeout = _settings(cfg)
+    timeout = min(timeout, cfg.get("max_run_seconds", 600))
     if cfg["max_calls_per_day"] == 0:
         return {"status": "budget_exhausted", "scanned_count": 0}
     if _deadline is not None:
@@ -760,17 +762,19 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             timeout = min(timeout, remaining)
         with log_path.open("wb") as log:
             with runtime.transaction():
-                runtime.assert_admin_executor_snapshot(project, provider_plan, provider_plan.get("conversation"),
-                                                       require_enabled=_history_job_id is None)
-                if reserved.get("summary_context"):
-                    runtime.work_summary_guard(project, reserved["packet"]["problem"]["id"])
-                if _history_job_id is None and not runtime.admin_effective_config(project)["enabled"]:
-                    usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
-                    return {"status": "disabled", "call_id": call_id, "usage": usage, **context}
-                mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+                with _review_state_guard():
+                    runtime.assert_admin_executor_snapshot(project, provider_plan, provider_plan.get("conversation"),
+                                                           require_enabled=_history_job_id is None)
+                    if reserved.get("summary_context"):
+                        runtime.work_summary_guard(project, reserved["packet"]["problem"]["id"])
+                    if _history_job_id is None and not runtime.admin_effective_config(project)["enabled"]:
+                        usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
+                        return {"status": "disabled", "call_id": call_id, "usage": usage, **context}
+                    mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             if _history_job_id is not None:
                 with runtime.transaction():
-                    runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
+                    with _review_state_guard():
+                        runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
             try:
                 stream_mode = provider_plan["provider"] in {"antigravity", "dsh"}
                 process = subprocess.Popen(args, stdin=subprocess.PIPE,
@@ -783,7 +787,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 detail = launch_error(exc)
                 record_executor_failure(runtime, project, provider_plan, detail["reason"], detail)
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **detail, **context}
-            mark_started(runtime, call_id, reserved["owner"], getattr(process, "pid", None))
+            with _review_state_guard():
+                mark_started(runtime, call_id, reserved["owner"], getattr(process, "pid", None))
             record_dispatch_diagnostic(runtime, project, "model_started")
             execution_state["phase"] = "initialization" if stream_mode else "execution"
             if stream_mode:
@@ -854,7 +859,15 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         if isinstance(exc, ReviewStateChanged):
             execution_state["reason_code"] = "review_context_changed"
         else:
-            record_executor_failure(runtime, project, provider_plan, execution_state["reason_code"], execution_state)
+            from .admin_diagnostics import safe_diagnostic, configuration_failure
+            diagnostic = safe_diagnostic(output_state.get("diagnostic")) if output_state is not None else None
+            failure_reason = execution_state["reason_code"]
+            if diagnostic:
+                execution_state["provider_diagnostic"] = diagnostic
+                execution_state["reason_code"] = diagnostic["reason_code"]
+                failure_reason = ("configuration_change_required" if configuration_failure(diagnostic)
+                                  else diagnostic["reason_code"])
+            record_executor_failure(runtime, project, provider_plan, failure_reason, execution_state)
         usage = _finish(runtime, call_id, "not_started" if process is None else "failed", log_path, started_at, provider_plan,
                         execution=execution_state)
         state = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
@@ -914,7 +927,7 @@ def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _
             row = runtime.db.execute("SELECT * FROM admin_dispatch WHERE project=? AND token=?", (project, dispatch_token)).fetchone()
             if not row or row["host_epoch"] != epoch or row["lease_until"] <= time.time():
                 return {"status": "dispatch_expired", "items": []}
-        deadline = started + cfg["max_batch_seconds"]
+        deadline = started + min(cfg["max_batch_seconds"], cfg.get("max_run_seconds", 600))
         if _deadline is not None:
             if not isinstance(_deadline, (int, float)) or isinstance(_deadline, bool):
                 raise ContractError("invalid administrator batch deadline")
@@ -929,7 +942,7 @@ def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _
             if not cfg["enabled"]:
                 results.append({"status": "disabled", "scanned_count": 0})
                 break
-            deadline = min(deadline, started + cfg["max_batch_seconds"])
+            deadline = min(deadline, started + cfg["max_batch_seconds"], started + cfg.get("max_run_seconds", 600))
             if scanned >= cfg["max_cases_per_batch"] or calls >= cfg["max_calls_per_batch"]:
                 break
             result = admin_once(runtime, project, expected_epoch=epoch, _deadline=deadline,
