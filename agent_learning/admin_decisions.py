@@ -118,7 +118,7 @@ def _missing_evidence(response):
 
 
 def persist_receipt(runtime, project, packet, evidence_signature, review_signature, call_id,
-                    response, duplicate_of=None):
+                    response, duplicate_of=None, *, evidence_wait_signature=None):
     from .runtime import ContractError, clean, digest, encode
 
     decision = response.get("decision", response.get("status")) if isinstance(response, dict) else None
@@ -130,6 +130,10 @@ def persist_receipt(runtime, project, packet, evidence_signature, review_signatu
     body["decision"] = decision
     body["reason"] = body["reason"][:1000]
     body["missing_evidence"] = _missing_evidence(body)
+    if evidence_wait_signature is not None:
+        if not isinstance(evidence_wait_signature, str) or len(evidence_wait_signature) != 64:
+            raise ContractError("invalid evidence wait signature")
+        body["evidence_wait_signature"] = evidence_wait_signature
     review_state = _STATES[decision]
     if decision == "candidate" and isinstance(body.get("publication"), dict) and body["publication"].get("status") == "published":
         review_state = "published"

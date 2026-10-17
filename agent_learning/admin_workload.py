@@ -169,7 +169,16 @@ def workload_page(db, project, *, view="groups", stage="all", group_id="", offse
             "history_excluded": True, "summary": summary}
 
 
-def hold_unchanged_review(runtime, project, packet, evidence):
+def evidence_wait_signature(packet, cfg, evidence):
+    from .admin_decisions import review_signature
+    from .runtime import digest
+    # Model selection alone does not supply missing facts. All other policy,
+    # format, instruction, provider and comparison dependencies still apply.
+    config = {key: value for key, value in cfg.items() if key not in {"model", "model_mode", "model_source"}}
+    return digest(["evidence-wait-v1", review_signature(packet, config, evidence)])
+
+
+def hold_unchanged_review(runtime, project, packet, evidence, cfg):
     """Missing-evidence decisions wait for changed evidence or dependencies.
 
     Explicit case review bypasses this helper. Evidence fingerprints include current
@@ -177,10 +186,12 @@ def hold_unchanged_review(runtime, project, packet, evidence):
     """
     if packet["problem"].get("knowledge_id"):
         return False
-    from .admin_decisions import dependencies
-    row = runtime.db.execute("SELECT r.evidence_signature,r.dependencies FROM review_states s JOIN review_receipts r "
+    row = runtime.db.execute("SELECT r.evidence_signature,json_extract(r.response,'$.evidence_wait_signature') AS wait_signature "
+        "FROM review_states s JOIN review_receipts r "
         "ON r.project=s.project AND r.problem=s.problem AND r.revision=s.revision AND r.review_signature=s.review_signature "
         "WHERE s.project=? AND s.problem=? AND s.revision=? AND r.decision='needs_evidence' "
         "AND r.duplicate_of IS NULL", (project, packet["problem"]["id"], packet["problem"]["revision"])).fetchone()
-    return bool(row and row["evidence_signature"] == evidence and
-                json.loads(row["dependencies"]) == dependencies(packet, evidence))
+    # Older receipts have no scheduling signature. Normal exact receipt reuse
+    # remains available; never invent their former model policy or instructions.
+    return bool(row and row["evidence_signature"] == evidence and row["wait_signature"] and
+                row["wait_signature"] == evidence_wait_signature(packet, cfg, evidence))

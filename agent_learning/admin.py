@@ -388,7 +388,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         evidence = _fingerprint(packet)
         if problem_id is None and not history_job_id and not summary_context:
             from .admin_workload import hold_unchanged_review
-            if hold_unchanged_review(runtime, project, packet, evidence):
+            if hold_unchanged_review(runtime, project, packet, evidence, review_cfg):
                 remember_check(runtime, project, selected, signature)
                 continue
         review = review_signature(packet, review_cfg, evidence)
@@ -454,7 +454,9 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                                (claim["call_id"], time.time(), project, selected["id"]))
         if history_job_id is not None:
             runtime.history_reserve_call(project, history_job_id, selected["id"], claim["call_id"], epoch)
+        from .admin_workload import evidence_wait_signature
         return {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
+                "evidence_wait_signature": evidence_wait_signature(packet, review_cfg, evidence),
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
                 "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id,
                 "provider_plan": provider_plan, "summary_context": summary_context,
@@ -623,7 +625,8 @@ def _accept_response(runtime, project, reserved, response):
             "publication_not_enabled_at_reservation")}
     result["status"] = response["decision"]
     persist_receipt(runtime, project, packet, reserved["evidence_signature"], reserved["review_signature"],
-                    call_id, dict(response, **result, decision=response["decision"]))
+                    call_id, dict(response, **result, decision=response["decision"]),
+                    evidence_wait_signature=reserved.get("evidence_wait_signature") if response["decision"] == "needs_evidence" else None)
     if summary_context and response["decision"] == "candidate":
         runtime.db.execute("UPDATE review_states SET state='work_summary_ready' WHERE project=? AND problem=? AND revision=?",
                            (project, packet["problem"]["id"], packet["problem"]["revision"]))

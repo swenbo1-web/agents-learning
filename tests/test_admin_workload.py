@@ -10,7 +10,7 @@ from unittest.mock import patch
 from agent_learning.admin import _fingerprint, admin_once
 from agent_learning.admin_control import control_status
 from agent_learning.admin_decisions import persist_receipt, review_signature
-from agent_learning.admin_workload import hold_unchanged_review, workload_page, workload_summary
+from agent_learning.admin_workload import evidence_wait_signature, hold_unchanged_review, workload_page, workload_summary
 from agent_learning.knowledge_browser import _read_api
 from agent_learning.runtime import ContractError, Runtime
 from tests.test_module6_queue import fake_reviewer
@@ -36,7 +36,8 @@ class AdminWorkloadTests(unittest.TestCase):
         evidence = _fingerprint(packet)
         signature = review_signature(packet, self.r.config["admin"], evidence)
         persist_receipt(self.r, self.p, packet, evidence, signature, None,
-                        {"decision": decision, "reason": "Needs a real verification"})
+                        {"decision": decision, "reason": "Needs a real verification"},
+                        evidence_wait_signature=evidence_wait_signature(packet, self.r.config["admin"], evidence))
         return packet, evidence
 
     def test_stages_partition_rows_and_history_is_not_daily_work(self):
@@ -192,16 +193,35 @@ class AdminWorkloadTests(unittest.TestCase):
 
     def test_missing_evidence_gate_observes_health_and_dependencies(self):
         packet, evidence = self.decision(self.problem())
-        self.assertTrue(hold_unchanged_review(self.r, self.p, packet, evidence))
+        self.assertTrue(hold_unchanged_review(self.r, self.p, packet, evidence, self.r.config["admin"]))
         for field, value in (("related_knowledge", [{"knowledge_id": "new", "revision": 1}]),
                              ("related_candidates", [{"candidate_id": "new"}]), ("review_context_revision", 1)):
             changed = copy.deepcopy(packet)
             changed[field] = value
-            self.assertFalse(hold_unchanged_review(self.r, self.p, changed, evidence))
-        self.assertFalse(hold_unchanged_review(self.r, self.p, packet, "changed-health-or-evidence"))
+            self.assertFalse(hold_unchanged_review(self.r, self.p, changed, evidence, self.r.config["admin"]))
+        self.assertFalse(hold_unchanged_review(self.r, self.p, packet, "changed-health-or-evidence", self.r.config["admin"]))
         changed = copy.deepcopy(packet)
         changed["problem"]["knowledge_id"] = "feedback-target"
-        self.assertFalse(hold_unchanged_review(self.r, self.p, changed, evidence))
+        self.assertFalse(hold_unchanged_review(self.r, self.p, changed, evidence, self.r.config["admin"]))
+
+    def test_missing_evidence_does_not_mask_instruction_budget_or_provider_changes(self):
+        packet, evidence = self.decision(self.problem())
+        for key, value in (("max_input_chars", 12000), ("auto_publish", True),
+                           ("provider", "antigravity"), ("review_policy", "new")):
+            cfg = dict(self.r.config["admin"], **{key: value})
+            self.assertFalse(hold_unchanged_review(self.r, self.p, packet, evidence, cfg), key)
+        for key, value in (("REVIEW_PREFIX", "Updated instructions"), ("PACKET_FORMAT", 999)):
+            with patch("agent_learning.admin_decisions." + key, value):
+                self.assertFalse(hold_unchanged_review(self.r, self.p, packet, evidence, self.r.config["admin"]))
+
+    def test_legacy_wait_receipt_does_not_guess_old_policy(self):
+        problem = self.problem()
+        packet = self.r.review_packet(self.p, problem["id"])
+        evidence = _fingerprint(packet)
+        signature = review_signature(packet, self.r.config["admin"], evidence)
+        persist_receipt(self.r, self.p, packet, evidence, signature, None,
+                        {"decision": "needs_evidence", "reason": "Legacy receipt"})
+        self.assertFalse(hold_unchanged_review(self.r, self.p, packet, evidence, self.r.config["admin"]))
 
     def test_all_host_snapshots_use_the_same_additive_counts(self):
         self.problem()
