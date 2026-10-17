@@ -14,7 +14,7 @@ import uuid
 
 from .mcp import CANDIDATE, validate
 from .runtime import ContractError, clean, digest, encode
-from .review_packet import PACKET_FORMAT, REVIEW_PREFIX as _REVIEW_PREFIX, review_instruction
+from .review_packet import review_instruction
 
 
 class ReviewStateChanged(ContractError):
@@ -290,7 +290,7 @@ def _settings(cfg):
 def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch, history_job_id=None):
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
-    from .admin_queue import (eligible_query, executor_query, remember_check, scan_signature,
+    from .admin_queue import (eligible_query, executor_query, remember_check, scan_signatures,
                               executor_backoff, executor_wait_reason, REVIEW_ORDER)
     from .admin_providers import executor_availability
     cfg = runtime.admin_effective_config(project)
@@ -298,8 +298,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         return {"status": "disabled", "scanned_count": 0}
     epoch = runtime.assert_host_epoch(expected_epoch)
     recover_calls(runtime, project)
-    signature = scan_signature(runtime, project)
-    preflight_signature = scan_signature(runtime, project, include_candidates=False)
+    signature, preflight_signature = scan_signatures(runtime, project)
     if history_job_id is not None:
         runtime.history_guard(project, problem_id, history_job_id, require_review=True, expected_epoch=epoch)
     summary_enabled = runtime.work_summary_enabled(project)

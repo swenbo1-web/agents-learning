@@ -12,7 +12,7 @@ import uuid
 
 from . import __version__
 from .install import _hook_commands, _resource_root
-from .install_update import installation_lock, inspect_installation, safe_path, snapshot
+from .install_update import installation_lock, inspect_installation, python_executable, safe_path, snapshot
 from .runtime import ContractError
 
 
@@ -60,7 +60,7 @@ def _entry(installation):
         raise ContractError("UI registration requires an existing workspace")
     return ({"workspace": str(workspace), "installation": str(root),
             "receipt_sha256": hashlib.sha256((root / "runtime-release.json").read_bytes()).hexdigest(),
-            "python": str(safe_path(receipt["python"])),
+            "python": str(python_executable(receipt["python"])),
             "runtime_directory": str(safe_path(receipt["runtime_directory"]))}, safe_path(receipt["home"]))
 
 
@@ -90,7 +90,8 @@ def _prior(target):
         if (not isinstance(entry, dict) or set(entry) != fields
                 or any(not isinstance(entry[key], str) or not Path(entry[key]).is_absolute()
                        or str(safe_path(entry[key])) != entry[key]
-                       for key in fields - {"receipt_sha256"})
+                       for key in fields - {"receipt_sha256", "python"})
+                or str(python_executable(entry["python"], require_available=False)) != entry["python"]
                 or not _digest(entry["receipt_sha256"])):
             raise ContractError("invalid UI project registration")
         key, location = os.path.normcase(entry["workspace"]), os.path.normcase(entry["installation"])

@@ -3,9 +3,11 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -15,6 +17,69 @@ from agent_learning import install as installer
 from agent_learning.install import install
 from agent_learning.release import ReleaseError, validate_entry, validate_release_root
 from agent_learning.runtime import ContractError
+
+
+# These subprocesses check packaging and startup contracts, not latency. A
+# shared Windows runner can take over five seconds to import and migrate SQLite.
+STARTUP_TIMEOUT = 20
+
+
+@unittest.skipUnless(importlib.util.find_spec("setuptools"), "Offline build tools are optional")
+class BuildResourceTests(unittest.TestCase):
+    def test_reused_build_replaces_only_generated_resources(self):
+        from build_support import PluginBuildPy
+        from setuptools import Distribution
+
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="alp-resource-rebuild-") as temp:
+            build_root = Path(temp) / "build"
+            command = PluginBuildPy(Distribution())
+            command.build_lib = str(build_root)
+            with patch("build_support.build_py.run"):
+                command.run()
+                resources = build_root / "agent_learning/_plugin_resources"
+                removed = resources / "skills/removed-skill/SKILL.md"
+                removed.parent.mkdir()
+                removed.write_text("obsolete", encoding="utf-8")
+                sibling = resources.parent / "preserved-module.py"
+                sibling.write_text("preserve", encoding="utf-8")
+                command.run()
+
+            self.assertFalse(removed.parent.exists())
+            self.assertEqual(sibling.read_text(encoding="utf-8"), "preserve")
+            for relative in (".codex-plugin/plugin.json", "skills/learning-worker/SKILL.md",
+                             "host_resources/antigravity/sidecars/control/main.mjs",
+                             "host_resources/dsh/reviewer/runner.mjs", "README.en.md"):
+                self.assertEqual((resources / relative).read_bytes(), (source / relative).read_bytes())
+            self.assertFalse(any(resources.rglob("*.pyc")))
+
+    def test_linked_build_output_is_rejected_before_copy_or_cleanup(self):
+        from build_support import PluginBuildPy
+        from setuptools import Distribution
+
+        with tempfile.TemporaryDirectory(prefix="alp-resource-links-") as temp:
+            build_root = Path(temp) / "build"
+            target = build_root / "agent_learning/_plugin_resources"
+            target.mkdir(parents=True)
+            marker = target / "preserved"
+            marker.write_text("preserve", encoding="utf-8")
+            command = PluginBuildPy(Distribution())
+            command.build_lib = str(build_root)
+            original_lstat = Path.lstat
+            for linked in (build_root, target.parent, target):
+                for info in (SimpleNamespace(st_mode=stat.S_IFLNK),
+                             SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)):
+                    with self.subTest(path=linked.name, attributes=vars(info)):
+                        def lstat(path, *args, **kwargs):
+                            return info if path == linked else original_lstat(path, *args, **kwargs)
+                        with patch.object(Path, "lstat", autospec=True, side_effect=lstat), \
+                                patch("build_support.build_py.run") as build, \
+                                patch("build_support.shutil.rmtree") as remove:
+                            with self.assertRaisesRegex(ValueError, "links or junctions"):
+                                command.run()
+                            build.assert_not_called()
+                            remove.assert_not_called()
+                        self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
 
 class PackageTests(unittest.TestCase):
@@ -91,7 +156,7 @@ class PackageTests(unittest.TestCase):
             workspace.mkdir()
             status = subprocess.run(
                 [sys.executable, "-m", "agent_learning.cli", "status"],
-                cwd=workspace, env=environment, capture_output=True, timeout=5,
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT,
             )
             self.assertEqual(status.returncode, 0, status.stderr.decode("utf-8", "replace"))
             self.assertIsInstance(json.loads(status.stdout.decode("utf-8"))["project_id"], str)
@@ -118,7 +183,7 @@ class PackageTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, "-m", "agent_learning.cli", "install", str(exported),
                  "--runtime-store", str(base / "runtime releases")],
-                cwd=workspace, env=environment, capture_output=True, timeout=5,
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT,
             )
             self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
             self.assertEqual(json.loads(result.stdout.decode("utf-8"))["status"], "exported")
@@ -269,7 +334,7 @@ class PackageTests(unittest.TestCase):
             ]
             response = subprocess.run([mcp["command"], *mcp["args"]],
                 input=("\n".join(json.dumps(item) for item in messages) + "\n").encode("utf-8"),
-                cwd=workspace, env=environment, capture_output=True, timeout=5)
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
             self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
             replies = [json.loads(line) for line in response.stdout.decode("utf-8").splitlines()]
             names = {tool["name"] for tool in replies[-1]["result"]["tools"]}
@@ -299,13 +364,13 @@ class PackageTests(unittest.TestCase):
             for name in ("ALP_CONFIG", "ALP_DISABLED", "ALP_HOOK_MODE"):
                 environment.pop(name, None)
             response = subprocess.run([sys.executable, str(release / "scripts/learning.py"), "status"],
-                cwd=workspace, env=environment, capture_output=True, timeout=5)
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
             self.assertEqual(response.returncode, 1)
             self.assertEqual(response.stdout, b"")
             self.assertEqual(json.loads(response.stderr.decode("utf-8"))["status"], "error")
             event = {"hook_event_name": "PreToolUse", "session_id": "guard-chat", "cwd": str(workspace), "tool_name": "Bash"}
             response = subprocess.run([sys.executable, str(release / "hooks/dispatch.py"), "--event", "PreToolUse", "--hook-mode", "enforce"],
-                input=json.dumps(event).encode("utf-8"), cwd=workspace, env=environment, capture_output=True, timeout=5)
+                input=json.dumps(event).encode("utf-8"), cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
             self.assertEqual(response.returncode, 0)
             self.assertEqual(json.loads(response.stdout.decode("utf-8"))["hookSpecificOutput"]["permissionDecision"], "deny")
             (release / "release.json").unlink()
@@ -321,7 +386,7 @@ class PackageTests(unittest.TestCase):
             environment = dict(os.environ, ALP_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
             response = subprocess.run([sys.executable, str(Path(first["runtime_directory"]) / "scripts/learning.py"),
                 "install", str(base / "second export"), "--runtime-store", str(store)],
-                cwd=base, env=environment, capture_output=True, timeout=5)
+                cwd=base, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
             self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
             self.assertEqual(json.loads(response.stdout.decode("utf-8"))["release_id"], first["release_id"])
             self.assertEqual(len(list(store.iterdir())), 1)

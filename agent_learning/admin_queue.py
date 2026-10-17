@@ -62,31 +62,45 @@ def install_queue(runtime):
                        "WHERE project=NEW.project AND problem=NEW.id); END")
 
 
-def scan_signature(runtime, project, *, include_candidates=True):
+def _scan_state(runtime, project):
     from .review_packet import PACKET_FORMAT, REVIEW_PREFIX
-    from .runtime import digest
     row = runtime.db.execute("SELECT generation,source_epoch FROM projects WHERE id=?", (project,)).fetchone()
     candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
     # 发布变化允许重新比较；真正复审仍由实际比较资料的review_signature判定。
     scope = runtime._session_scope()
-    if runtime.admin_policy(project)["model_mode"] == "first":
+    policy = runtime.admin_policy(project)
+    if policy["model_mode"] == "first":
         observations = runtime.admin_first_model_binding(project)
     else:
         observations = [list(item) for item in runtime.db.execute(
             "SELECT conversation,model,active,version FROM admin_model_observations "
             "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
             (project, scope, runtime.session_epoch()))]
-    policy = runtime.admin_policy(project)
     provider = runtime.host if policy["provider"] == "host" else policy["provider"]
     origins = list(runtime.db.execute("SELECT COUNT(*),MAX(rowid) FROM events WHERE project=? AND type='DshProfileBound'",
                                      (project,)).fetchone()) if provider == "dsh" else None
-    return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
-                   "dsh_profile_origins": origins,
-                   "work_summary_policy": {"configuration": runtime.config["work_memory"],
-                                           "effective": runtime.work_summary_policy(project)},
-                   "host_scope": scope, "packet_format": PACKET_FORMAT,
-                   "instructions": REVIEW_PREFIX, "knowledge_changes": list(row) if row else None,
-                   "candidate_changes": (candidates[0] if candidates else 0) if include_candidates else None})
+    return {"policy": runtime.admin_effective_config(project), "model_observations": observations,
+            "dsh_profile_origins": origins,
+            "work_summary_policy": {"configuration": runtime.config["work_memory"],
+                                    "effective": runtime.work_summary_policy(project)},
+            "host_scope": scope, "packet_format": PACKET_FORMAT,
+            "instructions": REVIEW_PREFIX, "knowledge_changes": list(row) if row else None,
+            "candidate_changes": candidates[0] if candidates else 0}
+
+
+def scan_signature(runtime, project, *, include_candidates=True):
+    from .runtime import digest
+    state = _scan_state(runtime, project)
+    if not include_candidates:
+        state["candidate_changes"] = None
+    return digest(state)
+
+
+def scan_signatures(runtime, project):
+    """同一次扫描读取状态，生成原有审核／补证签名；不跨调用缓存。"""
+    from .runtime import digest
+    state = _scan_state(runtime, project)
+    return digest(state), digest({**state, "candidate_changes": None})
 
 
 def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None,
@@ -226,8 +240,8 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
                                         "AND c.state IN ('reserved','launch_intent','started'))").fetchone()[0]
         if dispatched + budget["global_active_calls"] >= budget["max_concurrent_calls"]:
             return None
-        query, args = eligible_query(scan_signature(runtime, project),
-                                     preflight_signature=scan_signature(runtime, project, include_candidates=False),
+        signature, preflight_signature = scan_signatures(runtime, project)
+        query, args = eligible_query(signature, preflight_signature=preflight_signature,
                                      summary_enabled=runtime.work_summary_enabled(project),
                                      summary_host_scope=runtime._session_scope())
         if not ready_executor(runtime, project, query, args):
@@ -399,8 +413,9 @@ def _dispatch_diagnostic(runtime, project):
     if dispatch:
         phase = "worker_claimed" if dispatch["phase"] == "worker_claimed" else "worker_reserved"
         return dict(detail, phase=phase, reason=phase, next_due=dispatch["lease_until"])
-    query, args = eligible_query(scan_signature(runtime, project),
-        preflight_signature=scan_signature(runtime, project, include_candidates=False),
+    signature, preflight_signature = scan_signatures(runtime, project)
+    query, args = eligible_query(signature,
+        preflight_signature=preflight_signature,
         summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope())
     routed, routed_args = executor_query(runtime, project, query, args)

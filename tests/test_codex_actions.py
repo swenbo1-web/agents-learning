@@ -92,6 +92,45 @@ class CodexActionsTests(unittest.TestCase):
         self.assertEqual(before, (self.action.read_bytes(), self.manifest.read_bytes(), self.action.stat().st_mtime_ns,
                                  self.manifest.stat().st_mtime_ns))
 
+    def test_interpreter_alias_is_preserved_while_workspace_links_stay_rejected(self):
+        from agent_learning.install_update import _linked
+
+        executable = self.root / "venv/bin/python"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"isolated interpreter placeholder; never executed")
+        with patch("agent_learning.install.sys.executable", str(executable)):
+            self.initial()
+
+        # Simulate Unix Python/venv links even on Windows without link privileges.
+        def linked(path):
+            return path in {executable, executable.parent} or _linked(path)
+
+        with patch("agent_learning.install_update._linked", side_effect=linked):
+            result = self.register()
+            self.assertEqual(self.register()["status"], "unchanged")
+        metadata = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["python"], str(executable))
+        self.assertIn(str(executable), build_action_command({"python": executable,
+                      "runtime_directory": self.root}, self.target, home=self.home,
+                      config=self.config, platform="linux"))
+        self.assertEqual(result["status"], "installed")
+        before = (self.action.read_bytes(), self.manifest.read_bytes())
+        with patch("agent_learning.install_update._linked", side_effect=lambda path: path == self.workspace or _linked(path)):
+            with self.assertRaises(ContractError):
+                self.register()
+        self.assertEqual((self.action.read_bytes(), self.manifest.read_bytes()), before)
+
+    def test_interpreter_path_requires_absolute_available_file(self):
+        from agent_learning.install_update import python_executable
+
+        for value in (None, "python", str(self.root), str(self.root / "missing-python"),
+                      str(self.root / ".." / "python"), str(self.root / "bad\0python"),
+                      str(self.root / "bad\npython")):
+            with self.subTest(value=value), self.assertRaises(ContractError):
+                python_executable(value)
+        missing = self.root / "removed-python"
+        self.assertEqual(python_executable(str(missing), require_available=False), missing)
+
     def test_environment_data_bindings_are_frozen_and_can_be_explicitly_updated(self):
         self.initial()
         with patch.dict(os.environ, {"ALP_HOME": str(self.home), "ALP_CONFIG": str(self.config)}):

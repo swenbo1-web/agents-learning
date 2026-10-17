@@ -41,8 +41,9 @@ def _summary(item, limit=700):
     if len(content) <= limit:
         return content
     matched = item.get("match", {}).get("matched_terms", [])
-    positions = [content.lower().find(term.lower()) for term in matched
-                 if isinstance(term, str) and term and content.lower().find(term.lower()) >= 0]
+    lowered = content.lower()
+    positions = [position for term in matched if isinstance(term, str) and term
+                 if (position := lowered.find(term.lower())) >= 0]
     # 选取命中附近的原文，并明确标识摘录，不把首段当成全部解决方案。
     start = max(0, min(positions) - 100) if positions else 0
     return ("…" if start else "") + content[start:start + limit - 2] + "…"

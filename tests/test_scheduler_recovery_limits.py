@@ -192,7 +192,11 @@ class PrelaunchStateChangeTests(unittest.TestCase):
         with patch("agent_learning.admin.subprocess.Popen", fake_reviewer(callback=lambda packet, process: observed.append(process.timeout))):
             result = admin_once(self.r, self.p)
         self.assertEqual(result["status"], "skip")
-        self.assertEqual(observed, [2])
+        self.assertEqual(len(observed), 1)
+        # Process setup consumes part of this deadline, especially on Linux's
+        # higher resolution clock; the contract is an upper bound, not equality.
+        self.assertGreater(observed[0], 0)
+        self.assertLessEqual(observed[0], 2)
 
     def test_summary_disabled_between_reservation_and_launch_is_local_state_change(self):
         self.r.config["work_memory"]["summary_enabled"] = True

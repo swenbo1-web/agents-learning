@@ -10,6 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from agent_learning.knowledge_index import _match_values
 from agent_learning.runtime import ContractError, Runtime
 from agent_learning.semantic_retrieval import (SEMANTIC_DEFAULTS, embed_texts,
                                                validate_semantic_config, _normalize)
@@ -123,6 +124,22 @@ class HybridRetrievalTests(unittest.TestCase):
         refreshed = self.r.semantic_refresh(self.p, limit=1)
         self.assertEqual(refreshed["processed"], 1)
         self.assertEqual(refreshed["pending"], 0)
+
+    def test_hybrid_reuses_lexical_analysis_for_all_gates(self):
+        expected = self.publish()
+        self.r.semantic_refresh(self.p)
+        first = None
+        for cached in (False, True):
+            with self.subTest(cached=cached):
+                with patch("agent_learning.knowledge_index._match_values", wraps=_match_values) as analyze:
+                    result = self.r.search(self.p, "mémoire saturée")
+                self.assertEqual([item["knowledge_id"] for item in result["items"]], [expected])
+                self.assertTrue(result["items"][0]["match"]["auto_eligible"])
+                self.assertEqual(analyze.call_count, 1)
+                if first is None:
+                    first = result["items"]
+                else:
+                    self.assertEqual(result["items"], first)
 
     def test_filters_and_project_isolation_apply_to_semantic_candidates(self):
         expected = self.publish(environment="A")

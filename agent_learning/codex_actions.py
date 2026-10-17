@@ -11,7 +11,7 @@ import sys
 import uuid
 
 from .install import _hook_commands
-from .install_update import installation_lock, inspect_installation, safe_path
+from .install_update import installation_lock, inspect_installation, python_executable, safe_path
 from .runtime import ContractError
 
 
@@ -58,8 +58,7 @@ def _binding(installation, workspace, *, require_panel=True):
     actual = safe_path(workspace) if workspace is not None else bound
     if actual != bound or not actual.is_dir():
         raise ContractError("Codex action workspace must exactly match the installed project")
-    if not safe_path(receipt["python"]).is_file():
-        raise ContractError("installed Python interpreter is unavailable")
+    receipt = dict(receipt, python=str(python_executable(receipt["python"])))
     return receipt, inspected["target"], bound
 
 
@@ -157,7 +156,7 @@ def install_action(installation, workspace=None, remove=False, *, home=None, con
                + '[[actions]]\nname = "Agent Learning"\nicon = "debug"\n'
                + "command = " + quote(command) + "\nplatform = " + quote(platform) + "\n").encode("utf-8")
         body = {"schema_version": 1, "kind": "agent-learning-codex-action", "workspace": str(bound),
-                "installation": str(installation), "python": str(safe_path(receipt["python"])),
+                "installation": str(installation), "python": receipt["python"],
                 "runtime_directory": str(safe_path(receipt["runtime_directory"])), "home": str(home),
                 "config": str(config), "host_instance": host_instance, "platform": platform,
                 "sha256": hashlib.sha256(raw).hexdigest()}

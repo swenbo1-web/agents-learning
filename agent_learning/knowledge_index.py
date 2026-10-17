@@ -99,9 +99,10 @@ def _rank(body_json, query_weights, denominator):
     return _match_values(body_json, query_weights, denominator)[0]
 
 
-def _match_info(body_json, query_weights, denominator, query):
+def _match_info(body_json, query_weights, denominator, query, *, _values=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
-    score, coverage, matches = _match_values(body_json, query_weights, denominator)
+    score, coverage, matches = (_match_values(body_json, query_weights, denominator)
+                                if _values is None else _values)
     strong = [token for token in matches if len(token) > 1]
     eligible = bool(strong) and coverage >= 0.65
     if not eligible and len(strong) >= 3:
@@ -232,6 +233,13 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             conditions = _filter_sql(filters)
             weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
             denominator = sum(weights.values())
+            # 只在本次快照中复用分析结果；缓存校验、解释和语义门槛共用同一修订的词元。
+            analyses = {}
+            def analyze(row):
+                identity = (row["id"], row["revision"])
+                if identity not in analyses:
+                    analyses[identity] = _match_values(row["body"], weights, denominator)
+                return analyses[identity]
             semantic_matches = self._semantic_candidates(project, semantic, filters) if hybrid else {}
             rows = []
             if references is not None:
@@ -240,7 +248,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                                           "AND k.id=a.id AND k.revision=a.revision WHERE k.project=? "
                                           "AND k.id=? AND k.revision=?" + conditions,
                                           (project, ref["knowledge_id"], ref["revision"], *filters.values())).fetchone()
-                    if row is None or (_match_values(row["body"], weights, denominator)[0] <= 0
+                    if row is None or (analyze(row)[0] <= 0
                                       and row["id"] not in semantic_matches):
                         references = None
                         rows = []
@@ -265,19 +273,18 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         return (1 / (60 + lexical_ranks[identity]) if identity in lexical_ranks else 0) + (
                             1 / (60 + semantic_matches[identity]["rank"]) if identity in semantic_matches else 0)
                     rows = sorted(merged.values(), key=lambda row: (-fusion(row["id"]), row["id"]))
-                    semantic["lexical_ranks"] = lexical_ranks
-                references = [{"knowledge_id": row["id"], "revision": row["revision"]} for row in rows]
             # 正文及来源都在同一快照读取，禁止通过 read() 跳转到刚发布的新修订。
             items = []
             retained = []
             for row in rows:
-                explanation = _match_info(row["body"], weights, denominator, meaningful)
+                values = analyze(row)
+                explanation = _match_info(row["body"], weights, denominator, meaningful, _values=values)
                 # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
                 semantic_match = semantic_matches.get(row["id"])
                 if explanation["score"] <= 0 and semantic_match is None:
                     continue
                 if hybrid:
-                    full_matches = _match_values(row["body"], weights, denominator)[2]
+                    full_matches = values[2]
                     # Cached references preserve ranking; scores remain query-specific.
                     explanation.update(method="hybrid", semantic_score=round(semantic_match["score"], 6)
                         if semantic_match else None, semantic_rank=semantic_match["rank"] if semantic_match else None,
@@ -289,7 +296,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 if semantic["config"]["enabled"]:
                     # Optional-provider failure must not weaken the configured exact
                     # identifier gate when results fall back to the lexical channel.
-                    full_matches = _match_values(row["body"], weights, denominator)[2]
+                    full_matches = values[2]
                     if not semantic_exact_anchors_allowed(meaningful, full_matches):
                         explanation["auto_eligible"] = False
                 item = self._public(project, row)

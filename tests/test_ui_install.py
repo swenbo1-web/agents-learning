@@ -100,6 +100,37 @@ class UiInstallTests(unittest.TestCase):
         self.assertEqual(read_json(self.target / REGISTRY)["projects"], [])
         self.assertFalse(self.home.exists())
 
+    def test_interpreter_alias_is_valid_for_registration_refresh_and_removal(self):
+        from agent_learning.install_update import _linked
+
+        executable = self.root / "venv/bin/python"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"isolated interpreter placeholder; never executed")
+        with patch("agent_learning.install.sys.executable", str(executable)):
+            self.core_install()
+
+        def linked(path):
+            return path in {executable, executable.parent} or _linked(path)
+
+        with patch("agent_learning.install_update._linked", side_effect=linked):
+            install_ui(self.target, [self.core])
+            install_ui(self.target, [self.core], upgrade=True)
+        entry = read_json(self.target / REGISTRY)["projects"][0]
+        self.assertEqual(entry["python"], str(executable))
+        executable.unlink()
+        result = install_ui(self.target, [self.core], upgrade=True, remove=True)
+        self.assertEqual(result["registered_projects"], 0)
+        self.assertFalse(self.home.exists())
+
+    def test_interpreter_alias_support_does_not_allow_linked_workspace(self):
+        from agent_learning.install_update import _linked
+
+        self.core_install()
+        with patch("agent_learning.install_update._linked", side_effect=lambda path: path == self.workspace or _linked(path)):
+            with self.assertRaises(ContractError):
+                install_ui(self.target, [self.core])
+        self.assertFalse(self.target.exists())
+
     def test_remove_registration_after_core_was_uninstalled(self):
         self.core_install()
         install_ui(self.target, [self.core])

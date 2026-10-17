@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_learning.knowledge_index import INDEX_VERSION, terms
+from agent_learning.knowledge_index import INDEX_VERSION, terms, _match_values
 from agent_learning.runtime import ContractError, Runtime
 
 
@@ -138,6 +138,14 @@ class KnowledgeIndexTests(unittest.TestCase):
         self.assertEqual([item["knowledge_id"] for item in cached["items"]], expected)
         self.assertEqual([item["knowledge_id"] for item in missed["items"]], expected)
         self.assertEqual(self.r.search(self.p, "alpha beta", limit=1)["items"][0]["knowledge_id"], expected[0])
+
+    def test_cached_search_reuses_validation_analysis_for_explanation(self):
+        self.publish(title="compiler", content="alpha")
+        initial = self.r.search(self.p, "compiler alpha")
+        with patch("agent_learning.knowledge_index._match_values", wraps=_match_values) as analyze:
+            cached = self.r.search(self.p, "compiler alpha")
+        self.assertEqual(cached["items"], initial["items"])
+        self.assertEqual(analyze.call_count, 1)
 
     def test_technical_identifiers_remain_distinct_and_single_chinese_is_searchable(self):
         ids = {}

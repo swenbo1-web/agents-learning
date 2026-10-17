@@ -55,6 +55,24 @@ def safe_path(value):
         raise ContractError("installation path could not be verified") from None
 
 
+def python_executable(value, *, require_available=True):
+    """Validate a pinned interpreter without resolving its virtualenv symlink.
+
+    Unlike writable installation paths, interpreter aliases are valid. Keep
+    their invocation path: resolving a venv's Python can change its environment.
+    Existing UI metadata may retain an unavailable interpreter for safe removal.
+    """
+    try:
+        if not isinstance(value, str) or not value or any(ord(char) < 32 for char in value):
+            raise ValueError
+        path = Path(value)
+        if not path.is_absolute() or ".." in path.parts or require_available and not path.is_file():
+            raise ValueError
+        return path
+    except (OSError, TypeError, ValueError, RuntimeError):
+        raise ContractError("installed Python interpreter is invalid or unavailable") from None
+
+
 def _hash_file(path):
     digest = hashlib.sha256()
     with filesystem_path(path).open("rb") as stream:

@@ -54,13 +54,14 @@ def readonly_runtime(database, db, host, instance):
 
 
 def control_status(runtime, project):
-    from .admin_queue import eligible_query, scan_signature, dispatch_diagnostic
+    from .admin_queue import eligible_query, scan_signatures, dispatch_diagnostic
     from .admin_usage import admin_admission_status
     from .admin_presets import PRESETS
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
-    query, args = eligible_query(scan_signature(runtime, project),
-        preflight_signature=scan_signature(runtime, project, include_candidates=False),
+    signature, preflight_signature = scan_signatures(runtime, project)
+    query, args = eligible_query(signature,
+        preflight_signature=preflight_signature,
         summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope())
     eligible = runtime.db.execute("SELECT COUNT(*) FROM (" + query + ")", (project, *args)).fetchone()[0]

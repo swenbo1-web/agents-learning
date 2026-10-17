@@ -204,7 +204,7 @@ class CodexPanelTests(unittest.TestCase):
             status, _, raw = self.request(server, "POST", "/api/action", args, headers)
         self.assertEqual(status, 200, raw)
         result = json.loads(raw)
-        self.assertEqual(result["diagnostics"]["project"]["home"], str(self.home))
+        self.assertEqual(result["diagnostics"]["project"]["home"], str(self.home.resolve()))
         self.assertIsNone(result["diagnostics"]["connection"]["context_bound"])
         self.assertNotIn("context_handle", raw.decode())
         self.assertEqual(server.runtime.db.total_changes, before)

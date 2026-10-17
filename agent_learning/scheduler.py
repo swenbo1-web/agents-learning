@@ -121,11 +121,12 @@ class SchedulerMixin:
             self.host, self.host_instance, self.host_scope = old_host, old_instance, old_scope
 
     def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
-        from .admin_queue import eligible_query, scan_signature, ready_executor, dispatch_diagnostic
+        from .admin_queue import eligible_query, scan_signatures, ready_executor, dispatch_diagnostic
         from .admin_usage import admin_admission_status
         from .runtime import digest
         with self._scheduler_host_scope(target_scope):
-            signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
+            scan, preflight = scan_signatures(self, project)
+            signature = digest({"scan": scan, "host_epoch": self.host_epoch(),
                 "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "
                                                    "FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()),
                 "tasks": self.db.execute("SELECT MAX(updated) FROM tasks WHERE project=?", (project,)).fetchone()[0],
@@ -141,8 +142,7 @@ class SchedulerMixin:
             dispatch = self.db.execute("SELECT lease_until FROM admin_dispatch WHERE project=?", (project,)).fetchone()
             if active is not None or dispatch:
                 return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
-            query, args = eligible_query(scan_signature(self, project),
-                                         preflight_signature=scan_signature(self, project, include_candidates=False),
+            query, args = eligible_query(scan, preflight_signature=preflight,
                                          summary_enabled=self.work_summary_enabled(project),
                                          summary_host_scope=self._session_scope())
             eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from agent_learning.admin import admin_batch, admin_once
 from agent_learning.admin_lifecycle import recover_calls, retry_call
-from agent_learning.admin_queue import claim_dispatch, scan_signature
+from agent_learning.admin_queue import claim_dispatch, scan_signature, scan_signatures
 from agent_learning.runtime import Runtime
 
 
@@ -81,6 +81,26 @@ class Module6QueueTests(unittest.TestCase):
 
     def call_count(self):
         return self.r.db.execute("SELECT COUNT(*) FROM admin_calls WHERE state!='deduplicated'").fetchone()[0]
+
+    def test_paired_scan_signatures_reuse_state_without_changing_cache_keys(self):
+        expected = (scan_signature(self.r, self.p),
+                    scan_signature(self.r, self.p, include_candidates=False))
+        with patch.object(self.r, "admin_effective_config", wraps=self.r.admin_effective_config) as config:
+            actual = scan_signatures(self.r, self.p)
+        self.assertEqual(actual, expected)
+        config.assert_called_once_with(self.p)
+
+    def test_paired_scan_signatures_keep_candidate_and_policy_invalidation_separate(self):
+        initial = scan_signatures(self.r, self.p)
+        self.r.db.execute("INSERT INTO admin_queue_epochs(project,candidates) VALUES(?,1) "
+                          "ON CONFLICT(project) DO UPDATE SET candidates=candidates+1", (self.p,))
+        changed = scan_signatures(self.r, self.p)
+        self.assertNotEqual(changed[0], initial[0])
+        self.assertEqual(changed[1], initial[1])
+        self.r.config["admin"]["max_input_chars"] += 100
+        policy_changed = scan_signatures(self.r, self.p)
+        self.assertNotEqual(policy_changed[0], changed[0])
+        self.assertNotEqual(policy_changed[1], changed[1])
 
     def test_two_runtimes_allow_only_one_project_model_claim(self):
         self.problem("alphaerror")

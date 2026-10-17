@@ -16,7 +16,8 @@ jobs:
   offline:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The full Windows matrix can exceed 20 minutes on shared runners.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
