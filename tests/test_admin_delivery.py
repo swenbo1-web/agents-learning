@@ -281,13 +281,18 @@ class DshSdkLauncherTests(unittest.TestCase):
         self.node = self.root / ("node.exe" if sys.platform == "win32" else "node")
         self.node.write_text("never executed", encoding="utf-8")
         self.command = [str(self.node), str(self.anchor)]
+        self.profile_file = self.root / "trusted-profile.json"
+        self.profile_file.write_text(json.dumps({"version": 1, "profile_directory": str(self.root / "profiles/web"),
+            "entries": [{"name": "@deepseek-ai/dsh-llm-deepseek", "config": {}}]}), encoding="utf-8")
+        from agent_learning.dsh_profile import resolve_profile
+        self.profile = resolve_profile(str(self.profile_file))
 
     def test_real_dsh_anchor_builds_fixed_tool_free_runner_and_schema_stdin(self):
         schema = self.root / "response.schema.json"
         schema.write_text(json.dumps({"type": "object", "properties": {"decision": {"type": "string"}}}), encoding="utf-8")
         with patch("subprocess.Popen") as process:
             execution = build_execution(self.command, "dsh", "provider/model", self.root, schema, self.root / "result",
-                                        "Private supplied evidence", 10, selection_mode="first")
+                                        "Private supplied evidence", 10, selection_mode="first", dsh_profile=self.profile)
         process.assert_not_called()
         self.assertTrue(execution["command_resolved"])
         self.assertEqual(execution["args"][0], str(self.node.resolve()))
@@ -306,7 +311,7 @@ class DshSdkLauncherTests(unittest.TestCase):
             self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
             kwargs["stdout"].write(b'{"protocol":"alp-dsh-sdk-v1","ready":true}\n')
             return Mock(returncode=0)
-        plan = {"provider": "dsh", "command": self.command}
+        plan = {"provider": "dsh", "command": self.command, "dsh_profile": self.profile}
         with patch("agent_learning.admin_providers.subprocess.run", side_effect=probe) as process:
             result = executor_capability(plan)
         self.assertTrue(result["ready"])

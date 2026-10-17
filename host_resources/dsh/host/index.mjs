@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -147,14 +148,14 @@ function debugStatusText(value) {
   ].join("\n");
 }
 
-function runPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs = 15000) {
+function baseRunPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs = 15000, hostEnvironment = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExe, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal,
-      env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
+      env: { ...process.env, ...hostEnvironment, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
     });
     const timer = setTimeout(() => {
       try {
@@ -458,7 +459,51 @@ const WORKER_TOOL_SPECS = [
 export const name = "agent-learning";
 export const inject = ["tools", "systemPrompt", "agents"];
 
+export function reviewProfileEnvironment(ctx) {
+  // Only the trusted, already-composed loader tree supplies model configuration.
+  // Event payloads, workspace files and the global process environment cannot
+  // overwrite a host snapshot. Never persist it or publish it as model evidence.
+  const unavailable = { ALP_DSH_REVIEW_PROFILE: "" };
+  try {
+    const directory = resolve(fileURLToPath(ctx.baseUrl));
+    const configuredHome = process.env.DSH_HOME;
+    const rawHome = configuredHome?.trim() ? configuredHome : join(homedir(), ".dsh");
+    const hostPath = (value) => resolve(value === "~" ? homedir()
+      : value.startsWith("~/") || value.startsWith("~\\") ? join(homedir(), value.slice(2)) : value);
+    const home = hostPath(rawHome);
+    const canonical = (path) => process.platform === "win32" ? normalizeWinPath(path) : resolve(path);
+    if (canonical(dirname(directory)) !== canonical(join(home, "profiles"))
+      || typeof ctx.loader?.entries !== "function") return unavailable;
+    const allowed = new Set(["@deepseek-ai/dsh-settings-file", "@deepseek-ai/dsh-credentials-local",
+      "@deepseek-ai/dsh-agent-default-model", "@deepseek-ai/dsh-llm-deepseek", "@deepseek-ai/dsh-llm-pi-ai"]);
+    const entries = [], names = new Set();
+    for (const entry of ctx.loader.entries()) {
+      const name = entry?.options?.name;
+      if (!allowed.has(name) || entry.disabled) continue;
+      const config = entry.fiber?.config;
+      if (!config || typeof config !== "object" || Array.isArray(config) || names.has(name)) return unavailable;
+      names.add(name);
+      const frozen = { ...config };
+      if (name === "@deepseek-ai/dsh-settings-file" || name === "@deepseek-ai/dsh-credentials-local") {
+        // These SDK modules resolve relative paths against invocation cwd,
+        // not loader.baseUrl. Freeze that path before moving to review cwd.
+        if (typeof frozen.path === "string") frozen.path = resolve(frozen.path);
+        if (typeof frozen.dshHome === "string") frozen.dshHome = hostPath(frozen.dshHome);
+      }
+      entries.push({ name, config: frozen });
+    }
+    if (!entries.length) return unavailable;
+    const raw = JSON.stringify({ version: 1, profile_directory: directory, entries });
+    // Windows individual environment values are bounded; an explicit operator
+    // snapshot file remains available for larger host configurations.
+    return raw.length <= 16000 ? { ALP_DSH_REVIEW_PROFILE: raw, DSH_HOME: home } : unavailable;
+  } catch { return unavailable; }
+}
+
 export function apply(ctx) {
+  const hostEnvironment = () => reviewProfileEnvironment(ctx);
+  const runPythonProcess = (python, args, input, cwd, signal, timeout = 15000) =>
+    baseRunPythonProcess(python, args, input, cwd, signal, timeout, hostEnvironment());
   if (typeof globalThis.__ALP_DSH_DISPOSE__ === "function") {
     try {
       globalThis.__ALP_DSH_DISPOSE__();
@@ -813,7 +858,7 @@ export function apply(ctx) {
         cwd: targetWorkspace,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
+        env: { ...process.env, ...hostEnvironment(), PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
       });
       let buffer = "";
       let stderrText = "";

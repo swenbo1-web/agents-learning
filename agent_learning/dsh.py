@@ -249,8 +249,6 @@ class DshAdapter:
         # 后台任务（尚未取得终态退出码）标为 running，绝不误判为 succeeded
         job_id = (response.get("session_id") or response.get("job_id") or response.get("jobId")
                   or value.get("job_id") or value.get("jobId") or meta.get("job_id") or meta.get("jobId"))
-        if isinstance(job_id, str) and job_id.strip() and not is_error and response.get("exit_code") is None and response.get("exitCode") is None:
-            return {"session_id": job_id.strip(), "status": "running", "output": text[:4000]}
         if is_error:
             err_obj = response.get("error")
             err_msg = err_obj.get("message", "") if isinstance(err_obj, dict) else (str(err_obj) if err_obj else text)
@@ -303,6 +301,12 @@ class DshAdapter:
             if exit_code is not None:
                 out["exitCode"] = exit_code
             return out
+        if isinstance(job_id, str) and job_id.strip() and exit_code is None:
+            marker = _EXIT_CODE_MARKER.search(text)
+            if marker:
+                exit_code = int(marker.group(1))
+            else:
+                return {"session_id": job_id.strip(), "status": "running", "output": text[:4000]}
         if exit_code is None and (lower_name in _SHELL_EXEC_TOOLS or "pwsh" in lower_name or "bash" in lower_name):
             match = _EXIT_CODE_MARKER.search(text)
             if match:

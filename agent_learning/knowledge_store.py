@@ -11,6 +11,43 @@ import sqlite3
 import time
 
 
+def problem_feedback_target(runtime, project, problem):
+    """Separate explicit feedback targets from the short-lived publication backfill.
+
+    Publication lineage lives in knowledge_sources.  The 8f54757 writer also filled
+    the feedback target columns for ordinary source cases; recognize only that
+    evidenced legacy shape, preserving actual feedback and counterexample targets.
+    Unknown legacy bindings remain conservative explicit targets.
+    """
+    knowledge_id, revision = problem["knowledge_id"], problem["knowledge_revision"]
+    counterexample = runtime.db.execute(
+        "SELECT knowledge_id,revision FROM knowledge_feedback WHERE project=? AND problem_id=? "
+        "ORDER BY created,knowledge_id,revision LIMIT 1",
+        (project, problem["id"]),
+    ).fetchone()
+    if counterexample:
+        return counterexample["knowledge_id"], counterexample["revision"]
+    feedback = runtime.db.execute(
+        "SELECT json_extract(e.payload,'$.knowledge_id') AS knowledge_id, "
+        "json_extract(e.payload,'$.knowledge_revision') AS revision FROM problem_events pe JOIN events e ON e.id=pe.event "
+        "WHERE pe.problem=? AND e.project=? AND e.type='Feedback' "
+        "AND json_extract(e.payload,'$.knowledge_id') IS NOT NULL ORDER BY e.rowid LIMIT 1",
+        (problem["id"], project),
+    ).fetchone()
+    if feedback:
+        # The old backfill also advanced explicit observation columns when the
+        # same ID was updated.  The original event keeps its exact target intact.
+        return feedback["knowledge_id"], feedback["revision"]
+    if not knowledge_id:
+        return None, None
+    derived = runtime.db.execute(
+        "SELECT 1 FROM knowledge_sources WHERE project=? AND problem_id=? "
+        "AND knowledge_id=? AND revision=? LIMIT 1",
+        (project, problem["id"], knowledge_id, revision),
+    ).fetchone()
+    return (None, None) if derived else (knowledge_id, revision)
+
+
 class KnowledgeStoreMixin:
     def _migrate_knowledge_store(self):
         """在同一写事务内清洗旧正文并重建派生数据，不猜测历史发布目标。"""
@@ -101,13 +138,10 @@ class KnowledgeStoreMixin:
         from .knowledge_lifecycle import record_action
         linked = self._link_knowledge_source(project, knowledge_id, revision, candidate, body)
         self.db.execute("UPDATE candidates SET status='published' WHERE project=? AND id=?", (project, candidate["id"]))
-        self.db.execute(
-            "UPDATE problems SET status='reviewed', "
-            "knowledge_id=COALESCE(knowledge_id, ?), "
-            "knowledge_revision=CASE WHEN knowledge_id IS NULL OR knowledge_id=? THEN ? ELSE knowledge_revision END "
-            "WHERE project=? AND id=?",
-            (knowledge_id, knowledge_id, revision, project, body["problem_id"]),
-        )
+        # A publication creates source lineage, never a retrospective feedback
+        # target or a mutation of the evidence packet that produced this candidate.
+        self.db.execute("UPDATE problems SET status='reviewed' WHERE project=? AND id=?",
+                        (project, body["problem_id"]))
         self.db.execute("UPDATE review_states SET state='published',updated=? WHERE project=? AND problem=? AND revision=?",
                         (time.time(), project, body["problem_id"], body["problem_revision"]))
         if changed or linked:

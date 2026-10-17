@@ -1,8 +1,8 @@
 // One bounded SDK request. No profile loader, Agent, tools, Hooks or project files.
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PROTOCOL = "alp-dsh-sdk-v1";
@@ -38,7 +38,8 @@ function options(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--probe") { result.probe = true; continue; }
-    const key = { "--sdk-anchor": "anchor", "--model": "model", "--selection-mode": "mode", "--timeout": "timeout" }[flag];
+    const key = { "--sdk-anchor": "anchor", "--model": "model", "--selection-mode": "mode", "--timeout": "timeout",
+      "--profile-directory": "profileDirectory", "--profile-fingerprint": "profileFingerprint", "--profile-snapshot": "profileSnapshot" }[flag];
     if (!key || index + 1 >= argv.length) throw refusal("invalid_arguments");
     result[key] = argv[++index];
   }
@@ -63,47 +64,39 @@ async function loadSDK(anchor) {
   return sdk;
 }
 
-async function loadProfileConfigs(anchor) {
-  let piConfig = {};
-  let defaultModelConfig = { provider: "alp-unconfigured", model: "alp-unconfigured" };
-  let yamlMod;
-  try {
-    const require = createRequire(pathToFileURL(resolve(anchor)));
-    yamlMod = await import(pathToFileURL(require.resolve("yaml")).href);
-  } catch {
-    return { piConfig, defaultModelConfig };
-  }
-  if (typeof yamlMod?.parseDocument !== "function") {
-    return { piConfig, defaultModelConfig };
-  }
-  const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
-  for (const profile of ["desktop", "web", "default"]) {
-    const ymlPath = join(dshHome, "profiles", profile, "cordis.yml");
-    if (!existsSync(ymlPath)) continue;
-    try {
-      const doc = yamlMod.parseDocument(readFileSync(ymlPath, "utf8")).toJS();
-      if (!Array.isArray(doc)) continue;
-      const piEntry = doc.find((item) => item?.name === "@deepseek-ai/dsh-llm-pi-ai" && item?.config);
-      if (piEntry?.config?.providers && typeof piEntry.config.providers === "object") {
-        piConfig = structuredClone(piEntry.config);
-        for (const prov of Object.values(piConfig.providers || {})) {
-          if (Array.isArray(prov?.models)) {
-            for (const m of prov.models) {
-              if (m && typeof m === "object") {
-                m.reasoningEfforts = false;
-              }
-            }
-          }
-        }
+function loadProfileConfigs(config) {
+  if (!config.profileDirectory || !isAbsolute(config.profileDirectory)
+    || !/^[a-f0-9]{64}$/.test(config.profileFingerprint ?? "")) throw refusal("dsh_profile_unavailable");
+  const raw = config.profileSnapshot
+    ? readFileSync(config.profileSnapshot, "utf8") : process.env.ALP_DSH_REVIEW_PROFILE;
+  if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > MAX_INPUT_BYTES)
+    throw refusal("dsh_profile_unavailable");
+  if (createHash("sha256").update(raw, "utf8").digest("hex") !== config.profileFingerprint)
+    throw refusal("dsh_profile_changed");
+  const snapshot = JSON.parse(raw.replace(/^\uFEFF/, ""));
+  const canonicalDirectory = (value) => {
+    if (typeof value !== "string" || !isAbsolute(value)) throw refusal("dsh_profile_invalid");
+    const path = resolve(value);
+    return process.platform === "win32" ? path.toLowerCase() : path;
+  };
+  if (snapshot?.version !== 1 || canonicalDirectory(snapshot.profile_directory) !== canonicalDirectory(config.profileDirectory)
+    || !Array.isArray(snapshot.entries) || !snapshot.entries.length || snapshot.entries.length > 5)
+    throw refusal("dsh_profile_invalid");
+  const allowed = new Set([MODULES.settings, MODULES.credentials, MODULES.defaults, MODULES.deepseek, MODULES.pi]);
+  const entries = new Map();
+  for (const entry of snapshot.entries) {
+    if (!entry || !allowed.has(entry.name) || entries.has(entry.name)
+      || !entry.config || typeof entry.config !== "object" || Array.isArray(entry.config)
+      || Object.keys(entry).some((key) => !["name", "config"].includes(key))) throw refusal("dsh_profile_invalid");
+    if ([MODULES.settings, MODULES.credentials].includes(entry.name)) {
+      for (const key of ["path", "dshHome"]) {
+        if (key in entry.config && (typeof entry.config[key] !== "string" || !isAbsolute(entry.config[key])))
+          throw refusal("dsh_profile_invalid");
       }
-      const defEntry = doc.find((item) => item?.name === "@deepseek-ai/dsh-agent-default-model" && item?.config);
-      if (typeof defEntry?.config?.provider === "string" && typeof defEntry?.config?.model === "string") {
-        defaultModelConfig = { provider: defEntry.config.provider, model: defEntry.config.model };
-      }
-      if (Object.keys(piConfig).length) break;
-    } catch {}
+    }
+    entries.set(entry.name, entry.config);
   }
-  return { piConfig, defaultModelConfig };
+  return entries;
 }
 
 function readonlyClass(Base, methods) {
@@ -117,13 +110,13 @@ function readonlyClass(Base, methods) {
 async function createRuntime(sdk, config) {
   const ctx = new sdk.cordis.Context();
   try {
-    const { piConfig, defaultModelConfig } = await loadProfileConfigs(config.anchor);
-    await ctx.plugin(readonlyClass(sdk.settings.default, ["persist", "prepareDocument"]), { watch: false });
-    await ctx.plugin(readonlyClass(sdk.credentials.default, ["set", "unset", "modifyRecord", "deleteRecord"]), { watch: false });
+    const entries = loadProfileConfigs(config);
+    await ctx.plugin(readonlyClass(sdk.settings.default, ["persist", "prepareDocument"]), { ...entries.get(MODULES.settings), watch: false });
+    await ctx.plugin(readonlyClass(sdk.credentials.default, ["set", "unset", "modifyRecord", "deleteRecord", "migrateFlatDocument"]), { ...entries.get(MODULES.credentials), watch: false });
     await ctx.plugin(sdk.llm.LlmRuntime);
     // Sentinels make an absent explicit platform default fail, instead of
     // silently selecting a different account, provider or shipped default model.
-    await ctx.plugin(sdk.defaults.default, defaultModelConfig);
+    await ctx.plugin(sdk.defaults.default, entries.get(MODULES.defaults) ?? { provider: "alp-unconfigured", model: "alp-unconfigured" });
     const selected = ctx.get("agentDefaultModel").currentSelection();
     let provider, model;
     if (config.model) {
@@ -138,7 +131,9 @@ async function createRuntime(sdk, config) {
     }
     if (typeof provider !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(provider)
       || typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(model)) throw refusal("model_binding_invalid");
-    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, provider === "deepseek-official" ? {} : piConfig);
+    const adapterName = provider === "deepseek-official" ? MODULES.deepseek : MODULES.pi;
+    if (!entries.has(adapterName)) throw refusal("provider_unavailable");
+    await ctx.plugin(provider === "deepseek-official" ? sdk.deepseek : sdk.pi, entries.get(adapterName));
     const llm = ctx.get("llm");
     if (!llm || typeof llm.stream !== "function" || typeof llm.listProviders !== "function"
       || !llm.listProviders().some((item) => item.id === provider)) throw refusal("provider_unavailable");

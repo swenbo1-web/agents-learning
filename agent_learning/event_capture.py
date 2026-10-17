@@ -185,9 +185,9 @@ def operation_input_conflict(runtime, project, operation, raw):
 
 _TARGET_KEYS = {"path", "paths", "file", "file_path", "filepath", "filename", "target",
                 "resource", "resource_id", "resource_uri", "asset", "asset_id", "asset_path",
-                "workspace", "cwd", "project_path"}
+                "workspace", "cwd", "workdir", "project_path"}
 _PATH_KEYS = {"path", "paths", "file", "file_path", "filepath", "filename", "asset_path",
-              "workspace", "cwd", "project_path"}
+              "workspace", "cwd", "workdir", "project_path"}
 
 
 def _targets(value, prefix="", depth=0):
@@ -204,7 +204,8 @@ def _targets(value, prefix="", depth=0):
         return {}
     result = {}
     for key, item in value.items():
-        label = prefix + key
+        # Native hosts use cwd/Cwd/workdir for the same execution directory.
+        label = prefix + ("cwd" if key.lower() in {"cwd", "workdir"} else key)
         if key.lower() in _TARGET_KEYS and item is not None:
             if key.lower() in _PATH_KEYS and isinstance(item, str):
                 item = os.path.normcase(os.path.normpath(item))
@@ -214,58 +215,94 @@ def _targets(value, prefix="", depth=0):
     return result
 
 
-_STOP_COMMAND_TOKENS = {
-    "pwsh", "powershell", "bash", "sh", "cmd", "exe", "bin", "usr", "env",
-    "true", "false", "null", "out", "echo", "write-output", "set-location", "cd",
-    "and", "or", "not", "the", "for", "with", "from", "import", "select-object",
-}
-_SCRIPT_SUFFIXES = (".py", ".mjs", ".js", ".cjs", ".ts", ".tsx", ".sh", ".ps1", ".json", ".yml", ".yaml", ".toml", ".sql")
+def _command_target(text):
+    """只解释单条明确运行器命令；完整目标相同才可作为潜在恢复。
 
-
-def _command_tokens(text):
+    不使用词重合、脚本叶名或公共运行器证明相关性；复杂 shell 保持未知。
+    参数变化本身不证明修复，只允许后续证据继续关联同一测试/脚本。
+    """
     import re
-    if not isinstance(text, str) or not text.strip():
-        return set(), set()
-    raw_tokens = re.findall(r"[A-Za-z0-9_./\\-]+", text.lower())
-    meaningful, scripts = set(), set()
-    for tok in raw_tokens:
-        base = tok.replace("\\", "/").strip("/.")
-        if not base or base in _STOP_COMMAND_TOKENS or base.isdigit() or len(base) < 3:
-            continue
-        meaningful.add(base)
-        leaf = base.rsplit("/", 1)[-1]
-        if leaf and leaf not in _STOP_COMMAND_TOKENS and not leaf.isdigit() and len(leaf) >= 3:
-            meaningful.add(leaf)
-            if leaf.endswith(_SCRIPT_SUFFIXES):
-                scripts.add(leaf)
-    return meaningful, scripts
+    import shlex
+    if (not isinstance(text, str) or not text.strip() or len(text) > 8000
+            or any(mark in text for mark in (";", "|", "&", "<", ">", "`", "$", "\n", "\r"))):
+        return None
+    try:
+        parts = [part.strip("\"'") for part in shlex.split(text, posix=False)]
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    runner = os.path.basename(parts.pop(0).replace("\\", "/")).lower().removesuffix(".exe")
+    mode = runner
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)?)?|py", runner):
+        while parts and parts[0] in {"-B", "-u", "-I", "-E", "-s", "-S", "-q", "-3"}:
+            parts.pop(0)
+        if not parts:
+            return None
+        if parts[0] == "-m" and len(parts) > 1:
+            module = parts[1]
+            if module not in {"pytest", "unittest"}:
+                return None
+            mode, parts = module, parts[2:]
+        elif parts[0].startswith("-"):
+            return None
+        else:
+            return ("python-script", os.path.normcase(os.path.normpath(parts[0])))
+    if mode in {"pytest", "py.test", "unittest"}:
+        options_with_value = {"-k", "-m", "-c", "-o", "--override-ini", "--rootdir", "--confcutdir",
+                              "--maxfail", "--tb", "--capture", "--color", "--junitxml", "--log-level"}
+        if mode == "unittest":
+            options_with_value = {"-s", "--start-directory", "-p", "--pattern", "-t", "--top-level-directory"}
+        targets, index = [], 0
+        while index < len(parts):
+            value = parts[index]
+            if value in options_with_value:
+                # unittest discovery 的目录/模式也是目标身份，不能当通用开关抛弃。
+                if index + 1 >= len(parts):
+                    return None
+                if mode == "unittest":
+                    targets.append(value + "=" + os.path.normcase(os.path.normpath(parts[index + 1])))
+                index += 2
+                continue
+            if not value.startswith("-"):
+                targets.append(os.path.normcase(os.path.normpath(value)))
+            elif mode == "unittest" and value.startswith(("--start-directory=", "--pattern=", "--top-level-directory=")):
+                targets.append(value)
+            index += 1
+        return ("unittest" if mode == "unittest" else "pytest", tuple(sorted(set(targets)))) if targets else None
+    if mode in {"node", "nodejs", "bash", "sh", "pwsh", "powershell"}:
+        if parts and parts[0] in {"-File", "-file"} and mode in {"pwsh", "powershell"}:
+            parts.pop(0)
+        if parts and not parts[0].startswith("-"):
+            return (mode, os.path.normcase(os.path.normpath(parts[0])))
+    return None
 
 
 def _targets_compatible(first, second):
     a, b = _targets(first), _targets(second)
     common = a.keys() & b.keys()
+    contexts = {"workspace", "cwd", "workdir", "project_path"}
+    if ({key: value for key, value in a.items() if key.rsplit(".", 1)[-1].lower() in contexts}
+            != {key: value for key, value in b.items() if key.rsplit(".", 1)[-1].lower() in contexts}):
+        # An omitted directory means host default, not the other call's cwd.
+        return False
     if any(a[key] != b[key] for key in common):
         return False
     # 共享 cwd/workspace 不能证明两条命令相关；明确资源或相同/同目标命令才形成潜在恢复。
-    if any(key.rsplit(".", 1)[-1].lower() not in {"workspace", "cwd", "project_path"}
+    if any(key.rsplit(".", 1)[-1].lower() not in contexts
            for key in common):
         return True
     if a and b and not common:
         return False
     if not isinstance(first, dict) or not isinstance(second, dict):
         return False
-    for key in ("command", "cmd"):
+    for key in ("command", "cmd", "CommandLine"):
         c1, c2 = first.get(key), second.get(key)
         if isinstance(c1, str) and c1.strip() and isinstance(c2, str) and c2.strip():
             if c1.strip() == c2.strip():
                 return True
-            t1, s1 = _command_tokens(c1)
-            t2, s2 = _command_tokens(c2)
-            if s1 and s2:
-                return bool(s1 & s2)
-            if s1 or s2:
-                return bool((s1 | s2) & (t1 & t2)) and len(t1 & t2) >= 2
-            if len(t1 & t2) >= 2:
+            target = _command_target(c1)
+            if target is not None and target == _command_target(c2):
                 return True
     return False
 
@@ -299,11 +336,13 @@ class CaseCaptureMixin:
                 "SELECT p.id AS problem_id,e.* FROM problems p JOIN problem_events pe ON pe.problem=p.id "
                 "JOIN events e ON e.id=pe.event JOIN operations o ON o.project=e.project AND o.id=e.operation "
                 "WHERE p.project=? AND p.conversation=? AND p.task_id IS ? AND p.task_revision IS ? "
-                "AND (p.resolution_status='recovery_observed' OR p.knowledge_id IS NOT NULL) "
+                "AND (p.resolution_status='recovery_observed' OR p.knowledge_id IS NOT NULL OR EXISTS "
+                "(SELECT 1 FROM knowledge_sources ks WHERE ks.project=p.project AND ks.problem_id=p.id)) "
                 "AND e.type='PostToolUse' AND e.outcome='failed' AND e.agent IS ? "
                 "AND e.assignment_id IS ? AND o.host_epoch=? "
                 "AND json_extract(e.payload,'$.tool_name')=? "
-                "ORDER BY (p.knowledge_id IS NOT NULL) DESC,e.created DESC,e.id DESC LIMIT 10",
+                "ORDER BY (EXISTS (SELECT 1 FROM knowledge_sources ks WHERE ks.project=p.project "
+                "AND ks.problem_id=p.id)) DESC,e.created DESC,e.id DESC LIMIT 10",
                 (project, conversation, event.get("task_id"), event.get("task_revision"),
                  agent_id, event.get("assignment_id"), epoch, raw.get("tool_name")),
             ).fetchall()

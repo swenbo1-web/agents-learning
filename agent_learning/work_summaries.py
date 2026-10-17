@@ -123,13 +123,13 @@ class WorkSummaryMixin:
                 "AND COALESCE(json_extract(m.body,'$.completion'),'complete')='complete' "
                 "AND e.type NOT IN ('HistoryImport','WorkSummaryRequested') "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
-                "WHERE s.project=m.project AND s.host_scope=? AND s.state IN ('pending','accepted','skipped') "
+                "WHERE s.project=m.project AND s.host_scope=? AND s.state IN ('pending','accepted','skipped','superseded') "
                 "AND j.value=m.id) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_snapshots) j "
                 "WHERE s.project=m.project AND s.host_scope=? AND s.conversation=m.conversation AND s.workspace_key=m.workspace_key "
                 "AND ((json_extract(j.value,'$.task_id') IS m.task_id AND json_extract(j.value,'$.task_revision') IS m.task_revision) "
                 "OR (s.task_id IS m.task_id AND s.task_revision IS m.task_revision)) "
-                "AND s.state IN ('pending','accepted','skipped') "
+                "AND s.state IN ('pending','accepted','skipped','superseded') "
                 "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
                 "JOIN admin_calls c ON c.project=s.project AND c.problem=s.problem_id "
@@ -139,6 +139,26 @@ class WorkSummaryMixin:
                 "ORDER BY m.created,m.id LIMIT ?",
                 (project, conversation, checkout, task.get("id"), task.get("revision"), self._session_scope(),
                  self._session_scope(), self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
+            # A full needs-evidence window must make room for a new observation.
+            # Its prior sources have already been reviewed, but are not accepted
+            # summaries; retain their raw memories and the original receipt.
+            awaiting_rows = self.db.execute(
+                "SELECT problem_id,source_record_ids FROM work_summary_links WHERE project=? AND conversation=? "
+                "AND host_scope=? AND workspace_key=? AND task_id IS ? AND task_revision IS ? "
+                "AND state='awaiting_evidence' AND policy_digest=? AND session_epoch=? AND governance_epoch=? "
+                "ORDER BY created,problem_id",
+                (project, conversation, self._session_scope(), checkout, task.get("id"), task.get("revision"),
+                 digest(settings), self.session_epoch(), epoch),
+            ).fetchall()
+            awaiting_ids = {ident for old in awaiting_rows for ident in json.loads(old["source_record_ids"])}
+            new_rows = [row for row in rows if row["id"] not in awaiting_ids]
+            if awaiting_rows and not new_rows:
+                return {"status": "awaiting_evidence", "problem_id": awaiting_rows[0]["problem_id"],
+                        "reused": True, "invocations": 0}
+            if awaiting_rows:
+                # First reserve one genuinely new source, then retain as much
+                # old context as the same count/character limits allow.
+                rows = new_rows[:1] + [row for row in rows if row["id"] in awaiting_ids] + new_rows[1:]
             distinct, seen, used = [], set(), 0
             blocked_by_budget, min_blocked_cost = 0, None
             configured_max = self.config["admin"]["max_input_chars"]
@@ -163,7 +183,13 @@ class WorkSummaryMixin:
                     used += cost
                 if len(distinct) >= settings["summary_max_events"]:
                     break
-            rows = distinct
+            # Selection priority reserves space for supplementation; evidence
+            # presentation retains the original chronological order.
+            rows = sorted(distinct, key=lambda row: (row["created"], row["id"]))
+            if awaiting_rows and not any(row["id"] not in awaiting_ids for row in rows):
+                return {"status": "input_budget_exceeded", "source_count": 0,
+                        "blocked_count": blocked_by_budget,
+                        "required_max_input_chars": (min_blocked_cost or 0) + overhead, "invocations": 0}
             minimum = 1 if _continuation else settings["summary_min_events"]
             if len(rows) < minimum:
                 if blocked_by_budget > 0 and len(rows) + blocked_by_budget >= minimum:
@@ -188,25 +214,15 @@ class WorkSummaryMixin:
             if old:
                 return {"status": old["state"], "problem_id": old["problem_id"], "reused": True, "invocations": 0}
             selected_ids = {row["id"] for row in rows}
-            awaiting_rows = self.db.execute(
-                "SELECT problem_id,source_record_ids FROM work_summary_links WHERE project=? AND conversation=? "
-                "AND host_scope=? AND state='awaiting_evidence'",
-                (project, conversation, self._session_scope()),
-            ).fetchall()
-            superseded_problems = []
-            for awaiting in awaiting_rows:
-                prior_ids = set(json.loads(awaiting["source_record_ids"]))
-                if prior_ids & selected_ids and selected_ids - prior_ids:
-                    superseded_problems.append(awaiting["problem_id"])
-            if awaiting_rows and not superseded_problems and all(
-                selected_ids <= set(json.loads(a["source_record_ids"])) for a in awaiting_rows
-            ):
-                return {"status": "awaiting_evidence", "problem_id": awaiting_rows[0]["problem_id"],
-                        "reused": True, "invocations": 0}
+            superseded_problems = [old["problem_id"] for old in awaiting_rows]
+            supplementation = ({"previous_problem_ids": superseded_problems,
+                                 "omitted_previous_sources": len(awaiting_ids - selected_ids)}
+                                if superseded_problems else {})
             request, _ = self._event(project, conversation, "WorkSummaryRequested",
                                      {"purpose": "work_summary", "source_event_refs": [row["event_id"] for row in rows],
                                       "source_digest": identity, "source_count": len(rows),
-                                      "validation_level": "reported", "publication_automatic": False},
+                                      "validation_level": "reported", "publication_automatic": False,
+                                      **({"supplementation": supplementation} if supplementation else {})},
                                      event_id="work-summary:" + identity, task_id=task.get("id"),
                                      task_revision=task.get("revision"), task_write_version=task.get("write_version"),
                                      execution_epoch=task.get("execution_epoch"), outcome="reported")
@@ -235,7 +251,16 @@ class WorkSummaryMixin:
                    "source_count": len(rows), "invocations": 0, "purpose": "work_summary"}
             if superseded_problems:
                 out["superseded_problem_ids"] = superseded_problems
+                out["omitted_previous_sources"] = supplementation["omitted_previous_sources"]
             return out
+
+    def _work_summary_supplementation(self, project, problem_id):
+        row = self.db.execute(
+            "SELECT e.payload FROM events e JOIN problem_events pe ON pe.event=e.id "
+            "WHERE e.project=? AND pe.problem=? AND e.type='WorkSummaryRequested' ORDER BY e.created LIMIT 1",
+            (project, problem_id),
+        ).fetchone()
+        return json.loads(row["payload"]).get("supplementation", {}) if row else {}
 
     def work_summary_guard(self, project, problem_id, *, accepted_call_id=None):
         """返回用途快照；关闭、换号、改任务、变更来源时禁止旧摘要写回。"""
@@ -288,6 +313,9 @@ class WorkSummaryMixin:
                   "source_digest": link["source_digest"], "events": [], "evidence_count": len(snapshots),
                   "related_knowledge": [], "related_candidates": [], "incomplete": False,
                   "evidence_truncated": False, "coverage": "frozen_visible_projections", "omitted_count": 0}
+        supplementation = self._work_summary_supplementation(project, problem_id)
+        if supplementation:
+            packet["supplementation"] = supplementation
         for snapshot in snapshots:
             projection = snapshot.get("projection")
             if projection is None:
@@ -349,6 +377,9 @@ class WorkSummaryMixin:
                       snapshot.get("projection", {}).get("coverage", {}).get("truncated", False) for snapshot in snapshots),
                                "scope": link["scope"], "projection_only": True,
                                "task_acceptance": "not_verified", "origin": "administrator_model"}}
+        supplementation = self._work_summary_supplementation(project, problem_id)
+        if supplementation:
+            record["coverage"]["supplementation"] = supplementation
         ident = digest([project, "work-summary", link["source_digest"]])[:32]
         mixed = any(self.db.execute("SELECT task_id,task_revision FROM work_memories WHERE project=? AND event_id=?",
                     (project, snapshot["event_id"])).fetchone()[:] != (link["task_id"], link["task_revision"])

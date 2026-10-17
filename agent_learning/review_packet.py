@@ -88,6 +88,8 @@ class ReviewPacketMixin:
         if not problem_row:
             raise ContractError("unknown problem")
         problem = clean(dict(problem_row))
+        from .knowledge_store import problem_feedback_target
+        problem["knowledge_id"], problem["knowledge_revision"] = problem_feedback_target(self, project, problem)
         if expected_revision is not None and problem["revision"] != expected_revision:
             raise ContractError("problem changed; restart packet pagination")
         target_required, target = self._review_target(project, problem_id)
@@ -373,12 +375,19 @@ class ReviewPacketMixin:
         has_file_links = self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_file_links'"
         ).fetchone()
+        from .knowledge_store import problem_feedback_target
+        problem = self.db.execute("SELECT * FROM problems WHERE project=? AND id=?", (project, problem_id)).fetchone()
+        feedback_target = problem_feedback_target(self, project, problem) if problem else (None, None)
         bound_sql = (
+            "SELECT k.* FROM knowledge_sources ks JOIN active a ON a.project=ks.project AND a.id=ks.knowledge_id "
+            "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+            "WHERE ks.project=? AND ks.problem_id=? "
+            "UNION "
             "SELECT k.* FROM problems p JOIN active a ON a.project=p.project AND a.id=p.knowledge_id "
             "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-            "WHERE p.project=? AND p.id=? AND p.knowledge_id IS NOT NULL "
+            "WHERE p.project=? AND p.id=? AND p.knowledge_id=? "
         )
-        bound_args = [project, problem_id]
+        bound_args = [project, problem_id, project, problem_id, feedback_target[0]]
         if has_file_links:
             bound_sql += (
                 "UNION "

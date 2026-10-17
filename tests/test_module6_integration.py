@@ -282,7 +282,11 @@ class Module6IntegrationTests(unittest.TestCase):
         regressed_row = self.r.db.execute(
             "SELECT status,resolution_status,knowledge_id FROM problems WHERE id=?", (prob_id,)
         ).fetchone()
-        self.assertEqual(tuple(regressed_row), ("pending", "open", kid))
+        self.assertEqual(tuple(regressed_row), ("pending", "open", None))
+        self.assertIsNotNone(self.r.db.execute(
+            "SELECT 1 FROM knowledge_sources WHERE project=? AND problem_id=? AND knowledge_id=?",
+            (self.p, prob_id, kid),
+        ).fetchone())
 
         # 防反哺佐证验证：当前会话 chat 正在重修该问题时，自动检索不会把过时的 v1 注入回当前会话误导模型
         h_chat = self.r.register_context(self.p, "chat")["context_handle"]

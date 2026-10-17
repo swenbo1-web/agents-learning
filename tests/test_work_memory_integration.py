@@ -66,8 +66,10 @@ class WorkMemoryIntegrationTests(unittest.TestCase):
         with patch.object(self.r, "_work_queue_summary", side_effect=sqlite3.OperationalError("queue interrupted")):
             self.assertEqual(self.hook("Stop", turn_id="delivery", last_assistant_message="compiler checked, user acceptance pending"), {})
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM events WHERE type='Stop'").fetchone()[0], 1)
-        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories m JOIN events e ON e.id=m.event_id "
+                                          "WHERE e.type='Stop'").fetchone()[0], 1)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_summary_links").fetchone()[0], 0)
+        self.assertEqual(self.r.status(self.p)["metrics"].get("work_summary_queue_failed"), 1)
 
     def test_work_reads_remain_recovery_tools_without_execution_grant_on_both_hosts(self):
         self.r.config["enforce_task_policy"] = True

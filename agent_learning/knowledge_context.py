@@ -376,29 +376,8 @@ class KnowledgeContextMixin:
                                 break
                 if evolving_in_current_session:
                     continue
-                source_files_changed = False
-                if workspace and self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_file_links'").fetchone():
-                    from .work_files import current_file_version
-                    ev_ids = [ev["event_id"] for ev in item.get("evidence", []) if isinstance(ev, dict) and ev.get("event_id")]
-                    if ev_ids:
-                        marks = ",".join("?" for _ in ev_ids[:20])
-                        file_rows = self.db.execute(
-                            f"SELECT relative_path,version FROM work_file_links "
-                            f"WHERE project=? AND event_id IN ({marks}) LIMIT 16",
-                            (project, *ev_ids[:20]),
-                        ).fetchall()
-                        for f_row in file_rows:
-                            try:
-                                recorded_ver = json.loads(f_row["version"])
-                                current_ver = current_file_version(f_row["relative_path"], workspace)
-                                if (recorded_ver.get("status") == "stat_observed"
-                                        and (current_ver.get("status") != "stat_observed"
-                                             or current_ver.get("size") != recorded_ver.get("size")
-                                             or current_ver.get("mtime_ns") != recorded_ver.get("mtime_ns"))):
-                                    source_files_changed = True
-                                    break
-                            except Exception:
-                                pass
+                from .work_files import knowledge_file_state
+                file_state = knowledge_file_state(self, project, item, workspace)
                 eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
@@ -409,8 +388,7 @@ class KnowledgeContextMixin:
                         "maturity": item.get("maturity", "candidate"),
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
-                if source_files_changed:
-                    card["source_files_changed"] = True
+                card.update(file_state)
                 if item.get("pending_counterexample_count", 0):
                     card["pending_counterexample_count"] = item["pending_counterexample_count"]
                     card["feedback_status"] = "pending_counterexample"
@@ -430,6 +408,7 @@ class KnowledgeContextMixin:
                             "title": clip(item["title"], 60), "summary_only": True,
                             "read_required": True, "source_health": item["source_health"],
                             "maturity": item.get("maturity", "candidate")}
+                    card.update(file_state)
                     if item.get("pending_counterexample_count", 0):
                         card["pending_counterexample_count"] = item["pending_counterexample_count"]
                 if len(encode(card)) > available:

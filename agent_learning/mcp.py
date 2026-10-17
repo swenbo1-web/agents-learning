@@ -308,13 +308,19 @@ class Server:
                 r.access_context(p, handle, expected_epoch=self.epoch)
             if name == "knowledge_search":
                 body = {key: value for key, value in args.items() if key not in {"context_handle", "max_chars"}}
-                result = search_preview(r.search(p, **body), args.get("max_chars", 6000))
+                found = r.search(p, **body)
+                from .work_files import knowledge_file_state
+                for item in found.get("items", []):
+                    item.update(knowledge_file_state(r, p, item, self.workspace))
+                result = search_preview(found, args.get("max_chars", 6000))
                 items = result["items"]
             else:
                 if args.get("offset", 0) and "expected_revision" not in args:
                     raise ContractError("expected_revision is required to continue a section page")
                 try:
                     current = r.read(p, args["knowledge_id"])
+                    from .work_files import knowledge_file_state
+                    current.update(knowledge_file_state(r, p, current, self.workspace))
                     if "expected_revision" in args and current["revision"] != args["expected_revision"]:
                         raise ContractError("knowledge revision changed; restart reading from offset 0")
                     result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0),

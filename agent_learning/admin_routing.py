@@ -11,7 +11,7 @@ from .host_sessions import host_scope_key
 
 ROUTING_DEFAULTS = {
     "provider": "host", "model_mode": "default", "model": "",
-    "antigravity_command": ["agy"], "dsh_command": ["dsh"],
+    "antigravity_command": ["agy"], "dsh_command": ["dsh"], "dsh_profile": "",
 }
 _PROVIDERS = {"host", "codex", "antigravity", "dsh"}
 _MODES = {"default", "current", "fixed", "first"}
@@ -75,6 +75,11 @@ def validate_admin_routing_config(config):
         _error("administrator model override requires fixed mode")
     result["antigravity_command"] = validate_executor_command(result["antigravity_command"])
     result["dsh_command"] = validate_executor_command(result["dsh_command"])
+    from pathlib import Path
+    if (not isinstance(result["dsh_profile"], str) or len(result["dsh_profile"]) > 4096
+            or any(ord(c) < 32 for c in result["dsh_profile"])
+            or result["dsh_profile"] and not Path(result["dsh_profile"]).is_absolute()):
+        _error("administrator DSH profile snapshot must be an absolute file path or empty")
     if "command" in result:
         result["command"] = validate_executor_command(result["command"])
     if "enabled" in result and not isinstance(result["enabled"], bool):
@@ -306,6 +311,15 @@ class AdminRoutingMixin:
                   "policy_source": policy["source"], "host": self.host, "host_scope": self._session_scope(),
                   "session_epoch": session_epoch, "governance_epoch": governance_epoch,
                   "conversation": conversation, "model_observation_signature": observation}
+        if provider == "dsh":
+            from .admin_providers import dsh_sdk_launcher
+            try:
+                sdk = dsh_sdk_launcher(command)
+            except (OSError, ValueError):
+                sdk = None  # Availability retains its precise executable diagnostic.
+            if sdk is not None:
+                from .dsh_profile import resolve_profile
+                result["dsh_profile"] = resolve_profile(config["dsh_profile"])
         result["executor_signature"] = _digest(result)
         return result
 

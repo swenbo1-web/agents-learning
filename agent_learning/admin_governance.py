@@ -109,7 +109,9 @@ def propose_governance(runtime, project, problem_id, problem_revision, action, c
             if not runtime.db.execute("SELECT 1 FROM knowledge WHERE project=? AND id=? AND revision=?",
                                       (project, knowledge_id, expected_revision)).fetchone():
                 raise ContractError("unknown target knowledge revision")
-            if problem["knowledge_id"] and (problem["knowledge_id"], problem["knowledge_revision"]) != (knowledge_id, expected_revision):
+            from .knowledge_store import problem_feedback_target
+            feedback_target = problem_feedback_target(runtime, project, problem)
+            if feedback_target[0] and feedback_target != (knowledge_id, expected_revision):
                 raise ContractError("governance target differs from the case knowledge revision")
         if action == "dismiss_counterexample" and not runtime.db.execute(
                 "SELECT 1 FROM knowledge_feedback WHERE project=? AND problem_id=? AND knowledge_id=? "
@@ -150,6 +152,10 @@ def execute_governance(runtime, project, proposal_id, expected_epoch=None):
         _sources(runtime, project, problem, json.loads(proposal["evidence_refs"]), dismiss=action == "dismiss_counterexample")
         target = None
         if action != "publish":
+            from .knowledge_store import problem_feedback_target
+            feedback_target = problem_feedback_target(runtime, project, problem)
+            if feedback_target[0] and feedback_target != (proposal["knowledge_id"], proposal["expected_revision"]):
+                raise ContractError("governance target differs from the case knowledge revision")
             target = runtime.db.execute("SELECT k.* FROM active a JOIN knowledge k ON k.project=a.project AND k.id=a.id "
                                         "AND k.revision=a.revision WHERE a.project=? AND a.id=?", (project, proposal["knowledge_id"])).fetchone()
             if not target or target["revision"] != proposal["expected_revision"]:

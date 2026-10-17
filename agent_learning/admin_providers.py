@@ -44,6 +44,9 @@ def executor_availability(plan):
     """使用与 Popen 相同的静态解析；不运行模型、shell 或读取登录凭证。"""
     try:
         resolved = (dsh_sdk_launcher(plan.get("command")) if plan.get("provider") == "dsh" else None)
+        if resolved is not None:
+            from .dsh_profile import assert_profile
+            assert_profile(plan.get("dsh_profile"))
         resolved = resolved or resolve_command(plan.get("command"))
         return {"cli_available": True, "authentication": "provider_cli_managed_not_checked",
                 "reason": None, "launch_kind": resolved["launch_kind"]}
@@ -164,6 +167,9 @@ def executor_capability(plan):
     command = validate_command(plan["command"])
     try:
         sdk = dsh_sdk_launcher(command) if plan.get("provider") == "dsh" else None
+        if sdk:
+            from .dsh_profile import assert_profile
+            assert_profile(plan.get("dsh_profile"))
     except (OSError, ValueError) as exc:
         return {"ready": False, "reason": launch_error(exc)["reason"], "checked": "sdk"}
     if not sdk and Path(command[0]).stem.lower() not in {"codex", "agy", "dsh"}:
@@ -180,9 +186,13 @@ def executor_capability(plan):
         # Spooled output caps retained memory even if a broken CLI floods help.
         import tempfile
         with tempfile.TemporaryFile() as output:
+            probe_environment = dict(os.environ, ALP_DISABLED="1")
+            # Help and SDK import probes require no provider configuration.
+            # Do not expose an inherited DSH snapshot to another executable.
+            probe_environment.pop("ALP_DSH_REVIEW_PROFILE", None)
             result = subprocess.run(resolved + (["--probe"] if sdk else ["exec", "--help"] if provider == "codex" else ["--help"]),
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL, timeout=8 if sdk else 3,
-                env=dict(os.environ, ALP_DISABLED="1"),
+                env=probe_environment,
                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
             output.seek(0)
             text = output.read(65537).decode("utf-8", errors="replace")
@@ -203,7 +213,7 @@ def executor_capability(plan):
 
 
 def build_execution(command, provider, model, directory, schema, output, instruction, timeout,
-                    *, selection_mode="default", codex_overrides=None):
+                    *, selection_mode="default", codex_overrides=None, dsh_profile=None):
     """只构建临时审核进程；用户材料仅通过 stdin 传递。"""
     command = validate_command(command)
     model = validate_model(model)
@@ -234,7 +244,12 @@ def build_execution(command, provider, model, directory, schema, output, instruc
     elif provider == "dsh":
         sdk = dsh_sdk_launcher(command)
         if sdk:
+            from .dsh_profile import assert_profile
+            profile = assert_profile(dsh_profile)
             args = sdk["args"] + ["--model", model, "--selection-mode", selection_mode, "--timeout", str(timeout)]
+            args += ["--profile-directory", profile["profile_directory"], "--profile-fingerprint", profile["sha256"]]
+            if profile["source"] == "operator_file":
+                args += ["--profile-snapshot", profile["path"]]
             schema_body = json.loads(schema.read_text(encoding="utf-8"))
             stdin = (json.dumps({"event": "user", "message": {"content": instruction}, "response_schema": schema_body},
                                 ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")

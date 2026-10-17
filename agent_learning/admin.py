@@ -62,7 +62,10 @@ _TRUNCATION_NOTE = "原始证据已投影或截短；结论仅限可见记录，
 
 def _executor_semantics(provider_plan):
     # 身份边界由不可变调用计划另行核对，不能使换号或换会话绕过未知调用。
-    return {key: provider_plan.get(key) for key in ("provider", "model", "model_mode", "model_source", "command")}
+    result = {key: provider_plan.get(key) for key in ("provider", "model", "model_mode", "model_source", "command")}
+    if provider_plan.get("dsh_profile") is not None:
+        result["dsh_profile"] = provider_plan["dsh_profile"]
+    return result
 
 
 def _review_configuration(cfg, provider_plan):
@@ -555,7 +558,16 @@ def _accept_response(runtime, project, reserved, response):
         bound_kid = packet["problem"].get("knowledge_id")
         target_kid = proposal.get("knowledge_id")
         same_lineage_update = False
+        target_operation_solution = False
         if proposal["action"] in {"update", "attach"} and target_kid:
+            target_row = runtime.db.execute(
+                "SELECT k.body FROM active a JOIN knowledge k ON k.project=a.project AND k.id=a.id "
+                "AND k.revision=a.revision WHERE a.project=? AND a.id=? AND a.revision=?",
+                (project, target_kid, proposal["expected_revision"]),
+            ).fetchone()
+            target_body = json.loads(target_row[0]) if target_row else {}
+            target_operation_solution = (target_body.get("category") == "operation"
+                                         and target_body.get("knowledge_kind", "solution") == "solution")
             has_unresolved_counterexample = runtime.db.execute(
                 "SELECT 1 FROM knowledge_feedback WHERE project=? AND knowledge_id=? AND disposition='unresolved' LIMIT 1",
                 (project, target_kid),
@@ -563,8 +575,7 @@ def _accept_response(runtime, project, reserved, response):
             if not has_unresolved_counterexample:
                 # 1) 同源案例多轮演进升级 (v1 -> v2)
                 same_problem_source = (
-                    bound_kid == target_kid
-                    or runtime.db.execute(
+                    runtime.db.execute(
                         "SELECT 1 FROM knowledge_sources WHERE project=? AND knowledge_id=? AND problem_id=? LIMIT 1",
                         (project, target_kid, prob_id),
                     ).fetchone() is not None
@@ -595,14 +606,40 @@ def _accept_response(runtime, project, reserved, response):
         ).fetchone()[0]
         latest_succ_seq = runtime.db.execute(
             "SELECT COALESCE(MAX(e.rowid),0) FROM problem_events pe JOIN events e ON e.id=pe.event "
-            "WHERE pe.problem=? AND e.project=? AND e.type='PostToolUse' AND e.outcome='succeeded'",
+            "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
+            "WHERE pe.problem=? AND e.project=? AND e.type='PostToolUse' AND e.outcome='succeeded' "
+            "AND COALESCE(o.conflict,0)=0 AND COALESCE(o.decision,'')!='denied'",
             (prob_id, project),
         ).fetchone()[0]
-        regressed = bool(latest_fail_seq and latest_succ_seq and latest_fail_seq > latest_succ_seq)
+        # The accepted candidate must cite the recovery evidence itself.  A newer
+        # success elsewhere in the packet cannot validate a stale quoted success.
+        cited_success_seq = 0
+        for ref in body["evidence_refs"]:
+            observed = runtime.db.execute(
+                "SELECT e.rowid FROM problem_events pe JOIN events e ON e.id=pe.event "
+                "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
+                "WHERE pe.problem=? AND e.project=? AND e.id=? AND e.type='PostToolUse' "
+                "AND e.outcome='succeeded' AND COALESCE(o.conflict,0)=0 AND COALESCE(o.decision,'')!='denied'",
+                (prob_id, project, ref),
+            ).fetchone()
+            if observed:
+                cited_success_seq = max(cited_success_seq, observed[0])
+        latest_write_seq = runtime.db.execute(
+            "SELECT COALESCE(MAX(e.rowid),0) FROM problem_events pe JOIN events e ON e.id=pe.event "
+            "WHERE pe.problem=? AND e.project=? AND e.type='PostToolUse' "
+            "AND EXISTS(SELECT 1 FROM work_file_links wfl WHERE wfl.project=e.project "
+            "AND wfl.event_id=e.id AND wfl.relation='write_target')",
+            (prob_id, project),
+        ).fetchone()[0]
+        regressed = bool(latest_fail_seq > latest_succ_seq)
+        stale_citation = (not cited_success_seq or cited_success_seq <= latest_fail_seq
+                          or cited_success_seq < latest_write_seq)
         reason = ("evidence truncated" if packet.get("evidence_truncated") or packet.get("incomplete") else
                   "requires trusted tool-success evidence" if body["validation_level"] != "tool_success" else
                   "latest observation is unresolved failure" if regressed else
+                  "requires current cited tool-success evidence" if stale_citation else
                   "requires operation solution" if body["category"] != "operation" or body.get("knowledge_kind", "solution") != "solution" else
+                  "target knowledge requires trusted governance" if target_kid and not target_operation_solution else
                   "existing knowledge requires trusted governance" if not (
                       (proposal["action"] == "publish" and not bound_kid) or same_lineage_update
                   ) else None)
@@ -673,7 +710,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         schema_path.write_text(encode(HISTORY_RESPONSE_SCHEMA if _history_job_id else RESPONSE_SCHEMA), encoding="utf-8")
         execution = build_execution(provider_plan["command"], provider_plan["provider"], provider_plan.get("model", ""),
                                     directory, schema_path, output, reserved["instruction"], timeout,
-                                    selection_mode=provider_plan.get("model_mode", "default"))
+                                    selection_mode=provider_plan.get("model_mode", "default"),
+                                    dsh_profile=provider_plan.get("dsh_profile"))
         if execution.get("command_resolved"):
             args = execution["args"]
         else:
@@ -686,6 +724,10 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **detail, **context}
             args = resolved["args"] + execution["args"][len(provider_plan["command"]):]
         env = dict(os.environ, ALP_DISABLED="1", ALP_HOME=str(runtime.home))
+        if provider_plan.get("provider") != "dsh" or provider_plan.get("dsh_profile") is None:
+            # A DSH host configuration can contain provider authentication. It
+            # belongs only to our restricted SDK runner, never another launcher.
+            env.pop("ALP_DSH_REVIEW_PROFILE", None)
         if _deadline is not None:
             remaining = int(_deadline - time.monotonic())
             if remaining < 1:

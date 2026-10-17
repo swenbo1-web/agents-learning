@@ -389,11 +389,11 @@ The same project and data directory can retain knowledge across login accounts. 
 
 **3. Knowledge storage and indexing.** SQLite stores published content, revisions, evidence sources and action receipts. Categories cover project, domain, operation and mixed problems; kinds distinguish facts, specific solutions and reusable methods. The full-text index projects active knowledge only. Content and sources are read from the same database snapshot.
 
-**4. Retrieval and context management.** Queries use the current question and explicit task filters; bounded recall checks matches and source state. The default shared budget is 2400 characters: up to three published knowledge cards have priority, while up to three working-history indices use at most 600 of the remaining characters. Incomplete conditions produce `read_required`. Knowledge sections and working summaries/evidence have separate revision-bound pages. Exposure ledgers track changes; compaction prioritizes current matches before restoring relevant history.
+**4. Retrieval and context management.** Queries use the current question and explicit task filters; bounded recall checks matches and source state. The default shared budget is 2400 characters: up to three published knowledge cards have priority, while up to three working-history indices use at most 600 of the remaining characters. Incomplete conditions produce `read_required`; identifier cards retain file-change warnings. MCP search and read check recorded size/mtime metadata in the same checkout, which is not content verification. Knowledge sections and working summaries/evidence have separate revision-bound pages. Exposure ledgers track changes; compaction prioritizes current matches before restoring relevant history.
 
-**5. Event, evidence and case collection.** Tool events, public delivery notes and feedback create problem increments. Valuable visible events also become working observations with file associations; ordinary reads only assist those associations. Duplicate callbacks are deduplicated, conflicts retained, and late callbacks follow original boundaries. Tool success, completion and statements remain separate from user acceptance. Deterministic indexing makes no model calls.
+**5. Event, evidence and case collection.** Tool events, public delivery notes and feedback create problem increments. Valuable visible events also become working observations with file associations; ordinary reads only assist those associations. Duplicate callbacks are deduplicated, conflicts retained, and late callbacks follow original boundaries. Recovery associations require explicit complete script/test targets; a shared runner, script basename or partial word overlap cannot establish the relationship. Tool success, completion and statements remain separate from user acceptance. Deterministic indexing makes no model calls.
 
-**6. Administrator knowledge governance.** New or changed problems enter the review queue. The administrator receives a bounded review packet, compares existing knowledge and candidates, and proposes suggestions with applicable conditions, limitations and evidence references. Receipts record calls, results and retry states. When enabled, narrowly scoped automatic publication accepts only new operational solutions with complete tool success evidence. Domain knowledge, methodologies and governance changes continue through their corresponding trusted entry points.
+**6. Administrator knowledge governance.** New or changed problems enter the review queue. The administrator receives a bounded review packet, compares existing knowledge and candidates, and proposes suggestions with applicable conditions, limitations and evidence references. Receipts record calls, results and retry states. Explicitly enabled automatic publication can create operational solutions or update/attach sources to operational solutions associated through a source case or a write to the same checkout file. Candidates must cite current healthy success evidence. Domain knowledge, patterns, counterexample dispositions and other governance retain their trusted entry points.
 
 **7. Knowledge publication and version governance.** Publication checks the candidate's basis, identity, sources and target revision; identical requests return receipts idempotently. Published knowledge supports updates, revocation, explicit restoration, counterexample handling and maturity promotion. Knowledge batches save deterministic entry manifests and differences. Batch rollback cannot overwrite newer content or revive revoked knowledge.
 
@@ -1114,6 +1114,28 @@ For Antigravity, replace `--host codex` with `--host antigravity` (or `--host ds
 
 Reviewers receive bounded packets in temporary directories and return structured candidates, with `ALP_DISABLED=1` to avoid plugin recursion. Codex skips user configuration and execpolicy rules, disables supported Hook, app, plugin, command and multi-agent capabilities, and uses a read-only sandbox. Read-only does not mean zero tools. Antigravity selects an empty-tool agent and sends evidence only after confirming `init.tools=[]` and `permission_mode=request-review`; it checks terminal ordering and discards thinking and intermediate text streams. DSH uses a fixed SDK module allowlist for one model request with no tools. It creates no Agent and loads no project Hooks, skills, rules or dynamic plugins. Its `--probe` checks SDK interfaces without initializing settings, authentication or a model.
 
+**DSH profile configuration:** The updated native bridge captures the active host's merged, allowlisted model settings and passes them through a dedicated child-process environment. It never guesses Desktop/Web profiles or puts configuration contents into knowledge or review evidence. Execution freezes the directory and digest and rechecks the same snapshot before startup. Independent terminals and old bridges without that environment report `dsh_profile_unavailable`: upgrade/reload the native plugin or set `admin.dsh_profile` in trusted configuration to an absolute private JSON snapshot path. Project `first/current/fixed/default` policy still selects the model. Later host reloads require a new bridge event; already running workers do not track subsequent in-memory changes.
+
+<details>
+<summary>Explicit DSH snapshot for independent terminals</summary>
+
+Keep the private JSON outside the source repository and verify it against actual host settings:
+
+```json
+{
+  "version": 1,
+  "profile_directory": "C:/Users/you/.dsh/profiles/web",
+  "entries": [
+    {"name": "@deepseek-ai/dsh-agent-default-model", "config": {"provider": "deepseek-official", "model": "YOUR_MODEL_ID"}},
+    {"name": "@deepseek-ai/dsh-llm-deepseek", "config": {}}
+  ]
+}
+```
+
+Set `admin.dsh_profile` in your existing `ALP_CONFIG` to that file's absolute path. The default empty string uses the native bridge environment. Any settings/credentials `path` or `dshHome` in an explicit snapshot must be absolute; the native bridge resolves them against the original host working directory so the reviewer cannot read the wrong temporary directory. Environment snapshots are limited to 16000 characters and explicit files to 1 MiB; oversized configurations are rejected rather than truncated. Only the fixed SDK module allowlist is accepted; the file cannot request dynamic plugins or code execution.
+
+</details>
+
 Antigravity CLI may still load trusted global Hooks, rules or plugins. Empty-tool initialization does not prove that those components did not execute. These CLI options do not provide full OS isolation. Use a separate controlled environment for stronger boundaries. Actual `agy` loading and model calls remain unverified.
 
 `admin.auto_publish` remains `false` by default; administrator configuration does not change it. Successful review produces candidates or governance suggestions. Publication uses its separate trusted entry point.
@@ -1136,7 +1158,9 @@ The page can adjust daily calls, batch calls, batch time and runner time, saving
 
 Administrator MCP `propose_governance` can only propose publish/update/attach/revoke/dismiss_counterexample, not execute them. Trusted operators submit JSON with `governance-propose FILE` and execute with `governance-execute PROPOSAL_ID`. This checks case and target revisions, evidence and host boundaries, committing the governance change and idempotent receipt in one transaction. update must produce a real new revision; equivalent content should use attach. Publishing different knowledge does not resolve an old counterexample. A proposal in model output also remains a proposal.
 
-Even when `auto_publish` is enabled, it is limited to new operation/solution knowledge with no truncation and actual tool success evidence. Governance of existing knowledge, counterexamples, professional, pattern and unverified facts still require the trusted entry point. Tool success does not prove a domain conclusion correct.
+`auto_publish` is off by default. When enabled, untruncated everyday `operation/solution` candidates with actual tool success evidence may create knowledge. Updates and source attachments additionally require an existing `operation/solution` target, a shared source case or a write to the same file in the same checkout, and no unresolved counterexample. The candidate must cite a healthy success after the latest failure and no earlier than the latest linked write; an uncited newer success cannot validate an old citation. A shared file still requires the administrator to judge whether the solution is the same. Tool success does not establish domain correctness. Historical absorption, work summaries, professional knowledge, patterns, counterexample dispositions and other governance retain explicit confirmation.
+
+Publication lineage stays in `knowledge_sources`, without changing a case's original feedback target. New evidence can support another update of current knowledge, while explicit feedback and counterexamples retain their exact historical revision. Previously backfilled publication targets are interpreted through source lineage without moving counterexample targets or rewriting original evidence.
 
 `max_calls_per_day` limits call count, `max_input_chars` limits input characters and `timeout_seconds` limits one call. `max_cases_per_batch`, `max_calls_per_batch` and `max_batch_seconds` govern batches; `max_run_seconds` bounds the continuous runner. Characters and counts are not tokens or costs; the tool guarantees no strict token or dollar cap. Pending records remain when disabled or after failure. The next dispatch rotates background logs exceeding 1 MiB and keeps one old log; an active Windows handle records a rotation delay without blocking dispatch. Antigravity streams reject excessive total reads, events or structured results. Codex logs have a timeout rather than a hard disk-write limit. Cleanup guarantees the direct process; CLI descendants need host-level constraints.
 
@@ -1253,6 +1277,16 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity\|dsh`; `--upgrade` validates the same host profile and retains a full backup |
 | `antigravity-session-reset`, `dsh-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
+
+## main evidence association and review recovery fixes (2026-10-17)
+
+Fixes cover false recovery associations through script basenames/shared command words, operational solutions overwriting other knowledge kinds, stale success citations supporting new revisions, and publication backfills changing historical review fingerprints. Publication lineage is separate from original feedback targets: an existing source case can update current knowledge while counterexamples retain exact historical targets.
+
+Full awaiting-evidence windows reserve space for new material, freeze observations in chronological order and report omitted prior sources. Cross-host scheduling freezes, rechecks and executes the selected host. Root stop/resume preserves child operations and confirmed background runs. DSH terminal signals precede background IDs; compact cards and manual reads retain current-checkout file-change warnings.
+
+The isolated integration snapshot ran **1542 checks: 1539 passed, 3 Windows symlink-condition skips, no failures or errors**, in 432.173 seconds. Later boundary changes passed **244 targeted checks against final source**, including installation/MCP wiring. All 151 Python files passed Python 3.10 syntax parsing; both DSH entry points passed Node.js syntax checks. Reviewers were fakes; the official SDK was only probed. No live Hooks, real knowledge changes or paid model calls were enabled.
+
+Version, database schema and internal protocol remain `1.0.0` / `17` / `17`, with defaults unchanged. A source push does not update installed copies: perform a same-host upgrade from `main` and reload connections. Upgrade the DSH native bridge together so it supplies the active profile configuration.
 
 ## main conversation continuity and administrator fixes (2026-10-16)
 

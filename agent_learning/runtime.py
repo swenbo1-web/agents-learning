@@ -961,12 +961,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                 "AND agent=? AND state IN ('running','started')", (project, conversation, agent_id))
             if fresh and kind == "SessionStart" and not agent_id and raw.get("source") in {None, "startup", "resume", "clear"}:
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
-                                "AND state IN ('running','started')", (project, conversation))
+                                "AND agent IS NULL AND state='started'", (project, conversation))
             if fresh and kind == "Stop" and not agent_id:
                 # 同步工具调用若到回合结束仍停留在 started（从未收到 PostToolUse 转为后台 running 或终态），
-                # 说明工具回执已丢失，收敛为 unknown 以免永久阻塞后续管理员审核。
+                # 收敛本 root 的缺失回执；子 Agent 与已确认后台 running 操作保持各自生命周期。
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
-                                "AND state='started'", (project, conversation))
+                                "AND agent IS NULL AND state='started'", (project, conversation))
             if fresh and kind == "UserPromptSubmit" and not agent_id and str(raw.get("prompt", "")).strip().lower().strip("。.!！ ") not in {
                     "继续", "继续吧", "接着", "continue", "go on"}:
                 self._execution_fence(project, conversation, "new_user_prompt")

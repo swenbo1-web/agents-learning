@@ -9,6 +9,7 @@ import json
 import math
 import time
 import uuid
+from contextlib import contextmanager
 
 
 SCHEDULER_DEFAULTS = {
@@ -100,18 +101,30 @@ class SchedulerMixin:
                     scope = row[0]
                     if isinstance(scope, str) and ":" in scope and scope not in scopes:
                         scopes.append(scope)
+        last = self.db.execute("SELECT json_extract(summary,'$.host_scope') FROM scheduler_jobs "
+                               "WHERE project=? AND kind='admin'", (project,)).fetchone()
+        if last and last[0] in scopes and len(scopes) > 1:
+            scopes.remove(last[0])
+            scopes.append(last[0])
         return scopes
+
+    @contextmanager
+    def _scheduler_host_scope(self, target_scope):
+        from .host_sessions import host_scope_key
+        host, instance = target_scope.split(":", 1)
+        host_scope_key(host, instance)
+        old_host, old_instance, old_scope = self.host, self.host_instance, self.host_scope
+        self.host, self.host_instance, self.host_scope = host, instance, target_scope
+        try:
+            yield
+        finally:
+            self.host, self.host_instance, self.host_scope = old_host, old_instance, old_scope
 
     def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
         from .admin_queue import eligible_query, scan_signature, ready_executor, dispatch_diagnostic
         from .admin_usage import admin_budget_status
         from .runtime import digest
-        old_host, old_instance = self.host, getattr(self, "host_instance", "default")
-        old_scope = getattr(self, "host_scope", None)
-        parts = target_scope.split(":", 1)
-        if len(parts) == 2 and parts[0] in {"codex", "antigravity", "dsh"} and parts[1]:
-            self.host, self.host_instance, self.host_scope = parts[0], parts[1], target_scope
-        try:
+        with self._scheduler_host_scope(target_scope):
             signature = digest({"scan": scan_signature(self, project), "host_epoch": self.host_epoch(),
                 "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "
                                                    "FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()),
@@ -151,28 +164,29 @@ class SchedulerMixin:
                 due = now + cfg["poll_seconds"] if admission == "concurrency_limited" else budget["next_reset_at"]
                 return signature, "waiting", due, admission
             return signature, "ready", now, ""
-        finally:
-            self.host, self.host_instance = old_host, old_instance
-            if old_scope is not None:
-                self.host_scope = old_scope
 
-    def _scheduler_admin_state(self, project, cfg):
+    def _scheduler_admin_selection(self, project, cfg):
         scopes = self._scheduler_admin_scopes(project)
         primary = self._scheduler_eval_admin_for_scope(project, cfg, scopes[0])
         if not cfg["enabled"] or primary[1] == "ready" or len(scopes) == 1:
-            return primary
-        best = primary
+            return (*primary, scopes[0])
+        best, best_scope = primary, scopes[0]
         rank = {"ready": 3, "waiting": 2, "idle": 1, "disabled": 0}
         for scope in scopes[1:]:
             candidate = self._scheduler_eval_admin_for_scope(project, cfg, scope)
             if candidate[1] == "ready":
-                return candidate
+                return (*candidate, scope)
             if rank[candidate[1]] > rank[best[1]]:
-                best = candidate
+                best, best_scope = candidate, scope
             elif candidate[1] == "waiting" and best[1] == "waiting":
                 if candidate[2] is not None and (best[2] is None or candidate[2] < best[2]):
-                    best = candidate
-        return best
+                    best, best_scope = candidate, scope
+        return (*best, best_scope)
+
+    def _scheduler_admin_state(self, project, cfg):
+        # The shared job reports aggregate readiness; execution must retain the
+        # exact scope selected in its claim transaction.
+        return self._scheduler_admin_selection(project, cfg)[:4]
 
     def _scheduler_release_state(self, project, cfg, prior):
         from .runtime import digest
@@ -289,7 +303,7 @@ class SchedulerMixin:
     @staticmethod
     def _scheduler_summary(result):
         # 不复制模型响应、案例或日志；状态页只保存固定的计数及停止原因。
-        keys = ("status", "state", "stop_reason", "processed", "invocations", "scanned_count", "elapsed_seconds", "budget_exhausted")
+        keys = ("status", "state", "stop_reason", "processed", "invocations", "scanned_count", "elapsed_seconds", "budget_exhausted", "host_scope")
         return {k: result[k] for k in keys if k in result and isinstance(result[k], (bool, int, float, str))}
 
     def _scheduler_tick(self, project, max_jobs, deadline, token, epoch):
@@ -312,10 +326,28 @@ class SchedulerMixin:
                     raise ContractError("scheduler worker ownership changed")
                 rows = self.db.execute("SELECT * FROM scheduler_jobs WHERE state IN ('ready','waiting') AND next_due<=? "
                     "AND (? IS NULL OR project=?) ORDER BY last_run,created,project,CASE kind WHEN 'release' THEN 0 WHEN 'sync' THEN 1 ELSE 2 END LIMIT 100", (time.time(), project, project)).fetchall()
-                selected = next((r for r in rows if (r["project"], r["kind"]) not in attempted), None)
+                selected, admin_plan = None, None
+                for candidate in rows:
+                    key = (candidate["project"], candidate["kind"])
+                    if key in attempted:
+                        continue
+                    if candidate["kind"] == "admin":
+                        selection = self._scheduler_admin_selection(candidate["project"], cfg)
+                        if selection[1] != "ready":
+                            # A wake-up is only a hint. Do not invoke the current
+                            # host when the ready scope disappeared meanwhile.
+                            attempted.add(key)
+                            self._scheduler_refresh(candidate["project"], cfg)
+                            continue
+                        from .admin_queue import scan_signature
+                        with self._scheduler_host_scope(selection[4]):
+                            admin_plan = {"host_scope": selection[4], "session_epoch": self.session_epoch(),
+                                          "signature": scan_signature(self, candidate["project"])}
+                    selected = candidate
+                    break
                 if selected is None:
                     break
-                owner = str(uuid.uuid4())
+                owner = ((admin_plan["host_scope"] + "/") if admin_plan else "") + str(uuid.uuid4())
                 self.db.execute("UPDATE scheduler_jobs SET state='running',owner=?,host_epoch=?,lease_until=?,updated=? "
                     "WHERE project=? AND kind=?", (owner, epoch, time.time() + remaining + 30, time.time(), selected["project"], selected["kind"]))
             identifier, kind = selected["project"], selected["kind"]
@@ -327,29 +359,22 @@ class SchedulerMixin:
                 if remaining <= 0:
                     result = {"status": "time_exhausted"}
                 elif kind == "admin":
-                    target_scope = self._session_scope()
-                    if not self.admin_effective_config(identifier)["enabled"]:
-                        for candidate_scope in self._scheduler_admin_scopes(identifier):
-                            if self._scheduler_eval_admin_for_scope(identifier, cfg, candidate_scope)[1] == "ready":
-                                target_scope = candidate_scope
-                                break
-                    old_host, old_instance = self.host, getattr(self, "host_instance", "default")
-                    old_scope = getattr(self, "host_scope", None)
-                    parts = target_scope.split(":", 1)
-                    if len(parts) == 2 and parts[0] in {"codex", "antigravity", "dsh"} and parts[1]:
-                        self.host, self.host_instance, self.host_scope = parts[0], parts[1], target_scope
-                    try:
-                        result = admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
-                    finally:
-                        self.host, self.host_instance = old_host, old_instance
-                        if old_scope is not None:
-                            self.host_scope = old_scope
+                    from .admin_queue import scan_signature
+                    with self._scheduler_host_scope(admin_plan["host_scope"]):
+                        with self.transaction():
+                            self.assert_session_epoch(admin_plan["session_epoch"])
+                            valid_plan = scan_signature(self, identifier) == admin_plan["signature"]
+                        result = (admin_batch(self, identifier, expected_epoch=epoch, _deadline=deadline)
+                                  if valid_plan else {"status": "state_changed", "invocations": 0})
+                        result["host_scope"] = admin_plan["host_scope"]
                 elif kind == "release":
                     result = self.daily_knowledge_release(identifier, max_items=cfg["max_release_items"], expected_epoch=epoch)
                 else:
                     result = self.sync_batch(identifier, max_items=cfg["max_sync_items"], max_seconds=min(cfg["max_sync_seconds"], remaining), expected_epoch=epoch)
             except Exception as exc:
                 result = {"status": "failed", "stop_reason": type(exc).__name__}
+            if kind == "admin" and admin_plan:
+                result["host_scope"] = admin_plan["host_scope"]
             summary = self._scheduler_summary(result)
             with self.transaction():
                 current = self.db.execute("SELECT * FROM scheduler_jobs WHERE project=? AND kind=?", (identifier, kind)).fetchone()

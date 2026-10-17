@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -135,3 +136,30 @@ def file_links_from_payload(tool_name, payload, workspace, *, observe_version=Tr
 def current_file_version(relative_path, workspace):
     item = normalize_file_target(relative_path, checkout_root(workspace))
     return item["version"] if item else {"status": "outside_workspace", "content_hash": None}
+
+
+def knowledge_file_state(runtime, project, item, workspace):
+    """比较当前 checkout 已记录的文件元数据；不读取正文或声称内容校验。"""
+    if not workspace:
+        return {}
+    refs = list(dict.fromkeys(ev["event_id"] for ev in item.get("evidence", [])
+                             if isinstance(ev, dict) and ev.get("event_id")))[:20]
+    if not refs:
+        return {}
+    marks = ",".join("?" for _ in refs)
+    rows = runtime.db.execute(
+        f"SELECT relative_path,version FROM work_file_links WHERE project=? AND checkout_key=? "
+        f"AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
+        (project, checkout_key(workspace), *refs)).fetchall()
+    for row in rows:
+        try:
+            recorded = json.loads(row["version"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(recorded, dict) or recorded.get("status") != "stat_observed":
+            continue
+        current = current_file_version(row["relative_path"], workspace)
+        if (current.get("status") != "stat_observed" or current.get("size") != recorded.get("size")
+                or current.get("mtime_ns") != recorded.get("mtime_ns")):
+            return {"source_files_changed": True}
+    return {}
