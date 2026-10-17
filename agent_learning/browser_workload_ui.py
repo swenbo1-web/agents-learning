@@ -43,7 +43,7 @@ function workloadCaseCard(item){
  card.append(node('p',item.review_reason||t('notReviewed')),node('div',stamp(item.created)+' · '+item.id,'muted'));
  card.append(node('div',item.source_host+' · '+item.conversation,'muted'));
  if(item.last_call)card.append(node('p',t('lastCall')+': '+label(item.last_call.state)+' · '+stamp(item.last_call.created),'muted'));
- for(const candidate of item.candidates||[]){const button=node('button',candidate.title+' · '+label(candidate.status),'card-title');button.addEventListener('click',()=>run(()=>showDetail('candidate',candidate.id)));card.append(button);}
+ for(const candidate of item.candidates||[]){const button=node('button',candidate.title+' · '+label(candidate.status),'card-title');button.dataset.detailKey='candidate:'+candidate.id;button.addEventListener('click',()=>run(()=>showDetail('candidate',candidate.id,undefined,button)));card.append(button);}
  return card;
 }
 function renderWorkload(data){
