@@ -41,6 +41,27 @@ assert.equal(context.globalPayload.limits.max_calls_per_day,200);
 assert.equal(context.globalPayload.project_limits,undefined);
 assert.equal(context.globalPayload.expected_project_budget_version,undefined);
 assert.equal(context.globalPayload.start,false);
+vm.runInContext(`
+state.adminData.recovery={capture:{conversations:3,work_memories:24,last_event_at:1},
+ blocked_reviews:[{id:'failed-attempt',version:'a'.repeat(64),state:'failed',reason:'historical_failure_details_unavailable',usage_known:false,can_retry:true}],
+ history_jobs:[{id:'old-batch',version:'b'.repeat(64),state:'paused',files_read:229,pending:0,unsupported:0,conversation_sources:0,can_reauthorize:true}]};
+renderAdminRecovery(state.adminData);
+globalThis.recoverySubmission=null;
+sendAdminRequest=async(path,payload)=>{globalThis.recoverySubmission={path,payload};};
+globalThis.window={confirm:()=>false,prompt:()=>{throw Error('cancelled action requested a reason');}};
+confirmAdminRecovery('retry_call',state.adminData.recovery.blocked_reviews[0]);
+`,context);
+assert(flatten(get('admin-recovery')).includes('These totals do not verify this chat'));
+assert(flatten(get('admin-recovery')).includes('Previous usage is unknown'));
+assert.equal(context.recoverySubmission,null);
+vm.runInContext(`window.confirm=()=>true;window.prompt=()=> 'User reviewed the unknown attempt';confirmAdminRecovery('retry_call',state.adminData.recovery.blocked_reviews[0]);`,context);
+assert.equal(context.recoverySubmission.path,'admin-control/recovery');
+assert.equal(context.recoverySubmission.payload.action,'retry_call');
+assert.equal(context.recoverySubmission.payload.confirmed,true);
+assert.equal(context.recoverySubmission.payload.id,'failed-attempt');
+assert.equal(context.recoverySubmission.payload.start,undefined);
+vm.runInContext(`state.language='zh-CN';renderAdminRecovery(state.adminData);state.language='en';`,context);
+assert(flatten(get('admin-recovery')).includes('采集覆盖与流程恢复'));
 vm.runInContext(`delete state.adminData.project_usage;delete state.adminData.project_budget_policy;renderAdminState();`,context);
 assert(flatten(get('admin-readiness')).includes('Project usage unavailable'));
 assert.equal(get('admin-save').disabled,true);

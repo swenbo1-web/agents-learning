@@ -57,6 +57,7 @@ def control_status(runtime, project):
     from .admin_queue import eligible_query, scan_signatures, dispatch_diagnostic
     from .admin_usage import admin_admission_status
     from .admin_presets import PRESETS
+    from .admin_recovery import recovery_status
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
@@ -84,6 +85,7 @@ def control_status(runtime, project):
         "project_usage": project_usage, "global_usage": global_usage, "admission": admission,
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
+        "recovery": recovery_status(runtime, project),
         "usage": global_usage,
         "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting, "blocked_calls": blocked, "history_excluded": history},
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],

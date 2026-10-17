@@ -138,7 +138,9 @@ def _fingerprint(packet):
 
 def _usage(log_path, elapsed):
     """有界流式累计全部可读报告；预览裁剪不丢累计，缺失不写成零。"""
+    from .admin_diagnostics import codex_failure
     records, totals, seen = [], {}, {}
+    failure_diagnostic = None
     pending, failed = set(), set()
     anonymous_pending, anonymous_failed, started_turns = 0, 0, 0
     truncated, incomplete, count, scanned = False, False, 0, 0
@@ -175,6 +177,9 @@ def _usage(log_path, elapsed):
                 if not isinstance(event, dict):
                     continue
                 kind = event.get("type")
+                observed_failure = codex_failure(event)
+                if observed_failure and (failure_diagnostic is None or observed_failure["reason_code"] != "model_request_failed"):
+                    failure_diagnostic = observed_failure
                 identity = event.get("turn_id", event.get("id"))
                 identity = identity if isinstance(identity, str) and identity else None
                 if kind == "turn.started":
@@ -236,11 +241,14 @@ def _usage(log_path, elapsed):
         truncated = True
     unreported_turns = len(pending) + len(failed) + anonymous_pending + anonymous_failed
     incomplete |= unreported_turns > 0
+    if failure_diagnostic:
+        failure_diagnostic["usage_observed"] = bool(totals)
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": records, "token_totals": totals,
             "reported_turns": count, "preview_truncated": count > 16,
             "started_turns": started_turns, "unreported_turns": unreported_turns,
             "completeness": "complete" if count and not truncated and not incomplete else "partial" if totals else "unknown",
-            "log_tail_truncated": truncated}
+            "log_tail_truncated": truncated,
+            **({"provider_diagnostic": failure_diagnostic} if failure_diagnostic else {})}
 
 
 def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *, execution=None):
@@ -257,6 +265,8 @@ def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *
         # Only adapter-owned scalar observations survive temporary log cleanup.
         # Input submission does not establish model receipt or paid inference.
         usage["execution"] = dict(execution)
+        if usage.get("provider_diagnostic"):
+            usage["execution"].setdefault("provider_diagnostic", usage["provider_diagnostic"])
     summary = runtime.db.execute("SELECT source_digest FROM work_summary_links WHERE call_id=?", (call_id,)).fetchone()
     if summary:
         usage.update(purpose="work_summary", work_source_digest=summary["source_digest"])

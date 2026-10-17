@@ -49,7 +49,8 @@ def executor_availability(plan):
             assert_profile(plan.get("dsh_profile"))
         resolved = resolved or resolve_command(plan.get("command"))
         return {"cli_available": True, "authentication": "provider_cli_managed_not_checked",
-                "reason": None, "launch_kind": resolved["launch_kind"]}
+                "reason": None, "launch_kind": resolved["launch_kind"],
+                "executable_source": resolved.get("executable_source", "configured_or_path")}
     except (OSError, ValueError) as exc:
         return {"cli_available": False, "authentication": "provider_cli_managed_not_checked",
                 "reason": getattr(exc, "launch_reason", "cli_unavailable")}
@@ -59,7 +60,20 @@ def resolve_command(command, *, _windows=None):
     """npm Windows shim 仅投影为已存在 node + 包脚本，绝不交给 cmd.exe。"""
     command = validate_command(command)
     candidate = Path(command[0])
-    executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
+    # A desktop may ship a newer backend than the independently installed CLI.
+    # Only the bare default name inherits this host-owned hint. Explicit paths
+    # and custom launchers remain authoritative; project evidence is never read.
+    host_cli = os.environ.get("CODEX_CLI_PATH") if (len(command) == 1 and not candidate.is_absolute()
+                and command[0].lower() in {"codex", "codex.exe"}) else None
+    if host_cli:
+        hinted = Path(host_cli)
+        if not hinted.is_absolute() or hinted.name.lower() not in {"codex", "codex.exe"} or not hinted.is_file():
+            exc = FileNotFoundError("host Codex executable unavailable")
+            exc.launch_reason = "host_cli_unavailable"
+            raise exc
+        executable = str(hinted)
+    else:
+        executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
     if not executable:
         raise FileNotFoundError("administrator executable unavailable")
     executable = Path(executable).resolve()
@@ -69,7 +83,8 @@ def resolve_command(command, *, _windows=None):
         exc.launch_reason = "cli_shim_unsupported"
         raise exc
     if not windows or executable.suffix.lower() not in {".cmd", ".bat"}:
-        return {"args": [str(executable), *command[1:]], "launch_kind": "executable"}
+        return {"args": [str(executable), *command[1:]], "launch_kind": "executable",
+                "executable_source": "host_cli" if host_cli else "configured_or_path"}
     def refuse():
         exc = ValueError("administrator command shim is unsupported")
         exc.launch_reason = "cli_shim_unsupported"

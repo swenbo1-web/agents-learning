@@ -36,7 +36,7 @@ def handle_admin_post(handler):
         if len(content_types) != 1 or content_types[0].split(";", 1)[0].strip().lower() != "application/json":
             raise ContractError("administrator requests require application/json")
         parsed = urlsplit(handler.path)
-        if parsed.query or parsed.path not in {"/api/admin-control/configure", "/api/admin-control/wake"}:
+        if parsed.query or parsed.path not in {"/api/admin-control/configure", "/api/admin-control/wake", "/api/admin-control/recovery"}:
             handler._send(404, {"error": "unknown administrator endpoint"})
             return
         old_timeout = handler.request.gettimeout()
@@ -51,7 +51,11 @@ def handle_admin_post(handler):
         from .admin_control import apply_control
         runtime = handler._review_runtime()
         try:
-            result = apply_control(runtime, handler.server.project, body, wake=parsed.path.endswith("/wake"))
+            if parsed.path.endswith("/recovery"):
+                from .admin_recovery import apply_recovery
+                result = apply_recovery(runtime, handler.server.project, body)
+            else:
+                result = apply_control(runtime, handler.server.project, body, wake=parsed.path.endswith("/wake"))
         finally:
             runtime.close()
         handler._send(200, result)

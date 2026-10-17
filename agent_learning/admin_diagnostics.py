@@ -12,10 +12,28 @@ REASONS = frozenset({
     "provider_quota_exceeded", "invalid_credential", "model_timeout", "invalid_output_stream", "invalid_output_block",
     "invalid_output_text", "output_limit_exceeded", "output_block_mismatch", "tool_output_refused",
     "incomplete_model_response", "invalid_response_json", "invalid_response_object", "model_cleanup_failed",
+    "model_unavailable",
 })
 PARAMETERS = frozenset({"thinking_budget", "thinking_level", "reasoning_effort"})
 FLAGS = frozenset({"stream_invoked", "http_response_observed", "usage_observed"})
 FIELDS = frozenset({"version", "phase", "reason_code", "http_status", "parameter_code", "retry_policy", *FLAGS})
+
+
+def codex_failure(event):
+    """Map machine fields only. Provider messages, stderr and credentials never survive."""
+    if not isinstance(event, dict) or event.get("type") not in {"error", "turn.failed"}:
+        return None
+    error = event.get("error")
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code")
+    reasons = {"model_not_found": "model_unavailable", "invalid_api_key": "invalid_credential",
+               "insufficient_quota": "provider_quota_exceeded", "rate_limit_exceeded": "provider_quota_exceeded"}
+    reason = reasons.get(code, "model_request_failed") if isinstance(code, str) else "model_request_failed"
+    status = error.get("status_code")
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    return {"version": 1, "phase": "stream", "reason_code": reason, "http_status": status,
+            "parameter_code": None, "retry_policy": "no_automatic_retry", "stream_invoked": False,
+            "http_response_observed": status is not None, "usage_observed": False}
 
 
 def safe_diagnostic(value):
