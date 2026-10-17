@@ -44,6 +44,8 @@ def parser():
     run.add_argument("--max-seconds", type=int, default=600, help="本次历史处理时长预算，默认600秒")
     state = sub.add_parser("history-status", help="查看来源覆盖、审阅进度和用量，不启动吸收")
     state.add_argument("--job-id")
+    history_worker = sub.add_parser("history-review-worker", help=argparse.SUPPRESS)
+    history_worker.add_argument("--request-id", required=True)
     sub.add_parser("history-jobs", help="列出当前项目的有限历史任务摘要")
     sources = sub.add_parser("history-sources", help="分页查看完整来源、未解析及排除清单，不读取原始正文")
     sources.add_argument("job_id")
@@ -476,6 +478,9 @@ def main(argv=None):
         elif args.command == "history-run": result = runtime.history_run(
             project, args.job_id, allow_review=args.allow_review, max_calls=args.max_calls, max_seconds=args.max_seconds)
         elif args.command == "history-status": result = runtime.history_status(project, args.job_id)
+        elif args.command == "history-review-worker":
+            from .history_review_control import run_history_review
+            result = run_history_review(runtime, project, args.request_id)
         elif args.command == "history-jobs": result = runtime.history_jobs(project)
         elif args.command == "history-sources": result = runtime.history_source_report(
             project, args.job_id, section=args.section, offset=args.offset, limit=args.limit)
@@ -572,7 +577,7 @@ def main(argv=None):
             with runtime.transaction():
                 state = control_state(runtime, project)
                 if bool(state["enabled"]) != (args.enabled == "on"):
-                    runtime.db.execute("INSERT INTO admin_control_state VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
+                    runtime.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated) VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
                         "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
                         (project, runtime._session_scope(), int(args.enabled == "on"), state["version"] + 1, time.time()))
         elif args.command == "admin-status":

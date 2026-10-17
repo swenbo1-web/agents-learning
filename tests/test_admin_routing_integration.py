@@ -92,7 +92,7 @@ class AdminRoutingIntegrationTests(unittest.TestCase):
     def test_cli_on_reopens_a_previous_visual_admission_pause(self):
         code, _ = self.cli("admin-configure", "--enabled", "on")
         self.assertEqual(code, 0)
-        self.r.db.execute("INSERT INTO admin_control_state VALUES(?,?,0,1,0)", (self.p, self.r._session_scope()))
+        self.r.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated) VALUES(?,?,0,1,0)", (self.p, self.r._session_scope()))
         self.assertFalse(self.r.admin_effective_config(self.p)["enabled"])
         code, _ = self.cli("admin-configure", "--enabled", "on")
         self.assertEqual(code, 0)
@@ -231,7 +231,7 @@ class AdminRoutingIntegrationTests(unittest.TestCase):
             self.r.db.execute("PRAGMA user_version=13")
         self.r.close()
         upgraded = self.runtime()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 18)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 19)
         for table, count in before.items():
             self.assertEqual(upgraded.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], count, table)
         self.assertEqual(upgraded.read(self.p, knowledge["knowledge_id"])["content"], "review include directories")

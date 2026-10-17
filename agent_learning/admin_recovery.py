@@ -35,6 +35,12 @@ def _history_available(row):
         row["state"] == "paused" and json.loads(row["last_result"]).get("reason") in BUDGET_PAUSES)
 
 
+def _history_review_available(row):
+    """A new, explicitly confirmed run may resume a user pause or failed batch."""
+    return (not row["owner"] or (row["lease_until"] or 0) <= time.time()) and row["state"] in {
+        "materialized", "review_complete", "paused"}
+
+
 def recovery_status(runtime, project):
     """Bounded read view. Observations do not prove current-session Hook health."""
     db, scope = runtime.db, runtime._session_scope()
@@ -74,6 +80,16 @@ def recovery_status(runtime, project):
         stats = plan.get("stats") or {}
         pending = plan.get("pending") or []
         unsupported = sum(isinstance(value, dict) and value.get("reason") == "unparsed_file_type" for value in pending)
+        progress = runtime.history_status(project, row["id"])["job"]
+        review_request = None
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='history_review_requests' AND type='table'").fetchone():
+            request = db.execute("SELECT state,lease_until,result FROM history_review_requests WHERE project=? AND job_id=? "
+                "ORDER BY created DESC LIMIT 1", (project, row["id"])).fetchone()
+            if request:
+                review_request = {"state": "result_unknown" if request["state"] in {"reserved", "running"}
+                    and (request["lease_until"] or 0) <= time.time() else request["state"],
+                    "result": json.loads(request["result"])}
+        request_active = review_request and review_request["state"] in {"reserved", "running"}
         history.append({"id": row["id"], "version": _version(row), "state": row["state"],
             "epoch_matches": row["host_epoch"] == runtime.host_epoch(),
             "review_enabled": bool(row["review_enabled"]), "remaining_calls": row["remaining_calls"],
@@ -81,7 +97,11 @@ def recovery_status(runtime, project):
             "pending": plan.get("pending_count", 0), "unsupported": unsupported,
             "conversation_sources": sum(isinstance(value, dict) and value.get("kind") == "conversation"
                                         for value in plan.get("extra_sources", [])),
-            "can_reauthorize": _history_available(row) and row["host_epoch"] != runtime.host_epoch()})
+            "can_reauthorize": _history_available(row) and row["host_epoch"] != runtime.host_epoch(),
+            "counts": progress["counts"], "review_request": review_request,
+            "can_review": _history_review_available(row) and row["host_epoch"] == runtime.host_epoch()
+                and not request_active and progress["coverage"]["review"]["ready_cases"] > 0,
+            "publication_automatic": False})
     return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
                 "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},
             "blocked_reviews": calls, "history_jobs": history, "models_started": False}

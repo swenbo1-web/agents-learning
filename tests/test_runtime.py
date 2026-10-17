@@ -160,6 +160,9 @@ class RuntimeTests(unittest.TestCase):
 
     def test_admin_budget_is_durable_and_new_problems_are_not_starved(self):
         self.problem()
+        # Bare tool failures now wait locally. A later substantive observation
+        # must still be reviewed, charged once and subject to the durable cap.
+        self.r.feedback(self.p, "chat-a", "已记录需要整理的项目分析", category="professional")
         fake = Path(self.temp.name) / "reviewer.py"
         fake.write_text("import sys,json,pathlib\nargs=sys.argv\njson.loads(sys.stdin.read().split('<untrusted_evidence>')[1].split('</untrusted_evidence>')[0])\npathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'decision':'skip','reason':'no new fact','candidate':None}),encoding='utf-8')\n", encoding="utf-8")
         self.r.config["admin"].update(enabled=True, command=[sys.executable, str(fake)], max_calls_per_day=1)

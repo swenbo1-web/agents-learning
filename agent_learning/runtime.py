@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(19)):
+        if version not in set(range(20)):
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
@@ -313,17 +313,19 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 install_work_summaries(self)
                 from .admin_control import install_control
                 install_control(self)
-                if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 18:
-                    self._fence_project_budget_upgrade()
-                self.db.execute("PRAGMA user_version=18")
+                from .admin_review_flow import install_flow
+                install_flow(self)
+                if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
+                    self._fence_runtime_upgrade()
+                self.db.execute("PRAGMA user_version=19")
         except BaseException:
             self.db.close()
             raise
 
-    def _fence_project_budget_upgrade(self):
+    def _fence_runtime_upgrade(self):
         """Fence old executors without interpreting a protocol upgrade as an account change."""
         if not self.db.in_transaction:
-            raise ContractError("project budget upgrade requires a write transaction")
+            raise ContractError("runtime upgrade requires a write transaction")
         prior_governance = self.host_epoch()
         boundary = max(prior_governance, self.db.execute(
             "SELECT COALESCE(MAX(epoch),0) FROM host_scopes").fetchone()[0]) + 1
@@ -348,6 +350,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             "AND h.epoch=work_summary_links.session_epoch)", (boundary, boundary, prior_governance))
         self.db.execute("UPDATE host_state SET epoch=? WHERE id=1", (boundary,))
         self.db.execute("UPDATE host_scopes SET epoch=?", (boundary,))
+        self.db.execute("UPDATE history_review_requests SET state='cancelled',lease_until=NULL,updated=? "
+                        "WHERE state IN ('reserved','running')", (time.time(),))
         self.db.execute(
             "UPDATE admin_calls SET state=CASE WHEN state='reserved' AND owner IS NOT NULL AND owner!='' "
             "AND launch_intent IS NULL AND started IS NULL THEN 'not_started' ELSE 'orphaned_unknown' END,"

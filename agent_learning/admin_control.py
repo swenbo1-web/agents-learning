@@ -24,7 +24,7 @@ def control_state(runtime, project):
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_control_state'").fetchone()
     row = runtime.db.execute("SELECT * FROM admin_control_state WHERE project=? AND host_scope=?",
         (project, runtime._session_scope())).fetchone() if exists else None
-    return dict(row) if row else {"enabled": 1, "version": 0, "updated": None}
+    return dict(row) if row else {"enabled": 1, "version": 0, "updated": None, "auto_publish": None}
 
 
 def admission_enabled(runtime, project):
@@ -58,6 +58,7 @@ def control_status(runtime, project):
     from .admin_usage import admin_admission_status
     from .admin_presets import PRESETS
     from .admin_recovery import recovery_status
+    from .admin_review_flow import publication_policy, review_activity
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
@@ -86,6 +87,7 @@ def control_status(runtime, project):
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
         "recovery": recovery_status(runtime, project),
+        "publication_policy": publication_policy(runtime, project), "review_activity": review_activity(runtime, project),
         "usage": global_usage,
         "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting, "blocked_calls": blocked, "history_excluded": history},
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
@@ -110,14 +112,14 @@ def apply_control(runtime, project, body, *, wake=False):
                 "expected_session_epoch", "expected_governance_epoch"}
     configured = {"enabled", "model_mode", "model", "start"}
     versions = {"expected_budget_version", "expected_project_budget_version"}
-    optional = {"summary_enabled", "limits", "project_limits"} if not wake else set()
+    optional = {"summary_enabled", "auto_publish", "limits", "project_limits"} if not wake else set()
     mandatory = required | (set() if wake else configured)
     if (not isinstance(body, dict) or not mandatory <= set(body) or set(body) - (mandatory | versions | optional)
             or not versions.intersection(body)
             or not wake and not {"limits", "project_limits"}.intersection(body)
             or "limits" in body and "expected_budget_version" not in body
             or "project_limits" in body and "expected_project_budget_version" not in body
-            or "summary_enabled" in body and not isinstance(body["summary_enabled"], bool)):
+            or any(key in body and not isinstance(body[key], bool) for key in ("summary_enabled", "auto_publish"))):
         raise ContractError("invalid administrator control fields")
     request_id = body["request_id"]
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
@@ -176,10 +178,14 @@ def apply_control(runtime, project, body, *, wake=False):
                 or body["summary_enabled"] != summary_prior["enabled"])
             if "summary_enabled" in body:
                 runtime.configure_work_summary(project, body["summary_enabled"])
-            if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed:
-                runtime.db.execute("INSERT INTO admin_control_state VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
-                    "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated",
-                    (project, runtime._session_scope(), int(body["enabled"]), state["version"] + 1, time.time()))
+            publication_changed = "auto_publish" in body and (state.get("auto_publish") is None
+                or bool(state["auto_publish"]) != body["auto_publish"])
+            if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed or publication_changed:
+                runtime.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated,auto_publish) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
+                    "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated,auto_publish=excluded.auto_publish",
+                    (project, runtime._session_scope(), int(body["enabled"]), state["version"] + 1, time.time(),
+                     int(body["auto_publish"]) if "auto_publish" in body else state.get("auto_publish")))
         response = {"request_id": request_id, "status": "configured", "settings": control_status(runtime, project),
                     "launch": {"status": "unconfirmed" if start else "not_requested"}}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)", (*identity, fingerprint, encode(response), time.time()))

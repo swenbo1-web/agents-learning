@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.0.1 source patch on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.0 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -52,6 +52,17 @@ The panels passed isolated regressions, fixed-runtime checks and Edge checks wit
 ### 1. Composer “📖 Memory” Button & Quick Control Popover (DSH)
 
 ![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
+
+### Inspect review subjects and publication (1.1.0)
+
+Open **Review & settings → Administrator settings** from any host control panel:
+
+1. **Review subjects and publication** shows current, recent, upcoming and locally deferred cases, with sources, purpose, evidence, candidate summaries, applicability, limitations and publication blockers. Checking a candidate's publication conditions is read only and makes no model call.
+2. **Review and publication have separate switches.** Frequency controls review budgets. Automatic publication of future verified operation solutions is saved per project and host, with explicit confirmation. Historical knowledge, facts, professional conclusions and existing candidates still require approval.
+3. **Archive first, review separately.** Each history card separates archived cases, primary reviews, candidates and publications. Confirm a finite review of that frozen batch: defaults are 5 calls and 180 seconds, adjustable up to 20 calls and 600 seconds. This does not scan new sources, automatically resume, or publish historical knowledge. Closing the page does not cancel an approved bounded worker; progress and request receipts remain available.
+4. **Defer bare failures locally.** Daily cases containing only failed tools and no recovery or public explanation wait for more evidence without a model call. Relevant new evidence makes them eligible for reconsideration. Explicit per-case review remains available.
+
+These cards show public records and observable evidence, not internal model reasoning. Reported statements, tool success, candidates and formal publication remain distinct; tool success is not business correctness or user acceptance.
 
 ### 2. Local Visual Knowledge Browser, Candidate Review & Frequency Presets (All Hosts)
 
@@ -576,7 +587,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` uses database schema **18** and internal publication protocol **18**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution retains schema/protocol 15. Back up the external database before upgrading, then update and reload every shared-database host runtime. Older runtimes cannot open schema 18.
+Current `main` uses database schema **19** and internal publication protocol **19**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution retains schema/protocol 15. Back up the external database before upgrading, then update and reload every shared-database host runtime. Older runtimes cannot open schema 19.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -865,7 +876,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**1.0.0 is the first stable release; its original distribution uses schema/internal protocol 15.** Current `main` adds visual administrator settings, first valid project-model binding, independent project limits, global safeguards and bounded continuous organization, advancing schema/internal publication protocol to **18** without a new downloadable Release. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage; unknown old events do not become complete histories. Back up the database before updating and reloading all shared-database installations. Older runtimes reject schema 18; export backups do not replace database backups.
+**1.0.0 is the first stable release; its original distribution uses schema/internal protocol 15.** Current `main` adds visual administrator settings, first valid project-model binding, independent project limits, global safeguards and bounded continuous organization, advancing schema/internal publication protocol to **19** without a new downloadable Release. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Migration preserves knowledge, sources and usage; unknown old events do not become complete histories. Back up the database before updating and reloading all shared-database installations. Older runtimes reject schema 19; export backups do not replace database backups.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1228,7 +1239,7 @@ Frequency presets, daily calls, batch calls, batch time and runner time on a pro
 
 Project cards show the project's budget occupancy, valid review decisions, failed attempts and remaining allowance. Combined usage appears separately and is never substituted for project usage. A started process does not prove a successful model request. Missing token reports remain unknown; multiple candidates from one review are not multiple calls. Existing records already identify their project and need no regeneration or reimport.
 
-The first schema 18 upgrade invalidates older host connections and governance executors. Reload every shared-database host and bind again through a new session event. Knowledge, project attribution and recorded usage remain intact. Reviews whose completion was not confirmed at upgrade retain an unknown outcome and are not automatically retried.
+The first schema 19 upgrade invalidates older host connections and governance executors. Reload every shared-database host and bind again through a new session event. Knowledge, project attribution and recorded usage remain intact. Reviews whose completion was not confirmed at upgrade retain an unknown outcome and are not automatically retried.
 
 `admin-once` scans at most ten problems; `admin-batch` defaults to **40 cases**, at most **5 calls/180 seconds**. `admin-drain` retains one lease across small batches for at most **600 seconds**, with shared concurrency **1**. Empty queues, unknown calls, errors or either exhausted budget stop it. Initialization, execution and protocol failures after process startup also trigger executor cooldown; the scheduler does not treat an internally failed batch as a successful batch to resume immediately. Counts are limits, not a promise of five completed calls per batch. Runtime includes model waiting; cleanup and database finalization may slightly exceed the allowance.
 

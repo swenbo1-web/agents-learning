@@ -74,8 +74,8 @@ def resolve_browser_project(database, workspace, project_id=None):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16, 17, 18}:
-        raise ContractError("browser requires database schema 11..18; run an explicit upgrade first")
+    if db.execute("PRAGMA user_version").fetchone()[0] not in {11, 12, 13, 14, 15, 16, 17, 18, 19}:
+        raise ContractError("browser requires database schema 11..19; run an explicit upgrade first")
 
 
 class _ReadModel(KnowledgeStoreMixin, CaseStoreMixin, KnowledgeReleaseMixin,
@@ -148,11 +148,11 @@ class BrowserServer(ThreadingHTTPServer):
         host_scope_key(runtime_host, runtime_instance)
         with contextlib.closing(_connection(self.database)) as db:
             _schema(db)
-            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16, 17, 18}
+            if review and (db.execute("PRAGMA user_version").fetchone()[0] not in {15, 16, 17, 18, 19}
                            or self.database.name != "runtime.sqlite3"):
-                raise ContractError("review mode requires an existing schema 15..18 runtime database")
-            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] not in {16, 17, 18} or self.database.name != "runtime.sqlite3"):
-                raise ContractError("administrator control requires an explicitly upgraded schema 16..18 runtime database")
+                raise ContractError("review mode requires an existing schema 15..19 runtime database")
+            if admin_control and (db.execute("PRAGMA user_version").fetchone()[0] not in {16, 17, 18, 19} or self.database.name != "runtime.sqlite3"):
+                raise ContractError("administrator control requires an explicitly upgraded schema 16..19 runtime database")
             if not db.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
                 raise ContractError("unknown browser project")
         self.project = project
@@ -291,13 +291,18 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                 result = {"project": self.server.project, "review_enabled": self.server.review_enabled,
                           "admin_control_enabled": self.server.admin_control_enabled,
                           "read_only": not (self.server.review_enabled or self.server.admin_control_enabled), "language": self.server.language}
-            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt"}:
+            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt", "/api/admin-control/publication-preview"}:
                 if not self.server.admin_control_enabled:
                     raise ContractError("administrator control capability was not opened")
                 from .admin_control import readonly_runtime, control_status, request_receipt
                 with self.server.snapshot() as db:
                     view = readonly_runtime(self.server.database, db, self.server.runtime_host, self.server.runtime_instance)
-                    if parsed.path.endswith("/receipt"):
+                    if parsed.path.endswith("/publication-preview"):
+                        if set(params) != {"candidate_id"}:
+                            raise ContractError("publication preview requires candidate_id")
+                        from .admin_publication import publication_preview
+                        result = publication_preview(view, self.server.project, params["candidate_id"])
+                    elif parsed.path.endswith("/receipt"):
                         if set(params) != {"request_id"}:
                             raise ContractError("receipt requires request_id")
                         result = request_receipt(view, self.server.project, params["request_id"])
