@@ -24,7 +24,8 @@
     <h2 id="project"></h2><div id="workspace" class="path muted"></div>
     <div class="stats" id="stats"></div>
     <div class="detail" id="admin"></div>
-    <div class="row"><button id="refresh"></button><button id="browser"></button><button id="review"></button></div>
+    <div class="row"><button id="refresh"></button><button id="debug"></button><button id="browser"></button><button id="review"></button></div>
+    <section id="debugPanel" hidden><h2 id="debugTitle"></h2><div id="debugOutput" class="detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></div></section>
     <h2 id="frequencyTitle"></h2>
     <p class="muted" id="shared"></p>
     <div class="row" id="presets"></div>
@@ -41,14 +42,19 @@
     en: { waiting:"Waiting for the active project…", unavailable:"This panel is available only in its installed, bound project. Reopen it after switching projects or updating the plugin.", connecting:"Checking the project connection…", ready:"Local controls. Opening this panel starts no model or history import.", refresh:"Refresh status", browser:"Open knowledge", review:"Approval & settings", frequency:"Administrator frequency", shared:"Each project has its own daily allowance shared across hosts; global protection also applies.", quota:"Changing a frequency can enable paid model work. The model uses your platform allowance. Knowledge approval remains a separate decision.", historyTitle:"Existing project history", historyNote:"Archive this project's eligible files only. This does not call a model, review candidates or publish knowledge. Use the history skill for a selected scope and model review.", history:"Archive project history…", active:"Published knowledge", work:"Work observations", pending:"Pending cases", candidates:"Knowledge candidates", enabled:"Administrator enabled", disabled:"Administrator paused", model:"Model", waitingModel:"Waiting for an eligible model", remaining:"Project calls remaining", attempts:"Project review attempts", completed:"Valid review results", failedCalls:"Failed attempts", globalCalls:"All-project attempts", globalLeft:"Global protection remaining", usageUnavailable:"Project usage unavailable; update the runtime", reset:"UTC day; local reset time", blocking:"Blocking scope", unknown:"Unknown", opened:"Opened the local knowledge page.", saved:"Administrator settings saved.", archived:"History archived; review and publication have not been started.", archivedPartial:"This batch is only partially archived or its completion is unconfirmed; no review or publication has started.", archiveConfirm:"Archive eligible files in this project? No model review or knowledge publication will start.", confirmPreset:"Save this administrator frequency? This changes only this project’s daily call limit and may start model-backed daily organization. It does not start historical review or publish knowledge.", confirmOff:"Pause new administrator model calls for this project and host?", failed:"The request could not be completed. Refresh before trying again; an uncertain action is not retried automatically.", off:"Off", minimal:"On demand · 5/day", light:"Light · 15/day", balanced:"Balanced · 100/day", activePreset:"Active · 300/day" },
     "zh-CN": { waiting:"正在等待当前项目…", unavailable:"仅在已安装绑定的项目中显示控制。切换项目或更新插件后，请重新打开此面板。", connecting:"正在核对项目连接…", ready:"本地控制面板。打开页面不会启动模型或历史吸收。", refresh:"刷新状态", browser:"打开知识库", review:"审批与设置", frequency:"管理员调用频率", shared:"项目独立计算每日额度，同项目各宿主共用；另受全局保护限制。", quota:"调整频率可能启用模型整理，使用平台额度。知识批准发布仍需单独确认。", historyTitle:"已有项目历史", historyNote:"仅归档当前项目符合条件的文件，不调用模型、不审核候选、不发布知识。指定范围和模型整理请使用历史吸收技能。", history:"归档项目历史…", active:"正式知识", work:"工作观察", pending:"待审案例", candidates:"知识候选", enabled:"管理员已启用", disabled:"管理员已暂停", model:"模型", waitingModel:"等待有效模型记录", remaining:"项目今日剩余", attempts:"项目审核尝试", completed:"有效审核结论", failedCalls:"失败尝试", globalCalls:"所有项目合计尝试", globalLeft:"全局保护余量", usageUnavailable:"项目统计暂不可用，请更新运行端", reset:"按 UTC 日统计；本地重置时间", blocking:"限制范围", unknown:"未知", opened:"已打开本机知识页面。", saved:"管理员设置已保存。", archived:"历史已归档；尚未启动审核和发布。", archivedPartial:"本批次部分归档或完成情况尚未确认；尚未启动审核和发布。", archiveConfirm:"归档此项目符合条件的文件？不会启动模型审核或知识发布。", confirmPreset:"保存此管理员频率？这会调整当前项目的每日调用上限，并可能启动模型整理日常待办；不会启动历史审核或发布知识。", confirmOff:"暂停此项目、此宿主新的管理员模型调用？", failed:"本次请求未能完成，请刷新后再操作；结果不明确的操作不会自动重试。", off:"关闭", minimal:"按需 · 5次/天", light:"省流 · 15次/天", balanced:"均衡 · 100次/天", activePreset:"积极 · 300次/天" }
   };
+  Object.assign(strings.en, {debug:"Check connection",debugTitle:"Local diagnostics (no model calls)",uiBridge:"UI connection",mcp:"MCP connection",hook:"Current Hook binding",responding:"Responding",verified:"Verified",install:"Installation check",home:"Knowledge directory",version:"Running version / protocol",installedVersion:"Installed version / protocol",schema:"Database / index version",phase:"Administrator phase",reason:"Current reason",nextDue:"Next attempt",failure:"Last provider failure",latestUnchecked:"The latest remote release was not checked. UI connectivity does not verify the current Hook or MCP connection."});
+  Object.assign(strings["zh-CN"], {debug:"检查接入",debugTitle:"本地诊断（不调用模型）",uiBridge:"界面连接",mcp:"MCP连接",hook:"当前Hook绑定",responding:"已响应",verified:"已验证",install:"安装校验",home:"知识目录",version:"运行版本／协议",installedVersion:"安装版本／协议",schema:"数据库／索引版本",phase:"管理员阶段",reason:"当前原因",nextDue:"下次尝试",failure:"最近供应商故障",latestUnchecked:"未检查远端最新版本；界面连接不能证明当前Hook或MCP已连通。"});
+  Object.assign(strings.en, {host:"Host scope",runtimeMatch:"Running process / installed runtime",matches:"Match",mismatch:"Mismatch (check the entry point)"});
+  Object.assign(strings["zh-CN"], {host:"宿主范围",runtimeMatch:"当前进程与安装副本",matches:"匹配",mismatch:"不匹配（需核对运行入口）"});
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
-  let generation = 0, capability = null, summary = null, context = null, busy = false, disposed = false;
+  let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
   const t = (key) => strings[language][key];
   const count = (value) => Number.isFinite(value) && value >= 0 ? String(value) : t("unknown");
 
   function hide(message = "unavailable") {
-    capability = null; summary = null; context = null; busy = false;
+    capability = null; summary = null; diagnostics = null; context = null; busy = false;
     $("panel").hidden = true;
+    $("debugPanel").hidden = true; $("debugOutput").textContent = "";
     $("notice").textContent = t(message);
     $("result").textContent = "";
   }
@@ -56,7 +62,7 @@
   function render() {
     document.documentElement.lang = language;
     $("language").value = language;
-    for (const [id, key] of [["refresh","refresh"],["browser","browser"],["review","review"],["frequencyTitle","frequency"],["shared","shared"],["quota","quota"],["historyTitle","historyTitle"],["historyNote","historyNote"],["history","history"]]) $(id).textContent = t(key);
+    for (const [id, key] of [["refresh","refresh"],["debug","debug"],["debugTitle","debugTitle"],["browser","browser"],["review","review"],["frequencyTitle","frequency"],["shared","shared"],["quota","quota"],["historyTitle","historyTitle"],["historyNote","historyNote"],["history","history"]]) $(id).textContent = t(key);
     if (!summary || !capability) return;
     $("project").textContent = summary.project_name || "Agent Learning";
     $("workspace").textContent = summary.workspace || "";
@@ -75,6 +81,8 @@
     lines.push(`${t("globalCalls")}: ${count(g.counted_attempts ?? g.used_calls)} · ${t("globalLeft")}: ${count(g.remaining_calls)}`);
     if (p?.next_reset_at) lines.push(`${t("reset")}: ${new Date(p.next_reset_at * 1000).toLocaleString(language)}`);
     if (summary.admission?.blocking_scope) lines.push(`${t("blocking")}: ${summary.admission.blocking_scope}`);
+    if (summary.reason) lines.push(`${t("reason")}: ${summary.reason}`);
+    if (summary.admin_phase) lines.push(`${t("phase")}: ${summary.admin_phase}`);
     $("admin").textContent = lines.join("\n");
     $("presets").replaceChildren();
     for (const preset of ["off","minimal","light","balanced","active"]) {
@@ -82,7 +90,29 @@
       button.addEventListener("click", () => changePreset(preset)); button.dataset.projectSetting = "true"; $("presets").append(button);
     }
     for (const button of document.querySelectorAll("#panel button")) button.disabled = busy || (button.dataset?.projectSetting === "true" && (!p || !Number.isInteger(summary.expected?.expected_project_budget_version)));
+    renderDebug();
     $("panel").hidden = false; $("notice").textContent = t("ready");
+  }
+
+  function renderDebug() {
+    const d = diagnostics;
+    if (!d || d.version !== 1 || d.project?.id !== summary?.project_id) { $("debugPanel").hidden = true; return; }
+    const c = d.connection || {}, i = d.installation || {}, p = d.project || {}, a = d.administrator || {};
+    const val = value => String(value ?? t("unknown"));
+    const connection = value => ["responding","verified"].includes(value) ? t(value) : t("unknown");
+    const lines = [[t("uiBridge"),connection(c.ui_bridge)], [t("mcp"),connection(c.mcp)], [t("hook"),connection(c.hook)],
+      [t("install"),connection(i.state)], [t("host"),p.host_scope], [t("home"),p.home], [t("version"),val(i.running_version)+" / "+val(i.running_protocol)],
+      [t("installedVersion"),val(i.version)+" / "+val(i.protocol)],
+      [t("runtimeMatch"),typeof i.running_runtime_matches_installation === "boolean" ? t(i.running_runtime_matches_installation ? "matches" : "mismatch") : t("unknown")],
+      [t("schema"),val(p.storage_schema)+" / "+val(p.index_version)],
+      [t("phase"),a.phase], [t("reason"),a.reason]];
+    if (a.next_due) lines.push([t("nextDue"),new Date(a.next_due * 1000).toLocaleString(language)]);
+    if (a.last_provider_failure) {
+      const f = a.last_provider_failure;
+      lines.push([t("failure"),[f.reason_code,f.http_status,f.parameter_code].filter(v => v !== null && v !== undefined).join(" · ")]);
+    }
+    $("debugOutput").textContent = lines.map(([key,value]) => key+": "+val(value)).join("\n")+"\n"+t("latestUnchecked");
+    $("debugPanel").hidden = false;
   }
 
   async function post(method, data) {
@@ -110,11 +140,11 @@
     const turn = generation;
     busy = true; render(); $("result").textContent = "";
     try {
-      const request = {...context,capability,action:name,...(name === "status" ? {} : {request_id:crypto.randomUUID()}),...extra};
+      const request = {...context,capability,action:name,...(["status","debug"].includes(name) ? {} : {request_id:crypto.randomUUID()}),...extra};
       const result = await post("action", request);
       if (disposed || turn !== generation) return;
       if (!result.visible || !result.summary) { hide(); return; }
-      summary = result.summary;
+      summary = result.summary; diagnostics = result.diagnostics || null;
       $("result").textContent = result.opened ? t("opened") : name === "set_admin_preset" ? t("saved") : result.history ? `${t(result.history.state === "materialized" ? "archived" : "archivedPartial")} ${count(result.history.archived_cases)} (${result.history.state || "unknown"})` : "";
     } catch {
       if (turn === generation) { hide(); $("notice").textContent = t("failed"); }
@@ -126,6 +156,7 @@
     action("set_admin_preset", {preset,confirm:true,expected:{...summary.expected},request_id:crypto.randomUUID()});
   }
   $("refresh").addEventListener("click", () => window.sidecar.getWorkspaceUris().then(bind).catch(() => hide()));
+  $("debug").addEventListener("click", () => action("debug"));
   $("browser").addEventListener("click", () => action("open_browser"));
   $("review").addEventListener("click", () => action("open_review"));
   $("history").addEventListener("click", () => { if (!busy && window.confirm(t("archiveConfirm"))) action("archive_history", {confirm:true,request_id:crypto.randomUUID()}); });

@@ -40,7 +40,7 @@ class PanelIntegrationTests(unittest.TestCase):
         self.runtime = Runtime(self.home, config={})
         self.addCleanup(self.runtime.close)
 
-    def client(self, workspace):
+    def client(self, workspace, *, ui=True):
         project = self.runtime.project(workspace)
         handle = self.runtime.register_context(project, "native-chat")["context_handle"]
         env = {**os.environ, "ALP_HOME": str(self.home), "ALP_CONFIG": str(self.config),
@@ -80,8 +80,9 @@ class PanelIntegrationTests(unittest.TestCase):
             self.assertEqual(result.get("id"), serial[0], result)
             self.assertNotIn("error", result, result)
             return result["result"]
+        capabilities = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}} if ui else {}
         request("initialize", {"protocolVersion": "2025-11-25", "clientInfo": {"name": "isolated-ui", "version": "1"},
-            "capabilities": {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}})
+            "capabilities": capabilities})
         process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         process.stdin.flush()
         return request, handle
@@ -117,3 +118,22 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertNotIn("learning_panel", names)
         self.assertNotIn("learning_panel_action", names)
         self.assertIn("knowledge_search", names)
+
+    def test_fixed_runtime_without_ui_returns_only_verified_browser_launch_information(self):
+        request, handle = self.client(self.workspace, ui=False)
+        names = {tool["name"] for tool in request("tools/list")["tools"]}
+        self.assertNotIn("learning_panel_action", names)
+        opened = request("tools/call", {"name": "learning_panel", "arguments": {"context_handle": handle}})
+        self.assertNotIn("_meta", opened)
+        body = opened["structuredContent"]
+        self.assertEqual(body["reason"], "panel_ui_unavailable")
+        self.assertEqual(body["fallback_skill"], "learning-browser")
+        fallback = body["fallback"]
+        self.assertEqual(Path(fallback["installation"]), self.target.resolve())
+        self.assertEqual(Path(fallback["workspace"]), self.workspace.resolve())
+        self.assertEqual(Path(fallback["home"]), self.home.resolve())
+        self.assertEqual((fallback["host"], fallback["host_instance"], fallback["mode"]),
+                         ("codex", "default", "read_only"))
+        self.assertNotIn(handle, json.dumps(opened))
+        self.assertNotIn("capability", json.dumps(opened))
+        self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)

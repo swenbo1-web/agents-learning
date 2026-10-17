@@ -37,11 +37,11 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 | 控制方式 | 适用宿主与入口位置 | 可直接执行的可视化操作 |
 |---|---|---|
 | **聊天框「📖 知识库」实体按键** | **DSH（DeepSeek Harness）**：仅在已安装绑定的项目聊天框左下角工具栏自动显示，未接入的其他项目自动隐藏 | 点击弹出浮动控制面板：实时查看当前项目名称／路径、正式知识数、1.0.0 工作观察数与待审案例数；**一键切换管理员调用频率方案（关闭／按需 5次/天／省流 15次/天／均衡 100次/天／积极 300次/天）**；一键打开知识审批台、只读知识库或吸收项目历史 |
-| **对话控制卡片** | **支持 MCP Apps 的 Codex 桌面端**：在绑定安装项目的对话调用 **Agent Learning 控制面板**／`$learning-panel` | 卡片按钮直接刷新状态、打开知识库或审批设置；确认后设置管理员频率或归档项目历史，无需每次让模型生成操作命令 |
-| **对话侧边控制面板** | **支持 UI Extension 的 Antigravity App 2.22+**：当前项目会话 **⋮ → Extensions → Agent Learning**，也可使用 `learning-panel` 技能 | 宿主管理的 Sidecar 提供相同按钮；切换到未绑定项目、多个不明确工作区或失效会话时隐藏操作并拒绝请求 |
+| **对话控制卡片** | **Codex**：在输入框技能菜单选择 **Agent Learning 控制面板**／发送 `$learning-panel`；宿主声明 MCP Apps 能力时显示卡片，否则由技能打开本机知识库页面 | 卡片按钮直接检查接入、刷新状态、打开知识库或审批设置；确认后设置管理员频率或归档项目历史。当前没有输入框旁的常驻自定义按键 |
+| **对话侧边控制面板** | **支持 UI Extension 的 Antigravity App 2.22+**：完成下方全局 UI 桥登记并启用后，在当前项目会话 **⋮ → Extensions → Agent Learning** 打开 | Sidecar 按钮直接检查接入并提供相同操作；仅连接明确登记的项目安装，未登记项目、多工作区或失效会话不提供可执行内容 |
 | **本机可视化 WebUI 控制中心** | **Codex / Antigravity / DSH 共用**（仅监听 `127.0.0.1`，支持简体中文／English 离线切换） | 顶部直接展示可读项目名称与路径（`项目名 (磁盘路径) · ID`）；分栏查看**正式知识、候选审批、事件时间线、管理员待办、管理员设置**；支持预览并批量批准／拒绝／暂缓候选知识，提供 **4 套简单通用的管理员调用频率方案**及可展开的 **4 项高级细致参数微调** |
 
-**新增面板按安装项目限制显示与执行，知识库里已有项目记录不等于安装。** Codex 安装时显式传入 `--workspace` 绑定面板；未绑定的旧全局安装不显示控制卡，可继续用原有工具。Antigravity 使用导出回执中的项目。项目不匹配、换号、卸载或安装变化会使旧面板能力失效。宿主自带的技能／Extensions 列表由宿主管理；本插件控制的是项目内面板与可执行按钮。
+**新增面板按安装项目限制显示与执行，知识库里已有项目记录不等于安装。** Codex 安装时显式传入 `--workspace` 绑定面板；未绑定的旧全局安装不显示控制卡，可继续用原有工具。Antigravity 的核心插件保留在项目内，全局 UI 桥只保存用户明确登记的安装位置及指纹，不加载第二套 Hooks、MCP 或知识库。项目不匹配、换号、卸载或安装变化会使旧面板能力失效。宿主自带的技能／Extensions 列表由宿主管理；本插件控制的是项目内面板与可执行按钮，不能保证全局扩展名称在其他项目的菜单中消失。
 
 初次通过技能打开 Codex 卡片会经过模型工具调用；卡片和侧栏中的后续操作直接连接本地程序。开启管理员会使用平台额度；**调用次数和管理员档位按项目独立统计、设置，同一项目的三个宿主合并计账**。同一 `ALP_HOME` 的全局总保护另行显示，达到总保护上限仍会暂停新调用。**历史按钮仅归档默认项目资料，不调用模型、不生成或发布知识**；界面分别显示归档与后续审核。详细审批继续在独立本机网页中确认。CLI／不支持原生 UI 的宿主使用现有 `learning-debug`、`learning-browser`、`learning-review` 技能。
 
@@ -108,7 +108,7 @@ codex plugin add agent-learning@agent-learning-local
 
 **重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
-将 `$learningProject` 换成已有项目的绝对路径。这一绑定只决定控制卡显示范围；普通 MCP 工具仍按宿主当前工作区运行。已有安装可加同项目 `--workspace` 并使用 `install "$learningPlugin" --host codex --upgrade`；已绑定安装不可直接换项目，其他项目使用独立导出目录。界面能力未开放时会保留文字诊断入口。
+将 `$learningProject` 换成已有项目的绝对路径。这一绑定只决定控制卡显示范围；普通 MCP 工具仍按宿主当前工作区运行。已有安装可加同项目 `--workspace` 并使用 `install "$learningPlugin" --host codex --upgrade`；已绑定安装不可直接换项目，其他项目使用独立导出目录。随后选择 **Agent Learning 控制面板**：支持 MCP Apps 时显示按钮卡片；未开放该能力时，技能按当前已验证安装打开本机只读知识库，需要设置或审批再使用 `learning-review`。
 
 ## 在 Antigravity 中安装（原生插件）
 
@@ -122,7 +122,20 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 
 **在支持原生插件的 Antigravity IDE／2.0 中重载该项目 → 确认插件组件启用 → 开启新对话。** IDE 安装无需 `agy`。[官方插件说明](https://antigravity.google/docs/plugins/)
 
-Antigravity App 2.22+ 若支持原生 UI，请在该项目的插件组件中启用 **Agent Learning UI Sidecar**，再从会话扩展菜单打开面板。启用界面组件不启用管理员模型；管理员频率与历史归档仍由用户在面板内确认。独立 IDE／CLI 未提供这一界面时，使用原有技能打开知识库。
+### Antigravity App：添加可视化面板
+
+App 的 Sidecar 从**全局目录**发现；只安装项目核心插件时，核心可以接入，但不会据此发现项目中的侧栏 UI。已有核心安装请先在上述安装命令中加 `--upgrade`，再执行；旧核心缺少桥接能力时会拒绝登记：
+
+```powershell
+$learningUI = Join-Path $env:USERPROFILE ".gemini/config/plugins/agent-learning-ui"
+python -B scripts/learning.py install-ui "$learningUI" --installation "$learningPlugin"
+```
+
+**在 App 自定义组件设置中启用 `agent-learning-ui/control`，重载后从会话 ⋮ → Extensions → Agent Learning 打开。** 该组件默认未启用；命令不修改宿主设置、不启用管理员模型。需要手动配置时，将 `sidecars.agent-learning-ui/control.enabled` 设为 `true`，保留其他已有配置。[官方 Sidecar 发现与启用说明](https://antigravity.google/docs/sidecars/)
+
+UI 桥启动时不调用模型、不扫描项目、不打开知识数据库。仅在当前工作区精确匹配已登记安装时连接该项目的固定运行副本；**项目隔离由工作区、项目标识和访问校验共同保证，不能单凭安装目录判断**。面板的“检查接入”可检查安装、目录、版本与管理员预算；UI 接通不代表当前会话的 Hook／MCP 已验证，后者仍需 `learning-debug` 核对。
+
+已有全局 UI 桥时，用 `install-ui "$learningUI" --installation "$learningPlugin" --upgrade` 添加项目或在核心更新后刷新指纹；支持多次 `--installation`。取消登记使用同一命令再加 `--remove`；不会卸载项目核心或删除知识。暂存和旧版备份位于插件发现目录之外的 `config/agent-learning-ui-installations/`，避免被宿主重复加载。独立 IDE／CLI 不支持 Sidecar 时，用技能打开本机知识库。
 
 <details>
 <summary>Antigravity CLI 用户：再执行一步</summary>

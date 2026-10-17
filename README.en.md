@@ -39,11 +39,11 @@ You can inspect and control project memory visually without memorizing CLI flags
 | Visual Entry | Host & Location | What You Can Control Directly |
 |---|---|---|
 | **Composer “📖 Memory / 知识库” Button** | **DSH (DeepSeek Harness)**: automatically shown at the bottom-left of the chat input bar **only** in bound/installed projects (hidden in other projects) | Click to open the floating control panel: view the project name/path, published knowledge count, 1.0.0 work observations and pending cases; **one-click switch administrator frequency presets (Off / Minimal 5/d / Light 15/d / Balanced 100/d / Active 300/d)**; open the review console, read-only browser or absorb project history |
-| **Conversation control card** | **Codex Desktop with MCP Apps support**: invoke **Agent Learning 控制面板** / `$learning-panel` in the installation's bound project | Buttons refresh status, open knowledge/review pages, and explicitly confirm administrator presets or history archival without asking the model to generate each operation |
-| **Conversation side panel** | **Antigravity App 2.22+ with UI Extension support**: **⋮ → Extensions → Agent Learning**, or the `learning-panel` skill | A host-managed Sidecar provides the same controls; another project, ambiguous workspaces or an expired session hides the controls and rejects requests |
+| **Conversation control card** | **Codex**: choose **Agent Learning 控制面板** in the skill menu or send `$learning-panel`. Hosts declaring MCP Apps capability show a card; otherwise the skill opens the local knowledge page | Buttons check the connection, refresh status, open knowledge/review pages and explicitly confirm administrator presets or history archival. There is currently no custom permanent composer button |
+| **Conversation side panel** | **Antigravity App 2.22+ with UI Extension support**: register and enable the global UI bridge below, then open **⋮ → Extensions → Agent Learning** | Sidecar buttons check the connection and provide the same controls; only explicitly registered project installations can connect. Unregistered or ambiguous workspaces and expired sessions have no actionable content |
 | **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
 
-**The new panels require an installation bound to the current project. A knowledge database entry alone is insufficient.** Explicitly pass `--workspace` when exporting the Codex installation; an older unbound global installation does not expose the card. Antigravity uses its receipt's workspace. Project mismatch, account changes, uninstall or installation replacement invalidate the old panel capability. Host-owned skill and Extensions lists remain controlled by the host; this plugin gates the actual panel and its actionable controls.
+**The new panels require an installation bound to the current project. A knowledge database entry alone is insufficient.** Explicitly pass `--workspace` when exporting the Codex installation; an older unbound global installation does not expose the card. Antigravity keeps the core in each project; its global UI bridge stores only explicitly registered installation locations and fingerprints, without a second set of Hooks, MCP tools or knowledge. Project mismatch, account changes, uninstall or installation replacement invalidate old capabilities. The host controls skill and Extensions lists: this plugin gates panel content and actions, but cannot guarantee that a global extension's menu label disappears in other projects.
 
 The first Codex skill invocation uses a model tool call. Subsequent panel operations connect directly to local code. Enabling the administrator uses platform allowance. **Usage and frequency limits are separate for each project; Codex, Antigravity and DSH share that project's ledger.** An independently displayed `ALP_HOME` safeguard can still stop new calls when the combined limit is reached. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval stays in the separate local WebUI. CLI and unsupported surfaces retain the existing debug, browser and review skills.
 
@@ -115,7 +115,7 @@ codex plugin add agent-learning@agent-learning-local
 
 **Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
-Replace `$learningProject` with your existing project's absolute path. This binding scopes the control card; ordinary MCP tools keep using the host's current workspace. Existing exports can add that project with matching-host `install --upgrade`. A bound export cannot be reassigned to another project; use a separate export directory. Hosts without UI support keep the text diagnostic fallback.
+Replace `$learningProject` with your existing project's absolute path. This binding scopes the control card; ordinary MCP tools keep using the host's current workspace. Existing exports can add that project with matching-host `install --upgrade`. A bound export cannot be reassigned to another project; use a separate export directory. Choose **Agent Learning 控制面板**: MCP Apps hosts show a button card; otherwise the skill uses the verified installation to open the local read-only knowledge page. Use `learning-review` for settings or approvals.
 
 ## Install in Antigravity (native plugin)
 
@@ -129,7 +129,20 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 
 **Reload the project in Antigravity IDE / 2.0 → enable the plugin components → start a new conversation.** The IDE loads this project's export without the `agy` CLI. [Official plugin guide](https://antigravity.google/docs/plugins/)
 
-In Antigravity App 2.22+ with native UI support, enable this project's **Agent Learning UI Sidecar**, then open it from the conversation's Extensions menu. Enabling the UI does not enable an administrator model; the user separately confirms presets and history archival. Use the existing skills in unsupported IDE/CLI surfaces.
+### Antigravity App: add the visual panel
+
+The App discovers Sidecars from **global directories**; installing the project core alone does not make its sidebar discoverable. For an existing core, add `--upgrade` to the installation command above first; old cores without bridge support cannot be registered. Then run:
+
+```powershell
+$learningUI = Join-Path $env:USERPROFILE ".gemini/config/plugins/agent-learning-ui"
+python -B scripts/learning.py install-ui "$learningUI" --installation "$learningPlugin"
+```
+
+**Enable `agent-learning-ui/control` in App customizations, reload, then open ⋮ → Extensions → Agent Learning.** Sidecars start disabled; this command changes no host settings and enables no administrator. If configuring manually, set `sidecars.agent-learning-ui/control.enabled` to `true`, preserving existing settings. [Official discovery and activation guide](https://antigravity.google/docs/sidecars/)
+
+The UI bridge starts no model, scans no projects and opens no knowledge database on startup. It connects to a fixed project runtime only when the current workspace exactly matches a registered installation. Workspace, project identity and access checks enforce isolation; the installation directory alone does not. **Check connection** inspects installation, directories, versions and administrator budgets. A working UI pipe does not verify the current conversation's Hook/MCP connections; use `learning-debug` for those checks.
+
+For an existing bridge, use `install-ui "$learningUI" --installation "$learningPlugin" --upgrade` to add a project or refresh its fingerprint after a core update; multiple `--installation` arguments are supported. Add `--remove` to unregister without uninstalling the project core or deleting knowledge. Staging and old backups stay outside plugin discovery, under `config/agent-learning-ui-installations/`, avoiding duplicate loading. Unsupported IDE/CLI surfaces use the browser skills.
 
 <details>
 <summary>Using Antigravity CLI instead?</summary>

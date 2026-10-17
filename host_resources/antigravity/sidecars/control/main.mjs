@@ -1,5 +1,5 @@
 // Antigravity App UI adapter. Authority and write decisions remain in Python.
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 16384;
 const MAX_OUTPUT = 131072;
-const ACTIONS = new Set(["status", "open_browser", "open_review", "set_admin_preset", "archive_history"]);
+const ACTIONS = new Set(["status", "debug", "open_browser", "open_review", "set_admin_preset", "archive_history"]);
 const PRESETS = new Set(["off", "minimal", "light", "balanced", "active"]);
 const EXPECTED = new Set(["expected_policy_version", "expected_project_budget_version", "expected_settings_version", "expected_session_epoch", "expected_governance_epoch"]);
 
@@ -61,7 +61,7 @@ export function validateInput(method, data) {
   if (method === "action") {
     if (!text(data.capability, 512) || !ACTIONS.has(data.action)) throw new Error("Invalid panel action");
     if (data.request_id !== undefined && !text(data.request_id, 200)) throw new Error("Invalid request identity");
-    if (data.action !== "status" && !text(data.request_id, 200)) throw new Error("Panel action identity is required");
+    if (!["status", "debug"].includes(data.action) && !text(data.request_id, 200)) throw new Error("Panel action identity is required");
     if (data.confirm !== undefined && typeof data.confirm !== "boolean") throw new Error("Invalid confirmation");
     if (data.expected !== undefined && (!plain(data.expected) || Object.keys(data.expected).length !== EXPECTED.size
         || Object.keys(data.expected).some((key) => !EXPECTED.has(key) || !Number.isSafeInteger(data.expected[key]) || data.expected[key] < 0))) {
@@ -168,6 +168,107 @@ export function createController(installation, bridge) {
   };
 }
 
+// This global component contains only the UI. The installer is the sole writer
+// of its allowlist; projects and their knowledge are never discovered by a scan.
+export function loadRegistry(root) {
+  const raw = readFileSync(join(root, "ui-registry.json"), "utf8");
+  if (Buffer.byteLength(raw, "utf8") > 2097152) throw new Error("UI registry exceeds its budget");
+  const registry = JSON.parse(raw);
+  if (!plain(registry) || Object.keys(registry).some((key) => !["schema_version", "projects"].includes(key))
+      || registry.schema_version !== 1 || !Array.isArray(registry.projects) || registry.projects.length > 128) {
+    throw new Error("Invalid UI registry");
+  }
+  const workspaces = new Set(), installations = new Set();
+  const key = (value) => process.platform === "win32" ? value.toLowerCase() : value;
+  for (const entry of registry.projects) {
+    if (!plain(entry) || Object.keys(entry).length !== 5
+        || Object.keys(entry).some((field) => !["workspace", "installation", "receipt_sha256", "python", "runtime_directory"].includes(field))
+        || !/^[a-f0-9]{64}$/.test(entry.receipt_sha256)) throw new Error("Invalid registered installation");
+    for (const field of ["workspace", "installation", "python", "runtime_directory"]) {
+      if (!text(entry[field], 8192) || !isAbsolute(entry[field])) throw new Error("Invalid registered path");
+    }
+    if (workspaces.has(key(entry.workspace)) || installations.has(key(entry.installation))) {
+      throw new Error("Duplicate registered installation");
+    }
+    workspaces.add(key(entry.workspace)); installations.add(key(entry.installation));
+  }
+  return registry;
+}
+
+function registryIdentity(entry) {
+  return JSON.stringify([entry.workspace, entry.installation, entry.receipt_sha256, entry.python, entry.runtime_directory]);
+}
+
+function localWorkspace(uris) {
+  if (!Array.isArray(uris) || uris.length !== 1 || !text(uris[0], 16384)) return null;
+  try {
+    const uri = new URL(uris[0]);
+    if (uri.protocol !== "file:" || (uri.hostname && uri.hostname !== "localhost") || uri.search || uri.hash) return null;
+    const workspace = realpathSync(fileURLToPath(uri));
+    return statSync(workspace).isDirectory() ? workspace : null;
+  } catch { return null; }
+}
+
+export function createRegistryController(root, spawnProcess = spawn) {
+  const records = new Map();
+  const key = (value) => process.platform === "win32" ? value.toLowerCase() : value;
+  const close = () => {
+    for (const record of records.values()) record.bridge.close();
+    records.clear();
+  };
+  return {
+    close,
+    async handle(method, input) {
+      const data = validateInput(method, input);
+      let registry;
+      try { registry = loadRegistry(root); }
+      catch (error) { close(); throw error; }
+      const entries = new Map(registry.projects.map((entry) => [key(entry.workspace), entry]));
+      const invalidated = new Set();
+      for (const [workspaceKey, record] of records) {
+        const entry = entries.get(workspaceKey);
+        if (!entry || registryIdentity(entry) !== record.identity) {
+          record.bridge.close(); records.delete(workspaceKey); invalidated.add(workspaceKey);
+        }
+      }
+      const workspace = localWorkspace(data.workspace_uris);
+      const workspaceKey = workspace && key(workspace);
+      const entry = entries.get(workspaceKey);
+      if (!entry) return { visible: false, reason: "workspace_not_bound" };
+      if (method === "action" && invalidated.has(workspaceKey)) {
+        return { visible: false, reason: "installation_changed" };
+      }
+      let installation;
+      try {
+        installation = loadInstallation(entry.installation);
+        if (installation.fingerprint !== entry.receipt_sha256 || installation.workspaceKey !== workspaceKey
+            || pathKey(installation.receipt.python) !== pathKey(entry.python)
+            || pathKey(installation.receipt.runtime_directory) !== pathKey(entry.runtime_directory)) {
+          throw new Error("Registered installation changed");
+        }
+      } catch (error) {
+        records.get(workspaceKey)?.bridge.close(); records.delete(workspaceKey);
+        throw error;
+      }
+      let record = records.get(workspaceKey);
+      if (record?.bridge.closed) { records.delete(workspaceKey); record = null; }
+      if (!record) {
+        // A write from an expired view cannot bootstrap a replacement process.
+        if (method !== "bootstrap") return { visible: false, reason: "panel_refresh_required" };
+        if (records.size >= 8) {
+          const idle = [...records].find(([, value]) => value.bridge.pending.size === 0);
+          if (!idle) throw new Error("UI bridge is busy");
+          idle[1].bridge.close(); records.delete(idle[0]);
+        }
+        const bridge = new PanelBridge(installation, spawnProcess);
+        record = { identity: registryIdentity(entry), bridge, controller: createController(installation, bridge) };
+      }
+      records.delete(workspaceKey); records.set(workspaceKey, record);
+      return record.controller(method, data);
+    },
+  };
+}
+
 export function guardRequests(server, tokenPresent) {
   if (!tokenPresent) throw new Error("Antigravity UI authentication is unavailable");
   const handlers = server.listeners("request");
@@ -191,9 +292,10 @@ export function guardRequests(server, tokenPresent) {
 
 export async function startPanel({ SidecarApp, Response }, root = join(HERE, "..", ".."), spawnProcess = spawn) {
   if (!process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN) throw new Error("Antigravity UI authentication is unavailable");
-  const installation = loadInstallation(root);
-  const bridge = new PanelBridge(installation, spawnProcess);
-  const handle = createController(installation, bridge);
+  const globalMode = existsSync(join(root, "ui-registry.json"));
+  const installation = globalMode ? null : loadInstallation(root);
+  const bridge = globalMode ? createRegistryController(root, spawnProcess) : new PanelBridge(installation, spawnProcess);
+  const handle = globalMode ? bridge.handle : createController(installation, bridge);
   const app = new SidecarApp();
   app.page("/", () => new Response(readFileSync(join(HERE, "index.html"), "utf8"), {
     contentType: "text/html; charset=utf-8", headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" },

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import sys
 import threading
@@ -27,7 +28,7 @@ MAX_REQUESTS = 128
 MAX_PANEL_MESSAGE = 32768
 EXPECTED_FIELDS = {"expected_policy_version", "expected_project_budget_version", "expected_settings_version",
                    "expected_session_epoch", "expected_governance_epoch"}
-ACTIONS = {"status", "open_browser", "open_review", "set_admin_preset", "archive_history"}
+ACTIONS = {"status", "debug", "open_browser", "open_review", "set_admin_preset", "archive_history"}
 
 
 def _path(value):
@@ -185,6 +186,73 @@ class PanelControl:
             return self.runtime.access_context(self.project, handle, expected_epoch=self.epoch)
         return None
 
+    def _debug(self, context_handle):
+        """Read bounded observations, never infer Hook/MCP health from a UI pipe."""
+        from . import __version__
+        from .release import PROTOCOL_VERSION
+        from .install import _hook_commands
+        from .install_update import inspect_installation
+        from .admin_diagnostics import safe_diagnostic
+
+        installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
+        receipt = installed["receipt"]
+        state = self.runtime.status(self.project)
+        routing = state.get("admin_routing") or {}
+        executor = routing.get("executor") or {}
+        dispatch = state.get("admin_dispatch_diagnostic") or {}
+        admission = state.get("admission") or {}
+
+        def code(value):
+            return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,99}", value) else None
+
+        def number(value):
+            return value if type(value) in (int, float) and value >= 0 and value < float("inf") else None
+
+        def usage(value):
+            value = value if isinstance(value, dict) else {}
+            return {key: number(value.get(key)) for key in ("counted_attempts", "completed_reviews", "failed_attempts",
+                    "remaining_calls", "max_calls_per_day", "next_reset_at")}
+
+        bound = False
+        if self.require_context:
+            # Do not return session_context's task, assignment or execution body.
+            bound = self.runtime.session_context(self.project, context_handle, expected_epoch=self.epoch)["context_bound"]
+        model = executor.get("model")
+        if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_./:@+\-]{1,240}", model):
+            model = None
+        latest = self.runtime.db.execute("SELECT c.usage FROM admin_calls c JOIN admin_execution_plans p ON p.call_id=c.id "
+            "WHERE c.project=? AND p.host_scope=? AND c.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
+            "ORDER BY c.created DESC LIMIT 1", (self.project, self.runtime._session_scope())).fetchone()
+        failure = None
+        if latest and isinstance(latest[0], str) and len(latest[0]) <= 65536:
+            try:
+                observed = json.loads(latest[0])
+                if isinstance(observed, dict):
+                    execution = observed.get("execution") or {}
+                    failure = safe_diagnostic(execution.get("provider_diagnostic")) if isinstance(execution, dict) else None
+                    failure = failure or safe_diagnostic(observed.get("provider_diagnostic"))
+            except (ValueError, TypeError):
+                pass
+        return {"version": 1, "connection": {"ui_bridge": "responding",
+                    "mcp": "responding" if self.require_context else "unknown",
+                    "hook": "verified" if bound else "unknown", "context_bound": bound if self.require_context else None},
+                "installation": {"state": "verified", "version": receipt["version"],
+                    "protocol": receipt["protocol_version"], "release_id": receipt["release_id"],
+                    "running_version": __version__, "running_protocol": PROTOCOL_VERSION,
+                    "protocol_matches": str(receipt["protocol_version"]) == PROTOCOL_VERSION,
+                    "running_runtime_matches_installation": Path(receipt["runtime_directory"]).resolve() == Path(__file__).resolve().parents[1],
+                    "latest_release_checked": False},
+                "project": {"id": self.project, "workspace": self.binding["workspace"], "home": str(self.runtime.home),
+                    "host_scope": self.runtime._session_scope(), "storage_schema": number(state.get("storage_schema_version")),
+                    "index_version": number(state.get("index_version"))},
+                "administrator": {"enabled": bool(state.get("admin_admission_enabled")),
+                    "model_mode": code((routing.get("policy") or {}).get("model_mode")), "model": model,
+                    "phase": code(dispatch.get("phase")), "reason": code(dispatch.get("reason")) or code(routing.get("reason")),
+                    "failure_reason": code(dispatch.get("failure_reason")), "next_due": number(dispatch.get("next_due")),
+                    "blocking_scope": admission.get("blocking_scope") if admission.get("blocking_scope") in {"project", "ALP_HOME"} else None,
+                    "project_usage": usage(state.get("project_usage")), "global_usage": usage(state.get("global_usage")),
+                    "last_provider_failure": failure}}
+
     def bootstrap(self, context_handle=None, workspace=None, conversation_id=None):
         if not self.eligible():
             return {"visible": False, "reason": self.reason}
@@ -261,8 +329,9 @@ class PanelControl:
         self._verify(capability, context_handle, workspace, conversation_id)
         if action not in ACTIONS:
             raise ContractError("unsupported panel action")
-        if action == "status":
-            return {"visible": True, "summary": self._summary()}
+        if action in {"status", "debug"}:
+            return {"visible": True, "summary": self._summary(),
+                    **({"diagnostics": self._debug(context_handle)} if action == "debug" else {})}
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
             raise ContractError("panel request identity is required")
         fingerprint = hashlib.sha256(encode([action, expected, preset, confirm]).encode("utf-8")).hexdigest()

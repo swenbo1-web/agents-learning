@@ -12,7 +12,7 @@ HARNESS = r'''
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const {script,scenario}=JSON.parse(fs.readFileSync(0,'utf8'));
 const nodes=new Map(),listeners=new Map(),sent=[],timers=new Map();let timer=0,rid=0;
-const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:['controls','confirmBox'].includes(id),disabled:false,textContent:'',value:'',dataset:{},querySelectorAll:()=>[...nodes.values()].filter(n=>['refresh','browser','review','apply','history','confirm','cancel','preset'].includes(n.id))});return nodes.get(id);};
+const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:['controls','confirmBox','debugPanel'].includes(id),disabled:false,textContent:'',value:'',dataset:{},querySelectorAll:()=>[...nodes.values()].filter(n=>['refresh','debug','browser','review','apply','history','confirm','cancel','preset'].includes(n.id))});return nodes.get(id);};
 const parent={postMessage:message=>sent.push(JSON.parse(JSON.stringify(message)))};
 const window={parent,addEventListener:(name,callback)=>{const callbacks=listeners.get(name)||[];callbacks.push(callback);listeners.set(name,callbacks);}};
 const context={window,document:{getElementById:element,querySelectorAll:()=>[]},navigator:{language:'en'},crypto:{randomUUID:()=>`stable-${++rid}`},setTimeout:(callback,delay)=>{const id=++timer;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),console};
@@ -38,6 +38,12 @@ if(scenario==='bootstrap'){
 }else if(scenario==='direct_actions'){
  await boot();for(const [id,action] of [['refresh','status'],['browser','open_browser'],['review','open_review']]){const request=await clickAndRespond(id);assert.equal(request.params.name,'learning_panel_action');assert.equal(request.params.arguments.action,action);assert.equal(request.params.arguments.context_handle,'real-handle');assert.equal(request.params.arguments.capability,'private-capability');if(action!=='status')assert.equal(typeof request.params.arguments.request_id,'string');}
  assert(!sent.some(m=>['ui/message','ui/update-model-context'].includes(m.method)));
+}else if(scenario==='debug'){
+ await boot();const promise=element('debug').onclick(),request=sent.filter(m=>m.method==='tools/call').at(-1);
+ assert.equal(request.params.arguments.action,'debug');assert.equal(request.params.arguments.request_id,undefined);assert.equal(element('confirmBox').hidden,true);
+ const response=result(false);response._meta.agentLearningPanel.diagnostics={version:1,project:{id:'p1',home:'/local/knowledge',storage_schema:18,index_version:4},connection:{ui_bridge:'responding',mcp:'responding',hook:'verified'},installation:{state:'verified',running_version:'1.0.0',running_protocol:'18',version:'1.0.0',protocol:'18'},administrator:{phase:'idle',reason:'executor_configuration_blocked',last_provider_failure:{reason_code:'invalid_request_parameter',http_status:400,parameter_code:'thinking_budget'}},secret:'private-not-rendered'};
+ respond(request,response);await promise;await flush();assert.equal(element('debugPanel').hidden,false);assert.match(element('debugOutput').textContent,/Current Hook binding: Verified/);assert.match(element('debugOutput').textContent,/Knowledge directory: \/local\/knowledge/);assert.match(element('debugOutput').textContent,/thinking_budget/);assert(!element('debugOutput').textContent.includes('private-not-rendered'));assert(!sent.some(m=>['ui/message','ui/update-model-context'].includes(m.method)));
+ dispatch({jsonrpc:'2.0',method:'ui/notifications/host-context-changed',params:{workspace:'/different'}});assert.equal(element('debugPanel').hidden,true);assert.equal(element('debugOutput').textContent,'');
 }else if(scenario==='confirmation'){
  await boot();element('preset').value='active';let before=sent.length;element('apply').onclick();assert.equal(element('confirmBox').hidden,false);assert.equal(sent.length,before);element('cancel').onclick();assert.equal(sent.length,before);element('apply').onclick();const frozen=JSON.parse(JSON.stringify(snapshot.expected));element('confirm').onclick();const request=sent.slice(before).find(m=>m.method==='tools/call');assert(request);assert.equal(request.params.arguments.preset,'active');assert.equal(request.params.arguments.confirm,true);assert.deepEqual(request.params.arguments.expected,frozen);assert.equal(typeof request.params.arguments.request_id,'string');assert([...timers.values()].some(t=>t.delay===20000));respond(request,result(false));await flush();assert.equal(element('controls').hidden,false);
 }else if(scenario==='archive_and_retry'){
@@ -87,6 +93,7 @@ class PanelUITests(unittest.TestCase):
     def test_foreign_project_usage_cannot_enable_project_settings(self): self.scenario("foreign_project_usage")
     def test_missing_host_tool_capability_keeps_controls_hidden(self): self.scenario("missing_tools")
     def test_buttons_call_mcp_directly_without_a_model_message(self): self.scenario("direct_actions")
+    def test_debug_is_direct_read_only_and_clears_on_project_switch(self): self.scenario("debug")
     def test_setting_change_requires_confirmation_and_frozen_expected_versions(self): self.scenario("confirmation")
     def test_history_archive_requires_confirmation_and_timeout_retry_keeps_request_id(self): self.scenario("archive_and_retry")
     def test_paused_history_archive_reports_partial_progress(self): self.scenario("archive_paused")

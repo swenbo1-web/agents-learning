@@ -1,6 +1,7 @@
 """Panel protocol boundaries with deterministic adapters; no installed host or database."""
 import copy
 import json
+from pathlib import Path
 import sys
 import types
 import unittest
@@ -22,10 +23,17 @@ SUMMARY = {"project_id": "project", "project_name": "Project", "workspace": "pro
 
 class FakeRuntime:
     host = "codex"
+    host_instance = "default"
+    home = Path("knowledge-home")
     epoch = 0
 
     def session_epoch(self): return self.epoch
     def host_epoch(self): return self.epoch
+
+    def access_context(self, project, handle, expected_epoch):
+        if project != "project" or handle != "current-handle" or expected_epoch != self.epoch:
+            raise ContractError("context required")
+        return {"conversation_id": "current-chat"}
 
 
 class FakePanel:
@@ -34,6 +42,7 @@ class FakePanel:
     def __init__(self, runtime, project, workspace, installation, require_context=True):
         self.calls, self.closed = [], False
         self.runtime, self.require_context = runtime, require_context
+        self.binding = {"installation": "export-path", "workspace": "project-path"}
 
     def eligible(self): return self.active
 
@@ -97,6 +106,40 @@ class PanelMCPTests(unittest.TestCase):
         response = self.tool(server, "learning_panel", {"context_handle": "current-handle"})["result"]
         self.assertFalse(response["structuredContent"]["visible"])
         self.assertNotIn("_meta", response)
+        self.assertFalse(server.panel.calls)
+        fallback = response["structuredContent"]["fallback"]
+        self.assertEqual(response["structuredContent"]["fallback_skill"], "learning-browser")
+        self.assertEqual(fallback["mode"], "read_only")
+        self.assertEqual(fallback["installation"], "export-path")
+        self.assertEqual(fallback["workspace"], "project-path")
+        self.assertEqual(fallback["home"], str(self.runtime.home))
+        self.assertEqual(fallback["host"], "codex")
+        self.assertEqual(fallback["host_instance"], "default")
+        self.assertEqual(fallback["diagnostic_skill"], "learning-debug")
+        self.assertNotIn("current-handle", json.dumps(response))
+        self.assertNotIn("private-panel-capability", json.dumps(response))
+
+    def test_fallback_requires_current_explicit_context_and_no_ui_action(self):
+        server, _ = self.ready(ui=False, handle="current-handle")
+        missing = self.tool(server, "learning_panel")["result"]
+        self.assertEqual(missing["structuredContent"]["reason"], "current_context_required")
+        self.assertNotIn("fallback", missing["structuredContent"])
+        mismatch = self.tool(server, "learning_panel", {"context_handle": "different-handle"})["result"]
+        self.assertTrue(mismatch["isError"])
+        self.assertNotIn("fallback", mismatch.get("structuredContent", {}))
+        self.assertEqual(self.tool(server, "learning_panel_action", {"context_handle": "current-handle",
+            "action": "status", "capability": "private-panel-capability"})["error"]["code"], -32602)
+        self.assertFalse(server.panel.calls)
+
+    def test_fallback_rejects_stale_context_or_removed_install(self):
+        server, _ = self.ready(ui=False)
+        stale = self.tool(server, "learning_panel", {"context_handle": "stale-handle"})["result"]
+        self.assertEqual(stale["structuredContent"]["reason"], "current_context_required")
+        self.assertNotIn("fallback", stale["structuredContent"])
+        server.panel.active = False
+        removed = self.tool(server, "learning_panel", {"context_handle": "current-handle"})["result"]
+        self.assertEqual(removed["structuredContent"]["reason"], "project_panel_not_installed")
+        self.assertNotIn("fallback", removed["structuredContent"])
         self.assertFalse(server.panel.calls)
 
     def test_ui_metadata_is_only_on_render_and_app_only_action(self):

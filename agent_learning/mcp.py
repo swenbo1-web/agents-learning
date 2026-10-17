@@ -26,12 +26,12 @@ PANEL_EXPECTED = schema({key: {"type": "integer", "minimum": 0} for key in (
     "expected_policy_version", "expected_project_budget_version", "expected_settings_version",
     "expected_session_epoch", "expected_governance_epoch"))
 PANEL_TOOLS = [
-    ("learning_panel", "打开当前已安装项目的轻量控制卡；仅展示状态，不开启管理员或历史吸收。需要本轮真实会话句柄；不支持UI时使用learning-debug。",
+    ("learning_panel", "打开当前已安装项目的轻量控制卡；仅展示状态，不开启管理员或历史吸收。需要本轮真实会话句柄；不支持UI时返回learning-browser本机可视化启动指引。",
      schema({"context_handle": NONEMPTY})),
     ("learning_panel_action", "仅供控制卡按钮使用；需要当前卡片的私有能力及真实会话句柄，不能用作模型执行入口。",
      schema({"capability": {"type": "string", "minLength": 1, "maxLength": 256},
              "context_handle": NONEMPTY,
-             "action": {"type": "string", "enum": ["status", "open_browser", "open_review", "set_admin_preset", "archive_history"]},
+             "action": {"type": "string", "enum": ["status", "debug", "open_browser", "open_review", "set_admin_preset", "archive_history"]},
              "request_id": {"type": "string", "minLength": 1, "maxLength": 200},
              "expected": PANEL_EXPECTED,
              "preset": {"type": "string", "enum": ["off", "minimal", "light", "balanced", "active"]},
@@ -217,21 +217,40 @@ class Server:
         return self.panel is not None and self.panel.eligible()
 
     def _panel_call(self, name, args):
-        if not self._panel_eligible() or not self.panel_ui_supported:
+        if not self._panel_eligible():
             if name == "learning_panel_action":
                 raise ContractError("panel UI is unavailable; reopen learning-panel in a supported client")
-            return {"visible": False, "reason": "panel_ui_unavailable", "fallback_skill": "learning-debug"}
+            return {"visible": False, "reason": "project_panel_not_installed"}
         # 旧连接的默认句柄不能证明当前对话；打开卡片和每次按钮操作均显式提交句柄。
         handle = args.get("context_handle")
         if handle is not None:
             self._handle(args)
+        if not self.panel_ui_supported:
+            if name == "learning_panel_action":
+                raise ContractError("panel UI is unavailable; reopen learning-panel in a supported client")
+            if not handle:
+                return {"visible": False, "reason": "current_context_required"}
+            try:
+                self.runtime.access_context(self.project, handle, expected_epoch=self.epoch)
+            except ContractError:
+                return {"visible": False, "reason": "current_context_required"}
+            # 只提供已验证项目的启动信息；不签发卡片能力、不弹窗、不启动模型。
+            binding = self.panel.binding
+            return {"visible": False, "reason": "panel_ui_unavailable", "fallback_skill": "learning-browser",
+                    "fallback": {"kind": "local_browser", "mode": "read_only", "skill": "learning-browser",
+                        "installation": binding["installation"], "workspace": binding["workspace"],
+                        "home": str(self.runtime.home), "host": self.runtime.host,
+                        "host_instance": self.runtime.host_instance, "diagnostic_skill": "learning-debug",
+                        "instructions": "使用 learning-browser 核对该安装的固定运行入口并启动 browser --open；"
+                            "页面提供知识浏览与待办查看，当前连接诊断使用 learning-debug。"
+                            "用户明确请求审批或管理员设置时使用 learning-review；打开页面不批准知识或开启模型。"}}
         if name == "learning_panel":
             result = self.panel.bootstrap(context_handle=handle, workspace=self.workspace)
         else:
             result = self.panel.action(args["capability"], args["action"], context_handle=handle,
                 workspace=self.workspace, request_id=args.get("request_id"), expected=args.get("expected"),
                 preset=args.get("preset"), confirm=args.get("confirm", False))
-        public = {key: result[key] for key in ("visible", "reason", "summary", "opened", "preset", "history")
+        public = {key: result[key] for key in ("visible", "reason", "summary", "diagnostics", "opened", "preset", "history")
                   if key in result}
         private = dict(result)
         if result.get("visible") is True and handle is not None:

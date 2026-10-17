@@ -66,6 +66,60 @@ class PanelControlTests(unittest.TestCase):
         self.assertNotIn("capability", status)
         self.assertNotIn("history_import", status["summary"])
 
+    def test_debug_is_read_only_bound_and_uses_a_field_whitelist(self):
+        opened = self.bootstrap()
+        state = self.runtime.status(self.project)
+        state["secret_prompt"] = "private-project-task"
+        state["admin_dispatch_diagnostic"]["details"] = {"credentials": "private-access-code"}
+        before = self.runtime.db.total_changes
+        with patch.object(self.runtime, "status", return_value=state), patch.object(self.runtime, "_launch_admin") as launch:
+            result = self.action(opened, "debug")
+        self.assertEqual(self.runtime.db.total_changes, before)
+        launch.assert_not_called()
+        self.assertEqual(self.panel.requests, {})
+        debug = result["diagnostics"]
+        self.assertEqual(debug["connection"], {"ui_bridge": "responding", "mcp": "responding", "hook": "verified", "context_bound": True})
+        self.assertEqual(debug["project"]["home"], str(self.runtime.home))
+        self.assertEqual(debug["project"]["id"], self.project)
+        self.assertEqual(debug["installation"]["state"], "verified")
+        self.assertFalse(debug["installation"]["latest_release_checked"])
+        encoded = json.dumps(debug)
+        for secret in (self.handle, opened["capability"], "private-project-task", "private-access-code", "context_handle", "task"):
+            self.assertNotIn(secret, encoded)
+
+    def test_native_debug_does_not_claim_hook_or_mcp_connectivity(self):
+        native = PanelControl(self.runtime, self.project, self.workspace, self.target, require_context=False)
+        self.addCleanup(native.close)
+        opened = native.bootstrap(workspace=self.workspace, conversation_id="native-chat")
+        self.assertTrue(opened["visible"])
+        before = self.runtime.db.total_changes
+        with patch.object(self.runtime, "session_context", side_effect=AssertionError("Do not guess Hook identity")):
+            result = native.action(opened["capability"], "debug", workspace=self.workspace, conversation_id="native-chat")
+        self.assertEqual(self.runtime.db.total_changes, before)
+        self.assertEqual(result["diagnostics"]["connection"], {"ui_bridge": "responding", "mcp": "unknown", "hook": "unknown", "context_bound": None})
+        self.assertEqual(native.requests, {})
+
+    def test_debug_rejects_expired_or_other_context_before_reading(self):
+        opened = self.bootstrap()
+        with patch.object(self.runtime, "status", side_effect=AssertionError("Not authorized")):
+            with self.assertRaises(ContractError):
+                self.panel.action(opened["capability"], "debug", context_handle="other-handle")
+            self.runtime.account_changed()
+            with self.assertRaises(ContractError):
+                self.action(opened, "debug")
+
+    def test_debug_does_not_forward_untyped_failure_or_model_configuration(self):
+        opened = self.bootstrap()
+        state = self.runtime.status(self.project)
+        state["admin_routing"]["executor"] = {"model": "model --token=private-access-code"}
+        state["admin_dispatch_diagnostic"] = {"reason": "Bearer private-access-code", "phase": "private unsafe text", "next_due": float("inf")}
+        with patch.object(self.runtime, "status", return_value=state):
+            debug = self.action(opened, "debug")["diagnostics"]
+        self.assertIsNone(debug["administrator"]["model"])
+        self.assertIsNone(debug["administrator"]["phase"])
+        self.assertIsNone(debug["administrator"]["next_due"])
+        self.assertNotIn("private-access-code", json.dumps(debug))
+
     def test_other_registered_project_and_nested_checkout_are_not_installed(self):
         other = Path(self.data.name) / "another project"
         other.mkdir()
