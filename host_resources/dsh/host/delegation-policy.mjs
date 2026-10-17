@@ -41,6 +41,48 @@ const TEXT = `## 委派与分工策略（本机全局约定）
 - 子代理必须回传：**改了哪些文件、关键改动摘要、如何验证（命令与结果）**；
 - 收到汇报后由你复核 diff 与验证结果，再向用户陈述结论。`;
 
+/**
+ * Thinking-language policy, scoped to DeepSeek routes only. Other models keep
+ * their native reasoning language: forcing Chinese onto an English-dominant
+ * code/math model costs attention for no benefit.
+ */
+const THINKING_TEXT = `## 思考语言
+
+- 内部思考（reasoning）与对用户的说明使用 **简体中文**；
+- 以下内容保持 **原样英文/原文**，不要翻译：代码、标识符、函数与变量名、文件路径、命令行、报错原文、协议字段、日志、数字与公式；
+- 不要为了"写中文"去改代码注释、字符串字面量或正则；技术术语没有通行中文译法时直接保留英文；
+- 中文用于组织逻辑与结论，不追求措辞完整，避免为凑句子而重复已知信息。`;
+
+/** True only for DeepSeek routes (`deepseek-account`, `deepseek-*`). */
+function isDeepSeekRoute(route) {
+  if (!route) return false;
+  const provider = typeof route.provider === "string" ? route.provider.toLowerCase() : "";
+  const model = typeof route.model === "string" ? route.model.toLowerCase() : "";
+  return provider.startsWith("deepseek") || model.startsWith("deepseek");
+}
+
+/**
+ * Resolve the route this assembly belongs to: the session's latest logged
+ * request header first (authoritative once a request has run), then explicit
+ * agent options, then the deployment default.
+ */
+function resolveRoute(context, ctx) {
+  const agent = context?.agent;
+  try {
+    const config = agent?.session?.requestHeader?.()?.config;
+    if (config && (config.provider || config.model)) return config;
+  } catch {}
+  try {
+    const options = agent?.options;
+    if (options && (options.provider || options.model)) return options;
+  } catch {}
+  try {
+    const selection = ctx.get("agentDefaultModel")?.currentSelection?.();
+    if (selection) return selection;
+  } catch {}
+  return undefined;
+}
+
 export const name = "agent-learning-delegation-policy";
 
 export function apply(ctx) {
@@ -57,6 +99,13 @@ export function apply(ctx) {
     text: TEXT,
   });
   if (typeof dispose === "function") ctx.effect(() => dispose);
+
+  const thinkingDispose = systemPrompt.section({
+    name: "agent-learning-thinking-language",
+    order: order + 0.5,
+    text: (context) => (isDeepSeekRoute(resolveRoute(context, ctx)) ? THINKING_TEXT : ""),
+  });
+  if (typeof thinkingDispose === "function") ctx.effect(() => thinkingDispose);
 }
 
 /** Place just after the repository prompt sections, before volatile context. */
