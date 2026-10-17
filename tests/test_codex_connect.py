@@ -44,6 +44,19 @@ class CodexConnectionDocumentTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 _patch(text, {SERVER: {"command": "python"}}, {})
 
+    def test_array_of_tables_repeat_keys_across_elements(self):
+        # 数组表的每个元素是独立表，同名键不是重复字段；否则合法配置会被拒。
+        text = '[[profiles]]\nname = "a"\n\n[[profiles]]\nname = "b"\n'
+        result = _patch(text, {SERVER: {"command": "python", "args": ["serve"]}}, {})
+        self.assertTrue(result.startswith(text))
+        self.assertEqual(result.count('[[profiles]]'), 2)
+        import tomllib
+        parsed = tomllib.loads(result)
+        self.assertEqual(parsed["profiles"], [{"name": "a"}, {"name": "b"}])
+        # 同一元素内的真实重复仍必须拒绝。
+        with self.assertRaises(ContractError):
+            _patch('[[profiles]]\nname = "a"\nname = "b"\n', {SERVER: {"command": "python"}}, {})
+
 
 class CodexConnectTests(unittest.TestCase):
     def setUp(self):

@@ -132,6 +132,8 @@ def _statements(text):
 
 def _document(text):
     section, sections, entries = (), {}, {}
+    # 数组表每个元素都是独立表：同名键属于不同元素，不能按重复字段处理。
+    arrays = 0
     for start, end, raw in _statements(text):
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
@@ -144,7 +146,8 @@ def _document(text):
                 raise ContractError("unsupported Codex table header; configuration preserved")
             section = _key(match[2].strip())
             if match[1] == "[[":
-                section = ("@array", *section)
+                arrays += 1
+                section = ("@array", arrays, *section)
             if section in sections and section in {SERVER, ENV, PLUGIN}:
                 raise ContractError("duplicate Agent Learning table; configuration preserved")
             sections[section] = end
