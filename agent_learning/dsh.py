@@ -401,6 +401,9 @@ class DshAdapter:
         conversation = r.host_conversation(native_session)
         with r.transaction():
             epoch = self._epoch()
+            if not agent_id:
+                from .dsh_profile import bind_conversation_profile
+                bind_conversation_profile(r, project, conversation)
             r.bind_session(project, conversation)
             session_state = self._session_state(project, conversation)
             generation = session_state["generation"]

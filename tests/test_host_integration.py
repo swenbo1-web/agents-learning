@@ -16,6 +16,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# These are process/SQLite bootstrap checks, not latency assertions. Shared
+# Windows CI can exceed five seconds during interpreter startup and migration.
+STARTUP_TIMEOUT = 20
 sys.path.insert(0, str(ROOT))
 from agent_learning.runtime import Runtime
 from agent_learning.install import install
@@ -55,7 +58,7 @@ class HostIntegrationTests(unittest.TestCase):
             cwd=self.workspace,
             env=self.environment,
             capture_output=True,
-            timeout=5,
+            timeout=STARTUP_TIMEOUT,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
@@ -82,7 +85,7 @@ class HostIntegrationTests(unittest.TestCase):
     def run_cli(self, *arguments):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/learning.py"), "--workspace", str(self.workspace), *arguments],
-            cwd=self.workspace, env=self.environment, capture_output=True, timeout=5, check=False,
+            cwd=self.workspace, env=self.environment, capture_output=True, timeout=STARTUP_TIMEOUT, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         return json.loads(result.stdout.decode("utf-8"))
@@ -121,7 +124,7 @@ class HostIntegrationTests(unittest.TestCase):
                 body = ("\n".join(json.dumps(item, ensure_ascii=False) for item in messages) + "\n").encode("utf-8")
                 result = subprocess.run(
                     [*command, "--workspace", str(self.workspace), "serve"],
-                    input=body, cwd=self.workspace, env=environment, capture_output=True, timeout=5, check=False,
+                    input=body, cwd=self.workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT, check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
                 responses = [json.loads(line) for line in result.stdout.decode("utf-8").splitlines()]

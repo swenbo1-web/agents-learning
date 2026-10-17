@@ -76,7 +76,12 @@ def scan_signature(runtime, project, *, include_candidates=True):
             "SELECT conversation,model,active,version FROM admin_model_observations "
             "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
             (project, scope, runtime.session_epoch()))]
+    policy = runtime.admin_policy(project)
+    provider = runtime.host if policy["provider"] == "host" else policy["provider"]
+    origins = list(runtime.db.execute("SELECT COUNT(*),MAX(rowid) FROM events WHERE project=? AND type='DshProfileBound'",
+                                     (project,)).fetchone()) if provider == "dsh" else None
     return digest({"policy": runtime.admin_effective_config(project), "model_observations": observations,
+                   "dsh_profile_origins": origins,
                    "work_summary_policy": {"configuration": runtime.config["work_memory"],
                                            "effective": runtime.work_summary_policy(project)},
                    "host_scope": scope, "packet_format": PACKET_FORMAT,
@@ -126,6 +131,28 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
 def executor_query(runtime, project, query, args):
     """current 仅排入有本宿主根模型观察的日常案例，避免异宿主旧案例堵塞。"""
     policy = runtime.admin_policy(project)
+    provider = runtime.host if policy["provider"] == "host" else policy["provider"]
+    if provider == "dsh":
+        from .admin_routing import validate_admin_routing_config, _default_provider_command
+        from .admin_providers import dsh_sdk_launcher
+        config = validate_admin_routing_config(runtime.config["admin"])
+        command = policy["command"] or _default_provider_command(config, provider)
+        try:
+            sdk = dsh_sdk_launcher(command)
+        except (OSError, ValueError):
+            sdk = None  # Preserve existing CLI availability diagnostics.
+        if sdk:
+            from .dsh_profile import resolve_profile, profile_key
+            try:
+                key = profile_key(resolve_profile(config["dsh_profile"]))
+            except ValueError:
+                return query + "AND 0 ", args
+            # Filter before bounded scans: a different profile's oldest cases
+            # must neither leak evidence nor starve this profile's ready case.
+            query += ("AND (p.conversation NOT LIKE 'dsh:%' OR EXISTS(SELECT 1 FROM events dp "
+                      "WHERE dp.project=p.project AND dp.conversation=p.conversation AND dp.type='DshProfileBound' "
+                      "AND json_extract(dp.payload,'$.profile_key')=?)) ")
+            args += (key,)
     if policy["model_mode"] == "current":
         provider = runtime.host if policy["provider"] == "host" else policy["provider"]
         if provider != runtime.host:
@@ -148,6 +175,19 @@ def ready_executor(runtime, project, query, args):
         if available and not executor_backoff(runtime, project, plan):
             return True
     return False
+
+
+def unrouted_reason(runtime, project, query, args, fallback):
+    """Expose a precise origin diagnostic without reserving or revealing case evidence."""
+    row = runtime.db.execute(query + REVIEW_ORDER + "LIMIT 1", (project, *args)).fetchone()
+    if row:
+        try:
+            runtime.resolve_admin_executor(project, row["conversation"])
+        except ValueError as exc:
+            reason = str(exc).split(":", 1)[0]
+            if reason.startswith("dsh_profile_"):
+                return reason
+    return fallback
 
 
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
@@ -333,7 +373,7 @@ def _dispatch_diagnostic(runtime, project):
     rows = runtime.db.execute(routed + REVIEW_ORDER + "LIMIT 40", (project, *routed_args)).fetchall()
     if not rows:
         if runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():
-            return dict(detail, reason="model_missing")
+            return dict(detail, reason=unrouted_reason(runtime, project, query, args, "model_missing"))
         if runtime.db.execute("SELECT 1 FROM operations o JOIN problems p ON p.project=o.project AND p.conversation=o.conversation "
             "AND p.task_id IS o.task_id AND p.task_revision IS o.task_revision WHERE p.project=? AND p.status='pending' "
             "AND o.state IN ('running','started') LIMIT 1", (project,)).fetchone():

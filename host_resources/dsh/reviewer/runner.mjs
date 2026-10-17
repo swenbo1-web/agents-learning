@@ -1,8 +1,8 @@
 // One bounded SDK request. No profile loader, Agent, tools, Hooks or project files.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PROTOCOL = "alp-dsh-sdk-v1";
@@ -76,8 +76,25 @@ function loadProfileConfigs(config) {
   const snapshot = JSON.parse(raw.replace(/^\uFEFF/, ""));
   const canonicalDirectory = (value) => {
     if (typeof value !== "string" || !isAbsolute(value)) throw refusal("dsh_profile_invalid");
-    const path = resolve(value);
-    return process.platform === "win32" ? path.toLowerCase() : path;
+    let current = resolve(value);
+    const missing = [];
+    while (true) {
+      try {
+        // Python Path.resolve() canonicalizes existing ancestors even when the
+        // final profile directory is absent. Resolve Windows 8.3/junction names
+        // the same way; lexical path.resolve() alone cannot compare identities.
+        const existing = realpathSync.native(current);
+        if (!statSync(existing).isDirectory()) throw refusal("dsh_profile_invalid");
+        const path = join(existing, ...missing.reverse());
+        return process.platform === "win32" ? path.toLowerCase() : path;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw refusal("dsh_profile_invalid");
+        const parent = dirname(current);
+        if (parent === current) throw refusal("dsh_profile_invalid");
+        missing.push(basename(current));
+        current = parent;
+      }
+    }
   };
   if (snapshot?.version !== 1 || canonicalDirectory(snapshot.profile_directory) !== canonicalDirectory(config.profileDirectory)
     || !Array.isArray(snapshot.entries) || !snapshot.entries.length || snapshot.entries.length > 5)

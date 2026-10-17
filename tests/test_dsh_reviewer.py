@@ -190,7 +190,34 @@ class DshReviewerTests(unittest.TestCase):
         env.pop("ALP_DSH_REVIEW_PROFILE", None)
         payload = {"event": "user", "message": {"content": "Only supplied evidence"}, "response_schema": RESPONSE_SCHEMA}
         response = subprocess.run(args, input=json.dumps(payload).encode(), capture_output=True, timeout=10, cwd=self.root, env=env)
-        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace")
+                         + "\nRunner safe output: " + response.stdout.decode("utf-8", "replace"))
+        self.assertEqual(json.loads(response.stdout.decode().splitlines()[-1])["result"]["status"], "SUCCESS")
+
+    def test_explicit_snapshot_resolves_existing_alias_ancestor_with_absent_profile_suffix(self):
+        if os.name == "nt":
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.windll.kernel32.GetShortPathNameW(str(self.root), buffer, len(buffer))
+            self.assertGreater(length, 0)
+            alias_root = Path(buffer.value)
+        else:
+            alias_root = self.root / "sdk-home-alias"
+            alias_root.symlink_to(self.sdk, target_is_directory=True)
+        raw_directory = alias_root / "not-created-profile-parent" / "web"
+        self.assertFalse(raw_directory.exists())
+        self.profile["profile_directory"] = raw_directory.as_posix()
+        raw = "\ufeff" + json.dumps(self.profile)
+        destination = self.root / "alias-profile.json"
+        destination.write_text(raw, encoding="utf-8")
+        args = [NODE, str(RUNNER), "--sdk-anchor", str(self.anchor), "--model", "custom-route/model",
+            "--selection-mode", "fixed", "--profile-directory", str(raw_directory.resolve()),
+            "--profile-fingerprint", hashlib.sha256(raw.encode()).hexdigest(), "--profile-snapshot", str(destination)]
+        payload = {"event": "user", "message": {"content": "Only fake supplied evidence"}, "response_schema": RESPONSE_SCHEMA}
+        response = subprocess.run(args, input=json.dumps(payload).encode(), capture_output=True, timeout=10, cwd=self.root,
+                                  env={**self.env, "ALP_FAKE_SCENARIO": "normal"})
+        self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace")
+                         + "\nRunner safe output: " + response.stdout.decode("utf-8", "replace"))
         self.assertEqual(json.loads(response.stdout.decode().splitlines()[-1])["result"]["status"], "SUCCESS")
 
     def test_missing_changed_or_nonwhitelisted_snapshot_never_calls_model(self):

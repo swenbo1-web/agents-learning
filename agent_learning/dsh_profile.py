@@ -80,3 +80,47 @@ def assert_profile(snapshot):
     if current != snapshot:
         _error("dsh_profile_changed")
     return current
+
+
+def profile_key(snapshot):
+    """A stable profile origin, independent of model/configuration revisions."""
+    return os.path.normcase(str(Path(snapshot["profile_directory"]).resolve()))
+
+
+def _binding_id(project, conversation):
+    from .runtime import digest
+    return digest([project, "dsh-profile-origin:" + conversation])
+
+
+def bind_conversation_profile(runtime, project, conversation):
+    """Only trusted inherited/operator configuration establishes this immutable origin."""
+    from .runtime import ContractError
+    try:
+        snapshot = resolve_profile(runtime.config["admin"].get("dsh_profile", ""))
+    except ContractError:
+        return False  # Missing review configuration must not stop ordinary capture.
+    key = profile_key(snapshot)
+    ident = _binding_id(project, conversation)
+    old = runtime.db.execute("SELECT payload FROM events WHERE project=? AND id=? AND type='DshProfileBound'",
+                             (project, ident)).fetchone()
+    if old:
+        if json.loads(old["payload"]).get("profile_key") != key:
+            _error("dsh_profile_source_mismatch")
+        return False
+    if not runtime.db.in_transaction:
+        _error("dsh_profile_binding_requires_transaction")
+    runtime._event(project, conversation, "DshProfileBound", {"profile_key": key,
+        "host_scope": runtime._session_scope(), "internal_control": True},
+        event_id="dsh-profile-origin:" + conversation)
+    return True
+
+
+def assert_conversation_profile(runtime, project, conversation, snapshot):
+    if conversation is None or not conversation.startswith("dsh:"):
+        return  # Explicit history and non-DSH source provider policies retain their contract.
+    row = runtime.db.execute("SELECT payload FROM events WHERE project=? AND id=? AND type='DshProfileBound'",
+        (project, _binding_id(project, conversation))).fetchone()
+    if row is None:
+        _error("dsh_profile_source_unbound")
+    if json.loads(row["payload"]).get("profile_key") != profile_key(snapshot):
+        _error("dsh_profile_source_mismatch")

@@ -295,7 +295,9 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     skipped, routing_skipped, scanned = [], [], 0
     if not rows:
         if history_job_id is None and runtime.db.execute(raw_query + "LIMIT 1", (project, *raw_args)).fetchone():
-            return {"status": "executor_not_ready", "reason": "administrator_current_model_unavailable", "scanned_count": 0}
+            from .admin_queue import unrouted_reason
+            return {"status": "executor_not_ready", "reason": unrouted_reason(runtime, project, raw_query, raw_args,
+                    "administrator_current_model_unavailable"), "scanned_count": 0}
         query, args = eligible_query(signature, None, include_cached=True, history_job_id=history_job_id,
                                     summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
         blocked = runtime.db.execute(query + "AND EXISTS(SELECT 1 FROM admin_preflights f WHERE "

@@ -318,8 +318,9 @@ class AdminRoutingMixin:
             except (OSError, ValueError):
                 sdk = None  # Availability retains its precise executable diagnostic.
             if sdk is not None:
-                from .dsh_profile import resolve_profile
+                from .dsh_profile import resolve_profile, assert_conversation_profile
                 result["dsh_profile"] = resolve_profile(config["dsh_profile"])
+                assert_conversation_profile(self, project, conversation, result["dsh_profile"])
         result["executor_signature"] = _digest(result)
         return result
 
