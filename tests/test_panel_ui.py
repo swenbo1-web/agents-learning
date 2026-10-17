@@ -5,29 +5,43 @@ import shutil
 import subprocess
 import unittest
 
-from agent_learning.panel_ui import HTML, MIME_TYPE, RESOURCE_URI, resource_content
+from agent_learning.panel_ui import DIRECT_HTML, DIRECT_RESOURCE_URI, HTML, MIME_TYPE, RESOURCE_URI, local_panel_html, resource_content
 
 
 HARNESS = r'''
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const {script,scenario}=JSON.parse(fs.readFileSync(0,'utf8'));
-const nodes=new Map(),listeners=new Map(),sent=[],timers=new Map();let timer=0,rid=0;
+const nodes=new Map(),listeners=new Map(),sent=[],timers=new Map(),http=[];let timer=0,rid=0;
 const element=id=>{if(!nodes.has(id))nodes.set(id,{id,hidden:['controls','confirmBox','debugPanel'].includes(id),disabled:false,textContent:'',value:'',dataset:{},querySelectorAll:()=>[...nodes.values()].filter(n=>['refresh','debug','browser','review','apply','history','confirm','cancel','preset'].includes(n.id))});return nodes.get(id);};
 const parent={postMessage:message=>sent.push(JSON.parse(JSON.stringify(message)))};
 const window={parent,addEventListener:(name,callback)=>{const callbacks=listeners.get(name)||[];callbacks.push(callback);listeners.set(name,callbacks);}};
-const context={window,document:{getElementById:element,querySelectorAll:()=>[]},navigator:{language:'en'},crypto:{randomUUID:()=>`stable-${++rid}`},setTimeout:(callback,delay)=>{const id=++timer;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),console};
+const context={window,document:{getElementById:element,querySelectorAll:()=>[]},navigator:{language:'en'},crypto:{randomUUID:()=>`stable-${++rid}`},fetch:(url,options)=>new Promise(resolve=>http.push({url,options,body:JSON.parse(options.body),resolve})),AbortController,setTimeout:(callback,delay)=>{const id=++timer;timers.set(id,{callback,delay});return id;},clearTimeout:id=>timers.delete(id),console};
 vm.runInNewContext(script,context);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const dispatch=(message,source=parent)=>{for(const callback of listeners.get('message')||[])callback({source,data:message});};
 const respond=(request,result)=>dispatch({jsonrpc:'2.0',id:request.id,result});
 const snapshot={project_id:'p1',project_name:'Sample project',workspace:'/project',host_scope:'codex:default',admin_admission_enabled:false,model_mode:'first',model:null,remaining_calls:100,max_calls_per_day:100,counts:{active:1,work_memory:2,pending_problems:3,candidates:4},budget_scope:'project',project_usage:{scope:'project',project_id:'p1',counted_attempts:0,completed_reviews:0,failed_attempts:0,remaining_calls:15,max_calls_per_day:15},global_usage:{counted_attempts:32,remaining_calls:68},reason:'disabled',expected:{expected_policy_version:1,expected_project_budget_version:2,expected_settings_version:3,expected_session_epoch:0,expected_governance_epoch:0}};
 const result=(bootstrap=true,summary=snapshot)=>({content:[{type:'text',text:'public'}],structuredContent:{visible:true,summary},_meta:{agentLearningPanel:{visible:true,summary,context_handle:'real-handle',...(bootstrap?{capability:'private-capability'}:{})}}});
+const directResult=(bootstrap=true,summary=snapshot)=>({content:[],_meta:{agentLearningPanel:{visible:true,scope:'project',summary,...(bootstrap?{capability:'private-direct-capability'}:{})}}});
 async function boot(tools=true){assert.equal(element('controls').hidden,true);const initialize=sent.find(m=>m.method==='ui/initialize');assert(initialize);respond(initialize,{protocolVersion:'2026-01-26',hostCapabilities:tools?{serverTools:{}}:{},hostContext:{}});await flush();dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-input',params:{arguments:{context_handle:'real-handle'}}});dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result()});await flush();}
 async function clickAndRespond(id){const before=sent.length,promise=element(id).onclick();const request=sent.slice(before).find(m=>m.method==='tools/call');assert(request);respond(request,result(false));await promise;await flush();return request;}
 (async()=>{
 if(scenario==='bootstrap'){
  const spoof={jsonrpc:'2.0',method:'ui/notifications/tool-result',params:result()};dispatch(spoof,{});assert.equal(element('controls').hidden,true);
- const initialize=sent.find(m=>m.method==='ui/initialize');dispatch(spoof);assert.equal(element('controls').hidden,true);respond(initialize,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();assert.equal(element('controls').hidden,false);assert.equal(element('project').textContent,'Sample project');assert.equal(element('active').textContent,'1');assert(![...nodes.values()].some(n=>n.textContent.includes('private-capability')));
+ const initialize=sent.find(m=>m.method==='ui/initialize');dispatch(spoof);assert.equal(element('controls').hidden,true);respond(initialize,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();assert.equal(element('controls').hidden,false);assert.equal(element('project').textContent,'Sample project');assert.equal(element('active').textContent,'1');assert(![...nodes.values()].some(n=>n.textContent.includes('private-capability')));assert(!sent.some(m=>m.method==='tools/call'));
+}else if(scenario==='menu_bootstrap'||scenario==='menu_missing_session'||scenario==='menu_project_switch'){
+ const init=sent.find(m=>m.method==='ui/initialize');respond(init,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();
+ const opening=sent.filter(m=>m.method==='tools/call');assert.equal(opening.length,1);assert.equal(opening[0].params.name,'learning_panel_open');assert.deepEqual(opening[0].params.arguments,{});
+ if(scenario==='menu_missing_session'){respond(opening[0],{content:[],isError:true,_meta:{agentLearningPanel:{visible:false,reason:'trusted_ui_session_required_use_project_action'}}});await flush();assert.equal(element('controls').hidden,true);assert.match(element('notice').textContent,/project Actions/);}
+ else{respond(opening[0],directResult());await flush();assert.equal(element('controls').hidden,false);
+ if(scenario==='menu_project_switch'){dispatch({jsonrpc:'2.0',method:'ui/notifications/host-context-changed',params:{threadId:'other'}});assert.equal(element('controls').hidden,true);}
+ else{const promise=element('debug').onclick(),request=sent.filter(m=>m.method==='tools/call').at(-1);assert.equal(request.params.name,'learning_panel_direct_action');assert.equal(request.params.arguments.action,'debug');assert.equal(request.params.arguments.capability,'private-direct-capability');assert.equal(request.params.arguments.context_handle,undefined);assert.equal(request.params.arguments.ui_session_id,undefined);respond(request,directResult(false));await promise;assert.equal(element('controls').hidden,false);}}
+ assert(!sent.some(m=>['ui/message','ui/update-model-context'].includes(m.method)));
+}else if(scenario==='menu_initial_tool_result'){
+ dispatch({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:directResult()});const init=sent.find(m=>m.method==='ui/initialize');respond(init,{protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}}});await flush();assert.equal(element('controls').hidden,false);assert(!sent.some(m=>m.method==='tools/call'));
+}else if(scenario==='local_http'){
+ assert.equal(sent.length,0);assert.equal(http.length,1);const opening=http[0];assert.equal(opening.url,'/api/bootstrap');assert.deepEqual(Object.keys(opening.body),['ui_session_id']);assert.equal(opening.options.credentials,'same-origin');assert.equal(opening.options.method,'POST');assert.equal(opening.options.headers['Content-Type'],'application/json');opening.resolve({ok:true,json:async()=>directResult()._meta.agentLearningPanel});await flush();assert.equal(element('controls').hidden,false);
+ const promise=element('debug').onclick(),request=http.at(-1);assert.equal(request.url,'/api/action');assert.equal(request.body.ui_session_id,opening.body.ui_session_id);assert.equal(request.body.action,'debug');assert.equal(request.body.capability,'private-direct-capability');assert.equal(request.body.context_handle,undefined);assert.equal(request.body.workspace,undefined);request.resolve({ok:true,json:async()=>directResult(false)._meta.agentLearningPanel});await promise;assert.equal(element('controls').hidden,false);assert.equal(sent.length,0);assert.equal(http.length,2);
 }else if(scenario==='project_usage'){
  await boot();assert.match(element('budget').textContent,/Project review attempts: 0/);assert.match(element('budget').textContent,/Valid review results: 0/);assert.match(element('budget').textContent,/Project calls remaining: 15 \/ 15/);assert.match(element('budget').textContent,/All-project attempts: 32/);
 }else if(scenario==='legacy_usage'||scenario==='foreign_project_usage'){
@@ -77,17 +91,29 @@ class PanelUITests(unittest.TestCase):
         self.assertNotRegex(HTML, r"(?i)<(?:iframe|img)|<script[^>]+src=|\b(?:fetch|XMLHttpRequest|localStorage|sessionStorage)\b")
         self.assertIn('<main id="controls" hidden>', HTML)
 
-    def scenario(self, name):
+    def test_menu_resource_is_separate_and_needs_no_network_or_model_context(self):
+        resource = resource_content(direct=True)
+        self.assertEqual(resource["uri"], DIRECT_RESOURCE_URI)
+        self.assertEqual(resource["text"], DIRECT_HTML)
+        self.assertNotRegex(DIRECT_HTML, r"(?i)<(?:iframe|img)|<script[^>]+src=|\b(?:fetch|XMLHttpRequest|localStorage|sessionStorage)\b")
+        self.assertNotEqual(DIRECT_HTML, HTML)
+
+    def scenario(self, name, *, html=HTML):
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is unavailable for the shipped JavaScript bridge check")
-        script = re.search(r"<script>([\s\S]*)</script>", HTML).group(1)
+        script = re.search(r"<script>([\s\S]*)</script>", html).group(1)
         result = subprocess.run([node, "-e", HARNESS], input=json.dumps({"script": script, "scenario": name}),
                                 capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["passed"])
 
     def test_only_verified_host_bootstrap_displays_controls(self): self.scenario("bootstrap")
+    def test_menu_load_bootstraps_and_calls_buttons_without_a_model_turn(self): self.scenario("menu_bootstrap", html=DIRECT_HTML)
+    def test_menu_load_accepts_an_initial_host_result_without_duplicate_bootstrap(self): self.scenario("menu_initial_tool_result", html=DIRECT_HTML)
+    def test_missing_trusted_ui_session_points_to_project_actions(self): self.scenario("menu_missing_session", html=DIRECT_HTML)
+    def test_menu_project_switch_invalidates_buttons(self): self.scenario("menu_project_switch", html=DIRECT_HTML)
+    def test_local_console_uses_same_origin_http_and_memory_session_only(self): self.scenario("local_http", html=local_panel_html())
     def test_project_counts_are_distinct_from_global_counts(self): self.scenario("project_usage")
     def test_old_runtime_does_not_relabel_global_counts_as_project_usage(self): self.scenario("legacy_usage")
     def test_foreign_project_usage_cannot_enable_project_settings(self): self.scenario("foreign_project_usage")

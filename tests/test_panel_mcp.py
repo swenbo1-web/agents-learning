@@ -7,8 +7,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from agent_learning.mcp import Server
-from agent_learning.panel_ui import MIME_TYPE, RESOURCE_URI, UI_EXTENSION
+from agent_learning.mcp import PANEL_TOOL_NAMES, Server
+from agent_learning.panel_ui import DIRECT_RESOURCE_URI, MIME_TYPE, RESOURCE_URI, UI_EXTENSION
 from agent_learning.runtime import ContractError
 
 
@@ -39,20 +39,29 @@ class FakeRuntime:
 class FakePanel:
     active = True
 
-    def __init__(self, runtime, project, workspace, installation, require_context=True):
+    def __init__(self, runtime, project, workspace, installation, require_context=True, *, project_ui=False):
         self.calls, self.closed = [], False
         self.runtime, self.require_context = runtime, require_context
         self.binding = {"installation": "export-path", "workspace": "project-path"}
+        self.project_ui, self.session = project_ui, None
 
     def eligible(self): return self.active
 
     def bootstrap(self, **args):
         self.calls.append(("bootstrap", args))
+        if self.project_ui:
+            self.session = args["ui_session_id"]
+            return {"visible": True, "summary": copy.deepcopy(SUMMARY), "capability": "private-direct-capability"}
         if args["context_handle"] != "current-handle":
             return {"visible": False, "reason": "context_required"}
         return {"visible": True, "summary": copy.deepcopy(SUMMARY), "capability": "private-panel-capability"}
 
     def action(self, capability, action, **args):
+        if self.project_ui:
+            if capability != "private-direct-capability" or args["ui_session_id"] != self.session:
+                raise ContractError("panel UI session mismatch")
+            self.calls.append((action, args))
+            return {"visible": True, "summary": copy.deepcopy(SUMMARY)}
         if capability != "private-panel-capability":
             raise ContractError("panel capability is invalid")
         self.calls.append((action, args))
@@ -84,8 +93,9 @@ class PanelMCPTests(unittest.TestCase):
         server.request({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return server, result["result"]
 
-    def tool(self, server, name, args=None):
-        return self.request(server, "tools/call", {"name": name, "arguments": args or {}})
+    def tool(self, server, name, args=None, *, meta=None):
+        return self.request(server, "tools/call", {"name": name, "arguments": args or {},
+                                                  **({"_meta": meta} if meta is not None else {})})
 
     def test_no_install_or_admin_role_keeps_legacy_tools_only(self):
         for kwargs in ({"install": False}, {"role": "admin"}):
@@ -95,14 +105,22 @@ class PanelMCPTests(unittest.TestCase):
                 names = {t["name"] for t in self.request(server, "tools/list")["result"]["tools"]}
                 self.assertNotIn("learning_panel", names)
                 self.assertNotIn("learning_panel_action", names)
+                self.assertNotIn("learning_panel_open", names)
+                self.assertNotIn("learning_panel_direct_action", names)
                 self.assertEqual(self.request(server, "resources/read", {"uri": RESOURCE_URI})["error"]["code"], -32601)
 
     def test_client_without_extension_has_text_fallback_and_no_action(self):
         server, init = self.ready(ui=False)
-        self.assertNotIn("resources", init["capabilities"])
+        self.assertEqual(init["capabilities"]["resources"], {})
         tools = {t["name"]: t for t in self.request(server, "tools/list")["result"]["tools"]}
         self.assertNotIn("_meta", tools["learning_panel"])
         self.assertNotIn("learning_panel_action", tools)
+        # Native Codex entrypoints do not depend on the standard iframe capability handshake.
+        self.assertEqual(tools["learning_panel_open"]["_meta"]["ui"]["visibility"], ["app"])
+        self.assertEqual(tools["learning_panel_direct_action"]["_meta"]["ui"]["visibility"], ["app"])
+        self.assertEqual([item["uri"] for item in self.request(server, "resources/list")["result"]["resources"]],
+                         [DIRECT_RESOURCE_URI])
+        self.assertEqual(self.request(server, "resources/read", {"uri": RESOURCE_URI})["error"]["code"], -32602)
         response = self.tool(server, "learning_panel", {"context_handle": "current-handle"})["result"]
         self.assertFalse(response["structuredContent"]["visible"])
         self.assertNotIn("_meta", response)
@@ -153,7 +171,7 @@ class PanelMCPTests(unittest.TestCase):
         self.assertEqual(set(expected["required"]), set(EXPECTED))
         self.assertNotIn("expected_budget_version", expected["properties"])
         for name, tool in tools.items():
-            if name not in {"learning_panel", "learning_panel_action"}:
+            if name not in PANEL_TOOL_NAMES:
                 self.assertNotIn("_meta", tool)
 
     def test_capability_is_only_hidden_metadata_even_on_old_protocol(self):
@@ -181,7 +199,7 @@ class PanelMCPTests(unittest.TestCase):
     def test_resource_has_no_secret_and_only_registered_uri_is_readable(self):
         server, _ = self.ready()
         listed = self.request(server, "resources/list")["result"]["resources"]
-        self.assertEqual([r["uri"] for r in listed], [RESOURCE_URI])
+        self.assertEqual([r["uri"] for r in listed], [RESOURCE_URI, DIRECT_RESOURCE_URI])
         body = self.request(server, "resources/read", {"uri": RESOURCE_URI})["result"]["contents"][0]
         self.assertEqual(body["mimeType"], MIME_TYPE)
         self.assertNotIn("private-panel-capability", body["text"])
@@ -222,3 +240,65 @@ class PanelMCPTests(unittest.TestCase):
         self.assertEqual(self.tool(server, "learning_panel", {"context_handle": "current-handle"})["error"]["code"], -32001)
         server.close()
         self.assertTrue(server.panel.closed)
+        self.assertTrue(server.direct_panel.closed)
+
+    def test_project_menu_tools_are_app_only_and_have_a_separate_resource(self):
+        server, _ = self.ready()
+        tools = {tool["name"]: tool for tool in self.request(server, "tools/list")["result"]["tools"]}
+        opening = tools["learning_panel_open"]
+        self.assertEqual(opening["title"], "Agent Learning")
+        self.assertEqual(opening["inputSchema"]["properties"], {})
+        self.assertEqual(opening["_meta"]["ui"], {"resourceUri": DIRECT_RESOURCE_URI, "visibility": ["app"]})
+        self.assertEqual(opening["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
+        action = tools["learning_panel_direct_action"]
+        self.assertEqual(action["_meta"]["ui"]["visibility"], ["app"])
+        self.assertNotIn("context_handle", action["inputSchema"]["properties"])
+        self.assertNotIn("ui_session_id", action["inputSchema"]["properties"])
+        resource = self.request(server, "resources/read", {"uri": DIRECT_RESOURCE_URI})["result"]["contents"][0]
+        self.assertEqual(resource["uri"], DIRECT_RESOURCE_URI)
+        self.assertIn("const launchMode='direct'", resource["text"])
+
+    def test_direct_bootstrap_and_actions_are_private_and_bound_to_host_metadata(self):
+        server, _ = self.ready(ui=False)
+        opened = self.tool(server, "learning_panel_open", meta={"thread_id": "native-ui", "threadId": "native-ui"})["result"]
+        self.assertEqual(opened["content"], [])
+        self.assertNotIn("structuredContent", opened)
+        private = opened["_meta"]["agentLearningPanel"]
+        self.assertEqual(private["scope"], "project")
+        self.assertNotIn("context_handle", private)
+        self.assertNotIn("native-ui", json.dumps(opened))
+        self.assertEqual(server.direct_panel.calls[0][1], {"workspace": "project-path", "ui_session_id": "native-ui"})
+        args = {"capability": private["capability"], "action": "debug"}
+        result = self.tool(server, "learning_panel_direct_action", args, meta={"threadId": "native-ui"})["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"], [])
+        self.assertNotIn("structuredContent", result)
+        self.assertFalse(server.panel.calls)
+        denied = self.tool(server, "learning_panel_direct_action", args, meta={"thread_id": "other-ui"})["result"]
+        self.assertTrue(denied["isError"])
+        self.assertEqual(denied["content"], [])
+
+    def test_missing_conflicting_or_untrusted_ui_sessions_never_use_work_context(self):
+        server, _ = self.ready(handle="current-handle")
+        for meta in (None, {}, {"thread_id": "a", "threadId": "b"}, {"threadId": 1},
+                     {"threadId": ""}, {"threadId": " x"}, {"threadId": "x\n"}, {"threadId": "x" * 501}):
+            with self.subTest(meta=meta):
+                result = self.tool(server, "learning_panel_open", meta=meta)["result"]
+                self.assertTrue(result["isError"])
+                self.assertEqual(result["content"], [])
+                self.assertNotIn("structuredContent", result)
+                self.assertEqual(result["_meta"]["agentLearningPanel"]["reason"],
+                                 "trusted_ui_session_required_use_project_action")
+        # Tool arguments and the connection's legacy handle cannot become trusted UI metadata.
+        denied = self.tool(server, "learning_panel_open", {"ui_session_id": "native-ui"}, meta={"threadId": "native-ui"})["result"]
+        self.assertTrue(denied["isError"])
+        self.assertFalse(server.direct_panel.calls)
+        self.assertFalse(server.panel.calls)
+
+    def test_direct_entrypoint_does_not_leak_into_antigravity_mcp(self):
+        self.runtime.host = "antigravity"
+        server, _ = self.ready()
+        names = {t["name"] for t in self.request(server, "tools/list")["result"]["tools"]}
+        self.assertNotIn("learning_panel_open", names)
+        self.assertNotIn("learning_panel_direct_action", names)
+        self.assertIn("learning_panel", names)

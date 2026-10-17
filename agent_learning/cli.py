@@ -109,6 +109,14 @@ def parser():
     serve.add_argument("--panel-installation", help="Codex可视化面板对应的已验证项目安装目录")
     panel = sub.add_parser("panel-serve", help="供原生宿主界面调用的有限JSON控制桥，不执行任意命令")
     panel.add_argument("--installation", required=True, help="当前项目的原生插件安装目录")
+    codex_panel = sub.add_parser("codex-panel", help="从项目Actions直接打开本机控制台；不发送对话或调用模型")
+    codex_panel.add_argument("--installation", required=True, help="当前项目已验证的Codex插件导出目录")
+    codex_panel.add_argument("--port", type=int, default=0, help="本机端口，默认随机分配")
+    codex_panel.add_argument("--no-open", action="store_true", help="不自动打开浏览器；不输出私有访问码")
+    codex_action = sub.add_parser("codex-action", help="显式登记项目顶部Actions控制台入口，保留原有环境配置")
+    codex_action.add_argument("--installation", required=True, help="已绑定当前项目的Codex插件导出目录")
+    codex_action.add_argument("--config", help="与该项目Hooks及MCP一致的配置文件；省略沿用ALP_CONFIG")
+    codex_action.add_argument("--remove", action="store_true", help="仅移除未被修改的受管Actions环境文件")
     bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
     bind.add_argument("--conversation", required=True)
     bind.add_argument("--agent-id")
@@ -290,6 +298,22 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    if args.command in {"codex-action", "codex-panel"}:
+        try:
+            if args.host != "codex":
+                raise ContractError("Codex visual controls require --host codex")
+            if args.command == "codex-action":
+                from .codex_actions import install_action
+                print(encode(install_action(args.installation, workspace=args.workspace, home=args.home,
+                    config=args.config, host_instance=args.host_instance, remove=args.remove)))
+            else:
+                from .codex_panel import open_panel
+                open_panel(args.installation, workspace=args.workspace, home=args.home,
+                           host_instance=args.host_instance, port=args.port, open_browser=not args.no_open)
+            return 0
+        except (ContractError, OSError) as exc:
+            print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
+            return 1
     if args.command == "install-ui":
         try:
             from .ui_install import install_ui

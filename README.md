@@ -37,13 +37,13 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 | 控制方式 | 适用宿主与入口位置 | 可直接执行的可视化操作 |
 |---|---|---|
 | **聊天框「📖 知识库」实体按键** | **DSH（DeepSeek Harness）**：仅在已安装绑定的项目聊天框左下角工具栏自动显示，未接入的其他项目自动隐藏 | 点击弹出浮动控制面板：实时查看当前项目名称／路径、正式知识数、1.0.0 工作观察数与待审案例数；**一键切换管理员调用频率方案（关闭／按需 5次/天／省流 15次/天／均衡 100次/天／积极 300次/天）**；一键打开知识审批台、只读知识库或吸收项目历史 |
-| **对话控制卡片** | **Codex**：在输入框技能菜单选择 **Agent Learning 控制面板**／发送 `$learning-panel`；宿主声明 MCP Apps 能力时显示卡片，否则由技能打开本机知识库页面 | 卡片按钮直接检查接入、刷新状态、打开知识库或审批设置；确认后设置管理员频率或归档项目历史。当前没有输入框旁的常驻自定义按键 |
+| **Codex 直接控制台与卡片** | **Codex**：支持插件 UI 的桌面端从当前会话的插件／侧栏入口打开 **Agent Learning**；也可登记项目顶部 **Actions → Agent Learning**。技能 `$learning-panel` 作为兼容入口 | 侧栏与 Actions 首次打开都无需发送技能消息。按钮直接检查接入、刷新状态、打开知识库或审批设置；确认后设置管理员频率或归档历史。当前没有输入框旁的常驻自定义按键 |
 | **对话侧边控制面板** | **支持 UI Extension 的 Antigravity App 2.22+**：完成下方全局 UI 桥登记并启用后，在当前项目会话 **⋮ → Extensions → Agent Learning** 打开 | Sidecar 按钮直接检查接入并提供相同操作；仅连接明确登记的项目安装，未登记项目、多工作区或失效会话不提供可执行内容 |
 | **本机可视化 WebUI 控制中心** | **Codex / Antigravity / DSH 共用**（仅监听 `127.0.0.1`，支持简体中文／English 离线切换） | 顶部直接展示可读项目名称与路径（`项目名 (磁盘路径) · ID`）；分栏查看**正式知识、候选审批、事件时间线、管理员待办、管理员设置**；支持预览并批量批准／拒绝／暂缓候选知识，提供 **4 套简单通用的管理员调用频率方案**及可展开的 **4 项高级细致参数微调** |
 
 **新增面板按安装项目限制显示与执行，知识库里已有项目记录不等于安装。** Codex 安装时显式传入 `--workspace` 绑定面板；未绑定的旧全局安装不显示控制卡，可继续用原有工具。Antigravity 的核心插件保留在项目内，全局 UI 桥只保存用户明确登记的安装位置及指纹，不加载第二套 Hooks、MCP 或知识库。项目不匹配、换号、卸载或安装变化会使旧面板能力失效。宿主自带的技能／Extensions 列表由宿主管理；本插件控制的是项目内面板与可执行按钮，不能保证全局扩展名称在其他项目的菜单中消失。
 
-初次通过技能打开 Codex 卡片会经过模型工具调用；卡片和侧栏中的后续操作直接连接本地程序。开启管理员会使用平台额度；**调用次数和管理员档位按项目独立统计、设置，同一项目的三个宿主合并计账**。同一 `ALP_HOME` 的全局总保护另行显示，达到总保护上限仍会暂停新调用。**历史按钮仅归档默认项目资料，不调用模型、不生成或发布知识**；界面分别显示归档与后续审核。详细审批继续在独立本机网页中确认。CLI／不支持原生 UI 的宿主使用现有 `learning-debug`、`learning-browser`、`learning-review` 技能。
+Codex 侧栏和项目 Actions 直接运行本地界面，不启动模型回合、不自动发送聊天消息或写入模型上下文；直接 UI 的结果仅返回界面。技能启动仍经过模型工具调用。项目控制台不继承任务执行权限，当前 Hook 绑定未核实时显示未知。开启管理员会使用平台额度；**调用次数和管理员档位按项目独立统计、设置，同一项目的三个宿主合并计账**。同一 `ALP_HOME` 的全局总保护另行显示，达到总保护上限仍会暂停新调用。**历史按钮仅归档默认项目资料，不调用模型、不生成或发布知识**；界面分别显示归档与后续审核。详细审批继续在独立本机网页中确认。
 
 本次面板通过隔离回归、实际固定运行副本和 Edge 模拟宿主桥检查；真实 Codex／Antigravity 桌面端渲染仍需宿主验收。更新安装后重载宿主连接，旧面板会失效。
 
@@ -109,6 +109,22 @@ codex plugin add agent-learning@agent-learning-local
 **重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 将 `$learningProject` 换成已有项目的绝对路径。这一绑定只决定控制卡显示范围；普通 MCP 工具仍按宿主当前工作区运行。已有安装可加同项目 `--workspace` 并使用 `install "$learningPlugin" --host codex --upgrade`；已绑定安装不可直接换项目，其他项目使用独立导出目录。随后选择 **Agent Learning 控制面板**：支持 MCP Apps 时显示按钮卡片；未开放该能力时，技能按当前已验证安装打开本机只读知识库，需要设置或审批再使用 `learning-review`。
+
+### Codex：点击打开，无需发送技能消息
+
+**原生侧栏：** 更新安装并重载 MCP 后，在支持插件 UI 的桌面端从当前会话的插件／侧栏菜单打开 **Agent Learning**。该入口直接加载页面；宿主必须传递可信线程标识，不使用“最新对话”猜测身份。入口未显示或宿主没有传递标识时，使用下面的 Actions。
+
+**项目顶部 Actions：** 完成核心安装后执行一次：
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
+```
+
+在项目 **Environment（本地环境）** 下拉菜单选择 **Agent Learning**，随后点击顶部 **Actions → Agent Learning** 即可直接打开本机控制台。命令只新增 `.codex/environments/agent-learning.toml` 及受管清单，保留已有环境、Setup 和 Actions；需要继续使用原环境时，将命令返回的 `manual_command` 添加为该环境的一项 Action。[官方 Actions 说明](https://learn.chatgpt.com/docs/environments/local-environment)
+
+自定义知识目录时，在相同 `ALP_HOME`、`ALP_CONFIG` 下登记，或显式传入 `--home` 与 `codex-action --config`，保持与 Hooks／MCP 一致；登记会固定这些路径。**核心更新后重新执行登记命令**；移除按钮使用同一命令加 `--remove`，不会删除知识或原环境配置。
+
+Actions 控制台仅监听 `127.0.0.1`，私有访问码由程序直接交给浏览器，不输出到对话；关闭运行它的集成终端会停止页面服务。打开、刷新和查看设置不调用生成模型，保存并开启管理员仍需用户确认。原生侧栏是否显示受桌面端功能支持影响；CLI 可使用 Actions 返回的命令或原有技能。
 
 ## 在 Antigravity 中安装（原生插件）
 
@@ -191,7 +207,7 @@ dsh plugin --profile "$learningProfile" add "$learningPlugin"
 
 | 想做什么 | 直接使用 |
 |---|---|
-| 打开项目快捷控制面板 | Codex 选择 **Agent Learning 控制面板**／发送 `$learning-panel`；Antigravity App 2.22+ 在当前会话 **Extensions → Agent Learning** 打开；DSH 点击「📖 知识库」。仅已绑定安装项目提供可执行按钮 |
+| 打开项目快捷控制面板 | Codex 从会话插件侧栏或 **Actions → Agent Learning** 直接打开，技能 `$learning-panel` 兼容；Antigravity App 在当前会话 **Extensions → Agent Learning** 打开；DSH 点击「📖 知识库」。仅已绑定安装项目提供可执行按钮 |
 | 检查接入、当前任务和管理员状态 | DSH 点击「📖 知识库」按键查看实时状态；Codex 输入框技能菜单选择 **Agent Learning 调试**，或发送「使用 `$learning-debug` 检查当前项目」 |
 | 日常任务复用项目经验 | 直接说明任务；插件在支持的事件中检索和记录，Agent 按需补查 |
 | 查看详细知识库 | DSH 点击「📖 知识库」→「打开可视化知识库（只读）」，或发送「使用 `$learning-browser` 打开当前项目知识库」 |
@@ -1234,6 +1250,8 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `doctor`、`backup`、`rebuild-index` | 按需存储检查、在线备份和派生索引重建 |
 | `semantic-status`、`semantic-refresh` | 查看向量完整度、显式增量刷新或重建 |
 | `browser` | 默认只读；`--review` 开启候选审批，`--admin-control` 开启管理员设置，`--language zh-CN\|en` 选择界面语言（main） |
+| `codex-action`、`codex-panel` | 显式登记项目顶部 Actions，或从已绑定项目直接运行本机控制台；不发送技能消息 |
+| `install-ui` | 登记 Antigravity 全局纯 UI 桥，项目核心与知识目录保留原位置 |
 | `evaluation-protocol`、`evaluation-run`、`evaluation-report` | 冻结成对实验、运行显式执行器、导入并汇总观测 |
 | `search`、`read` | 查询和读取正式知识 |
 | `work-search`、`work-read` | 检索工作历史轻索引，按修订分页读取摘要或可见证据 |

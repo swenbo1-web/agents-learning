@@ -46,7 +46,8 @@ class PackageTests(unittest.TestCase):
             with zipfile.ZipFile(wheels[0]) as wheel:
                 for module in ("semantic_retrieval", "knowledge_browser", "task_evaluation", "install_update", "software_updates", "history_sources", "history_import",
                                "work_memory", "work_files", "work_summaries", "dsh",
-                               "panel_control", "panel_ui", "panel_browser", "admin_diagnostics", "dsh_panel", "ui_install"):
+                               "panel_control", "panel_ui", "panel_browser", "admin_diagnostics", "dsh_panel", "ui_install",
+                               "codex_panel", "codex_actions"):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/README.en.md", wheel.namelist())

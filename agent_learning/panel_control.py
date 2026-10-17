@@ -93,10 +93,13 @@ def _project_for_workspace(runtime, workspace):
 
 
 class PanelControl:
-    def __init__(self, runtime, project, workspace, installation, require_context=True):
+    def __init__(self, runtime, project, workspace, installation, require_context=True, *, project_ui=False):
+        if type(project_ui) is not bool or project_ui and runtime.host != "codex":
+            raise ContractError("project UI authorization is available only for Codex")
         self.runtime, self.project = runtime, project
         self.workspace, self.installation = workspace, installation
-        self.require_context = require_context
+        self.project_ui = project_ui
+        self.require_context = require_context and not project_ui
         self.epoch, self.governance_epoch = runtime.session_epoch(), runtime.host_epoch()
         self.leases, self.requests = OrderedDict(), OrderedDict()
         self.browsers = {}
@@ -253,13 +256,24 @@ class PanelControl:
                     "project_usage": usage(state.get("project_usage")), "global_usage": usage(state.get("global_usage")),
                     "last_provider_failure": failure}}
 
-    def bootstrap(self, context_handle=None, workspace=None, conversation_id=None):
+    @staticmethod
+    def _ui_session(value):
+        return (isinstance(value, str) and 0 < len(value) <= 500 and value.strip() == value
+                and not any(ord(character) < 32 for character in value))
+
+    def bootstrap(self, context_handle=None, workspace=None, conversation_id=None, ui_session_id=None):
         if not self.eligible():
             return {"visible": False, "reason": self.reason}
         if workspace is not None and not same_workspace(workspace, self.binding["workspace"]):
             return {"visible": False, "reason": "project_panel_not_installed"}
-        if not self.require_context and (workspace is None or not isinstance(conversation_id, str)
-                                         or not conversation_id.strip() or len(conversation_id) > 500):
+        if self.project_ui:
+            if (workspace is None or not self._ui_session(ui_session_id)
+                    or context_handle is not None or conversation_id is not None):
+                return {"visible": False, "reason": "current_project_ui_required"}
+        elif ui_session_id is not None:
+            return {"visible": False, "reason": "panel_scope_mismatch"}
+        elif not self.require_context and (workspace is None or not isinstance(conversation_id, str)
+                                           or not conversation_id.strip() or len(conversation_id) > 500):
             return {"visible": False, "reason": "current_context_required"}
         try:
             context = self._context(context_handle)
@@ -273,10 +287,12 @@ class PanelControl:
         capability = secrets.token_hex(32)
         self.leases[capability] = {"expires": now + PANEL_SECONDS, "binding": dict(self.binding),
                                   "context_handle": context_handle, "conversation_id": conversation_id,
+                                  "ui_session_id": ui_session_id,
                                   "native_conversation": context["conversation_id"] if context else None}
-        return {"visible": True, "summary": self._summary(), "capability": capability}
+        return {"visible": True, "summary": self._summary(), "capability": capability,
+                **({"scope": "project"} if self.project_ui else {})}
 
-    def _verify(self, capability, context_handle, workspace, conversation_id):
+    def _verify(self, capability, context_handle, workspace, conversation_id, ui_session_id=None):
         if not isinstance(capability, str) or capability not in self.leases:
             raise ContractError("panel_access_expired")
         lease = self.leases[capability]
@@ -286,7 +302,13 @@ class PanelControl:
             raise ContractError("panel_access_expired")
         if workspace is not None and not same_workspace(workspace, self.binding["workspace"]):
             raise ContractError("panel_project_mismatch")
-        if self.require_context:
+        if self.project_ui:
+            if (workspace is None or not self._ui_session(ui_session_id) or ui_session_id != lease["ui_session_id"]
+                    or context_handle is not None or conversation_id is not None):
+                raise ContractError("panel_project_ui_mismatch")
+        elif ui_session_id is not None:
+            raise ContractError("panel_scope_mismatch")
+        elif self.require_context:
             if context_handle != lease["context_handle"]:
                 raise ContractError("panel_context_mismatch")
             self._context(context_handle)
@@ -325,12 +347,13 @@ class PanelControl:
             raise ContractError("panel_browser_open_failed")
 
     def action(self, capability, action, context_handle=None, workspace=None, conversation_id=None,
-               request_id=None, expected=None, preset=None, confirm=False):
-        self._verify(capability, context_handle, workspace, conversation_id)
+               request_id=None, expected=None, preset=None, confirm=False, ui_session_id=None):
+        self._verify(capability, context_handle, workspace, conversation_id, ui_session_id)
         if action not in ACTIONS:
             raise ContractError("unsupported panel action")
         if action in {"status", "debug"}:
             return {"visible": True, "summary": self._summary(),
+                    **({"scope": "project"} if self.project_ui else {}),
                     **({"diagnostics": self._debug(context_handle)} if action == "debug" else {})}
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
             raise ContractError("panel request identity is required")
@@ -354,7 +377,7 @@ class PanelControl:
                     or any(type(value) is not int or value < 0 for value in expected.values())):
                 raise ContractError("panel settings require the displayed versions")
         self.requests[key] = {"fingerprint": fingerprint, "result": None}
-        result = {"visible": True}
+        result = {"visible": True, **({"scope": "project"} if self.project_ui else {})}
         if action in {"open_browser", "open_review"}:
             self._open_browser(action == "open_review")
             result["opened"] = "review" if action == "open_review" else "browser"

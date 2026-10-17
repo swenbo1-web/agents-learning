@@ -39,13 +39,13 @@ You can inspect and control project memory visually without memorizing CLI flags
 | Visual Entry | Host & Location | What You Can Control Directly |
 |---|---|---|
 | **Composer “📖 Memory / 知识库” Button** | **DSH (DeepSeek Harness)**: automatically shown at the bottom-left of the chat input bar **only** in bound/installed projects (hidden in other projects) | Click to open the floating control panel: view the project name/path, published knowledge count, 1.0.0 work observations and pending cases; **one-click switch administrator frequency presets (Off / Minimal 5/d / Light 15/d / Balanced 100/d / Active 300/d)**; open the review console, read-only browser or absorb project history |
-| **Conversation control card** | **Codex**: choose **Agent Learning 控制面板** in the skill menu or send `$learning-panel`. Hosts declaring MCP Apps capability show a card; otherwise the skill opens the local knowledge page | Buttons check the connection, refresh status, open knowledge/review pages and explicitly confirm administrator presets or history archival. There is currently no custom permanent composer button |
+| **Codex direct console and card** | **Codex**: open **Agent Learning** from the conversation's plugin/side-panel menu on UI-capable desktop hosts, or register **Actions → Agent Learning** in the project top bar. `$learning-panel` remains a compatibility entry | Side-panel and Actions launches require no skill message. Buttons check the connection, refresh status, open knowledge/review pages and explicitly confirm administrator presets or history archival. There is no custom permanent composer button |
 | **Conversation side panel** | **Antigravity App 2.22+ with UI Extension support**: register and enable the global UI bridge below, then open **⋮ → Extensions → Agent Learning** | Sidecar buttons check the connection and provide the same controls; only explicitly registered project installations can connect. Unregistered or ambiguous workspaces and expired sessions have no actionable content |
 | **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
 
 **The new panels require an installation bound to the current project. A knowledge database entry alone is insufficient.** Explicitly pass `--workspace` when exporting the Codex installation; an older unbound global installation does not expose the card. Antigravity keeps the core in each project; its global UI bridge stores only explicitly registered installation locations and fingerprints, without a second set of Hooks, MCP tools or knowledge. Project mismatch, account changes, uninstall or installation replacement invalidate old capabilities. The host controls skill and Extensions lists: this plugin gates panel content and actions, but cannot guarantee that a global extension's menu label disappears in other projects.
 
-The first Codex skill invocation uses a model tool call. Subsequent panel operations connect directly to local code. Enabling the administrator uses platform allowance. **Usage and frequency limits are separate for each project; Codex, Antigravity and DSH share that project's ledger.** An independently displayed `ALP_HOME` safeguard can still stop new calls when the combined limit is reached. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval stays in the separate local WebUI. CLI and unsupported surfaces retain the existing debug, browser and review skills.
+Codex side-panel and project Actions launches run the UI locally, without a model turn, automatic chat messages or model-context updates; direct UI results stay in UI metadata. Skill launches still use a model tool call. Project controls grant no task execution permissions and show the current Hook binding as unknown unless verified. Enabling the administrator uses platform allowance. **Usage and frequency limits are separate for each project; Codex, Antigravity and DSH share that project's ledger.** An independently displayed `ALP_HOME` safeguard can still stop new calls when the combined limit is reached. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval stays in the separate local WebUI.
 
 The panels passed isolated regressions, actual fixed-runtime checks and Edge checks with simulated host bridges. Live Codex and Antigravity desktop rendering still needs host acceptance. Reload the host connection after an installation update; old panels expire.
 
@@ -116,6 +116,22 @@ codex plugin add agent-learning@agent-learning-local
 **Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
 Replace `$learningProject` with your existing project's absolute path. This binding scopes the control card; ordinary MCP tools keep using the host's current workspace. Existing exports can add that project with matching-host `install --upgrade`. A bound export cannot be reassigned to another project; use a separate export directory. Choose **Agent Learning 控制面板**: MCP Apps hosts show a button card; otherwise the skill uses the verified installation to open the local read-only knowledge page. Use `learning-review` for settings or approvals.
+
+### Codex: click to open without a skill message
+
+**Native side panel:** after updating the installation and reloading MCP, open **Agent Learning** from the current conversation's plugin/side-panel menu in a UI-capable desktop host. It loads the page directly and requires a trusted host thread identifier; it never guesses the latest conversation. If the entry is absent or thread metadata is unavailable, use Actions below.
+
+**Project top-bar Actions:** after installing the core, run once:
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
+```
+
+Select **Agent Learning** in the project's local **Environment** menu, then click **Actions → Agent Learning** to open the local console. Registration creates only `.codex/environments/agent-learning.toml` and its managed manifest, preserving existing environments, Setup and Actions. To keep your current environment selected, add the returned `manual_command` as an Action there instead. [Official Actions guide](https://learn.chatgpt.com/docs/environments/local-environment)
+
+For custom data locations, register under the same `ALP_HOME` and `ALP_CONFIG`, or explicitly supply `--home` and `codex-action --config`, matching Hooks and MCP; registration pins those paths. **Repeat registration after a core update.** Add `--remove` to unregister without deleting knowledge or existing environment configuration.
+
+The Actions console listens only on `127.0.0.1`; a private access code goes directly to the browser and is not printed into chat. Closing its integrated terminal stops the page server. Opening, refreshing and inspecting settings make no generative-model call; enabling the administrator still requires user confirmation. Native side-panel visibility depends on desktop support. CLI users can run the returned command or use the existing skills.
 
 ## Install in Antigravity (native plugin)
 
@@ -196,7 +212,7 @@ In a new project conversation, use the visual button, select a skill, or send on
 
 | I want to… | Use |
 |---|---|
-| Open project quick controls | In Codex, choose **Agent Learning 控制面板** or send `$learning-panel`; in Antigravity App 2.22+, open **Extensions → Agent Learning** in the current conversation; in DSH, click **📖 Memory**. Actionable controls require a matching project installation |
+| Open project quick controls | In Codex, open the conversation plugin side panel or **Actions → Agent Learning** directly; `$learning-panel` is the compatibility entry. In Antigravity App, open **Extensions → Agent Learning**; in DSH, click **📖 Memory**. Actionable controls require a matching project installation |
 | Check integration, task and administrator status | Click **📖 Memory / 知识库** in DSH; select **Agent Learning 调试** in the Codex input skill menu, or say “Use `$learning-debug` to check this project” |
 | Reuse project experience during a task | Describe the task; supported events retrieve and record observations, and the Agent can search further |
 | Browse detailed knowledge | Click **Open Visual Knowledge Browser (Read-Only)** in the DSH **📖 Memory** button popover, or say “Use `$learning-browser` to open this project's knowledge base” |

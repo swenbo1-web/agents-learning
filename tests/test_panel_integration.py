@@ -40,9 +40,9 @@ class PanelIntegrationTests(unittest.TestCase):
         self.runtime = Runtime(self.home, config={})
         self.addCleanup(self.runtime.close)
 
-    def client(self, workspace, *, ui=True):
+    def client(self, workspace, *, ui=True, register_context=True):
         project = self.runtime.project(workspace)
-        handle = self.runtime.register_context(project, "native-chat")["context_handle"]
+        handle = self.runtime.register_context(project, "native-chat")["context_handle"] if register_context else None
         env = {**os.environ, "ALP_HOME": str(self.home), "ALP_CONFIG": str(self.config),
                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"}
         env.pop("ALP_DISABLED", None)
@@ -117,6 +117,8 @@ class PanelIntegrationTests(unittest.TestCase):
         names = {tool["name"] for tool in request("tools/list")["tools"]}
         self.assertNotIn("learning_panel", names)
         self.assertNotIn("learning_panel_action", names)
+        self.assertNotIn("learning_panel_open", names)
+        self.assertNotIn("learning_panel_direct_action", names)
         self.assertIn("knowledge_search", names)
 
     def test_fixed_runtime_without_ui_returns_only_verified_browser_launch_information(self):
@@ -136,4 +138,39 @@ class PanelIntegrationTests(unittest.TestCase):
                          ("codex", "default", "read_only"))
         self.assertNotIn(handle, json.dumps(opened))
         self.assertNotIn("capability", json.dumps(opened))
+        self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_project_menu_bootstraps_without_creating_a_work_context_or_model_call(self):
+        request, handle = self.client(self.workspace, ui=False, register_context=False)
+        self.assertIsNone(handle)
+        self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM contexts").fetchone()[0], 0)
+        tools = {tool["name"]: tool for tool in request("tools/list")["tools"]}
+        self.assertEqual(tools["learning_panel_open"]["_meta"]["ui"]["visibility"], ["app"])
+        resource_uri = tools["learning_panel_open"]["_meta"]["ui"]["resourceUri"]
+        resource = request("resources/read", {"uri": resource_uri})["contents"][0]
+        self.assertIn("const launchMode='direct'", resource["text"])
+        missing = request("tools/call", {"name": "learning_panel_open", "arguments": {}})
+        self.assertTrue(missing["isError"])
+        self.assertEqual(missing["content"], [])
+        self.assertNotIn("structuredContent", missing)
+        meta = {"thread_id": "isolated-project-ui", "threadId": "isolated-project-ui"}
+        opened = request("tools/call", {"name": "learning_panel_open", "arguments": {}, "_meta": meta})
+        self.assertFalse(opened["isError"])
+        self.assertEqual(opened["content"], [])
+        self.assertNotIn("structuredContent", opened)
+        private = opened["_meta"]["agentLearningPanel"]
+        self.assertTrue(private["visible"])
+        self.assertEqual(private["scope"], "project")
+        self.assertNotIn("context_handle", private)
+        args = {"capability": private["capability"], "action": "debug"}
+        checked = request("tools/call", {"name": "learning_panel_direct_action", "arguments": args, "_meta": meta})
+        self.assertFalse(checked["isError"])
+        self.assertEqual(checked["content"], [])
+        self.assertNotIn("structuredContent", checked)
+        self.assertEqual(checked["_meta"]["agentLearningPanel"]["diagnostics"]["connection"]["hook"], "unknown")
+        denied = request("tools/call", {"name": "learning_panel_direct_action", "arguments": args,
+                                       "_meta": {"threadId": "different-ui-session"}})
+        self.assertTrue(denied["isError"])
+        self.assertEqual(denied["content"], [])
+        self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM contexts").fetchone()[0], 0)
         self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)

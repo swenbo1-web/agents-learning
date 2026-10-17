@@ -37,6 +37,15 @@ PANEL_TOOLS = [
              "preset": {"type": "string", "enum": ["off", "minimal", "light", "balanced", "active"]},
              "confirm": {"type": "boolean"}}, ("capability", "context_handle", "action"))),
 ]
+DIRECT_PANEL_TOOLS = [
+    ("learning_panel_open", "从当前项目的插件菜单打开可视化控制台；仅供宿主界面直接调用，不调用模型。",
+     schema({})),
+    ("learning_panel_direct_action", "仅供已验证项目控制台按钮使用；需要私有能力及宿主提供的当前界面会话。",
+     schema({key: value for key, value in PANEL_TOOLS[1][2]["properties"].items() if key != "context_handle"},
+            ("capability", "action"))),
+]
+PANEL_TOOL_NAMES = {entry[0] for entry in PANEL_TOOLS + DIRECT_PANEL_TOOLS}
+DIRECT_PANEL_TOOL_NAMES = {entry[0] for entry in DIRECT_PANEL_TOOLS}
 KNOWLEDGE_FILTERS = schema({**{key: NONEMPTY for key in sorted(METADATA_KEYS)},
                             "category": CATEGORY, "knowledge_kind": KNOWLEDGE_KIND})
 TASK_SCOPE = {"type": "object", "additionalProperties": True, "properties": {
@@ -180,6 +189,12 @@ class _PanelResult(dict):
         self.panel_private = private
 
 
+class _DirectPanelResult(_PanelResult):
+    """A UI-only result has no model-visible body or structured content."""
+    def __init__(self, private):
+        super().__init__({}, private)
+
+
 def error_response(ident, code, message, data=None):
     error = {"code": code, "message": message}
     if data is not None:
@@ -206,15 +221,44 @@ class Server:
         self.state, self.protocol_version = "new", None
         self.tools = {name: (description, contract) for name, description, contract in
                       WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])}
-        self.panel, self.panel_ui_supported = None, False
+        self.panel, self.direct_panel, self.panel_ui_supported = None, None, False
         if panel_installation is not None and role == "worker":
             from .panel_control import PanelControl
             self.panel = PanelControl(runtime, project, workspace, panel_installation, require_context=True)
             if self.panel.eligible():
                 self.tools[PANEL_TOOLS[0][0]] = PANEL_TOOLS[0][1:]
+                if runtime.host == "codex":
+                    # Codex 的本地桥不一定声明 iframe 扩展；原生菜单描述与旧卡片协商分别处理。
+                    self.direct_panel = PanelControl(runtime, project, workspace, panel_installation,
+                                                     require_context=False, project_ui=True)
+                    if self._direct_panel_eligible():
+                        self.tools.update({name: (description, contract) for name, description, contract in DIRECT_PANEL_TOOLS})
 
     def _panel_eligible(self):
         return self.panel is not None and self.panel.eligible()
+
+    def _direct_panel_eligible(self):
+        return self.direct_panel is not None and self.direct_panel.eligible()
+
+    def _direct_panel_call(self, name, args, request_meta):
+        if not self._direct_panel_eligible():
+            raise ContractError("project_panel_not_installed")
+        # 由 Codex 的宿主桥覆盖写入；不从工具参数、iframe hostContext 或历史句柄推断。
+        if not isinstance(request_meta, dict):
+            raise ContractError("trusted_ui_session_required_use_project_action")
+        sessions = [request_meta[key] for key in ("thread_id", "threadId") if key in request_meta]
+        if (not sessions or any(not isinstance(value, str) or not value or len(value) > 500
+                               or value.strip() != value or any(ord(char) < 32 for char in value)
+                               for value in sessions) or len(set(sessions)) != 1):
+            raise ContractError("trusted_ui_session_required_use_project_action")
+        ui_session_id = sessions[0]
+        if name == "learning_panel_open":
+            result = self.direct_panel.bootstrap(workspace=self.workspace, ui_session_id=ui_session_id)
+        else:
+            result = self.direct_panel.action(args["capability"], args["action"], workspace=self.workspace,
+                ui_session_id=ui_session_id, request_id=args.get("request_id"), expected=args.get("expected"),
+                preset=args.get("preset"), confirm=args.get("confirm", False))
+        return _DirectPanelResult({**result, "scope": "project"})
 
     def _panel_call(self, name, args):
         if not self._panel_eligible():
@@ -260,6 +304,8 @@ class Server:
     def close(self):
         if self.panel is not None:
             self.panel.close()
+        if self.direct_panel is not None:
+            self.direct_panel.close()
 
     def _check_epoch(self):
         if (self.runtime.session_epoch() != self.epoch
@@ -278,13 +324,15 @@ class Server:
         if not self.per_request_context:
             self.context_handle = handle
 
-    def call(self, name, args):
+    def call(self, name, args, *, request_meta=None):
         self._check_epoch()
         if not isinstance(name, str):
             raise ProtocolError(-32602, "tool name must be a string")
         if name not in self.tools:
             raise ProtocolError(-32602, "unknown tool")
         validate(args, self.tools[name][1])
+        if name in DIRECT_PANEL_TOOL_NAMES:
+            return self._direct_panel_call(name, args, request_meta)
         if name in {"learning_panel", "learning_panel_action"}:
             return self._panel_call(name, args)
         p, r = self.project, self.runtime
@@ -421,10 +469,12 @@ class Server:
                     isinstance(extension.get("mimeTypes"), list) and MIME_TYPE in extension["mimeTypes"])
                 if self._panel_eligible() and self.panel_ui_supported:
                     self.tools[PANEL_TOOLS[1][0]] = PANEL_TOOLS[1][1:]
+                    if self._direct_panel_eligible():
+                        self.tools.update({name: (description, contract) for name, description, contract in DIRECT_PANEL_TOOLS})
                 self.state = "negotiated"
                 result = {"protocolVersion": self.protocol_version, "capabilities": {"tools": {}},
                           "serverInfo": {"name": "agent-learning", "version": __version__}}
-                if self._panel_eligible() and self.panel_ui_supported:
+                if self._panel_eligible() and (self.panel_ui_supported or self._direct_panel_eligible()):
                     result["capabilities"]["resources"] = {}
             elif method == "ping":
                 result = {}
@@ -433,7 +483,9 @@ class Server:
             elif method == "tools/list":
                 result = {"tools": []}
                 for name, (description, contract) in self.tools.items():
-                    if name in {"learning_panel", "learning_panel_action"} and not self._panel_eligible():
+                    if name in PANEL_TOOL_NAMES and not self._panel_eligible():
+                        continue
+                    if name in DIRECT_PANEL_TOOL_NAMES and not self._direct_panel_eligible():
                         continue
                     tool = {"name": name, "description": description, "inputSchema": contract}
                     if name == "learning_panel" and self.panel_ui_supported:
@@ -443,25 +495,43 @@ class Server:
                     elif name == "learning_panel_action":
                         tool.update(annotations={"readOnlyHint": False, "openWorldHint": False},
                                     _meta={"ui": {"visibility": ["app"]}})
+                    elif name == "learning_panel_open":
+                        from .panel_ui import DIRECT_RESOURCE_URI
+                        tool.update(title="Agent Learning", annotations={"readOnlyHint": True, "openWorldHint": False},
+                                    _meta={"ui": {"resourceUri": DIRECT_RESOURCE_URI, "visibility": ["app"]},
+                                           "openai/ui": {"entrypoints": [{"type": "thread"}]}})
+                    elif name == "learning_panel_direct_action":
+                        tool.update(annotations={"readOnlyHint": False, "openWorldHint": False},
+                                    _meta={"ui": {"visibility": ["app"]}})
                     result["tools"].append(tool)
-            elif method in {"resources/list", "resources/read"} and self.panel_ui_supported and self.panel is not None:
-                from .panel_ui import MIME_TYPE, RESOURCE_URI, resource_content
+            elif (method in {"resources/list", "resources/read"} and self.panel is not None
+                  and (self.panel_ui_supported or self._direct_panel_eligible())):
+                from .panel_ui import DIRECT_RESOURCE_URI, MIME_TYPE, RESOURCE_URI, resource_content
                 if not self._panel_eligible():
                     if method == "resources/read":
                         raise ProtocolError(-32602, "panel resource is unavailable")
                     result = {"resources": []}
                 elif method == "resources/list":
-                    result = {"resources": [{"uri": RESOURCE_URI, "name": "Agent Learning control panel",
-                                             "mimeType": MIME_TYPE}]}
+                    result = {"resources": ([{"uri": RESOURCE_URI, "name": "Agent Learning control panel",
+                                              "mimeType": MIME_TYPE}] if self.panel_ui_supported else [])}
+                    if self._direct_panel_eligible():
+                        result["resources"].append({"uri": DIRECT_RESOURCE_URI,
+                            "name": "Agent Learning project controls", "mimeType": MIME_TYPE})
                 else:
-                    if params.get("uri") != RESOURCE_URI or set(params) - {"uri", "_meta"}:
+                    uris = ({RESOURCE_URI} if self.panel_ui_supported else set())
+                    if self._direct_panel_eligible():
+                        uris.add(DIRECT_RESOURCE_URI)
+                    if params.get("uri") not in uris or set(params) - {"uri", "_meta"}:
                         raise ProtocolError(-32602, "unknown panel resource")
-                    result = {"contents": [resource_content()]}
+                    result = {"contents": [resource_content(direct=params.get("uri") == DIRECT_RESOURCE_URI)]}
             elif method == "tools/call":
                 if not isinstance(params.get("name"), str) or not isinstance(params.get("arguments", {}), dict):
                     raise ProtocolError(-32602, "tools/call requires a string name and object arguments")
                 try:
-                    body = self.call(params["name"], params.get("arguments", {}))
+                    body = self.call(params["name"], params.get("arguments", {}), request_meta=params.get("_meta"))
+                    if isinstance(body, _DirectPanelResult):
+                        return {"jsonrpc": "2.0", "id": ident, "result": {"content": [], "isError": False,
+                            "_meta": {"agentLearningPanel": body.panel_private}}}
                     result = {"content": [{"type": "text", "text": encode(body)}], "isError": False}
                     # 旧协议保留文本结果；新版同时提供机器可直接读取的结构化结果。
                     if self.protocol_version in {"2025-06-18", "2025-11-25"} and isinstance(body, dict):
@@ -473,7 +543,11 @@ class Server:
                 except ContractError as exc:
                     if str(exc).startswith("reconnect_required"):
                         raise ProtocolError(-32001, "reconnect_required", {"reason": "host_epoch_changed"}) from exc
-                    result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+                    if params["name"] in DIRECT_PANEL_TOOL_NAMES:
+                        result = {"content": [], "isError": True, "_meta": {"agentLearningPanel": {
+                            "visible": False, "scope": "project", "reason": str(exc)}}}
+                    else:
+                        result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
             else:
                 raise ProtocolError(-32601, "method not found")
             return {"jsonrpc": "2.0", "id": ident, "result": result}
