@@ -180,6 +180,6 @@ def install_action(installation, workspace=None, remove=False, *, home=None, con
             "home": str(home), "config": str(config), "manual_command": command,
             "select_environment": "Agent Learning", "selected_automatically": False,
             "administrator_started": False,
-            "next_step": "Select Agent Learning in the project's local Environment menu, then click its top-bar Action. "
-                         "To keep your current environment, add manual_command as an Action there instead. "
+            "next_step": "If the host exposes local environments and Actions, select Agent Learning there. "
+                         "Otherwise run manual_command in a terminal opened at this workspace. "
                          "Opening the console starts no administrator model."}

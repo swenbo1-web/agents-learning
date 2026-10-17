@@ -107,16 +107,22 @@ def parser():
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
     serve.add_argument("--context-handle", help="受信显式绑定句柄；Codex可使用ALP_CONTEXT_HANDLE，Antigravity不继承环境句柄")
     serve.add_argument("--panel-installation", help="Codex可视化面板对应的已验证项目安装目录")
+    serve.add_argument("--panel-discovery", action="store_true", help="向Codex宿主目录声明只读UI入口；实际操作仍须当前项目的安装绑定")
     panel = sub.add_parser("panel-serve", help="供原生宿主界面调用的有限JSON控制桥，不执行任意命令")
     panel.add_argument("--installation", required=True, help="当前项目的原生插件安装目录")
-    codex_panel = sub.add_parser("codex-panel", help="从项目Actions直接打开本机控制台；不发送对话或调用模型")
+    codex_panel = sub.add_parser("codex-panel", help="打开当前项目的本机控制台；不发送对话或调用模型")
     codex_panel.add_argument("--installation", required=True, help="当前项目已验证的Codex插件导出目录")
     codex_panel.add_argument("--port", type=int, default=0, help="本机端口，默认随机分配")
     codex_panel.add_argument("--no-open", action="store_true", help="不自动打开浏览器；不输出私有访问码")
-    codex_action = sub.add_parser("codex-action", help="显式登记项目顶部Actions控制台入口，保留原有环境配置")
+    codex_action = sub.add_parser("codex-action", help="登记宿主可选的本地环境Action，保留原有环境配置")
     codex_action.add_argument("--installation", required=True, help="已绑定当前项目的Codex插件导出目录")
     codex_action.add_argument("--config", help="与该项目Hooks及MCP一致的配置文件；省略沿用ALP_CONFIG")
     codex_action.add_argument("--remove", action="store_true", help="仅移除未被修改的受管Actions环境文件")
+    codex_connect = sub.add_parser("codex-connect", help="接线当前项目MCP和宿主级只读面板入口，保留其他配置")
+    codex_connect.add_argument("--installation", required=True, help="已绑定当前项目的Codex插件导出目录")
+    codex_connect.add_argument("--config", help="与Hooks一致的Agent Learning配置文件")
+    codex_connect.add_argument("--codex-home", help="Codex配置目录；默认CODEX_HOME或~/.codex")
+    codex_connect.add_argument("--check", action="store_true", help="只读核对接线，不创建数据或调用模型")
     bind = sub.add_parser("session-bind", help="本地受信任入口登记宿主会话，不读取账户凭证")
     bind.add_argument("--conversation", required=True)
     bind.add_argument("--agent-id")
@@ -298,11 +304,15 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
-    if args.command in {"codex-action", "codex-panel"}:
+    if args.command in {"codex-action", "codex-panel", "codex-connect"}:
         try:
             if args.host != "codex":
                 raise ContractError("Codex visual controls require --host codex")
-            if args.command == "codex-action":
+            if args.command == "codex-connect":
+                from .codex_connect import connect
+                print(encode(connect(args.installation, workspace=args.workspace, home=args.home,
+                    config=args.config, codex_home=args.codex_home, check=args.check)))
+            elif args.command == "codex-action":
                 from .codex_actions import install_action
                 print(encode(install_action(args.installation, workspace=args.workspace, home=args.home,
                     config=args.config, host_instance=args.host_instance, remove=args.remove)))
@@ -455,7 +465,7 @@ def main(argv=None):
             if handle is None and args.host == "codex":
                 handle = os.environ.get("ALP_CONTEXT_HANDLE")
             Server(runtime, project, args.role, context_handle=handle, workspace=args.workspace,
-                   panel_installation=args.panel_installation).serve()
+                   panel_installation=args.panel_installation, panel_discovery=args.panel_discovery).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
         elif args.command == "history-prepare":

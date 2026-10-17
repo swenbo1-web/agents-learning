@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_learning.mcp import PANEL_TOOL_NAMES, Server
-from agent_learning.panel_ui import DIRECT_RESOURCE_URI, MIME_TYPE, RESOURCE_URI, UI_EXTENSION
+from agent_learning.panel_ui import DIRECT_COMPAT_RESOURCE_URI, DIRECT_RESOURCE_URI, MIME_TYPE, RESOURCE_URI, UI_EXTENSION
 from agent_learning.runtime import ContractError
 
 
@@ -83,9 +83,10 @@ class PanelMCPTests(unittest.TestCase):
         self.ident += 1
         return server.request({"jsonrpc": "2.0", "id": self.ident, "method": method, "params": params or {}})
 
-    def ready(self, *, install=True, ui=True, version="2025-11-25", role="worker", handle=None):
+    def ready(self, *, install=True, ui=True, version="2025-11-25", role="worker", handle=None, discovery=False):
         server = Server(self.runtime, "project", workspace="project-path", role=role,
-                        context_handle=handle, panel_installation="export-path" if install else None)
+                        context_handle=handle, panel_installation="export-path" if install else None,
+                        panel_discovery=discovery)
         capabilities = {"extensions": {UI_EXTENSION: {"mimeTypes": [MIME_TYPE]}}} if ui else {}
         result = self.request(server, "initialize", {"protocolVersion": version, "capabilities": capabilities,
                    "clientInfo": {"name": "offline-ui", "version": "1"}})
@@ -96,6 +97,37 @@ class PanelMCPTests(unittest.TestCase):
     def tool(self, server, name, args=None, *, meta=None):
         return self.request(server, "tools/call", {"name": name, "arguments": args or {},
                                                   **({"_meta": meta} if meta is not None else {})})
+
+    def test_host_catalog_advertises_ui_but_does_not_grant_project_access(self):
+        server, initialized = self.ready(install=False, ui=False, discovery=True)
+        self.assertIn("resources", initialized["capabilities"])
+        tools = {t["name"]: t for t in self.request(server, "tools/list")["result"]["tools"]}
+        self.assertEqual(tools["learning_panel_open"]["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
+        self.assertEqual(tools["learning_panel_open"]["_meta"]["ui"]["visibility"], ["app"])
+        resources = self.request(server, "resources/list")["result"]["resources"]
+        self.assertEqual([r["uri"] for r in resources], [DIRECT_RESOURCE_URI])
+        self.assertNotIn("error", self.request(server, "resources/read", {"uri": DIRECT_RESOURCE_URI}))
+        old = self.request(server, "resources/read", {"uri": DIRECT_COMPAT_RESOURCE_URI})["result"]["contents"][0]
+        self.assertEqual(old["uri"], DIRECT_COMPAT_RESOURCE_URI)
+        self.assertIn("Reconnect (no model call)", old["text"])
+        self.assertNotEqual(DIRECT_COMPAT_RESOURCE_URI, DIRECT_RESOURCE_URI)
+        self.assertIn("error", self.request(server, "resources/read", {"uri": RESOURCE_URI}))
+        result = self.tool(server, "learning_panel_open", meta={"thread_id": "uninstalled-chat"})["result"]
+        self.assertEqual(result["content"], [])
+        self.assertNotIn("structuredContent", result)
+        self.assertFalse(result["_meta"]["agentLearningPanel"]["visible"])
+        self.assertNotIn("summary", result["_meta"]["agentLearningPanel"])
+        denied = self.tool(server, "learning_panel_direct_action", {"capability": "foreign", "action": "debug"},
+                           meta={"thread_id": "uninstalled-chat"})["result"]
+        self.assertTrue(denied["isError"])
+        self.assertIsNone(server.direct_panel)
+
+    def test_discovery_cannot_be_enabled_for_admin_or_other_hosts(self):
+        with self.assertRaises(ContractError):
+            Server(self.runtime, "project", role="admin", panel_discovery=True)
+        self.runtime.host = "antigravity"
+        with self.assertRaises(ContractError):
+            Server(self.runtime, "project", panel_discovery=True)
 
     def test_no_install_or_admin_role_keeps_legacy_tools_only(self):
         for kwargs in ({"install": False}, {"role": "admin"}):

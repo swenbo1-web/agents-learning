@@ -37,15 +37,15 @@ Python **3.10+** · 本地 SQLite · [MIT](LICENSE) · [正式版 v1.0.0](https:
 | 控制方式 | 适用宿主与入口位置 | 可直接执行的可视化操作 |
 |---|---|---|
 | **聊天框「📖 知识库」实体按键** | **DSH（DeepSeek Harness）**：仅在已安装绑定的项目聊天框左下角工具栏自动显示，未接入的其他项目自动隐藏 | 点击弹出浮动控制面板：实时查看当前项目名称／路径、正式知识数、1.0.0 工作观察数与待审案例数；**一键切换管理员调用频率方案（关闭／按需 5次/天／省流 15次/天／均衡 100次/天／积极 300次/天）**；一键打开知识审批台、只读知识库或吸收项目历史 |
-| **Codex 直接控制台与卡片** | **Codex**：支持插件 UI 的桌面端从当前会话的插件／侧栏入口打开 **Agent Learning**；也可登记项目顶部 **Actions → Agent Learning**。技能 `$learning-panel` 作为兼容入口 | 侧栏与 Actions 首次打开都无需发送技能消息。按钮直接检查接入、刷新状态、打开知识库或审批设置；确认后设置管理员频率或归档历史。当前没有输入框旁的常驻自定义按键 |
+| **Codex 直接控制台与卡片** | **Codex**：完成 `codex-connect` 后，在支持 MCP Apps 的桌面端从对话右侧内容区的“新建标签页”菜单打开 **Agent Learning**；也可直接运行项目控制台。技能 `$learning-panel` 作为兼容入口 | 菜单名称由宿主全局发现，只有已安装并接线的当前项目显示控制按钮。打开、调试和重新连接无需发送聊天消息；确认后设置管理员频率或归档历史。当前没有输入框旁的常驻自定义按键 |
 | **对话侧边控制面板** | **支持 UI Extension 的 Antigravity App 2.22+**：完成下方全局 UI 桥登记并启用后，在当前项目会话 **⋮ → Extensions → Agent Learning** 打开 | Sidecar 按钮直接检查接入并提供相同操作；仅连接明确登记的项目安装，未登记项目、多工作区或失效会话不提供可执行内容 |
 | **本机可视化 WebUI 控制中心** | **Codex / Antigravity / DSH 共用**（仅监听 `127.0.0.1`，支持简体中文／English 离线切换） | 顶部直接展示可读项目名称与路径（`项目名 (磁盘路径) · ID`）；分栏查看**正式知识、候选审批、事件时间线、管理员待办、管理员设置**；支持预览并批量批准／拒绝／暂缓候选知识，提供 **4 套简单通用的管理员调用频率方案**及可展开的 **4 项高级细致参数微调** |
 
-**新增面板按安装项目限制显示与执行，知识库里已有项目记录不等于安装。** Codex 安装时显式传入 `--workspace` 绑定面板；未绑定的旧全局安装不显示控制卡，可继续用原有工具。Antigravity 的核心插件保留在项目内，全局 UI 桥只保存用户明确登记的安装位置及指纹，不加载第二套 Hooks、MCP 或知识库。项目不匹配、换号、卸载或安装变化会使旧面板能力失效。宿主自带的技能／Extensions 列表由宿主管理；本插件控制的是项目内面板与可执行按钮，不能保证全局扩展名称在其他项目的菜单中消失。
+**控制按钮与知识按安装项目限制，知识库里已有项目记录不等于安装。** Codex 的 Agent Learning 菜单名称可以全局可见；`codex-connect` 分别接线全局只读入口和当前项目连接，未接入项目只显示安装提示，不展示其他项目的知识或操作。Antigravity 的核心插件保留在项目内，全局 UI 桥只保存用户明确登记的安装位置及指纹，不加载第二套 Hooks、MCP 或知识库。换号、卸载或安装变化会使旧面板失效。普通连接到期后可在界面点击“重新连接”，不重放之前的设置或归档操作。
 
 Codex 侧栏和项目 Actions 直接运行本地界面，不启动模型回合、不自动发送聊天消息或写入模型上下文；直接 UI 的结果仅返回界面。技能启动仍经过模型工具调用。项目控制台不继承任务执行权限，当前 Hook 绑定未核实时显示未知。开启管理员会使用平台额度；**调用次数和管理员档位按项目独立统计、设置，同一项目的三个宿主合并计账**。同一 `ALP_HOME` 的全局总保护另行显示，达到总保护上限仍会暂停新调用。**历史按钮仅归档默认项目资料，不调用模型、不生成或发布知识**；界面分别显示归档与后续审核。详细审批继续在独立本机网页中确认。
 
-本次面板通过隔离回归、实际固定运行副本和 Edge 模拟宿主桥检查；真实 Codex／Antigravity 桌面端渲染仍需宿主验收。更新安装后重载宿主连接，旧面板会失效。
+面板通过隔离回归、实际固定运行副本和 Edge 模拟宿主桥检查；Codex 宿主目录发现、双项目路由及跨项目拒绝另由实际 App Server 验证，未启动模型回合。真实 Codex／Antigravity 桌面菜单与渲染仍需宿主验收。更新安装后重载连接，旧页面需重新打开。
 
 ### 1. 聊天框「📖 知识库」实体按键与快捷控制面板（DSH）
 
@@ -104,23 +104,37 @@ $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host codex --hook-mode observe
 codex plugin marketplace add "$learningPlugin"
 codex plugin add agent-learning@agent-learning-local
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin"
 ```
 
 **重启 Codex → 确认插件启用并审阅、信任 Hooks → 在目标项目开启新对话。** [官方 CLI 插件命令](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
-将 `$learningProject` 换成已有项目的绝对路径。这一绑定只决定控制卡显示范围；普通 MCP 工具仍按宿主当前工作区运行。已有安装可加同项目 `--workspace` 并使用 `install "$learningPlugin" --host codex --upgrade`；已绑定安装不可直接换项目，其他项目使用独立导出目录。随后选择 **Agent Learning 控制面板**：支持 MCP Apps 时显示按钮卡片；未开放该能力时，技能按当前已验证安装打开本机只读知识库，需要设置或审批再使用 `learning-review`。
+将 `$learningProject` 换成已有项目的绝对路径。`codex-connect` 根据安装回执更新当前项目 `.codex/config.toml` 和 `CODEX_HOME/config.toml` 中的相关 MCP 字段，保留其他配置，原文备份到 `CODEX_HOME/agent-learning-backups/`；不修改 Hook 信任、不开启管理员。已有安装先用相同项目 `install "$learningPlugin" --host codex --upgrade` 更新，再执行 `codex-connect`。其他项目使用独立导出目录并分别接线；同一数据目录下的项目知识仍分别管理。
 
 ### Codex：点击打开，无需发送技能消息
 
-**原生侧栏：** 更新安装并重载 MCP 后，在支持插件 UI 的桌面端从当前会话的插件／侧栏菜单打开 **Agent Learning**。该入口直接加载页面；宿主必须传递可信线程标识，不使用“最新对话”猜测身份。入口未显示或宿主没有传递标识时，使用下面的 Actions。
+**原生侧栏：** 更新、接线并重载 MCP 后，在提供 MCP Apps 菜单的桌面端，从对话右侧内容区的“新建标签页”入口选择 **Agent Learning**。全局连接只声明入口，实际操作经当前对话的项目连接校验，不使用“最新对话”猜测身份。连接五分钟到期后直接点击“重新连接”。
 
-**项目顶部 Actions：** 完成核心安装后执行一次：
+**只读检查接线：** 菜单没有出现时先运行；配置正确不等于桌面已完成渲染验收。
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin" --check
+```
+
+**终端直接打开：** 当前桌面没有菜单时，在目标项目终端运行固定副本；此操作不发送聊天或调用模型。
+
+```powershell
+$learningReceipt = Get-Content (Join-Path $learningPlugin "runtime-release.json") -Raw | ConvertFrom-Json
+& $learningReceipt.python -B (Join-Path $learningReceipt.runtime_directory "scripts/learning.py") --workspace "$learningProject" codex-panel --installation "$learningPlugin"
+```
+
+**可选 Actions：** 仅在宿主提供本地 Environment／Actions 功能时登记：
 
 ```powershell
 python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
 ```
 
-在项目 **Environment（本地环境）** 下拉菜单选择 **Agent Learning**，随后点击顶部 **Actions → Agent Learning** 即可直接打开本机控制台。命令只新增 `.codex/environments/agent-learning.toml` 及受管清单，保留已有环境、Setup 和 Actions；需要继续使用原环境时，将命令返回的 `manual_command` 添加为该环境的一项 Action。[官方 Actions 说明](https://learn.chatgpt.com/docs/environments/local-environment)
+登记只新增 `.codex/environments/agent-learning.toml` 及受管清单，保留已有环境、Setup 和 Actions；不会自动选择环境，也不能给缺少这项宿主功能的界面添加顶部按钮。支持该功能时选择此环境，或将返回的 `manual_command` 加到已有环境。[官方 Actions 说明](https://learn.chatgpt.com/docs/environments/local-environment)
 
 自定义知识目录时，在相同 `ALP_HOME`、`ALP_CONFIG` 下登记，或显式传入 `--home` 与 `codex-action --config`，保持与 Hooks／MCP 一致；登记会固定这些路径。**核心更新后重新执行登记命令**；移除按钮使用同一命令加 `--remove`，不会删除知识或原环境配置。
 
@@ -549,22 +563,13 @@ Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作�
 
    macOS／Linux 需在启动宿主的环境中设置同一变量；仅在一个终端 `export` 不会修改已运行的桌面进程。若使用 `ALP_CONFIG`，也以同样方式配置它。
 
-2. 导出安装后，在实际 `CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）合并下面配置。`command` 使用导出目录 `runtime-release.json` 的 `python`；脚本使用其中 `runtime_directory` 下的 `scripts/learning.py`。已有同名条目时修改原条目，保留其他设置。示例中的解释器、脚本、知识目录和安装目录路径都需替换：
+2. 导出安装后执行自动接线，显式沿用同一知识目录和当前项目安装：
 
-   ```toml
-   [plugins."agent-learning@agent-learning-local".mcp_servers.agent_learning]
-   enabled = false
-
-   [mcp_servers.agent_learning]
-   command = 'C:/path/to/python.exe'
-   args = ['-B', 'D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker', '--panel-installation', 'C:/path/to/agent-learning-plugins/codex']
-
-   [mcp_servers.agent_learning.env]
-   ALP_HOME = 'D:/AgentLearning'
-   # 使用独立配置文件时再加入同一路径的 ALP_CONFIG。
+   ```powershell
+   python -B scripts/learning.py --home "$learningHome" --workspace "$learningProject" codex-connect --installation "$learningPlugin"
    ```
 
-   这会用显式配置的工具入口替代插件内置入口；插件及 Hooks 继续启用。知识目录放在源码、导出和固定运行副本之外，不修改导出的受管理文件。
+   命令把同一 `ALP_HOME`／`ALP_CONFIG` 写入项目和全局 MCP 进程环境，不把单个项目的面板绑定到全局连接。使用自定义 `CODEX_HOME` 时传入 `--codex-home PATH`；配置采用无法安全合并的内联结构或同名入口并非本插件时会保留原文并报错。知识目录放在源码、导出和固定运行副本之外。
 
 3. 完全退出并重新启动 Codex，在目标项目新开对话，执行上方[连接检查](#安装是否成功)。升级后按新安装回执同步解释器与脚本路径，再重载；知识目录保持原值。
 

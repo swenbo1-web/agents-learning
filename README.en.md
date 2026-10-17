@@ -39,15 +39,15 @@ You can inspect and control project memory visually without memorizing CLI flags
 | Visual Entry | Host & Location | What You Can Control Directly |
 |---|---|---|
 | **Composer “📖 Memory / 知识库” Button** | **DSH (DeepSeek Harness)**: automatically shown at the bottom-left of the chat input bar **only** in bound/installed projects (hidden in other projects) | Click to open the floating control panel: view the project name/path, published knowledge count, 1.0.0 work observations and pending cases; **one-click switch administrator frequency presets (Off / Minimal 5/d / Light 15/d / Balanced 100/d / Active 300/d)**; open the review console, read-only browser or absorb project history |
-| **Codex direct console and card** | **Codex**: open **Agent Learning** from the conversation's plugin/side-panel menu on UI-capable desktop hosts, or register **Actions → Agent Learning** in the project top bar. `$learning-panel` remains a compatibility entry | Side-panel and Actions launches require no skill message. Buttons check the connection, refresh status, open knowledge/review pages and explicitly confirm administrator presets or history archival. There is no custom permanent composer button |
+| **Codex direct console and card** | **Codex**: run `codex-connect`, then open **Agent Learning** from the conversation side panel's new-tab menu on MCP Apps hosts, or launch the project console from a terminal. `$learning-panel` remains a compatibility entry | The menu name is discovered globally; actionable controls require the current project's verified installation and connection. Open, debug and reconnect without sending chat messages. Settings and history archival still require confirmation |
 | **Conversation side panel** | **Antigravity App 2.22+ with UI Extension support**: register and enable the global UI bridge below, then open **⋮ → Extensions → Agent Learning** | Sidecar buttons check the connection and provide the same controls; only explicitly registered project installations can connect. Unregistered or ambiguous workspaces and expired sessions have no actionable content |
 | **Local Visual WebUI Control Center** | **Shared across Codex, Antigravity and DSH** (loopback `127.0.0.1` only, offline English / 简体中文 switcher) | Displays readable project name and path (`name (path) · ID`); tabs for **Knowledge, Candidate review, Event timeline, Administrator queue, and Administrator settings**; batch approve/reject/defer candidates and choose **4 simple frequency presets** or expand **4 advanced fine-tuning parameters** |
 
-**The new panels require an installation bound to the current project. A knowledge database entry alone is insufficient.** Explicitly pass `--workspace` when exporting the Codex installation; an older unbound global installation does not expose the card. Antigravity keeps the core in each project; its global UI bridge stores only explicitly registered installation locations and fingerprints, without a second set of Hooks, MCP tools or knowledge. Project mismatch, account changes, uninstall or installation replacement invalidate old capabilities. The host controls skill and Extensions lists: this plugin gates panel content and actions, but cannot guarantee that a global extension's menu label disappears in other projects.
+**Actionable controls and knowledge require a matching project installation; existing knowledge records are not installation evidence.** The Codex menu name may be globally visible. `codex-connect` wires the host's read-only entrypoint descriptor separately from the current project's tool connection; unconnected projects show setup guidance without other projects' knowledge or controls. Antigravity keeps the core in each project and registers only explicit installation locations in its global UI bridge. Account changes, uninstall and installation replacement invalidate old panels. Ordinary five-minute expiry offers a direct Reconnect button without replaying previous mutations.
 
 Codex side-panel and project Actions launches run the UI locally, without a model turn, automatic chat messages or model-context updates; direct UI results stay in UI metadata. Skill launches still use a model tool call. Project controls grant no task execution permissions and show the current Hook binding as unknown unless verified. Enabling the administrator uses platform allowance. **Usage and frequency limits are separate for each project; Codex, Antigravity and DSH share that project's ledger.** An independently displayed `ALP_HOME` safeguard can still stop new calls when the combined limit is reached. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval stays in the separate local WebUI.
 
-The panels passed isolated regressions, actual fixed-runtime checks and Edge checks with simulated host bridges. Live Codex and Antigravity desktop rendering still needs host acceptance. Reload the host connection after an installation update; old panels expire.
+The panels passed isolated regressions, fixed-runtime checks and Edge checks with simulated host bridges. Real Codex App Server checks also cover host-catalog discovery, routing to two projects and cross-project rejection without model turns. Desktop menus and rendering still require Codex / Antigravity host acceptance. Reload connections after upgrading and reopen old pages.
 
 ### 1. Composer “📖 Memory” Button & Quick Control Popover (DSH)
 
@@ -111,23 +111,37 @@ $learningPlugin = Join-Path $env:USERPROFILE "agent-learning-plugins/codex"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host codex --hook-mode observe
 codex plugin marketplace add "$learningPlugin"
 codex plugin add agent-learning@agent-learning-local
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin"
 ```
 
 **Restart Codex → enable Agent Learning and review/trust its Hooks → start a new project conversation.** [Official CLI plugin commands](https://learn.chatgpt.com/docs/cli/reference#codex-plugin)
 
-Replace `$learningProject` with your existing project's absolute path. This binding scopes the control card; ordinary MCP tools keep using the host's current workspace. Existing exports can add that project with matching-host `install --upgrade`. A bound export cannot be reassigned to another project; use a separate export directory. Choose **Agent Learning 控制面板**: MCP Apps hosts show a button card; otherwise the skill uses the verified installation to open the local read-only knowledge page. Use `learning-review` for settings or approvals.
+Replace `$learningProject` with your existing project's absolute path. `codex-connect` updates the relevant MCP fields in the project's `.codex/config.toml` and `CODEX_HOME/config.toml`, preserves unrelated configuration, and backs up originals under `CODEX_HOME/agent-learning-backups/`. It does not change Hook trust or enable an administrator. After upgrading an existing export, run `codex-connect` again. Use a separate export and connection for each project.
 
 ### Codex: click to open without a skill message
 
-**Native side panel:** after updating the installation and reloading MCP, open **Agent Learning** from the current conversation's plugin/side-panel menu in a UI-capable desktop host. It loads the page directly and requires a trusted host thread identifier; it never guesses the latest conversation. If the entry is absent or thread metadata is unavailable, use Actions below.
+**Native side panel:** after updating, connecting and reloading MCP, select **Agent Learning** in the conversation side panel's new-tab menu on supported desktop hosts. The global connection advertises an entrypoint; actual calls use the current thread's verified project connection. It never guesses the latest conversation. When the five-minute connection expires, click Reconnect in the panel.
 
-**Project top-bar Actions:** after installing the core, run once:
+**Read-only connection check:** if the entry is absent, check configuration first. Correct wiring does not establish that the desktop has rendered it.
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin" --check
+```
+
+**Direct terminal launch:** when the desktop has no menu, run the fixed runtime in the project terminal without a chat message or model call:
+
+```powershell
+$learningReceipt = Get-Content (Join-Path $learningPlugin "runtime-release.json") -Raw | ConvertFrom-Json
+& $learningReceipt.python -B (Join-Path $learningReceipt.runtime_directory "scripts/learning.py") --workspace "$learningProject" codex-panel --installation "$learningPlugin"
+```
+
+**Optional Actions:** register only if your host provides local Environment / Actions support:
 
 ```powershell
 python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
 ```
 
-Select **Agent Learning** in the project's local **Environment** menu, then click **Actions → Agent Learning** to open the local console. Registration creates only `.codex/environments/agent-learning.toml` and its managed manifest, preserving existing environments, Setup and Actions. To keep your current environment selected, add the returned `manual_command` as an Action there instead. [Official Actions guide](https://learn.chatgpt.com/docs/environments/local-environment)
+Registration creates only `.codex/environments/agent-learning.toml` and its managed manifest, preserving existing environments, Setup and Actions. It does not select an environment automatically or add a top-bar button to hosts that lack this feature. Where supported, select this environment or add the returned `manual_command` to an existing environment. [Official Actions guide](https://learn.chatgpt.com/docs/environments/local-environment)
 
 For custom data locations, register under the same `ALP_HOME` and `ALP_CONFIG`, or explicitly supply `--home` and `codex-action --config`, matching Hooks and MCP; registration pins those paths. **Repeat registration after a core update.** Add `--remove` to unregister without deleting knowledge or existing environment configuration.
 
@@ -561,22 +575,13 @@ Before sharing a database with older installations, stop the relevant runtimes, 
 
    On macOS / Linux, set the same variable in the environment that launches the host. An `export` in one terminal does not change a running desktop process. Configure `ALP_CONFIG` the same way if using a separate configuration file.
 
-2. After export, merge the following into your actual `CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Set `command` to `python` from the export's `runtime-release.json`, and the script path to `scripts/learning.py` under its `runtime_directory`. Edit existing matching entries instead of duplicating them; preserve other settings. Replace all three example paths:
+2. After export, connect the project installation using the same knowledge directory:
 
-   ```toml
-   [plugins."agent-learning@agent-learning-local".mcp_servers.agent_learning]
-   enabled = false
-
-   [mcp_servers.agent_learning]
-   command = 'C:/path/to/python.exe'
-   args = ['-B', 'D:/path/to/runtime/scripts/learning.py', 'serve', '--role', 'worker', '--panel-installation', 'C:/path/to/agent-learning-plugins/codex']
-
-   [mcp_servers.agent_learning.env]
-   ALP_HOME = 'D:/AgentLearning'
-   # Add the matching ALP_CONFIG path only if using a separate configuration file.
+   ```powershell
+   python -B scripts/learning.py --home "$learningHome" --workspace "$learningProject" codex-connect --installation "$learningPlugin"
    ```
 
-   This replaces the bundled MCP entry with an explicitly configured tool entry; the plugin and Hooks remain enabled. Keep knowledge data outside the source, export and fixed runtime copy. Do not edit managed export files.
+   This passes matching `ALP_HOME` / `ALP_CONFIG` values to both MCP process environments without globally binding one project's panel. For a custom Codex configuration directory, add `--codex-home PATH`. Inline configurations that cannot be safely merged and unrelated servers using the same name are preserved and reported as errors. Keep knowledge outside source, exports and fixed runtime copies.
 
 3. Fully quit and restart Codex, open a new project conversation, and run the [connection check](#check-the-installation). After upgrades, update interpreter/script paths from the new receipt and reload; retain the knowledge directory.
 
