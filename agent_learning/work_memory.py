@@ -331,7 +331,8 @@ class WorkMemoryMixin:
                 "file_state": file_state, "file_focus": sorted(focus)}
 
     def _work_search_rows(self, project, query, *, file_path=None, workspace=None, limit=5,
-                          conversation=None, agent_id=None, task_state=None):
+                          conversation=None, agent_id=None, task_state=None, exclude_event_id=None,
+                          automatic=False):
         from .knowledge_index import normalized_query_plan
         from .runtime import ContractError
         if not isinstance(query, str) or len(query) > 8000:
@@ -339,6 +340,11 @@ class WorkMemoryMixin:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ContractError("work search limit must be 1..20")
         clauses, params = ["m.project=?"], [project]
+        if exclude_event_id is not None:
+            # Public-message segments retain the original event identity.
+            # Exclude before LIMIT so the current prompt cannot crowd out history.
+            clauses.append("m.event_id!=? AND COALESCE(json_extract(m.body,'$.public_message_id'),'')!=?")
+            params.extend((exclude_event_id, exclude_event_id))
         joins = ""
         if file_path is not None:
             if workspace is None:
@@ -376,8 +382,19 @@ class WorkMemoryMixin:
                 return (sum(term in values for term in selected), row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
         selected_rows, counts = [], {}
+        if automatic and query.strip():
+            from .knowledge_index import _match_info
+            plan = normalized_query_plan(query)
+            weights = {word: 2 if re.fullmatch(r"[\u3400-\u9fff]+", word) and len(word) > 1 else 1
+                       for word in plan["terms"]}
+            denominator = sum(weights.values())
         for row in rows:
             body = json.loads(row["body"])
+            if automatic and query.strip():
+                comparable = _json({"title": body["title"], "content": body["summary"], "knowledge_kind": ""})
+                if not denominator or not _match_info(comparable, weights, denominator,
+                                                       plan["meaningful"])["auto_eligible"]:
+                    continue
             parent = body.get("public_message_id", row["id"])
             if counts.get(parent, 0) >= 2:
                 continue
@@ -527,7 +544,7 @@ class WorkMemoryMixin:
 
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
-                           context_epoch=None, file_only=False):
+                           context_epoch=None, file_only=False, exclude_event_id=None):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
@@ -566,11 +583,13 @@ class WorkMemoryMixin:
             rows = []
             for link in links[:3]:
                 rows.extend(self._work_search_rows(project, query,
-                    file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit))
+                    file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
+                    exclude_event_id=exclude_event_id))
             if not links:
                 # 空查询先查当前会话；新会话可读取同checkout的公开交接索引。
                 rows = self._work_search_rows(project, query, limit=limit,
-                    conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state)
+                    conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state,
+                    exclude_event_id=exclude_event_id, automatic=bool(query.strip()))
                 if not rows and not query.strip() and not agent_id and workspace:
                     rows = self.db.execute("SELECT * FROM work_memories WHERE project=? AND workspace_key=? "
                         "AND agent IS NULL AND conversation!=? "

@@ -187,7 +187,7 @@ class KnowledgeContextMixin:
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
                  expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None, _outcome=None,
-                 workspace=None, raw=None):
+                 workspace=None, raw=None, _source_event_id=None):
         if delivery not in {"persistent", "ephemeral"}:
             from .runtime import ContractError
             raise ContractError("unsupported context delivery")
@@ -306,7 +306,8 @@ class KnowledgeContextMixin:
                     project, conversation, query=work_query[-8000:], workspace=workspace, raw=raw,
                     agent_id=agent_id, limit=work_settings.get("max_items", 3),
                     task_state=task_state, delivery=delivery, compact=compact,
-                    context_epoch=work_context_epoch, file_only=tool_only)
+                    context_epoch=work_context_epoch, file_only=tool_only,
+                    exclude_event_id=_source_event_id)
             except ContractError:
                 # 身份与任务契约失败仍必须由主上下文拒绝，不能当作派生索引故障。
                 raise

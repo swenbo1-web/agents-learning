@@ -1098,7 +1098,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             query = raw.get("prompt", "")
             text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
                                  agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"],
-                                 _outcome=_context_outcome, workspace=raw["cwd"], raw=raw)
+                                 _outcome=_context_outcome, workspace=raw["cwd"], raw=raw,
+                                 _source_event_id=event["id"] if kind == "UserPromptSubmit" else None)
             if text:
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
