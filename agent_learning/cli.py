@@ -254,7 +254,9 @@ def parser():
     configure.add_argument("--provider", choices=["host", "codex", "antigravity", "dsh"], help="首次默认 host，后续省略保留")
     configure.add_argument("--model-mode", choices=["first", "current", "default", "fixed"], help="首次默认 first，后续省略保留")
     configure.add_argument("--model", help="fixed 模式的模型标识")
-    configure.add_argument("--command-file", help="可选 JSON 可执行参数数组，不包含令牌或模型选项")
+    command_options = configure.add_mutually_exclusive_group()
+    command_options.add_argument("--command-file", help="可选 JSON 可执行参数数组，不包含令牌或模型选项")
+    command_options.add_argument("--codex-http", action="store_true", help="当前项目显式使用ChatGPT登录的HTTP审核连接；模型和预算保持原策略")
     configure.add_argument("--expected-policy-version", type=int)
     admin_status = sub.add_parser("admin-status", help="检查当前项目/宿主审核设置与预算，不调用模型")
     admin_status.add_argument("--conversation", help="可选宿主原生会话ID，用于核对当前模型")
@@ -601,6 +603,11 @@ def main(argv=None):
             command = json.loads(Path(args.command_file).read_text(encoding="utf-8-sig")) if args.command_file else None
             policy = runtime.admin_policy(project)
             provider = args.provider or (policy["provider"] if policy["policy_version"] else "host")
+            if args.codex_http:
+                if (runtime.host if provider == "host" else provider) != "codex":
+                    raise ContractError("--codex-http requires a Codex administrator provider")
+                from .admin_providers import codex_http_command
+                command = codex_http_command()
             mode = args.model_mode or (policy["model_mode"] if policy["policy_version"] else "first")
             model = args.model if args.model is not None else policy["model"] if mode == policy["model_mode"] else ""
             result = runtime.admin_configure(project, args.enabled == "on", provider, mode, model, command,

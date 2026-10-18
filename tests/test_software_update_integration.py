@@ -115,6 +115,7 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "updated")
         self.assertEqual(installer.call_args.kwargs, {"runtime_store": None, "hook_mode": "enforce",
                                                 "upgrade": True, "expected_release_id": "old-release", "host": "codex",
+                                                "python": None, "allow_volatile_python": False,
                                                 "panel_workspace": str(self.work)})
 
     def test_export_cannot_silently_ignore_nondefault_host_instance(self):

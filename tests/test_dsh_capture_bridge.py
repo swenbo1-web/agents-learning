@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -214,7 +215,7 @@ class DshCaptureBridgeTests(unittest.TestCase):
         self.bridge = self.plugin / "host/index.mjs"
         shutil.copytree(BRIDGE.parent, self.bridge.parent, dirs_exist_ok=True)
         (self.plugin / "runtime-release.json").write_text(json.dumps({
-            "python": "synthetic-python", "runtime_directory": str(self.root / "runtime"),
+            "python": sys.executable, "runtime_directory": str(self.root / "runtime"),
             "workspace": str(self.workspace), "home": str(self.root / "home"), "hook_mode": "observe",
         }), encoding="utf-8")
 

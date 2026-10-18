@@ -1,4 +1,5 @@
 import json
+import importlib.machinery
 import importlib.util
 from functools import wraps
 import os
@@ -110,7 +111,9 @@ class BuildResourceTests(unittest.TestCase):
 
 class PackageTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("setuptools") and importlib.util.find_spec("wheel")
-                         and importlib.util.find_spec("pip"), "Offline wheel build tools are optional")
+                         # Python 3.10's setuptools hook changes distutils even
+                         # on find_spec('pip'). Check the path without that hook.
+                         and importlib.machinery.PathFinder.find_spec("pip"), "Offline wheel build tools are optional")
     def test_wheel_includes_resources_and_supports_module_entry_and_export(self):
         source_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="alp-wheel-package-") as temp:

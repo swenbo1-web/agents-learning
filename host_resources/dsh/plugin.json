@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Local project memory for DSH: work and file history, progressive retrieval, explicit history import, visual knowledge approval and optional administrator settings. Includes native host integration and a lightweight debug skill.",
   "skills": "./skills/",
   "hooks": "./hooks.json",

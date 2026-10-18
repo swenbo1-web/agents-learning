@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Project memory for coding agents: automatic work history, progressive retrieval, history import, visual knowledge review and optional administrator controls. Includes a lightweight debug skill.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",

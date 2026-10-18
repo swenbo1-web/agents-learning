@@ -12,7 +12,7 @@ Python **3.10+** 路 SQLite 路 [MIT](LICENSE) 路 First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.5 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.6 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -1175,6 +1175,8 @@ A new user message invalidates the old execution turn. Exact matches of 鈥滅户缁
 Trusted approval also freezes actual path roots in rules, the task and existing assignment scopes. Checks intersect these roots so later directory link redirection cannot expand permission. A child task with the same approved scope inherits its parent's frozen roots. Other child scopes lacking a frozen basis, and old policies, require approval again. User rules and task fields cannot issue the internal frozen ledger.
 
 ## Optional administrator executor
+
+**Codex ChatGPT HTTP preset (1.1.6):** If you are signed in with ChatGPT but the isolated reviewer's default connection times out, explicitly run `admin-configure --enabled on --codex-http` for the selected project, using the installed `--home`, `--workspace` and `--host codex`. This changes only that project's reviewer command and starts no model. Model policy, budgets, disabled tools and unknown-call protection remain in force. The preset uses a fixed first-party OpenAI HTTP endpoint and CLI-managed authentication; it copies no tokens or unrelated host settings. It is not intended for custom gateways or API-key routes and cannot resolve every timeout. To restore the default command, use the existing `--command-file` option with `["codex"]`.
 
 **Off by default; users enable it themselves.** The administrator reviews knowledge sources, conditions and candidates. It does not run project tasks or perform product acceptance. Reviews run in separate processes: Codex/Antigravity use their platform CLI; DSH uses a restricted platform SDK entry point. No permanent administrator conversation is required. Manual review can still use a separate administrator MCP interface.
 

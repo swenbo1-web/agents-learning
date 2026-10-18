@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -152,7 +153,7 @@ const flush=()=>new Promise(resolve=>setTimeout(resolve,10));
         host_source = Path(__file__).resolve().parents[1] / "host_resources/dsh/host/index.mjs"
         shutil.copytree(host_source.parent, plugin / "host", dirs_exist_ok=True)
         receipt = {"workspace": str(self.workspace), "runtime_directory": str(self.root / "runtime"),
-                   "home": str(self.root / "home"), "python": "fake-python", "release_id": "isolated-v1"}
+                   "home": str(self.root / "home"), "python": sys.executable, "release_id": "isolated-v1"}
         (plugin / "runtime-release.json").write_text(json.dumps(receipt), encoding="utf-8")
         nested = self.workspace / "nested"
         nested.mkdir()

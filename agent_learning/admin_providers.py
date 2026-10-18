@@ -15,6 +15,20 @@ MAX_EVENT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 50000
 _CAPABILITIES = {}
 _TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
+# Explicit first-party transport preset. Never import arbitrary user settings
+# or permit free-form -c arguments in administrator launch commands.
+_CODEX_HTTP_OPTIONS = ["-c", 'model_provider="alp_chatgpt_http"', "-c",
+    'model_providers.alp_chatgpt_http={name="OpenAI",base_url="https://chatgpt.com/backend-api/codex",'
+    'wire_api="responses",requires_openai_auth=true,supports_websockets=false}']
+
+
+def codex_http_command():
+    return ["codex", *_CODEX_HTTP_OPTIONS]
+
+
+def _codex_http_command(command):
+    return (Path(command[0]).name.lower() in {"codex", "codex.exe"}
+            and command[1:] == _CODEX_HTTP_OPTIONS)
 
 
 def _error(message):
@@ -27,6 +41,8 @@ def validate_command(command):
             or not all(isinstance(item, str) and item and "\x00" not in item for item in command)):
         raise _error("administrator command must be a trusted executable argument array")
     python = bool(re.fullmatch(r"(?:python(?:3(?:\.\d+)?)?|pypy(?:3)?)(?:\.exe)?", Path(command[0]).name, re.I))
+    if _codex_http_command(command):
+        return list(command)
     safe_python_flags = {"-B", "-u", "-I", "-s", "-S", "-E"}
     if any(item in {"resume", "continue"} or item.startswith("-") and not (python and item in safe_python_flags)
            for item in command[1:]):
@@ -61,9 +77,9 @@ def resolve_command(command, *, _windows=None):
     command = validate_command(command)
     candidate = Path(command[0])
     # A desktop may ship a newer backend than the independently installed CLI.
-    # Only the bare default name inherits this host-owned hint. Explicit paths
+    # The default name and our exact HTTP preset inherit this host-owned hint. Explicit paths
     # and custom launchers remain authoritative; project evidence is never read.
-    host_cli = os.environ.get("CODEX_CLI_PATH") if (len(command) == 1 and not candidate.is_absolute()
+    host_cli = os.environ.get("CODEX_CLI_PATH") if ((len(command) == 1 or _codex_http_command(command)) and not candidate.is_absolute()
                 and command[0].lower() in {"codex", "codex.exe"}) else None
     if host_cli:
         hinted = Path(host_cli)
