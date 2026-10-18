@@ -41,7 +41,7 @@ def _history_review_available(row):
         "materialized", "review_complete", "paused", "materializing", "reviewing"}
 
 
-def recovery_status(runtime, project):
+def recovery_status(runtime, project, *, include_history=True):
     """Bounded read view. Observations do not prove current-session Hook health."""
     db, scope = runtime.db, runtime._session_scope()
     capture = db.execute(
@@ -74,13 +74,43 @@ def recovery_status(runtime, project):
                 and execution["returncode"] != 0 else "historical_failure_details_unavailable"),
             "can_retry": row["state"] in RETRYABLE_STATES})
     history = []
-    for item in db.execute("SELECT id,plan FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT 10", (project,)):
+    if include_history:
+        history = history_recovery_page(runtime, project, limit=10)["items"]
+    return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
+                "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},
+            "blocked_reviews": calls, "history_jobs": history, "history_separate": not include_history,
+            "models_started": False}
+
+
+def history_recovery_page(runtime, project, *, offset=0, limit=3):
+    from .history_import import _read_snapshot
+    with _read_snapshot(runtime):
+        return _history_recovery_page(runtime, project, offset=offset, limit=limit)
+
+
+def _history_recovery_page(runtime, project, *, offset, limit):
+    if type(offset) is not int or not 0 <= offset <= 10000 or type(limit) is not int or not 1 <= limit <= 10:
+        raise ContractError("invalid history progress page")
+    from .history_import import _summaries
+    db = runtime.db
+    rows = db.execute("SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT ? OFFSET ?",
+                      (project, limit, offset)).fetchall()
+    from .history_workflow import head
+    selected = head(runtime, project)
+    selected_id = selected["id"] if selected else None
+    summary_rows = list(rows)
+    if selected and all(row["id"] != selected_id for row in rows):
+        summary_rows.append(selected)
+    progress_by_id = {item["job_id"]: item for item in _summaries(runtime, summary_rows)}
+    head_blocks = bool(selected and progress_by_id[selected_id]["workflow"]["blocks_new_batch"])
+    history = []
+    for item in rows:
         row = _history(runtime, project, item["id"])
         plan = json.loads(item["plan"])
         stats = plan.get("stats") or {}
         pending = plan.get("pending") or []
         unsupported = sum(isinstance(value, dict) and value.get("reason") == "unparsed_file_type" for value in pending)
-        progress = runtime.history_status(project, row["id"])["job"]
+        progress = progress_by_id[row["id"]]
         review_request = None
         from .history_review_control import current_history_request
         active_request = current_history_request(runtime, project, row["id"], active_only=True)
@@ -103,13 +133,20 @@ def recovery_status(runtime, project):
                                         for value in plan.get("extra_sources", [])),
             "can_reauthorize": _history_available(row) and row["host_epoch"] != runtime.host_epoch(),
             "counts": progress["counts"], "review_request": review_request,
+            "review_progress": progress["coverage"]["review"],
+            "awaiting_approval": progress["coverage"]["publication"]["awaiting_approval"],
             "resume_required": progress["resume_required"],
+            "workflow": progress["workflow"], "changes": progress.get("changes"),
+            "selected": row["id"] == selected_id,
+            "blocked_by_batch": selected_id if head_blocks and row["id"] != selected_id else None,
+            "can_defer": row["id"] == selected_id and progress["workflow"]["blocks_new_batch"] and not progress["run_active"] and not active_request,
             "can_review": _history_review_available(row) and row["host_epoch"] == runtime.host_epoch()
-                and not active_request and progress["resume"]["explicit_run_required"],
+                and not active_request and progress["resume"]["explicit_run_required"]
+                and (not head_blocks or row["id"] == selected_id),
             "publication_automatic": False})
-    return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
-                "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},
-            "blocked_reviews": calls, "history_jobs": history, "models_started": False}
+    total = db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]
+    return {"items": history, "total": total, "offset": offset,
+            "next_offset": offset + len(history) if offset + len(history) < total else None}
 
 
 def apply_recovery(runtime, project, body):
@@ -117,7 +154,7 @@ def apply_recovery(runtime, project, body):
     required = {"request_id", "expected_policy_version", "expected_session_epoch", "expected_governance_epoch",
                 "action", "id", "version", "reason", "confirmed"}
     if (not isinstance(body, dict) or set(body) != required or body["confirmed"] is not True
-            or not isinstance(body["action"], str) or body["action"] not in {"retry_call", "reauthorize_history"}
+                or not isinstance(body["action"], str) or body["action"] not in {"retry_call", "reauthorize_history", "defer_history"}
             or any(not isinstance(body[key], str) or not body[key].strip() or len(body[key]) > maximum
                    for key, maximum in (("request_id", 200), ("id", 200), ("reason", 2000)))
             or not isinstance(body["version"], str) or not re.fullmatch(r"[a-f0-9]{64}", body["version"])
@@ -145,6 +182,8 @@ def apply_recovery(runtime, project, body):
             if runtime.db.execute("SELECT 1 FROM review_receipts WHERE project=? AND call_id=?", (project, body["id"])).fetchone():
                 raise ContractError("administrator call already has an accepted review receipt")
             result = retry_call(runtime, project, body["id"], body["reason"])
+        elif body["action"] == "defer_history":
+            result = runtime.history_defer(project, body["id"], body["reason"], body["expected_governance_epoch"])
         else:
             if not _history_available(row):
                 raise ContractError("history job is running, cancelled or explicitly paused; use its explicit resume workflow")

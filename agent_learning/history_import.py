@@ -105,45 +105,30 @@ def _summary(runtime, row):
         return _summary_snapshot(runtime, row)
 
 
-def _summary_snapshot(runtime, row):
+def _summaries(runtime, rows):
+    from .history_progress import progress_snapshots
+    progress = progress_snapshots(runtime, rows)
+    return [_summary_snapshot(runtime, row, progress[row["id"]]) for row in rows]
+
+
+def _summary_snapshot(runtime, row, progress=None):
+    from .history_progress import progress_snapshots
     plan = json.loads(row["plan"])
-    counts = {}
-    for key, sql in {
-        "sources": "SELECT COUNT(*) FROM history_job_sources WHERE job_id=?",
-        "materialized_sources": "SELECT COUNT(*) FROM history_job_sources WHERE job_id=? AND materialized=1",
-        "cases": "SELECT COUNT(*) FROM history_case_links WHERE job_id=?",
-        "candidates": "SELECT COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=?",
-        "published_candidates": "SELECT COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=? AND c.status='published'",
-        "candidate_cases": "SELECT COUNT(DISTINCT l.problem_id) FROM history_case_links l JOIN candidates c ON c.project=l.project AND c.problem=l.problem_id WHERE l.job_id=?",
-        "published_cases": "SELECT COUNT(DISTINCT l.problem_id) FROM history_case_links l JOIN candidates c ON c.project=l.project AND c.problem=l.problem_id WHERE l.job_id=? AND c.status='published'",
-        "calls": "SELECT COUNT(*) FROM history_call_links WHERE job_id=? AND refunded=0",
-        "reviewed_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project JOIN review_states r ON r.project=p.project AND r.problem=p.id AND r.revision=p.revision WHERE l.job_id=? AND r.state IN ('candidate_ready','proposal_ready','skipped','published')",
-        "review_decision_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project WHERE l.job_id=? AND EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=p.project AND r.problem=p.id AND r.revision=p.revision AND r.decision IN ('candidate','governance','skip','needs_evidence'))",
-        "awaiting_evidence_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project JOIN review_states r ON r.project=p.project AND r.problem=p.id AND r.revision=p.revision WHERE l.job_id=? AND r.state='awaiting_evidence'",
-        "untouched_cases": "SELECT COUNT(*) FROM history_case_links l JOIN problems p ON p.id=l.problem_id AND p.project=l.project WHERE l.job_id=? AND NOT EXISTS(SELECT 1 FROM candidates c WHERE c.project=p.project AND c.problem=p.id) AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=p.project AND r.problem=p.id AND r.revision=p.revision) AND NOT EXISTS(SELECT 1 FROM admin_calls a WHERE a.project=p.project AND a.problem=p.id AND a.revision=p.revision AND a.state NOT IN ('not_started','deduplicated'))",
-    }.items():
-        counts[key] = runtime.db.execute(sql, (row["id"],)).fetchone()[0]
-    counts["pending_cases"] = max(0, counts["cases"] - counts["reviewed_cases"])
-    counts["completed_review_cases"] = counts["reviewed_cases"]
-    counts["reviewed_cases"] = counts["review_decision_cases"]
-    queue = _review_queue(runtime, row["project"], row["id"])
-    dispositions = {key: sum(item["disposition"] == key for item in queue)
-                    for key in ("completed", "ready", "awaiting_evidence", "blocked")}
+    progress = progress or progress_snapshots(runtime, [row])[row["id"]]
+    counts = progress["counts"]
+    dispositions = progress["dispositions"]
     selected_complete = counts["materialized_sources"] == counts["sources"]
-    review_complete = selected_complete and all(item["disposition"] == "completed" for item in queue)
-    blocked = [{"problem_id": item["problem_id"], "call_id": item["blocked_call_id"], "state": item["blocked_call_state"]}
-               for item in queue if item["disposition"] == "blocked"]
-    candidate_states = {item[0]: item[1] for item in runtime.db.execute(
-        "SELECT c.status,COUNT(DISTINCT c.id) FROM candidates c JOIN history_case_links l "
-        "ON l.project=c.project AND l.problem_id=c.problem WHERE l.job_id=? GROUP BY c.status", (row["id"],))}
+    review_complete = selected_complete and dispositions["completed"] == progress["queue_total"]
+    blocked = progress["blocked"]
+    candidate_states = progress["candidate_states"]
     active = bool(row["owner"] and (row["lease_until"] or 0) > time.time())
-    return {"job_id": row["id"], "state": row["state"], "workspace": row["workspace"], "counts": counts,
+    result = {"job_id": row["id"], "state": row["state"], "workspace": row["workspace"], "counts": counts,
             "coverage": {"incomplete": bool(plan.get("incomplete")), "stats": plan.get("stats", {}),
                          "skipped_count": plan.get("skipped_count", 0), "pending_count": plan.get("pending_count", 0),
                          "archive": {"selected_sources": counts["sources"], "materialized_sources": counts["materialized_sources"],
                                      "selected_sources_complete": selected_complete, "scan_incomplete": bool(plan.get("incomplete")),
                                      "project_scan_complete": not bool(plan.get("incomplete"))},
-                         "review": {"scope": "materialized_units", "total_cases": len(queue), "completed_cases": dispositions["completed"],
+                         "review": {"scope": "materialized_units", "total_cases": progress["queue_total"], "completed_cases": dispositions["completed"],
                                     "ready_cases": dispositions["ready"], "awaiting_evidence_cases": dispositions["awaiting_evidence"],
                                     "blocked_cases": dispositions["blocked"], "complete": review_complete},
                          "publication": {"candidates": counts["candidates"], "published_candidates": counts["published_candidates"],
@@ -162,6 +147,10 @@ def _summary_snapshot(runtime, row):
                        "wait_for_active_calls": any(item["state"] in {"reserved", "launch_intent", "started"} for item in blocked),
                        "blocked_calls": blocked[:20], "blocked_calls_truncated": len(blocked) > 20},
             "epoch_current": row["host_epoch"] == runtime.host_epoch()}
+    from .history_workflow import workflow_state
+    result["workflow"] = workflow_state(row, result)
+    result["changes"] = plan.get("changes")
+    return result
 
 
 def _unit_groups(source):
@@ -192,14 +181,40 @@ def _unit_groups(source):
 
 
 class HistoryImportMixin:
-    def history_prepare(self, project, workspace, extra_sources=None, scan_options=None, expected_epoch=None):
+    def history_prepare(self, project, workspace, extra_sources=None, scan_options=None, expected_epoch=None, mode="continue"):
         from .history_sources import scan_sources
+        from .history_workflow import MODES, existing_work, head
         from .runtime import ContractError, clean, digest, encode
+        if not isinstance(mode, str) or mode not in MODES:
+            raise ContractError("invalid history preparation mode")
         epoch = self.assert_host_epoch(expected_epoch)
         workspace = str(Path(workspace).absolute())
         if self.project(workspace) != project:
             raise ContractError("history workspace belongs to another project")
-        snapshot = scan_sources(workspace, extra_sources=extra_sources, options=scan_options)
+        with self.transaction():
+            self.assert_host_epoch(epoch)
+            pending = existing_work(self, project, mode)
+            if pending:
+                return pending
+            previous = head(self, project)
+        if mode == "remaining":
+            if not previous:
+                raise ContractError("no previous history scan to continue")
+            old_plan = json.loads(previous["plan"])
+            # Only the original roots and selection are eligible. Budget-skipped
+            # paths are prioritized, without treating unsupported files as work.
+            if extra_sources is not None or scan_options is not None:
+                raise ContractError("remaining scan reuses its frozen source selection")
+            extra_sources = old_plan.get("extra_sources", [])
+            scan_options = old_plan["options"]
+            prioritize = [v["path"] for v in old_plan.get("pending", [])
+                          if isinstance(v, dict) and v.get("reason") in {"budget_total_bytes", "budget_files", "budget_chunks"}]
+            if not prioritize:
+                raise ContractError("no resumable file budget omissions; select an explicit scope or adjust scan limits")
+        else:
+            prioritize = None
+        snapshot = scan_sources(workspace, extra_sources=extra_sources, options=scan_options, prioritize_paths=prioritize,
+                                only_paths=prioritize if mode == "remaining" else None)
         snapshot = clean(snapshot)
         workspace = snapshot["workspace"]
         sources = snapshot.get("sources", [])
@@ -207,9 +222,28 @@ class HistoryImportMixin:
         plan.update(extra_sources=clean(extra_sources or []), skipped_count=len(snapshot.get("skipped", [])),
                     pending_count=len(snapshot.get("pending", [])), skipped=snapshot.get("skipped", []),
                     pending=snapshot.get("pending", []))
-        signature = digest([project, workspace, plan, [(s["source_key"], s["content_hash"]) for s in sources]])
         with self.transaction():
             self.assert_host_epoch(epoch)
+            pending = existing_work(self, project, mode)
+            if pending:
+                return pending
+            # Source identity is exact; similarity never carries a decision.
+            known = {(r["source_key"], r["content_hash"]) for r in self.db.execute(
+                "SELECT m.source_key,m.content_hash FROM history_materials m WHERE m.project=? AND EXISTS("
+                "SELECT 1 FROM history_job_sources s WHERE s.material_id=m.id AND s.materialized=1)", (project,))}
+            all_sources = sources
+            changed = [s for s in sources if (s["source_key"], s["content_hash"]) not in known]
+            changes = {"selected_sources": len(sources), "new_or_changed_sources": len(changed),
+                       "reused_sources": len(sources) - len(changed), "mode": mode}
+            current_head = head(self, project)
+            if not changed and current_head and mode != "full":
+                return dict(_summary(self, current_head), reused=True, preparation={"action": "no_changes", "scanned": True,
+                            "models_started": False}, changes=changes)
+            if known and mode != "full":
+                sources = changed
+                changes["context_only_sources"] = len(all_sources) - len(changed)
+            plan["changes"] = changes
+            signature = digest([project, workspace, plan, [(s["source_key"], s["content_hash"]) for s in sources]])
             existing = self.db.execute("SELECT * FROM history_jobs WHERE project=? AND signature=? AND state!='cancelled' ORDER BY created DESC LIMIT 1",
                                        (project, signature)).fetchone()
             if existing:
@@ -217,21 +251,43 @@ class HistoryImportMixin:
             ident, now = uuid.uuid4().hex, time.time()
             self.db.execute("INSERT INTO history_jobs(id,project,workspace,plan,signature,state,host_epoch,created,updated) VALUES(?,?,?,?,?,'prepared',?,?,?)",
                             (ident, project, workspace, encode(plan), signature, epoch, now, now))
-            for position, source in enumerate(sources):
+            selected_keys = {(s["source_key"], s["content_hash"]) for s in sources}
+            for position, source in enumerate(all_sources):
                 material_id = digest([project, source["source_key"], source["content_hash"]])
                 self.db.execute("INSERT OR IGNORE INTO history_materials VALUES(?,?,?,?,?,?)",
                                 (material_id, project, source["source_key"], source["content_hash"], encode(source), now))
-                self.db.execute("INSERT INTO history_job_sources(job_id,material_id,position) VALUES(?,?,?)", (ident, material_id, position))
+                context_only = (source["source_key"], source["content_hash"]) not in selected_keys
+                self.db.execute("INSERT INTO history_job_sources(job_id,material_id,position,materialized) VALUES(?,?,?,?)",
+                                (ident, material_id, position, int(context_only)))
             self.db.execute("INSERT INTO project_onboarding VALUES(?,'prepared',?,?) ON CONFLICT(project) DO UPDATE SET state='prepared',job_id=excluded.job_id,updated=excluded.updated",
                             (project, ident, now))
-            return _summary(self, _job(self, project, ident))
+            return dict(_summary(self, _job(self, project, ident)), preparation={"action": "created", "scanned": True,
+                        "models_started": False})
+
+    def history_defer(self, project, job_id, reason, expected_epoch=None):
+        from .history_workflow import defer_history
+        return defer_history(self, project, job_id, reason, expected_epoch)
+
+    def history_archive(self, project, workspace, *, extra_sources=None, scan_options=None, expected_epoch=None,
+                        mode="continue", max_seconds=180):
+        prepared = self.history_prepare(project, workspace, extra_sources=extra_sources, scan_options=scan_options,
+                                        expected_epoch=expected_epoch, mode=mode)
+        preparation = prepared.get("preparation") or {}
+        may_materialize = (preparation.get("action") == "created" or
+            preparation.get("next_action") == "continue_archive" and prepared["epoch_current"]
+            and prepared["state"] != "paused")
+        status = (self.history_run(project, prepared["job_id"], allow_review=False, max_calls=0,
+                                  max_seconds=max_seconds, expected_epoch=expected_epoch) if may_materialize
+                  else self.history_status(project, prepared["job_id"]))
+        return dict(status, prepared_job_id=prepared["job_id"], reused_preparation=bool(prepared.get("reused")),
+                    preparation=preparation, changes=prepared.get("changes"))
 
     def history_status(self, project, job_id=None):
         with _read_snapshot(self):
             row = self.db.execute("SELECT * FROM project_onboarding WHERE project=?", (project,)).fetchone()
             onboarding = {"state": row["state"], "job_id": row["job_id"]} if row else {"state": "unoffered", "job_id": None}
-            selected = _job(self, project, job_id) if job_id else self.db.execute(
-                "SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT 1", (project,)).fetchone()
+            from .history_workflow import head
+            selected = _job(self, project, job_id) if job_id else head(self, project)
             return {"project_id": project, "onboarding": onboarding, "job": _summary(self, selected) if selected else None,
                     "manual_only": True, "automatic_resume": False}
 
@@ -241,7 +297,7 @@ class HistoryImportMixin:
             raise ContractError("history job limit must be 1..100")
         with _read_snapshot(self):
             rows = self.db.execute("SELECT * FROM history_jobs WHERE project=? ORDER BY created DESC,id LIMIT ?", (project, limit)).fetchall()
-            return {"items": [_summary(self, row) for row in rows], "limit": limit,
+            return {"items": _summaries(self, rows), "limit": limit,
                     "total": self.db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]}
 
     def history_source_report(self, project, job_id, section="sources", offset=0, limit=20):
@@ -446,6 +502,8 @@ class HistoryImportMixin:
                 raise ContractError("cancelled history job requires a new explicit prepare")
             if row["owner"] and (row["lease_until"] or 0) > time.time():
                 raise ContractError("history job already has an active run")
+            from .history_workflow import assert_run_head
+            assert_run_head(self, project, job_id)
             self.db.execute("UPDATE history_jobs SET state='materializing',host_epoch=?,review_enabled=?,max_calls=?,remaining_calls=?,owner=?,lease_until=?,updated=? WHERE project=? AND id=?",
                             (epoch, int(allow_review), max_calls, max_calls, owner, time.time() + max_seconds + 30, time.time(), project, job_id))
         results, state, reason = [], "materialized", "manual_review_available"

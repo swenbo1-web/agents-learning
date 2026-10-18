@@ -398,13 +398,12 @@ class PanelControl:
             apply_control(self.runtime, self.project, body)
             result["preset"] = preset
         else:
-            prepared = self.runtime.history_prepare(self.project, self.binding["workspace"], expected_epoch=self.governance_epoch)
-            job_id = prepared["job_id"]
-            status = self.runtime.history_run(self.project, job_id, allow_review=False,
-                                              max_calls=0, max_seconds=180, expected_epoch=self.governance_epoch)
+            status = self.runtime.history_archive(self.project, self.binding["workspace"], expected_epoch=self.governance_epoch)
+            job_id = status["prepared_job_id"]
             job = status.get("job") or {}
             counts = job.get("counts", {})
             result["history"] = {"job_id": job_id, "state": job.get("state", "unknown"),
+                "preparation": status.get("preparation"), "changes": status.get("changes"),
                 "archived_cases": counts.get("cases", 0), "reviewed_cases": counts.get("reviewed_cases", 0),
                 "published_knowledge": counts.get("published_candidates", 0), "review_requested": False}
         result["summary"] = self._summary()

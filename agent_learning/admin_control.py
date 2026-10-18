@@ -53,7 +53,7 @@ def readonly_runtime(database, db, host, instance):
     return view
 
 
-def control_status(runtime, project):
+def control_status(runtime, project, *, include_history=True):
     from .admin_queue import eligible_query, scan_signatures, dispatch_diagnostic
     from .admin_usage import admin_admission_status
     from .admin_presets import PRESETS
@@ -80,7 +80,7 @@ def control_status(runtime, project):
     enabled = bool(policy["enabled"] and state["enabled"])
     admission = admin_admission_status(runtime, project)
     project_usage, global_usage = admission["project_usage"], admission["global_usage"]
-    workload = workload_summary(runtime.db, project)
+    workload = workload_summary(runtime.db, project, history_stages=include_history)
     return {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
         "governance_epoch": runtime.host_epoch(), "settings_version": state["version"], "policy": policy,
         "enabled": enabled, "routing": routing, "budget_policy": global_usage["budget_policy"],
@@ -88,7 +88,7 @@ def control_status(runtime, project):
         "project_usage": project_usage, "global_usage": global_usage, "admission": admission,
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
-        "recovery": recovery_status(runtime, project),
+        "recovery": recovery_status(runtime, project, include_history=include_history),
         "publication_policy": publication_policy(runtime, project), "review_activity": review_activity(runtime, project),
         "usage": global_usage,
         "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting,

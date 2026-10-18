@@ -394,6 +394,10 @@ const WORKER_TOOL_SPECS = [
           type: "boolean",
           description: "当 action 为 auto / prepare / run 时必须显式设为 true（需用户明确要求吸收项目历史）。",
         },
+        mode: {
+          type: "string", enum: ["continue", "incremental", "remaining", "full"],
+          description: "默认 continue 先继续未结束主审；incremental 检测增量，remaining 优先补扫预算遗漏，full 显式全量。新扫描需先完成或在审批页明确暂存前批。",
+        },
         job_id: {
           type: "string",
           description: "历史批次 ID（run/sources/cases/pause/cancel 时使用；auto 可省略）。",
@@ -1516,6 +1520,8 @@ export function apply(ctx, config = {}) {
               send(200, {
                 ok: true,
                 job_id: parsed.result?.prepared_job_id,
+                preparation: parsed.result?.preparation,
+                changes: parsed.result?.changes,
                 cases: parsed.result?.job?.counts?.cases ?? 0,
                 sources: parsed.result?.job?.counts?.materialized_sources ?? 0,
               });

@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
         stoppedBrowser: "已停止后台知识库服务",
         archiving: "正在扫描并归档项目历史…",
         archivedPrefix: "仅归档完成，尚未整理或发布；案例数 ",
+        reusedHistory: "已复用历史批次；请打开审批查看进度并继续主审。未调用模型。",
         failed: "操作失败",
         confirmAdmin: "开启管理员会使用平台模型额度，是否应用此频率？",
         unresolved: "上次设置结果待核对；再次点击可用相同请求重试。",
@@ -78,6 +79,7 @@ window.__ModuleLoader__.load({
         stoppedBrowser: "Stopped background browser server",
         archiving: "Scanning and archiving project history...",
         archivedPrefix: "Archived only, not reviewed or published; cases ",
+        reusedHistory: "Existing history batch reused. Open review for progress; no model call.",
         failed: "Operation failed",
         confirmAdmin: "Enabling the administrator uses platform model quota. Apply this preset?",
         unresolved: "Previous settings result is unconfirmed. Click again to retry the same request.",
@@ -511,7 +513,7 @@ window.__ModuleLoader__.load({
                 style: btnStyle(false),
                 onClick: function () {
                   trigger("archive_history", t.archiving, function (res) {
-                    return t.archivedPrefix + String(res.cases ?? 0);
+                    return ["continue_existing","no_changes"].includes(res.preparation?.action) ? t.reusedHistory : t.archivedPrefix + String(res.cases ?? 0);
                   });
                 },
               },

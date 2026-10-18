@@ -57,7 +57,7 @@ def _available(db):
             and "retry_allowed" in {r[1] for r in db.execute("PRAGMA table_info(admin_calls)")})
 
 
-def workload_summary(db, project):
+def workload_summary(db, project, *, history_stages=True):
     """Mutually exclusive stages, with historical text units counted separately."""
     if not _available(db):
         return {"available": False, "reason": "workload_upgrade_required", "stages": {stage: None for stage in STAGES},
@@ -66,16 +66,23 @@ def workload_summary(db, project):
                 "history_in_daily_queue": False, "grouping_changes_authority": False}
     kinds = {kind: {stage: 0 for stage in STAGES} for kind in ("daily", "work_summary", "historical")}
     pending = {kind: 0 for kind in kinds}
-    for row in db.execute(CASE_VIEW +
+    view = CASE_VIEW if history_stages else CASE_VIEW.replace("WHERE p.project=?", "WHERE p.project=? "
+        "AND NOT EXISTS(SELECT 1 FROM history_case_links h WHERE h.project=p.project AND h.problem_id=p.id)")
+    for row in db.execute(view +
             "SELECT kind,queue_state,status,COUNT(*) AS n FROM cases GROUP BY kind,queue_state,status", (project,)):
         kinds[row["kind"]][row["queue_state"]] += row["n"]
         if row["status"] == "pending":
             pending[row["kind"]] += row["n"]
+    if not history_stages:
+        pending["historical"] = db.execute("SELECT COUNT(*) FROM problems p WHERE p.project=? AND p.status='pending' "
+            "AND EXISTS(SELECT 1 FROM history_case_links h WHERE h.project=p.project AND h.problem_id=p.id)", (project,)).fetchone()[0]
+        kinds["historical"] = {stage: None for stage in STAGES}
     stages = {stage: kinds["daily"][stage] + kinds["work_summary"][stage] for stage in STAGES}
     return {"available": True, "stages": stages, "kinds": kinds, "pending_by_kind": pending,
             "pending_total": sum(pending.values()), "history_pending_units": pending["historical"],
             "daily_pending_rows": pending["daily"], "summary_pending_rows": pending["work_summary"],
-            "history_in_daily_queue": False, "grouping_changes_authority": False}
+            "history_in_daily_queue": False, "historical_stages_available": history_stages,
+            "grouping_changes_authority": False}
 
 
 def _host(conversation):

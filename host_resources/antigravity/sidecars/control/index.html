@@ -145,7 +145,7 @@
       if (disposed || turn !== generation) return;
       if (!result.visible || !result.summary) { hide(); return; }
       summary = result.summary; diagnostics = result.diagnostics || null;
-      $("result").textContent = result.opened ? t("opened") : name === "set_admin_preset" ? t("saved") : result.history ? `${t(result.history.state === "materialized" ? "archived" : "archivedPartial")} ${count(result.history.archived_cases)} (${result.history.state || "unknown"})` : "";
+      $("result").textContent = result.opened ? t("opened") : name === "set_admin_preset" ? t("saved") : result.history ? `${["continue_existing","no_changes"].includes(result.history.preparation?.action) ? (language === "zh-CN" ? "已复用历史批次，请进入审批查看进度；未调用模型。" : "Existing history batch reused; open review for progress. No model call.") : t(result.history.state === "materialized" ? "archived" : "archivedPartial")} ${count(result.history.archived_cases)} (${result.history.state || "unknown"})` : "";
     } catch {
       if (turn === generation) { hide(); $("notice").textContent = t("failed"); }
     } finally { if (turn === generation) { busy = false; render(); } }

@@ -10,7 +10,7 @@ from agent_learning.browser_ui import HTML, JAVASCRIPT
 HARNESS = r'''
 const {script,scenario}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const vm=require('node:vm'),assert=require('node:assert/strict');
-const elements=new Map(),all=[],requests=[];let context,serial=0,published=false,failRefresh=false,failDetail=false;
+const elements=new Map(),all=[],requests=[];let context,serial=0,published=false,failRefresh=false,failDetail=false,failHistory=false;
 class Element{
  constructor(id,tag='div'){this.id=id;this.tagName=tag.toUpperCase();this.children=[];this.textContent='';this.value='';this.hidden=false;this.disabled=false;this.open=false;this.scrollTop=0;this.dataset={};this.listeners={};this.isConnected=true;this.parentElement=null;this.classes=new Set();this.classList={toggle:(key,value)=>{value??=!this.classes.has(key);value?this.classes.add(key):this.classes.delete(key);},contains:key=>this.classes.has(key)};all.push(this);}
  addEventListener(name,fn){(this.listeners[name]??=[]).push(fn);} setAttribute(name,value){this[name]=value;}
@@ -26,7 +26,8 @@ const win={scrollX:0,scrollY:1480,scrollTo:options=>{win.scrollX=options.left;wi
 const candidate=()=>({candidate_id:'c1',status:published?'published':'candidate',body:{title:'Review content',content:'Source',metadata:{}},problem:{id:'p1',revision:1,summary:'Observed source'},field:{text:'Content page',offset:0,total_chars:10000,next_offset:8000},evidence:{items:[],total:0,offset:0,next_offset:null},preflight:{publishable:true,issues:[],warnings:[]}});
 const fetch=async(url,options)=>{
  requests.push({url,options});let data;
- if(url.startsWith('/api/candidate?')){if(failDetail)throw new Error('offline detail');data=candidate();}
+ if(url.startsWith('/api/admin-control/history')){if(failHistory)return {ok:false,status:503,json:async()=>({error:'query budget exceeded'})};const offset=Number(new URL(url,'http://local').searchParams.get('offset'));data={items:[{id:'batch-'+offset,state:'materialized',counts:{cases:100,reviewed_cases:2,candidates:1,published_candidates:0}}],offset,next_offset:offset===0?3:null};}
+ else if(url.startsWith('/api/candidate?')){if(failDetail)throw new Error('offline detail');data=candidate();}
  else if(url.startsWith('/api/candidates?')){if(failRefresh)throw new Error('offline refresh');data={items:[],total:0,offset:20,next_offset:null};}
  else if(url==='/api/stats')data={project_id:'test',knowledge_active:1,workload:{stages:{pending_review:0}}};
  else if(url.startsWith('/api/review/prepare')){const body=JSON.parse(options.body);data={plan_id:'plan',expires_at:Date.now()/1000+3600,plan:{plan_digest:'digest',action:body.action,ready:true,items:body.candidate_ids.map(id=>({candidate_id:id,title:id,status:'candidate',preflight:{publishable:true,issues:[],warnings:[]}}))}};}
@@ -48,7 +49,20 @@ const opener=get('opener');opener.dataset.detailKey='candidate:c1';
   assert.equal(get('detail-dialog').open,true);assert.equal(win.scrollY,1480);
   assert.equal(context.document.documentElement.classList.contains('reading-open'),true);
  }
- if(scenario==='detail'){
+ if(scenario==='history_failure'||scenario==='history_paging'){
+  run("state.session={admin_control_enabled:true};state.adminToken='admin';state.adminData={enabled:true,recovery:{history_separate:true,capture:{},blocked_reviews:[]}};");
+  await run('loadAdminHistory()');assert.equal(run('adminHistoryPage.items[0].id'),'batch-0');
+  if(scenario==='history_failure'){
+   failHistory=true;await run('loadAdminHistory()');assert.equal(run('state.adminData.enabled'),true);
+   assert.equal(run('adminHistoryPage.items[0].id'),'batch-0');assert(run('adminHistoryError').includes('budget'));
+   assert(get('admin-recovery').children.some(x=>x.textContent.includes('budget')));
+   failHistory=false;await run('loadAdminHistory()');assert.equal(run('adminHistoryError'),'');
+  }else{
+   run('adminHistoryOffset=3');await run('loadAdminHistory()');assert.equal(run('adminHistoryPage.items[0].id'),'batch-3');
+  }
+  assert.equal(requests.filter(x=>x.options.method==='POST').length,0);assert.equal(win.scrollY,1480);
+  run('disconnect()');assert.equal(run('adminHistoryPage'),null);assert.equal(run('adminHistoryOffset'),0);
+ }else if(scenario==='detail'){
   get('detail-dialog').scrollTop=340;await run('state.fieldOffset=8000;loadField()');
   assert.equal(get('detail-dialog').scrollTop,340);assert.equal(win.scrollY,1480);
   await run('state.evidenceOffset=10;loadField()');assert.equal(get('detail-dialog').scrollTop,340);
@@ -111,7 +125,7 @@ class BrowserReaderUITests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required to execute the shipped UI")
     def test_reading_approval_recovery_and_scroll_preservation(self):
-        for scenario in ("detail", "cancel", "single", "batch", "refresh_failure", "disconnect", "detail_failure", "unknown", "rapid_reopen"):
+        for scenario in ("detail", "cancel", "single", "batch", "refresh_failure", "disconnect", "detail_failure", "unknown", "rapid_reopen", "history_failure", "history_paging"):
             with self.subTest(scenario=scenario):
                 result = subprocess.run([shutil.which("node"), "-e", HARNESS],
                                         input=json.dumps({"script": JAVASCRIPT, "scenario": scenario}),

@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.3 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.4 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -53,7 +53,7 @@ The panels passed isolated regressions, fixed-runtime checks and Edge checks wit
 
 ![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
 
-### Inspect review subjects and publication (1.1.3)
+### Inspect review subjects and publication (1.1.4)
 
 Open **Review & settings → Administrator settings** from any host control panel:
 
@@ -71,6 +71,17 @@ These cards show public records and observable evidence, not internal model reas
 Automatic selection prioritizes knowledge feedback, recovery observations and successful tool evidence, then public explanations, while preserving executor backoff. An awaiting-evidence case is not automatically reviewed again merely because the model changed when its evidence, actual comparison dependencies and explicit review context are unchanged. Explicit case review remains available; new evidence, source health or relevant knowledge changes trigger reconsideration. Historical batches retain separate consent. Changes to review instructions, packet format, input limits or provider still invalidate review reuse; legacy receipts keep exact matching without guessing their former policy. Schema and protocol remain 19; existing cases and user budgets are preserved.
 
 1.1.3 opens candidate and knowledge details in the current viewport, with independently scrolling content, paged evidence and persistent close/review controls. Closing restores the list position while keeping filters, pagination and other selections. Single-item decisions show their receipt in the same reader; batch results use a separate receipt dialog. “View last decision result” reopens the latest receipt without jumping to the page bottom. Escape closes an idle reader; loading or submission prevents accidental dismissal. Unknown results retain the same request and receipt-recovery rules. The shared interface serves all three hosts without extra model calls or changes to approval authority.
+
+### History continuation and incremental sources (1.1.4)
+
+- Repeated history actions first return the project's unfinished main review without rescanning, restarting it or calling a model. Continue that batch explicitly with a bounded review budget; account, pause and unknown-call checks still apply.
+- Main review, missing evidence and candidate approval have separate counts. Waiting evidence or approval does not block future delta work. Explicitly defer an unfinished main review in the history card, with a reason, to retain it while selecting another batch.
+- After the main review ends or is deferred, only new or changed file versions become primary review units. Unchanged sources selected in the same scan may provide bounded related context. Delta reuse is file based; semantic merging and paragraph-level decision inheritance are not implemented.
+- `history-prepare --mode remaining --confirm` reuses the original roots and limits, prioritizing files omitted by total-byte, file-count or chunk budgets. Unsupported formats, single-file ceilings and entry-enumeration limits still need an explicit scope or limit change.
+- Administrator settings and paged history progress load independently. An unavailable history query does not hide settings or display invented zero counts. Existing read budgets remain enforced.
+
+Advanced CLI: `history-prepare --mode incremental --confirm`, `history-defer <job_id> --reason "Review old sources later" --confirm`, or explicitly requested `--mode full`. Use the installed `--home`, explicit `--workspace` and matching `--host`. Schema and internal protocol stay at 19; historical publication still requires approval. Update installations to 1.1.4 and reopen existing pages.
+
 
 ### 2. Local Visual Knowledge Browser, Candidate Review & Frequency Presets (All Hosts)
 

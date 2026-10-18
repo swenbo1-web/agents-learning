@@ -137,6 +137,7 @@ class HistoryEntryTests(unittest.TestCase):
             old = runtime.history_prepare(project, self.workspace, scan_options={"include": ["old-*.md"]})["job_id"]
             runtime.history_run(project, old)
             runtime.history_pause(project, old)
+            runtime.history_defer(project, old, "Explicitly select a new source without reopening paused access")
             (self.workspace / "current.md").write_text("Current selected project fact.", encoding="utf-8")
             current = runtime.history_prepare(project, self.workspace, scan_options={"include": ["current.md"]})["job_id"]
             runtime.history_run(project, current)

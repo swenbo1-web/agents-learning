@@ -291,13 +291,19 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                 result = {"project": self.server.project, "review_enabled": self.server.review_enabled,
                           "admin_control_enabled": self.server.admin_control_enabled,
                           "read_only": not (self.server.review_enabled or self.server.admin_control_enabled), "language": self.server.language}
-            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt", "/api/admin-control/publication-preview"}:
+            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt", "/api/admin-control/publication-preview", "/api/admin-control/history"}:
                 if not self.server.admin_control_enabled:
                     raise ContractError("administrator control capability was not opened")
                 from .admin_control import readonly_runtime, control_status, request_receipt
                 with self.server.snapshot() as db:
                     view = readonly_runtime(self.server.database, db, self.server.runtime_host, self.server.runtime_instance)
-                    if parsed.path.endswith("/publication-preview"):
+                    if parsed.path.endswith("/history"):
+                        if set(params) - {"offset", "limit"}:
+                            raise ContractError("invalid history progress parameters")
+                        from .admin_recovery import history_recovery_page
+                        result = history_recovery_page(view, self.server.project,
+                            offset=_integer(params, "offset", 0, 10000), limit=_integer(params, "limit", 3, 10, 1))
+                    elif parsed.path.endswith("/publication-preview"):
                         if set(params) != {"candidate_id"}:
                             raise ContractError("publication preview requires candidate_id")
                         from .admin_publication import publication_preview
@@ -309,7 +315,7 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                     else:
                         if params:
                             raise ContractError("administrator status takes no parameters")
-                        result = control_status(view, self.server.project)
+                        result = control_status(view, self.server.project, include_history=False)
             else:
                 with self.server.snapshot() as db:
                     result = _read_api(db, self.server.project, parsed.path, params)
@@ -326,8 +332,10 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
         except LookupError:
             self._send(404, {"error": "item not found in this project"})
-        except sqlite3.DatabaseError:
-            self._send(503, {"error": "read unavailable or query budget exceeded"})
+        except sqlite3.DatabaseError as exc:
+            interrupted = getattr(exc, "sqlite_errorcode", None) == getattr(sqlite3, "SQLITE_INTERRUPT", 9) or str(exc) == "interrupted"
+            self._send(503, {"error": "query budget exceeded; narrow this view or retry" if interrupted else "database read unavailable",
+                             "reason": "query_budget_exceeded" if interrupted else "database_read_unavailable"})
         except (TypeError, KeyError, AttributeError):
             self._send(503, {"error": "stored data does not match the browser contract"})
 
@@ -427,7 +435,7 @@ def _read_api(db, project, route, params):
                 "tool_success_observations": count("events", " AND type='PostToolUse' AND outcome='succeeded'"),
                 "problems": states("problems", "status"), "candidates": states("candidates", "status"),
                 "review_states": states("review_states", "state"), "administrator_calls": states("admin_calls", "state"),
-                "workload": workload_summary(db, project)}
+                "workload": workload_summary(db, project, history_stages=False)}
     offset = _integer(params, "offset", 0, MAX_OFFSET if route != "/api/knowledge" else 1000000)
     limit = _integer(params, "limit", 20 if route != "/api/knowledge" else MAX_FIELD_PAGE,
                      MAX_PAGE if route != "/api/knowledge" else MAX_FIELD_PAGE, 1)

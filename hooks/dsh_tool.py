@@ -81,7 +81,7 @@ def _handle_learning_history(runtime, project, workspace, args):
 
     if action == "prepare":
         return runtime.history_prepare(
-            project, workspace, extra_sources=extra_sources or None, scan_options=scan_options
+            project, workspace, extra_sources=extra_sources or None, scan_options=scan_options, mode=args.get("mode", "continue")
         )
 
     allow_review = bool(args.get("allow_review", False))
@@ -89,8 +89,11 @@ def _handle_learning_history(runtime, project, workspace, args):
     max_seconds = int(args.get("max_seconds", 180))
 
     if action == "auto":
+        if not allow_review:
+            return dict(runtime.history_archive(project, workspace, extra_sources=extra_sources or None,
+                scan_options=scan_options, mode=args.get("mode", "continue"), max_seconds=max_seconds), mode="auto_prepare_and_run")
         prepared = runtime.history_prepare(
-            project, workspace, extra_sources=extra_sources or None, scan_options=scan_options
+            project, workspace, extra_sources=extra_sources or None, scan_options=scan_options, mode=args.get("mode", "continue")
         )
         target_job_id = prepared["job_id"]
         ran = runtime.history_run(
@@ -172,14 +175,17 @@ def _handle_slash_command(runtime, project, workspace, command_name, raw_input):
         if sub in {"run", "auto"}:
             allow_review = "--allow-review" in tokens or "--review" in tokens
             explicit_job = next((t for t in tokens[1:] if not t.startswith("-")), None)
-            if sub == "auto" or not explicit_job:
-                prep = runtime.history_prepare(project, workspace)
-                explicit_job = prep["job_id"]
-            res = runtime.history_run(project, explicit_job, allow_review=allow_review)
+            if (sub == "auto" or not explicit_job) and not allow_review:
+                res = runtime.history_archive(project, workspace)
+            else:
+                if sub == "auto" or not explicit_job:
+                    prep = runtime.history_prepare(project, workspace)
+                    explicit_job = prep["job_id"]
+                res = runtime.history_run(project, explicit_job, allow_review=allow_review)
             job = res["job"]
             return {
                 "text": (
-                    f"### 项目历史吸收已完成\n"
+                    f"### 项目历史吸收进度（归档与主审分别统计）\n"
                     f"- **批次 ID (`job_id`)**: `{job['job_id']}` | **终态**: `{job['state']}`\n"
                     f"- **已归档来源**: `{job['counts']['materialized_sources']}/{job['counts']['sources']}` 个文件\n"
                     f"- **生成历史案例 (`reported`)**: `{job['counts']['cases']}` 条（待审 `{job['counts']['pending_cases']}` 条，候选 `{job['counts']['candidates']}` 条）\n"

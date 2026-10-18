@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_learning import history_import
+from agent_learning import history_import, history_progress
 from agent_learning.runtime import Runtime
 from tests.test_module6_queue import fake_reviewer
 
@@ -262,13 +262,13 @@ class HistoryOptimizationTests(unittest.TestCase):
         job = self.prepare()
         self.r.history_run(self.p, job)
         other, body = self.parallel_candidate(job)
-        original, writes = history_import._review_queue, []
-        def concurrent(runtime, project, identity):
+        original, writes = history_progress.progress_snapshots, []
+        def concurrent(runtime, rows):
             self.assertTrue(runtime.db.in_transaction)
             if not writes:
                 writes.append(other.submit_candidate(self.p, **body))
-            return original(runtime, project, identity)
-        with patch.object(history_import, "_review_queue", side_effect=concurrent):
+            return original(runtime, rows)
+        with patch.object(history_progress, "progress_snapshots", side_effect=concurrent):
             result = self.r.history_status(self.p, job)["job"]
         self.assertEqual(result["counts"]["candidates"], 0)
         self.assertEqual(result["coverage"]["review"]["ready_cases"], 1)
@@ -283,20 +283,21 @@ class HistoryOptimizationTests(unittest.TestCase):
         self.write("README.md", "An older documented source.")
         older = self.prepare()
         self.r.history_run(self.p, older)
+        self.r.history_defer(self.p, older, "Explicitly create a second frozen fixture")
         self.write("README.md", "A newer documented source.")
         newer = self.prepare()
         self.r.history_run(self.p, newer)
         self.r.db.execute("UPDATE history_jobs SET created=1 WHERE id=?", (older,))
         self.r.db.execute("UPDATE history_jobs SET created=2 WHERE id=?", (newer,))
         other, body = self.parallel_candidate(older)
-        original, writes = history_import._review_queue, []
-        def concurrent(runtime, project, identity):
+        original, writes = history_progress.progress_snapshots, []
+        def concurrent(runtime, rows):
             self.assertTrue(runtime.db.in_transaction)
             if not writes:
-                self.assertEqual(identity, newer)
+                self.assertEqual(rows[0]["id"], newer)
                 writes.append(other.submit_candidate(self.p, **body))
-            return original(runtime, project, identity)
-        with patch.object(history_import, "_review_queue", side_effect=concurrent):
+            return original(runtime, rows)
+        with patch.object(history_progress, "progress_snapshots", side_effect=concurrent):
             result = self.r.history_jobs(self.p)
         self.assertEqual(result["total"], 2)
         self.assertEqual([item["job_id"] for item in result["items"]], [newer, older])
@@ -311,13 +312,13 @@ class HistoryOptimizationTests(unittest.TestCase):
         self.r.history_run(self.p, job)
         other, body = self.parallel_candidate(job)
         row = history_import._job(self.r, self.p, job)
-        original, writes = history_import._review_queue, []
-        def concurrent(runtime, project, identity):
+        original, writes = history_progress.progress_snapshots, []
+        def concurrent(runtime, rows):
             self.assertTrue(runtime.db.in_transaction)
             if not writes:
                 writes.append(other.submit_candidate(self.p, **body))
-            return original(runtime, project, identity)
-        with patch.object(history_import, "_review_queue", side_effect=concurrent):
+            return original(runtime, rows)
+        with patch.object(history_progress, "progress_snapshots", side_effect=concurrent):
             result = history_import._summary(self.r, row)
         self.assertEqual(result["counts"]["candidates"], 0)
         self.assertEqual(result["coverage"]["review"]["ready_cases"], 1)

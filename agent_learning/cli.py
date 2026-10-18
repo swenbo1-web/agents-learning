@@ -36,6 +36,12 @@ def parser():
     history.add_argument("--conversation-file", action="append", default=[], help="明确选择的对话导出或受支持原生记录")
     history.add_argument("--artifact-dir", action="append", default=[], help="明确选择的项目外 Agent 产物目录")
     history.add_argument("--scan-options", help="扫描上限 JSON 文件；省略使用有限默认值")
+    history.add_argument("--mode", choices=["continue", "incremental", "remaining", "full"], default="continue",
+                         help="默认先继续未结束批次；增量、补扫及全量扫描需先结束或暂存主审")
+    defer = sub.add_parser("history-defer", help="明确暂存历史主审，允许后续增量；保留原始资料与审批权限")
+    defer.add_argument("job_id")
+    defer.add_argument("--reason", required=True)
+    defer.add_argument("--confirm", action="store_true")
     run = sub.add_parser("history-run", help="用户启动或明确续做历史整理；不自动发布知识")
     run.add_argument("job_id")
     run.add_argument("--confirm", action="store_true", help="确认本次有限归档或整理")
@@ -360,7 +366,7 @@ def main(argv=None):
         if args.command.startswith("history-"):
             if not args.workspace:
                 raise ContractError("history commands require an explicit --workspace; installation cwd is not a project choice")
-            if args.command in {"history-prepare", "history-run"} and not args.confirm:
+            if args.command in {"history-prepare", "history-run", "history-defer"} and not args.confirm:
                 raise ContractError("history reading and processing require explicit user selection (--confirm)")
         args.workspace = args.workspace or str(Path.cwd())
         if args.command in {"update-check", "update-status", "update-notice", "update-choice"}:
@@ -474,7 +480,7 @@ def main(argv=None):
             options = json.loads(Path(args.scan_options).read_text(encoding="utf-8-sig")) if args.scan_options else None
             sources = ([{"path": str(Path(path).absolute()), "kind": "conversation"} for path in args.conversation_file]
                        + [{"path": str(Path(path).absolute()), "kind": "artifacts"} for path in args.artifact_dir])
-            result = runtime.history_prepare(project, args.workspace, extra_sources=sources, scan_options=options)
+            result = runtime.history_prepare(project, args.workspace, extra_sources=sources or None, scan_options=options, mode=args.mode)
         elif args.command == "history-run": result = runtime.history_run(
             project, args.job_id, allow_review=args.allow_review, max_calls=args.max_calls, max_seconds=args.max_seconds)
         elif args.command == "history-status": result = runtime.history_status(project, args.job_id)
@@ -488,6 +494,7 @@ def main(argv=None):
             project, args.job_id, offset=args.offset, limit=args.limit)
         elif args.command == "history-cancel": result = runtime.history_cancel(project, args.job_id)
         elif args.command == "history-pause": result = runtime.history_pause(project, args.job_id)
+        elif args.command == "history-defer": result = runtime.history_defer(project, args.job_id, args.reason)
         elif args.command == "history-skip": result = runtime.history_skip(project)
         elif args.command == "semantic-status": result = runtime.semantic_status(project)
         elif args.command == "semantic-refresh": result = runtime.semantic_refresh(project, limit=args.limit, rebuild=args.rebuild)

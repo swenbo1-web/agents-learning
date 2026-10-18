@@ -1,6 +1,7 @@
 """Settings capability, admission pause, receipts and read-only HTTP status."""
 import http.client
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -280,6 +281,26 @@ class AdminControlHttpTests(unittest.TestCase):
         self.assertEqual(self.r.db.total_changes, before)
         model.assert_not_called()
         self.assertNotIn(self.server.admin_token, json.dumps(response))
+
+    def test_history_query_failure_does_not_hide_core_settings(self):
+        with patch("agent_learning.admin_recovery.history_recovery_page", side_effect=sqlite3.OperationalError("interrupted")), \
+                patch("subprocess.Popen") as model:
+            code, core = self.request("/api/admin-control")
+            self.assertEqual(code, 200, core)
+            self.assertTrue(core["recovery"]["history_separate"])
+            code, history = self.request("/api/admin-control/history")
+            self.assertEqual(code, 503, history)
+            self.assertEqual(history["reason"], "query_budget_exceeded")
+            self.assertEqual(self.request("/api/admin-control")[0], 200)
+        model.assert_not_called()
+
+    def test_history_page_is_project_scoped_and_does_not_construct_runtime(self):
+        with patch("agent_learning.runtime.Runtime.__init__", side_effect=AssertionError("GET constructed Runtime")):
+            code, history = self.request("/api/admin-control/history?limit=1&offset=0")
+        self.assertEqual(code, 200, history)
+        self.assertEqual(history["items"], [])
+        self.assertEqual(self.request("/api/admin-control/history?project=another")[0], 400)
+        self.assertEqual(self.request("/api/admin-control/history", Authorization="Bearer invalid")[0], 401)
 
     def test_review_key_and_cross_origin_never_configure_administrator(self):
         for headers in ({"X-Admin-Token": None}, {"X-Admin-Token": self.server.review_token},

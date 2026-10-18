@@ -43,7 +43,12 @@ class HistoryContextTests(unittest.TestCase):
                           (time.time() + 120, job))
 
     def materialize(self):
-        job = self.r.history_prepare(self.project, self.workspace)["job_id"]
+        previous = self.r.history_status(self.project)["job"]
+        if previous:
+            # End only the synthetic fixture worker before selecting a new scope.
+            self.r.db.execute("UPDATE history_jobs SET owner=NULL,lease_until=NULL WHERE id=?", (previous["job_id"],))
+            self.r.history_defer(self.project, previous["job_id"], "Explicit new full-snapshot fixture")
+        job = self.r.history_prepare(self.project, self.workspace, mode="full")["job_id"]
         self.r.history_run(self.project, job)
         self.activate(job)
         return job
@@ -254,6 +259,8 @@ class HistoryContextTests(unittest.TestCase):
         # The bounded scan may intentionally omit later relevant sources; it
         # never converts those omissions into a completed review.
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM review_receipts").fetchone()[0], 0)
+
+    def test_oversized_events_are_not_silently_cut(self):
         related = self.enriched()["related_history"][0]
         event = related["events"][0]
         payload = deepcopy(event["payload"])

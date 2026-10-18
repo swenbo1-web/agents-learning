@@ -599,7 +599,30 @@ def _conversation(text, suffix, chars, max_chunks):
     return "\n\n".join(sections), chunks, coverage, metadata, messages
 
 
-def scan_sources(workspace, extra_sources=None, options=None):
+def _project_configuration(raw):
+    """Exclude only our MCP tables; preserve user tables and multiline values."""
+    from .codex_connect import _statements, _key, SERVER, PLUGIN
+    from .runtime import ContractError
+    result, section, removed = [], (), False
+    try:
+        for _, _, text in _statements(raw):
+            stripped = text.strip()
+            if stripped.startswith("["):
+                match = re.fullmatch(r"\[(.*?)\]\s*(?:#[^\n]*)?", stripped)
+                if not match:
+                    return raw, False
+                section = _key(match[1].strip())
+            owned = any(section[:len(prefix)] == prefix for prefix in (SERVER, PLUGIN))
+            if not owned:
+                result.append(text)
+            else:
+                removed = True
+    except (ContractError, ValueError):
+        return raw, False
+    return "".join(result), removed
+
+
+def scan_sources(workspace, extra_sources=None, options=None, *, prioritize_paths=None, only_paths=None):
     """预览明确选择的项目和额外来源；所有来源共用预算，不持久写入。
 
     extra_sources 为 [{path: 明确路径, kind: conversation|artifacts}]；kind
@@ -632,6 +655,7 @@ def scan_sources(workspace, extra_sources=None, options=None):
                         "files_attempted": 0, "files_included": 0, "bytes_read": 0, "chunks": 0, "unlisted_entries": 0},
               "options": configuration}
     candidates, seen = [], set()
+    selected_paths = None if only_paths is None else {os.path.normcase(str(path)) for path in only_paths}
 
     def note(path, reason, *, pending=False):
         record = {"path": str(path), "reason": reason}
@@ -701,6 +725,9 @@ def scan_sources(workspace, extra_sources=None, options=None):
                 continue
             seen.add(identity)
             result["stats"]["files_considered"] += 1
+            if selected_paths is not None and identity not in selected_paths:
+                note(current, "outside_remaining_scope")
+                continue
             if _sensitive(current):
                 note(current, "sensitive_file")
                 continue
@@ -713,7 +740,9 @@ def scan_sources(workspace, extra_sources=None, options=None):
                 continue
             candidates.append((_priority(current, kind), str(current).casefold(), current, root, root_info, kind, requested))
 
-    for priority, _, path, root, root_info, kind, requested in sorted(candidates, key=lambda row: (row[0], row[1], str(row[2]))):
+    priority_paths = {os.path.normcase(str(path)) for path in prioritize_paths or []}
+    for priority, _, path, root, root_info, kind, requested in sorted(candidates, key=lambda row: (
+            os.path.normcase(str(row[2])) not in priority_paths, row[0], row[1], str(row[2]))):
         stats = result["stats"]
         if stats["files_attempted"] >= configuration["max_files"]:
             note(path, "budget_files", pending=True)
@@ -737,6 +766,22 @@ def scan_sources(workspace, extra_sources=None, options=None):
                 raise _Skip("unparsed_encoding") from None
             if not raw:
                 raise _Skip("empty_source")
+            relative_path = path.relative_to(root).as_posix().casefold()
+            if relative_path == ".codex/environments/agent-learning.toml" and raw.startswith(
+                    "# Agent Learning managed project action; update through codex-action."):
+                raise _Skip("plugin_generated_content")
+            if relative_path == ".codex/environments/agent-learning.action.json":
+                try:
+                    managed = json.loads(raw)
+                except ValueError:
+                    managed = None
+                if isinstance(managed, dict) and managed.get("kind") == "agent-learning-codex-action" and managed.get("schema_version") == 1:
+                    raise _Skip("plugin_generated_content")
+            omitted_plugin = False
+            if relative_path == ".codex/config.toml":
+                raw, omitted_plugin = _project_configuration(raw)
+                if omitted_plugin and not raw.strip():
+                    raise _Skip("plugin_generated_content")
             if kind != "conversation" and path.suffix.casefold() in {".json", ".ipynb"}:
                 # 已批准项目内的聊天 JSON 自动进入白名单解析，不能回退配置全文。
                 try:
@@ -759,6 +804,9 @@ def scan_sources(workspace, extra_sources=None, options=None):
                 metadata = {"author_role": "unknown", "format": path.suffix.casefold() or path.name.casefold(),
                             "agent_artifact_hint": kind == "document" and priority == 1,
                             "selection_kind": requested}
+                if omitted_plugin:
+                    coverage = "partial"
+                    metadata["excluded_plugin_configuration"] = True
             metadata["read_stat"] = read_stat
             if len(chunks) > max_chunks:
                 raise _Skip("budget_chunks")
@@ -773,7 +821,7 @@ def scan_sources(workspace, extra_sources=None, options=None):
             stats["chunks"] += len(chunks)
         except _Skip as exc:
             stats["bytes_read"] += exc.bytes_read
-            note(path, exc.reason, pending=exc.reason != "empty_source")
+            note(path, exc.reason, pending=exc.reason not in {"empty_source", "plugin_generated_content"})
         except (OSError, ValueError) as exc:
             stats["bytes_read"] += getattr(exc, "bytes_read", 0)
             note(path, "unreadable_or_changed", pending=True)

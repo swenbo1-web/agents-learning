@@ -96,11 +96,10 @@ def _source_rows(runtime, project, primary, job_id):
     return runtime.db.execute(
         "SELECT p.id,p.revision,p.summary,p.task_id,p.task_revision,u.id AS unit_id,"
         "u.material_id,u.unit_index,u.body AS unit_body,m.source_key,m.content_hash,s.position "
-        "FROM history_case_links l JOIN problems p ON p.project=l.project AND p.id=l.problem_id "
-        "JOIN history_units u ON u.id=l.unit_id AND u.project=l.project AND u.problem_id=p.id "
-        "JOIN history_job_sources s ON s.job_id=l.job_id AND s.material_id=u.material_id "
-        "JOIN history_materials m ON m.id=u.material_id AND m.project=l.project "
-        "WHERE l.project=? AND l.job_id=? AND p.id<>? AND u.material_id<>? AND s.materialized=1 "
+        "FROM history_units u JOIN problems p ON p.project=u.project AND p.id=u.problem_id "
+        "JOIN history_job_sources s ON s.material_id=u.material_id "
+        "JOIN history_materials m ON m.id=u.material_id AND m.project=u.project "
+        "WHERE u.project=? AND s.job_id=? AND p.id<>? AND u.material_id<>? AND s.materialized=1 "
         "AND p.task_id IS NULL AND p.task_revision IS NULL "
         "ORDER BY s.position,u.unit_index,p.id LIMIT ?",
         (project, job_id, primary["id"], primary["material_id"], MAX_SCAN)).fetchall()
@@ -230,12 +229,11 @@ def _source_snapshot(runtime, project, job_id, item):
 
     row = runtime.db.execute(
         "SELECT p.id,p.revision,p.task_id,p.task_revision,u.id AS unit_id,u.material_id,u.body AS unit_body,"
-        "m.source_key,m.content_hash FROM history_case_links l "
-        "JOIN problems p ON p.project=l.project AND p.id=l.problem_id "
-        "JOIN history_units u ON u.id=l.unit_id AND u.project=l.project AND u.problem_id=p.id "
-        "JOIN history_job_sources s ON s.job_id=l.job_id AND s.material_id=u.material_id "
-        "JOIN history_materials m ON m.id=u.material_id AND m.project=l.project "
-        "WHERE l.project=? AND l.job_id=? AND p.id=? AND s.materialized=1",
+        "m.source_key,m.content_hash FROM history_units u "
+        "JOIN problems p ON p.project=u.project AND p.id=u.problem_id "
+        "JOIN history_job_sources s ON s.material_id=u.material_id "
+        "JOIN history_materials m ON m.id=u.material_id AND m.project=u.project "
+        "WHERE u.project=? AND s.job_id=? AND p.id=? AND s.materialized=1",
         (project, job_id, item.get("problem_id"))).fetchone()
     if (not row or row["task_id"] is not None or row["task_revision"] is not None
             or any(row[key] != item.get(key) for key in

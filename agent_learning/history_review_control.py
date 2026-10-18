@@ -54,7 +54,7 @@ def request_history_review(runtime, project, body):
             return request_receipt(runtime, project, body["request_id"])["response"]
         if runtime.db.execute("SELECT 1 FROM admin_control_receipts WHERE project=? AND host_scope=? AND session_epoch=? AND request_id=?", identity).fetchone():
             raise ContractError("administrator request identity already used")
-        status = control_status(runtime, project)
+        status = control_status(runtime, project, include_history=False)
         if (status["settings_version"] != body["expected_settings_version"]
                 or status["policy"]["policy_version"] != body["expected_policy_version"]
                 or status["project_budget_policy"]["version"] != body["expected_project_budget_version"]):
@@ -66,6 +66,13 @@ def request_history_review(runtime, project, body):
             raise ContractError("history batch requires explicit reauthorization")
         if current_history_request(runtime, project, row["id"], active_only=True):
             raise ContractError("history batch already has an active review request")
+        from .history_workflow import head, active_request
+        from .history_import import _summary
+        selected = head(runtime, project)
+        if selected and selected["id"] != row["id"] and _summary(runtime, selected)["workflow"]["blocks_new_batch"]:
+            raise ContractError("continue or explicitly defer the project's unfinished history batch first")
+        if active_request(runtime, project):
+            raise ContractError("this project already has an active history review request")
         plan = runtime.resolve_admin_executor(project, require_enabled=False)
         workspace = runtime.db.execute("SELECT workspace FROM history_jobs WHERE id=? AND project=?", (row["id"], project)).fetchone()[0]
         if not Path(workspace).is_dir():

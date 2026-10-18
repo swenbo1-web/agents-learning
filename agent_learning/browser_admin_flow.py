@@ -4,7 +4,18 @@ FLOW_HTML = '<section id="admin-flow" class="admin-details" aria-live="polite"><
 
 FLOW_JAVASCRIPT = r'''
 const historyReviewDrafts=new Map();
+let adminHistoryPage=null,adminHistoryError='',adminHistoryOffset=0;
 Object.assign(strings,{
+flowHistoryUnavailable:['History details are temporarily unavailable: {message}. Administrator settings remain available.','历史详情暂不可用：{message}。管理员设置仍可查看。'],
+flowHistoryReload:['Refresh history','刷新历史进度'],
+flowHistoryPrevious:['Previous batches','上一页批次'],flowHistoryNext:['Next batches','下一页批次'],
+flowHistoryPhases:['Unreviewed {ready} · needs evidence {evidence} · blocked {blocked} · awaiting approval {approval}','待主审{ready} · 待补证{evidence} · 待核对{blocked} · 待批准{approval}'],
+flowHistoryChanges:['New or changed sources {changed} · reused sources {reused} (context only)','新增或变化来源{changed} · 复用来源{reused}（仅作上下文）'],
+flowHistoryDefer:['Defer this batch…','暂存本批主审…'],
+flowHistorySelected:['Selected main-review batch','当前优先批次'],
+flowHistoryBlockedBy:['Continue or explicitly defer batch {id} before reviewing this batch.','请先继续或明确暂存批次{id}，再整理本批。'],
+flowHistoryDeferConfirm:['Defer this main review to allow a later incremental scan? Records and pending approvals remain. This does not retry calls or publish knowledge.','暂存本批主审，允许后续检测增量？保留原始记录和待批准内容；此操作不重试调用、不发布知识。'],
+flowHistoryDeferred:['Main review deferred by the user; unresolved work is retained.','用户已暂存主审，未处理内容仍保留。'],
 flowHeading:['Review subjects and publication','审核内容与发布去向'],
 flowNote:['Read visible records and evidence only; this is not model internal reasoning. Refreshing makes no model call.','展示可见记录与证据，不代表读取模型内部思考；刷新不调用模型。'],
 flowUpcoming:['Next daily cases (up to 5)','接下来可审的日常案例（最多5项）'],
@@ -103,7 +114,14 @@ function renderAdminFlow(data){
  }
 }
 function addHistoryReviewControls(card,item){
+ if(item.selected)card.append(node('strong',t('flowHistorySelected')));
+ if(item.blocked_by_batch)card.append(node('p',t('flowHistoryBlockedBy',{id:item.blocked_by_batch}),'note'));
  const counts=item.counts||{};card.append(node('p',t('flowHistoryCounts',{cases:counts.cases??0,reviewed:counts.reviewed_cases??0,candidates:counts.candidates??0,published:counts.published_candidates??0})));
+ const phases=item.coverage?.review||item.review_progress,publication=item.coverage?.publication||{};
+ if(phases)card.append(node('p',t('flowHistoryPhases',{ready:phases.ready_cases,evidence:phases.awaiting_evidence_cases,blocked:phases.blocked_cases,approval:publication.awaiting_approval??item.awaiting_approval??0})));
+ if(item.changes)card.append(node('p',t('flowHistoryChanges',{changed:item.changes.new_or_changed_sources,reused:item.changes.context_only_sources??0}),'note'));
+ if(item.workflow?.deferred)card.append(node('p',t('flowHistoryDeferred'),'note'));
+ if(item.can_defer){const defer=node('button',t('flowHistoryDefer'));defer.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;defer.addEventListener('click',()=>run(()=>confirmAdminRecovery('defer_history',item)));card.append(defer);}
  if(item.review_request)card.append(node('p',t('flowHistoryRequest',{state:label(item.review_request.state)}),'note'));
  if(item.resume_required)card.append(node('p',t('flowHistoryInterrupted'),'note'));
  if(!item.can_review)return;
@@ -125,5 +143,11 @@ async function saveAdminConfiguration(action){
  const payload=adminConfiguration(action);
  if(payload.auto_publish&&!state.adminData?.publication_policy?.enabled&&!window.confirm(t('autoPublishConfirm')))return;
  return sendAdminRequest('admin-control/configure',payload);
+}
+async function loadAdminHistory(){
+ const epoch=state.epoch,offset=adminHistoryOffset;
+ try{const page=await api('admin-control/history',{offset,limit:3});if(epoch!==state.epoch||offset!==adminHistoryOffset)return;adminHistoryPage=page;adminHistoryError='';}
+ catch(e){if(epoch!==state.epoch)return;adminHistoryError=e.message;}
+ if(state.adminData)renderAdminRecovery(state.adminData);
 }
 '''

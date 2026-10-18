@@ -80,6 +80,7 @@ class HistoryImportTests(unittest.TestCase):
 
     def test_changed_source_creates_new_version_preserving_original(self):
         original = self.materialize()
+        self.r.history_defer(self.p, original, "Explicit new source version fixture")
         self.document.write_text("# Agent project notes\nNew storage documentation.\n", encoding="utf-8")
         newer = self.materialize()
         self.assertNotEqual(original, newer)
@@ -333,6 +334,7 @@ class HistoryImportTests(unittest.TestCase):
             (self.workspace / ("old-" + str(index) + ".md")).write_text("Previously documented project fact.", encoding="utf-8")
         old = self.materialize()
         self.r.history_pause(self.p, old)
+        self.r.history_defer(self.p, old, "Keep paused source access while selecting new material")
         (self.workspace / "current.md").write_text("Current project fact.", encoding="utf-8")
         current = self.materialize(scan_options={"include": ["current.md"]})
         current_page = self.r.history_cases(self.p, current)
