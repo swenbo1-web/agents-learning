@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.13 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.14 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -117,6 +117,16 @@ Invoke `$learning-review` (or click **Open Review & Advanced Fine-Tuning** in th
 4. **Publish and reuse.** A trusted operator or explicitly enabled publication policy admits eligible knowledge. Later tasks retrieve its conditions, evidence and current revision.
 
 Knowledge is reference material; it does not grant execution permission. Tool completion, observed success and user acceptance remain separate.
+
+| Path | User action | Automatic work |
+|---|---|---|
+| Record and reuse working history | Install and connect, then work in a supported host | Visible records become searchable without waiting for an administrator or publication approval |
+| Organize reusable knowledge | Confirm administrator enablement and publication scope once | Finite project-budgeted batches; eligible tiered publication, with disputes or missing evidence retained for follow-up |
+| Absorb an existing project | Explicitly archive, then confirm this review's budget and reference-publication permission | Review only the frozen batch, without rescanning or automatic continuation; retain per-item receipts |
+
+Knowledge admitted to local SQLite is immediately retrievable. Optional daily releases and remote synchronization archive or distribute it; they are not required for same-device reuse. Administrator runs are bounded, not an always-on service. Waiting for quota, evidence or confirmation is distinct from a failure.
+
+**1.1.14 simplification:** unchanged missing-evidence cases do not trigger another model call merely because publication is enabled, disabled or broadened. Signed older receipts remain usable without resetting real locks. Evidence, comparison context, instructions, input budgets and provider changes still trigger reconsideration. Summary sources with incomplete task binding use conversation scope instead of inheriting the current task title; request ownership and original source identity remain distinct.
 
 ## 84-second demo
 

@@ -179,10 +179,27 @@ def workload_page(db, project, *, view="groups", stage="all", group_id="", offse
 def evidence_wait_signature(packet, cfg, evidence):
     from .admin_decisions import review_signature
     from .runtime import digest
-    # Model selection alone does not supply missing facts. All other policy,
-    # format, instruction, provider and comparison dependencies still apply.
-    config = {key: value for key, value in cfg.items() if key not in {"model", "model_mode", "model_source"}}
-    return digest(["evidence-wait-v1", review_signature(packet, config, evidence)])
+    # Model choice and publication grants do not supply missing facts. Actual
+    # evidence, comparison, input format, instructions and provider still apply.
+    config = {key: value for key, value in cfg.items() if key not in
+              {"model", "model_mode", "model_source", "auto_publish", "publication_mode"}}
+    return digest(["evidence-wait-v2", review_signature(packet, config, evidence)])
+
+
+def _legacy_wait_matches(packet, cfg, evidence, stored):
+    """Recognize only v1's finite grant variants, never a missing/unknown policy."""
+    from .admin_decisions import review_signature
+    from .runtime import digest
+    base = {key: value for key, value in cfg.items() if key not in
+            {"model", "model_mode", "model_source", "auto_publish", "publication_mode"}}
+    for mode in (None, "verified_operation_solutions", "tiered"):
+        for enabled in (False, True):
+            config = dict(base, auto_publish=enabled)
+            if mode is not None:
+                config["publication_mode"] = mode
+            if stored == digest(["evidence-wait-v1", review_signature(packet, config, evidence)]):
+                return True
+    return False
 
 
 def hold_unchanged_review(runtime, project, packet, evidence, cfg):
@@ -198,7 +215,8 @@ def hold_unchanged_review(runtime, project, packet, evidence, cfg):
         "ON r.project=s.project AND r.problem=s.problem AND r.revision=s.revision AND r.review_signature=s.review_signature "
         "WHERE s.project=? AND s.problem=? AND s.revision=? AND r.decision='needs_evidence' "
         "AND r.duplicate_of IS NULL", (project, packet["problem"]["id"], packet["problem"]["revision"])).fetchone()
-    # Older receipts have no scheduling signature. Normal exact receipt reuse
-    # remains available; never invent their former model policy or instructions.
+    # Unsigned old receipts retain exact reuse only. Signed v1 memos can survive
+    # a publication switch while all their other original inputs still match.
     return bool(row and row["evidence_signature"] == evidence and row["wait_signature"] and
-                row["wait_signature"] == evidence_wait_signature(packet, cfg, evidence))
+                (row["wait_signature"] == evidence_wait_signature(packet, cfg, evidence)
+                 or _legacy_wait_matches(packet, cfg, evidence, row["wait_signature"])))

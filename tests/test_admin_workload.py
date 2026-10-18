@@ -206,7 +206,7 @@ class AdminWorkloadTests(unittest.TestCase):
 
     def test_missing_evidence_does_not_mask_instruction_budget_or_provider_changes(self):
         packet, evidence = self.decision(self.problem())
-        for key, value in (("max_input_chars", 12000), ("auto_publish", True),
+        for key, value in (("max_input_chars", 12000),
                            ("provider", "antigravity"), ("review_policy", "new")):
             cfg = dict(self.r.config["admin"], **{key: value})
             self.assertFalse(hold_unchanged_review(self.r, self.p, packet, evidence, cfg), key)

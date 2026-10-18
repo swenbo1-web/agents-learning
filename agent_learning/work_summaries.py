@@ -65,6 +65,11 @@ def _link(runtime, project, problem_id):
     return dict(row) if row else None
 
 
+def _source_scope(task_id, task_revision, bindings):
+    return "task" if task_id is not None and bindings and all(
+        pair == (task_id, task_revision) for pair in bindings) else "conversation"
+
+
 # Apply before LIMIT: covered previews must not fill the bounded scan and hide
 # new work. The derived message index also finds already-consumed segments.
 _PUBLIC_PREVIEW_FILTER = (
@@ -250,7 +255,9 @@ class WorkSummaryMixin:
                                      event_id="work-summary:" + identity, task_id=task.get("id"),
                                      task_revision=task.get("revision"), task_write_version=task.get("write_version"),
                                      execution_epoch=task.get("execution_epoch"), outcome="reported")
-            goal = task.get("goal") or "会话阶段记录"
+            source_scope = _source_scope(task.get("id"), task.get("revision"),
+                                         [(row["task_id"], row["task_revision"]) for row in rows])
+            goal = (task.get("goal") or "会话阶段记录") if source_scope == "task" else "本会话公开记录（任务归属未完整确认）"
             title = "工作历史摘要（reported，非正式知识）：" + goal[:240] + " [" + identity[:16] + "]"
             # The request belongs to the task, while original observations retain their own binding.
             problem = self._problem(project, conversation, title, "project", [request["id"]],
@@ -311,13 +318,22 @@ class WorkSummaryMixin:
         if link["task_id"] is not None and (not task or (task["id"], task["revision"]) != (
                 link["task_id"], link["task_revision"])):
             raise ContractError("work_summary_task_changed")
-        for snapshot in json.loads(link["source_snapshots"]):
+        snapshots = json.loads(link["source_snapshots"])
+        for snapshot in snapshots:
             current = self.work_source_snapshot(project, snapshot["event_id"])
             if (current.get("capture_digest"), current.get("source_version"), current.get("state")) != (
                     snapshot.get("capture_digest"), snapshot.get("source_version"), snapshot.get("state")):
                 raise ContractError("work_summary_source_changed")
+        refs = list(dict.fromkeys(snapshot["event_id"] for snapshot in snapshots))
+        if not refs:
+            raise ContractError("work_summary_source_changed")
+        marks = ",".join("?" for _ in refs)
+        bindings = self.db.execute(f"SELECT task_id,task_revision FROM work_memories WHERE project=? "
+                                   f"AND event_id IN ({marks})", (project, *refs)).fetchall()
+        if len(bindings) != len(refs):
+            raise ContractError("work_summary_source_changed")
         link["purpose"] = "work_summary"
-        link["scope"] = "task" if link["task_id"] else "conversation"
+        link["scope"] = _source_scope(link["task_id"], link["task_revision"], [tuple(row) for row in bindings])
         link["instruction_version"] = SUMMARY_INSTRUCTION_VERSION
         return link
 
@@ -332,6 +348,10 @@ class WorkSummaryMixin:
         if link is None:
             raise ContractError("work_summary_link_missing")
         problem = dict(self.db.execute("SELECT * FROM problems WHERE project=? AND id=?", (project, problem_id)).fetchone())
+        if link["scope"] == "conversation":
+            # The request has a task owner; unbound observations do not thereby
+            # become evidence for that task's goal. Legacy windows use this too.
+            problem["summary"] = "工作历史摘要（reported，非正式知识）：本会话公开记录 [" + link["source_digest"][:16] + "]"
         snapshots = json.loads(link["source_snapshots"])
         packet = {"problem": problem, "task": None, "purpose": "work_summary", "scope": link["scope"],
                   "source_digest": link["source_digest"], "events": [], "evidence_count": len(snapshots),
@@ -405,10 +425,7 @@ class WorkSummaryMixin:
         if supplementation:
             record["coverage"]["supplementation"] = supplementation
         ident = digest([project, "work-summary", link["source_digest"]])[:32]
-        mixed = any(self.db.execute("SELECT task_id,task_revision FROM work_memories WHERE project=? AND event_id=?",
-                    (project, snapshot["event_id"])).fetchone()[:] != (link["task_id"], link["task_revision"])
-                    for snapshot in snapshots)
-        scope = "conversation" if mixed or link["task_id"] is None else "task"
+        scope = link["scope"]
         record["scope"] = scope
         record["coverage"]["scope"] = scope
         result = self.record_work_summary(project, ident, record, snapshots, link["conversation"],
