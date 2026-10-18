@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.4 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.5 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -118,6 +118,8 @@ The demo replays selected fields from an actual local export, SQLite tool failur
 
 You need **Git**, **Python 3.10+**, and your chosen host with native plugin support. This default source installation requires no `pip install` or model API key. Obtain the `main` source once:
 
+**Use an independently installed Python, not a host cache or temporary runtime.** Installation checks Python 3.10+, sqlite3/FTS5 and SSL, and rejects known disposable paths by default. Select an absolute interpreter path with `install --python PATH`. `--allow-volatile-python` explicitly accepts removal risk. See [interpreter diagnostics and repair](#interpreter-diagnostics-and-repair-115) for broken installations.
+
 ```powershell
 git clone --branch main --depth 1 https://github.com/swenbo1-web/agents-learning.git
 cd agents-learning
@@ -150,7 +152,7 @@ Replace `$learningProject` with your existing project's absolute path. `codex-co
 
 ### Codex: click to open without a skill message
 
-**Native side panel:** after updating, connecting and reloading MCP, select **Agent Learning** in the conversation side panel's new-tab menu on supported desktop hosts. The global connection advertises an entrypoint; actual calls use the current thread's verified project connection. It never guesses the latest conversation. When the five-minute connection expires, click Reconnect in the panel.
+**Native side panel:** after updating, connecting and reloading MCP, open the conversation side panel's new-tab menu → **More tools… → Agent Learning** on supported desktop hosts (some versions show the entry directly). The global connection advertises an entrypoint; actual calls use the current thread's verified project connection. It never guesses the latest conversation. When the five-minute connection expires, click Reconnect in the panel.
 
 **Read-only connection check:** if the entry is absent, check configuration first. Correct wiring does not establish that the desktop has rendered it.
 
@@ -465,7 +467,7 @@ The same project and data directory can retain knowledge across login accounts. 
 
 | Module | Responsibilities and boundaries | Key source / resources |
 |---|---|---|
-| 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export and upgrade fixed runtimes, check software versions, contents and role permissions | [install.py](agent_learning/install.py), [install_update.py](agent_learning/install_update.py), [software_updates.py](agent_learning/software_updates.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
+| 1. Plugin integration and protocol | Unify CLI, MCP, Hook and skill entry points; export and upgrade fixed runtimes, diagnose and explicitly repair interpreter bindings, check versions, contents and role permissions | [install.py](agent_learning/install.py), [install_update.py](agent_learning/install_update.py), [installation_health.py](agent_learning/installation_health.py), [installation_repair.py](agent_learning/installation_repair.py), [software_updates.py](agent_learning/software_updates.py), [release.py](agent_learning/release.py), [mcp.py](agent_learning/mcp.py), [cli.py](agent_learning/cli.py), [hooks](hooks/hooks.json), [skills](skills/) |
 | 2. Task and execution control | Store task contracts and versions, bind parent/child Agents, check trusted authorization, state, actions and balance; knowledge cannot issue authorization | [task_control.py](agent_learning/task_control.py), [execution.py](agent_learning/execution.py), [assignments.py](agent_learning/assignments.py) |
 | 3. Knowledge storage and indexing | SQLite stores authoritative knowledge, revisions and sources; full-text and optional vectors are rebuildable derived indexes | [knowledge_store.py](agent_learning/knowledge_store.py), [knowledge_index.py](agent_learning/knowledge_index.py), [semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. Retrieval and context management | Search published knowledge and work indices separately; share context budgets, page details, track exposure, notify changes, restore and follow up failures | [knowledge_context.py](agent_learning/knowledge_context.py), [context_storage.py](agent_learning/context_storage.py), [knowledge_output.py](agent_learning/knowledge_output.py), [work_memory.py](agent_learning/work_memory.py), [knowledge_browser.py](agent_learning/knowledge_browser.py) |
@@ -671,6 +673,28 @@ The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and m
 The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
 
 Restart Codex after updating the local source directory and review the changed Hook definitions again. Existing MCP processes may still use the old runtime; a file update receipt does not confirm that they have switched. Reload the local plugin through the host installation entry if its cache remains old. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
+
+### Interpreter diagnostics and repair (1.1.5)
+
+Exports pin an absolute Python path. Removing a virtual environment or clearing a host cache can prevent MCP, Hooks and panels from starting; a missing interpreter cannot display its own diagnostic page. Run the updated source with a **working independent Python**:
+
+```powershell
+python -B scripts/learning.py installation-check --installation "$learningPlugin"
+python -B scripts/learning.py repair-python --installation "$learningPlugin" --python "ABSOLUTE_PYTHON_PATH" --confirm
+```
+
+The check verifies installation identity, interpreter availability, version and required standard libraries. `repair_needed` exits 1. It neither opens knowledge nor calls a model. `healthy` does not verify desktop rendering or current-session Hooks. Disposable-path detection cannot identify every possible cache.
+
+Repair supports all three hosts and retains the exact frozen release, workspace/home bindings, Hook mode, DSH workspace list and personal extras. It atomically replaces only the export's interpreter launch files, retains a full backup and leaves knowledge, configuration and fixed runtimes untouched. Modified managed files, identity mismatches or concurrent changes stop repair. Repeating it is idempotent. **A regular `install --upgrade` keeps the original interpreter, even when this installer is invoked from a host cache.** If the original is missing or in a known disposable location, explicitly select a replacement with `--python PATH`.
+
+For a project-bound Codex export, explicitly refresh its verified connection and any previously registered Action:
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin" --repair-python
+python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
+```
+
+The repair option accepts only verified old Agent Learning Python connections, not other programs or another project's panel. Use the existing project-bound export when reconnecting a global source; do not add an unintended project. Antigravity UI bridges need `install-ui --upgrade` to refresh receipt fingerprints; copied CLI installations must be reinstalled. Refresh the actual DSH profile installation as appropriate. Reload the host and review changed Hook paths when prompted. None of these operations enables administrator review, historical absorption or publishing. Database schema and internal protocol remain 19.
 
 ### Automatic GitHub version checks
 
@@ -1382,6 +1406,7 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `sync`, `sync-list`, `sync-read`, `sync-batch` | Optional state distribution, reconciliation and bounded batches |
 | `serve` | Start an MCP service with a specified role |
 | `install` | Select `--host codex\|antigravity\|dsh`; `--upgrade` validates the same host profile and retains a full backup |
+| `installation-check`, `repair-python` | Read-only installation/interpreter diagnostics; explicitly confirmed rebinding retains the fixed version and a complete old-directory backup |
 | `antigravity-session-reset`, `dsh-session-reset` | Trusted terminal reset of a native trajectory; pause the task and invalidate old handles and approvals |
 
 ## main evidence association and review recovery fixes (2026-10-17)

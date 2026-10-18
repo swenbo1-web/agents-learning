@@ -35,6 +35,29 @@ class InstallUpdateTests(unittest.TestCase):
     def initial(self, mode="enforce"):
         return install(self.target, runtime_store=self.store, hook_mode=mode)
 
+    def test_interpreter_repair_retains_legacy_release_and_installation_format(self):
+        from agent_learning.installation_repair import repair_python
+        _, manifest = self.make_legacy()
+        for format_version in (None, 1):
+            if format_version is not None:
+                current = inspect_installation(self.target, installer._hook_commands)
+                write_json(self.target / INSTALL_MANIFEST, {"schema": 1, "plugin": "agent-learning",
+                    "release_id": manifest["release_id"],
+                    "files": {name: current["snapshot"]["files"][name] for name in sorted(current["managed"])}})
+            before = read_json(self.target / "runtime-release.json")
+            replacement = str(self.root / ("replacement-" + str(format_version)) / "python.exe")
+            with patch("agent_learning.installation_repair.select_python", return_value=(replacement, {})):
+                result = repair_python(self.target)
+            self.assertEqual(result["release_id"], manifest["release_id"])
+            self.assertEqual(result["version"], "0.11.0")
+            after = read_json(self.target / "runtime-release.json")
+            self.assertEqual(after, dict(before, python=replacement))
+            if format_version is None:
+                self.assertFalse((self.target / INSTALL_MANIFEST).exists())
+            else:
+                self.assertEqual(read_json(self.target / INSTALL_MANIFEST)["schema"], 1)
+            self.assertEqual(inspect_installation(self.target, installer._hook_commands)["receipt"], after)
+
     def make_legacy(self, version="0.11.0", protocol="7"):
         """构造有真实文件清单的旧版本 export，而非修改真实安装。"""
         current = self.initial()

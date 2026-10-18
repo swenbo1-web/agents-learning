@@ -173,7 +173,7 @@ def _document(text):
     return sections, entries
 
 
-def _owned_server(entries, receipt):
+def _owned_server(entries, receipt, *, repair_python=False, desired=None):
     command, arguments = entries.get((*SERVER, "command")), entries.get((*SERVER, "args"))
     if command is None and arguments is None:
         return
@@ -184,24 +184,42 @@ def _owned_server(entries, receipt):
         args = _strings(arguments[2])
         if not isinstance(executable, str) or not isinstance(args, list) or any(not isinstance(x, str) for x in args):
             raise ValueError
-        if python_executable(executable) != python_executable(receipt["python"]) or "serve" not in args:
+        prior_python = python_executable(executable, require_available=not repair_python)
+        current_python = python_executable(receipt["python"])
+        if (prior_python != current_python and not repair_python) or "serve" not in args:
             raise ValueError
         scripts = [safe_path(item) for item in args if item.replace("\\", "/").endswith("/scripts/learning.py")]
         if len(scripts) != 1:
             raise ValueError
         validate_previous_release(scripts[0].parent.parent)
-    except (OSError, ValueError, TypeError, ContractError):
-        raise ContractError("existing agent_learning connection could not be verified; preserved") from None
+        if repair_python:
+            # Explicit repair can replace a missing interpreter, never an
+            # arbitrary program, another project's UI, or an altered command.
+            if not re.fullmatch(r"(?:python(?:\d+(?:\.\d+)*)?|pypy\d*)(?:\.exe)?", prior_python.name, re.I):
+                raise ValueError
+            argv = args[1:] if args[:1] == ["-B"] else args
+            intended = desired[SERVER]["args"]
+            intended = intended[1:] if intended[:1] == ["-B"] else intended
+            if (not argv or safe_path(argv[0]) != scripts[0] or
+                    argv[1:] not in (["serve", "--role", "worker"], intended[1:])):
+                raise ValueError
+            prior_cwd = entries.get((*SERVER, "cwd"))
+            expected_cwd = desired[SERVER].get("cwd")
+            if prior_cwd and expected_cwd and safe_path(_string(prior_cwd[2])) != safe_path(expected_cwd):
+                raise ValueError
+    except (OSError, ValueError, TypeError, KeyError, ContractError):
+        raise ContractError("existing agent_learning connection could not be verified; preserved. "
+                            "For an intact installation with a changed Python, use codex-connect --repair-python") from None
 
 
-def _patch(text, desired, receipt):
+def _patch(text, desired, receipt, *, repair_python=False):
     sections, entries = _document(text)
     # Inline tables and dotted root assignments would collide with table
     # insertion. Preserve such custom configurations for explicit editing.
     prefixes = {SERVER, ENV, PLUGIN}
     if any(path in entries for target in prefixes for path in (target[:i] for i in range(1, len(target) + 1))):
         raise ContractError("inline Agent Learning configuration requires manual wiring; preserved")
-    _owned_server(entries, receipt)
+    _owned_server(entries, receipt, repair_python=repair_python, desired=desired)
     edits, additions = [], {}
     for section, fields in desired.items():
         for key, value in fields.items():
@@ -223,13 +241,17 @@ def _patch(text, desired, receipt):
     return text
 
 
-def connect(installation, workspace=None, *, home=None, config=None, codex_home=None, check=False):
+def connect(installation, workspace=None, *, home=None, config=None, codex_home=None, check=False, repair_python=False):
     """Wire one bound project and the shared descriptor, preserving other keys."""
-    if type(check) is not bool:
+    if type(check) is not bool or type(repair_python) is not bool:
         raise ContractError("Codex connection check must be boolean")
     receipt, installation, workspace = _binding(installation, workspace)
     if not (Path(receipt["runtime_directory"]) / "agent_learning/codex_connect.py").is_file():
         raise ContractError("upgrade the project plugin before connecting native UI discovery")
+    from .installation_health import python_health
+    interpreter = python_health(receipt["python"], probe=True)
+    if not interpreter["usable"]:
+        raise ContractError("installed Python failed preflight; run installation-check and repair-python --confirm")
     home, config = _paths(home, config)
     codex_home = safe_path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     global_path = safe_path(codex_home / "config.toml")
@@ -254,14 +276,14 @@ def connect(installation, workspace=None, *, home=None, config=None, codex_home=
             before[path] = path.read_bytes() if path.exists() else None
             try:
                 text = before[path].decode("utf-8-sig") if before[path] is not None else ""
-                after[path] = _patch(text, desired, receipt).encode("utf-8")
+                after[path] = _patch(text, desired, receipt, repair_python=repair_python).encode("utf-8")
             except (ValueError, UnicodeError, RecursionError):
                 raise ContractError("Codex configuration could not be verified; preserved") from None
         changed = [path for path in paths if before[path] != after[path]]
         result = {"status": "needs_connection" if check and changed else "connected", "workspace": str(workspace),
                   "project_config": str(project_path), "host_config": str(global_path), "changes_needed": [str(p) for p in changed],
                   "menu_scope": "host", "controls_scope": "installed_project", "desktop_render_verified": False,
-                  "restart_required": bool(changed), "administrator_started": False}
+                  "restart_required": bool(changed), "administrator_started": False, "interpreter": interpreter}
         if check or not changed:
             return result
         backup = safe_path(codex_home / "agent-learning-backups" / uuid.uuid4().hex)

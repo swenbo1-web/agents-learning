@@ -106,7 +106,7 @@ class UiInstallTests(unittest.TestCase):
         executable = self.root / "venv/bin/python"
         executable.parent.mkdir(parents=True)
         executable.write_bytes(b"isolated interpreter placeholder; never executed")
-        with patch("agent_learning.install.sys.executable", str(executable)):
+        with patch("agent_learning.installation_health.select_python", return_value=(str(executable), {})):
             self.core_install()
 
         def linked(path):

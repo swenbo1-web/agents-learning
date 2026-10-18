@@ -81,7 +81,8 @@ def python_executable(value, *, require_available=True):
             raise ValueError
         return path
     except (OSError, TypeError, ValueError, RuntimeError):
-        raise ContractError("installed Python interpreter is invalid or unavailable") from None
+        raise ContractError("installed Python interpreter is invalid or unavailable; run installation-check "
+                            "with an independent Python, then repair-python --confirm") from None
 
 
 def _hash_file(path):

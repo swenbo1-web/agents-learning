@@ -161,6 +161,14 @@ function debugStatusText(value) {
 
 function baseRunPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs = 15000, hostEnvironment = {}) {
   return new Promise((resolve, reject) => {
+    if (typeof pythonExe !== "string" || !isAbsolute(pythonExe) || !existsSync(pythonExe)
+        || !statSync(pythonExe).isFile()) {
+      const error = new Error("Agent Learning Python unavailable. Use an independent Python to run "
+        + "installation-check, then repair-python --confirm and reload this plugin.");
+      error.code = "ALP_PYTHON_UNAVAILABLE";
+      reject(error);
+      return;
+    }
     const child = spawn(pythonExe, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],

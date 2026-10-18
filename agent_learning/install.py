@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import shlex
 import shutil
-import sys
 import tempfile
 
 from . import __version__
@@ -294,7 +293,7 @@ def _hook_commands(python, script_path, event_name, hook_mode, *, host="codex", 
 
 
 def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, expected_release_id=None,
-            host="codex", workspace=None, home=None, panel_workspace=None):
+            host="codex", workspace=None, home=None, panel_workspace=None, python=None, allow_volatile_python=False):
     """导出或显式覆盖已验证的插件目录；知识库与用户宿主配置不参与切换。"""
     if not isinstance(upgrade, bool):
         raise ContractError("upgrade must be a boolean")
@@ -318,6 +317,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
         raise ContractError("upgrade requires an existing plugin installation directory")
     # 在写入 store 前确定旧身份；锁内会再次核对以覆盖并发调用。
     previous = inspect_installation(target, _hook_commands, expected_release_id, target_host=host) if upgrade else None
+    from .installation_health import select_python
+    # Updating from a host cache must not replace an independent interpreter.
+    requested_python = previous["receipt"]["python"] if previous is not None and python is None else python
+    selected_python, interpreter = select_python(requested_python, allow_volatile=allow_volatile_python)
     dsh_workspaces = []
     if previous is not None:
         if tuple(map(int, previous["release"]["version"].split("."))) > tuple(map(int, __version__.split("."))):
@@ -435,7 +438,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                         _copy_resource(runtime_directory / original, staging / name)
                 dsh_multi = host == "dsh" and len(dsh_workspaces) > 1
                 pinned_workspace = None if dsh_multi else (str(workspace) if workspace is not None else None)
-                mcp = mcp_document(runtime_directory, sys.executable, host,
+                mcp = mcp_document(runtime_directory, selected_python, host,
                                    pinned_workspace,
                                    str(home) if home is not None else None,
                                    panel_installation=target if panel_workspace is not None else None)
@@ -443,16 +446,16 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 mcp_file.write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 hook_file = staging / ("hooks/hooks.json" if host == "codex" else "hooks.json")
                 if host == "antigravity":
-                    hooks = antigravity_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
+                    hooks = antigravity_hooks(runtime_directory, selected_python, hook_mode, _hook_commands,
                                               str(workspace), str(home))
                 elif host == "dsh":
-                    hooks = dsh_hooks(runtime_directory, sys.executable, hook_mode, _hook_commands,
+                    hooks = dsh_hooks(runtime_directory, selected_python, hook_mode, _hook_commands,
                                       pinned_workspace,
                                       str(home) if home is not None else None)
                 else:
                     hooks = json.loads(hook_file.read_text(encoding="utf-8"))
                     for event_name, groups in hooks["hooks"].items():
-                        command, windows = _hook_commands(sys.executable, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
+                        command, windows = _hook_commands(selected_python, runtime_directory / "hooks/dispatch.py", event_name, hook_mode)
                         for group in groups:
                             for handler in group["hooks"]:
                                 handler["command"] = command
@@ -462,7 +465,7 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 receipt = {"runtime_directory": str(runtime_directory),
                     "release_id": release["release_id"], "version": release["version"],
                     "protocol_version": release["protocol_version"], "content_digest": release["content_digest"],
-                    "python": sys.executable, "hook_mode": hook_mode, "target_host": host}
+                    "python": selected_python, "hook_mode": hook_mode, "target_host": host}
                 if panel_workspace is not None:
                     receipt["panel_workspace"] = str(panel_workspace)
                 if host == "antigravity":
@@ -490,7 +493,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 _cleanup_owned(staging, target.parent, staging_identity)
     except (OSError, ReleaseError):
         raise ContractError("plugin export could not complete; final destination was not published") from None
-    result = {"status": "updated" if upgrade else "exported", "plugin_directory": str(target), "python": sys.executable,
+    result = {"status": "updated" if upgrade else "exported", "plugin_directory": str(target), "python": selected_python,
+            "interpreter": interpreter,
             "runtime_directory": str(runtime_directory), "release_id": release["release_id"],
             "version": __version__, "hook_mode": hook_mode, "target_host": host,
             "next_step": "将此目录加入本地插件源并安装；保留固定运行目录及解释器，在Codex界面审阅并信任Hooks。"}

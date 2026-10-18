@@ -8,7 +8,7 @@
 
 在受支持事件中记录工具结果和公开工作说明，自动检索相关知识、注入有限摘要，让 Agent 在新对话中继续利用项目经验。需要时再启用管理员整理；你可以在本机浏览器中查看正式知识、来源、修订和审核待办。
 
-**以下使用 `main` 的 v1.1.4 源码版本；原 v1.0.0 发行包不含全部新功能。已有安装请先看[版本与共库升级](#当前版本与兼容)。**
+**以下使用 `main` 的 v1.1.5 源码版本；原 v1.0.0 发行包不含全部新功能。已有安装请先看[版本与共库升级](#当前版本与兼容)。**
 
 [核心能力](#核心能力) · [可视化控制](#可视化控制与知识库按键) · [84 秒演示](#84-秒演示) · [Codex 安装](#在-codex-中安装桌面端与-cli) · [Antigravity 安装](#在-antigravity-中安装原生插件) · [DSH 安装](#在-dsh-中安装deepseek-harness) · [完整架构](#完整架构)
 
@@ -112,6 +112,8 @@ Codex 侧栏和项目 Actions 直接运行本地界面，不启动模型回合�
 
 需要 **Git、Python 3.10+** 和支持插件的宿主。默认安装无需 `pip install` 或额外模型 API Key。
 
+**使用独立安装的 Python，不要依赖 Codex 的临时运行环境或插件缓存。** 安装会检查解释器版本及 sqlite3／FTS5／SSL，并默认拒绝已知缓存或临时路径；可用 `install --python "解释器绝对路径"` 指定。仅在明确接受清理后失效风险时使用 `--allow-volatile-python`。已有安装失联见[解释器诊断与修复](#解释器诊断与修复115)。
+
 在终端获取 `main` 源码，只需执行一次；已有源码时进入该目录并核对版本：
 
 ```powershell
@@ -142,7 +144,7 @@ python -B scripts/learning.py --workspace "$learningProject" codex-connect --ins
 
 ### Codex：点击打开，无需发送技能消息
 
-**原生侧栏：** 更新、接线并重载 MCP 后，在提供 MCP Apps 菜单的桌面端，从对话右侧内容区的“新建标签页”入口选择 **Agent Learning**。全局连接只声明入口，实际操作经当前对话的项目连接校验，不使用“最新对话”猜测身份。连接五分钟到期后直接点击“重新连接”。
+**原生侧栏：** 更新、接线并重载 MCP 后，在提供 MCP Apps 菜单的桌面端，从对话右侧“新建标签页”→“更多工具…”选择 **Agent Learning**（部分版本直接显示）。全局连接只声明入口，实际操作经当前对话的项目连接校验，不使用“最新对话”猜测身份。连接五分钟到期后直接点击“重新连接”。
 
 **只读检查接线：** 菜单没有出现时先运行；配置正确不等于桌面已完成渲染验收。
 
@@ -444,7 +446,7 @@ flowchart LR
 
 | 模块 | 职责与边界 | 关键源码／资源 |
 |---|---|---|
-| 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出与升级固定运行副本，检查软件版本，核对内容及角色权限 | [install.py](agent_learning/install.py)、[install_update.py](agent_learning/install_update.py)、[software_updates.py](agent_learning/software_updates.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
+| 1. 插件接入与协议 | 统一 CLI、MCP、Hook 和技能入口，导出与升级固定运行副本，诊断并显式修复解释器，核对版本、内容及角色权限 | [install.py](agent_learning/install.py)、[install_update.py](agent_learning/install_update.py)、[installation_health.py](agent_learning/installation_health.py)、[installation_repair.py](agent_learning/installation_repair.py)、[software_updates.py](agent_learning/software_updates.py)、[release.py](agent_learning/release.py)、[mcp.py](agent_learning/mcp.py)、[cli.py](agent_learning/cli.py)、[hooks](hooks/hooks.json)、[skills](skills/) |
 | 2. 任务与执行控制 | 保存任务合同与版本，绑定父子 Agent，核对受信许可、状态、动作和余额；知识不能签发权限 | [task_control.py](agent_learning/task_control.py)、[execution.py](agent_learning/execution.py)、[assignments.py](agent_learning/assignments.py) |
 | 3. 知识存储与索引 | SQLite 保存正式知识、修订与证据来源；全文与可选向量均为可重建派生索引 | [knowledge_store.py](agent_learning/knowledge_store.py)、[knowledge_index.py](agent_learning/knowledge_index.py)、[semantic_retrieval.py](agent_learning/semantic_retrieval.py) |
 | 4. 检索与上下文管理 | 正式知识与工作索引分别检索，共享摘要预算；按需分页、展示台账、失效通知、压缩恢复与失败补查 | [knowledge_context.py](agent_learning/knowledge_context.py)、[context_storage.py](agent_learning/context_storage.py)、[knowledge_output.py](agent_learning/knowledge_output.py)、[work_memory.py](agent_learning/work_memory.py)、[knowledge_browser.py](agent_learning/knowledge_browser.py) |
@@ -658,6 +660,28 @@ python -B scripts/learning.py install "$learningPlugin" --host codex --upgrade -
 回执给出 `backup_directory` 和新旧 `release_id`；旧导出目录完整保留为同级备份，旧固定运行副本也保留。目标锁和快照检测并发改动，切换失败尝试恢复原目录。切换有短暂目录间隙；进程硬退出可能留锁或备份，需要人工核对回执、目标及 `.alp-install-*.lock` 后恢复，安装器不自动抢锁或删除备份。不支持通过此入口降级。
 
 更新源目录后重启 Codex，使插件缓存重新加载，并重新审阅变化后的 Hook 信任。已运行的 MCP 仍可能使用旧副本，文件更新回执不代表当前进程已切换。若宿主仍沿用旧缓存，按宿主的插件安装入口重新加载该本地目录。[官方本地插件更新说明](https://developers.openai.com/plugins/build/plugins)
+
+### 解释器诊断与修复（1.1.5）
+
+插件记录的是安装时选择的 Python 绝对路径。清理缓存、移动虚拟环境或卸载 Python 后，MCP、Hook 和面板都可能无法启动；没有运行中的解释器时，插件也无法自己显示故障页面。先用一套**仍可运行的独立 Python**执行新版源码入口：
+
+```powershell
+python -B scripts/learning.py installation-check --installation "$learningPlugin"
+python -B scripts/learning.py repair-python --installation "$learningPlugin" --python "独立Python的绝对路径" --confirm
+```
+
+`installation-check` 验证安装摘要、解释器是否存在、版本和必要标准库；`repair_needed` 退出码为 1，不读取知识库、不调用模型、不修改配置。`healthy` 不代表桌面菜单或当前会话 Hooks 已验收。未知缓存位置不能保证全部识别。
+
+`repair-python` 支持 Codex、Antigravity、DSH，自动核对回执里的宿主。它只原子替换导出目录的 Python 启动文件，保留固定运行版本、项目／知识目录、Hook 模式、DSH 多项目绑定和额外个人文件，并保留完整旧目录备份；不升级版本、不改固定副本、不读取数据库。被修改的管理文件、错误预期版本或并发更改会阻止替换。重复执行不再次写入。**正常 `install --upgrade` 默认沿用原解释器，不会因本次安装器由宿主缓存 Python 运行而改绑。** 原解释器失效或属于已知缓存时须明确用 `--python` 选择替代解释器。
+
+**修复后刷新宿主接线：** Codex 项目安装执行下列命令；`--repair-python` 仅允许接管已验证的旧 Agent Learning Python 连接，不覆盖其他程序或其他项目。已有 Actions 再运行 `codex-action`。全局导出未绑定项目时，使用原来已经绑定该项目的导出目录接线，不新增项目。
+
+```powershell
+python -B scripts/learning.py --workspace "$learningProject" codex-connect --installation "$learningPlugin" --repair-python
+python -B scripts/learning.py --workspace "$learningProject" codex-action --installation "$learningPlugin"
+```
+
+Antigravity 核心修复后，已有 UI 桥用 `install-ui --upgrade` 刷新登记指纹；CLI 的复制安装需重新安装导出目录。DSH 同样刷新实际使用的 profile 安装。然后重载宿主；按提示重新审阅变化后的 Hook 路径。以上步骤不会开启管理员、历史吸收或自动发布。数据库 schema／内部协议仍为 19。
 
 ### 从 GitHub 自动检查版本
 
@@ -1331,6 +1355,7 @@ python scripts/learning.py --workspace "D:\Projects\my-project" scheduler-run --
 | `sync`、`sync-list`、`sync-read`、`sync-batch` | 可选状态分发、对账与有限批次 |
 | `serve` | 启动指定角色的 MCP 服务 |
 | `install` | `--host codex\|antigravity\|dsh` 选择安装；`--upgrade` 核对同宿主导出并保留完整备份 |
+| `installation-check`、`repair-python` | 只读诊断安装与解释器；显式确认后更换启动解释器，保留固定版本与旧目录备份 |
 | `antigravity-session-reset`、`dsh-session-reset` | 受信终端重置指定原生轨迹，暂停任务并失效旧句柄及执行许可 |
 
 ## main 证据关联与审核恢复修复（2026-10-17）

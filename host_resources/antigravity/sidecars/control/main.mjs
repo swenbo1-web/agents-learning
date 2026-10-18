@@ -33,8 +33,12 @@ export function loadInstallation(root) {
   for (const key of ["python", "runtime_directory", "workspace", "home"]) {
     if (!text(receipt[key], 8192) || !isAbsolute(receipt[key])) throw new Error("Invalid installation binding");
   }
+  if (!existsSync(receipt.python) || !statSync(receipt.python).isFile()) {
+    throw new Error("Agent Learning Python unavailable. Use an independent Python to run installation-check, "
+      + "then repair-python --confirm; refresh the UI registration after repair.");
+  }
   if (!statSync(receipt.workspace).isDirectory() || !statSync(receipt.runtime_directory).isDirectory()
-      || !statSync(receipt.python).isFile() || !statSync(join(receipt.runtime_directory, "scripts", "learning.py")).isFile()) {
+      || !statSync(join(receipt.runtime_directory, "scripts", "learning.py")).isFile()) {
     throw new Error("Installed runtime is unavailable");
   }
   const fingerprint = createHash("sha256").update(raw).digest("hex");

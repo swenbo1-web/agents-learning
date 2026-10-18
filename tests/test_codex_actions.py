@@ -98,7 +98,8 @@ class CodexActionsTests(unittest.TestCase):
         executable = self.root / "venv/bin/python"
         executable.parent.mkdir(parents=True)
         executable.write_bytes(b"isolated interpreter placeholder; never executed")
-        with patch("agent_learning.install.sys.executable", str(executable)):
+        # Alias ownership only; the non-executable fixture is never probed.
+        with patch("agent_learning.installation_health.select_python", return_value=(str(executable), {})):
             self.initial()
 
         # Simulate Unix Python/venv links even on Windows without link privileges.

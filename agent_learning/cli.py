@@ -127,6 +127,7 @@ def parser():
     codex_action.add_argument("--config", help="与该项目Hooks及MCP一致的配置文件；省略沿用ALP_CONFIG")
     codex_action.add_argument("--remove", action="store_true", help="仅移除未被修改的受管Actions环境文件")
     codex_connect = sub.add_parser("codex-connect", help="接线当前项目MCP和宿主级只读面板入口，保留其他配置")
+    codex_connect.add_argument("--repair-python", action="store_true", help="显式替换已验证旧连接的Python路径；不接管其他程序或项目")
     codex_connect.add_argument("--installation", required=True, help="已绑定当前项目的Codex插件导出目录")
     codex_connect.add_argument("--config", help="与Hooks一致的Agent Learning配置文件")
     codex_connect.add_argument("--codex-home", help="Codex配置目录；默认CODEX_HOME或~/.codex")
@@ -285,6 +286,16 @@ def parser():
     export.add_argument("--hook-mode", choices=["observe", "enforce"], help="可信Hook故障策略；省略按配置")
     export.add_argument("--upgrade", action="store_true", help="验证并覆盖已有插件导出；保留旧目录备份")
     export.add_argument("--expected-release-id", help="覆盖时校验旧安装的固定运行版本身份")
+    export.add_argument("--python", help="独立Python 3.10+的绝对路径；省略时首次安装用当前解释器，升级沿用原解释器")
+    export.add_argument("--allow-volatile-python", action="store_true", help="明确接受缓存或临时解释器被清理后失效的风险")
+    health = sub.add_parser("installation-check", help="只读检查安装与Python，不打开知识库或调用模型")
+    health.add_argument("--installation", required=True)
+    repair = sub.add_parser("repair-python", help="保留固定版本、项目、知识与配置，原子重绑已验证安装的Python")
+    repair.add_argument("--installation", required=True)
+    repair.add_argument("--python", help="替换解释器的绝对路径；省略使用当前解释器")
+    repair.add_argument("--expected-release-id")
+    repair.add_argument("--allow-volatile-python", action="store_true")
+    repair.add_argument("--confirm", action="store_true", help="明确执行安装启动文件替换；自动保留旧目录备份")
     ui = sub.add_parser("install-ui", help="导出Antigravity全局纯UI桥并登记明确项目安装；不启用管理员或修改宿主设置")
     ui.add_argument("destination", help="全局纯UI目录，建议 ~/.gemini/config/plugins/agent-learning-ui")
     ui.add_argument("--installation", action="append", required=True, help="明确的项目级Antigravity插件导出目录；可重复")
@@ -312,6 +323,22 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    if args.command in {"installation-check", "repair-python"}:
+        try:
+            if args.command == "installation-check":
+                from .installation_health import installation_check
+                result = installation_check(args.installation)
+            else:
+                if not args.confirm:
+                    raise ContractError("repair-python requires --confirm; use installation-check for read-only diagnostics")
+                from .installation_repair import repair_python
+                result = repair_python(args.installation, args.python, expected_release_id=args.expected_release_id,
+                                       allow_volatile_python=args.allow_volatile_python)
+            print(encode(result))
+            return 1 if result["status"] == "repair_needed" else 0
+        except (ContractError, OSError) as exc:
+            print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
+            return 1
     if args.command in {"codex-action", "codex-panel", "codex-connect"}:
         try:
             if args.host != "codex":
@@ -319,7 +346,7 @@ def main(argv=None):
             if args.command == "codex-connect":
                 from .codex_connect import connect
                 print(encode(connect(args.installation, workspace=args.workspace, home=args.home,
-                    config=args.config, codex_home=args.codex_home, check=args.check)))
+                    config=args.config, codex_home=args.codex_home, check=args.check, repair_python=args.repair_python)))
             elif args.command == "codex-action":
                 from .codex_actions import install_action
                 print(encode(install_action(args.installation, workspace=args.workspace, home=args.home,
@@ -346,6 +373,7 @@ def main(argv=None):
                 raise ContractError("installation exports currently require host_instance=default")
             print(encode(install(args.destination, runtime_store=args.runtime_store, hook_mode=args.hook_mode,
                                  upgrade=args.upgrade, expected_release_id=args.expected_release_id,
+                                 python=args.python, allow_volatile_python=args.allow_volatile_python,
                                  host=args.host, **({"workspace": args.workspace, "home": args.home}
                                                    if args.host in {"antigravity", "dsh"}
                                                    else {"panel_workspace": args.workspace}))))
