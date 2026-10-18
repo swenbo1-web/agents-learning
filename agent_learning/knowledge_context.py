@@ -226,12 +226,14 @@ class KnowledgeContextMixin:
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         filters = self._retrieval_filters(task)
+        from .knowledge_applicability import project_environment, automatic_applicability
+        environment = project_environment(workspace)
         semantic_signature = self.semantic_signature(project)
         # 预算变化只影响待发卡容纳，不必重新召回；知识、来源、模型与任务变化需重查。
         fault_result_signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task),
-                                         manifest, epoch, semantic_signature])
+                                         manifest, epoch, semantic_signature, environment])
         signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task), manifest,
-                            epoch, self.config["injection_max_chars"], semantic_signature])
+                            epoch, self.config["injection_max_chars"], semantic_signature, environment])
         # 跨短时Hook进程保留重试冷却，不将临时嵌入失败永久缓存成无结果。
         previous_signature = initial["retrieval_signature"]
         retry_at = 0.0
@@ -252,7 +254,8 @@ class KnowledgeContextMixin:
             should_search = (fault["state"] == "pending" or stale_results) and not cooling
         elif tool_only:
             should_search = False
-        search_result = self.search(project, retrieval, filters=filters, _automatic=True) if should_search else {}
+        search_result = self.search(project, retrieval, filters=filters, _automatic=True,
+                                    _environment=environment) if should_search else {}
         items = search_result.get("items", [])
         retryable = bool(search_result.get("retrieval", {}).get("retryable", False))
         if fault and fault["state"] == "ready" and not should_search:
@@ -313,6 +316,8 @@ class KnowledgeContextMixin:
                 raise
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
                 work_context_failed = True
+        if project_environment(workspace) != environment:
+            raise ContractError("context_changed: project version changed during retrieval")
         with self.transaction():
             self.assert_session_epoch(epoch)
             if _phase_guard:
@@ -361,6 +366,8 @@ class KnowledgeContextMixin:
                     latest["match"] = item.get("match", {})
                     item = latest
                 if item["source_health"] != "valid":
+                    continue
+                if automatic_applicability(item, environment)["status"] == "incompatible":
                     continue
                 # 防线：若某条正式知识的来源案例正属于当前同一个会话且案例已发生新变化（正在继续修改/重修中），
                 # 暂停将其作为定型正式知识反哺注入当前会话，防止模型拿上一轮的半成品当佐证自我锚定。

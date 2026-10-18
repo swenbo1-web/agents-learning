@@ -279,6 +279,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             self.db.close()
             raise ContractError("unsupported runtime database version")
         try:
+            from .runtime_storage import storage_ready, ensure_host_scope, mark_storage_ready
+            if storage_ready(self):
+                ensure_host_scope(self)
+                return
             self.db.executescript(SCHEMA)
             if version < 2:
                 self._migrate()
@@ -318,6 +322,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
                     self._fence_runtime_upgrade()
                 self.db.execute("PRAGMA user_version=19")
+                mark_storage_ready(self)
         except BaseException:
             self.db.close()
             raise

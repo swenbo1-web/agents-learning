@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.8 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.9 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -994,6 +994,13 @@ The server binds to `127.0.0.1` and validates the access code, Host and Origin. 
 On `main`, explicit `browser --review` opens [visual knowledge review](#visual-knowledge-review-main): inspect full candidate content, conditions, limitations, evidence and publication checks; then approve and publish, reject or defer one entry or a fixed selected batch. Actions recheck candidate and source versions and return per-item receipts. Repeated clicks do not republish knowledge. A model-call budget pause does not prevent explicit approval of existing historical candidates; cancellation and invalid identity retain their separate checks. Review starts no model, resumes no historical processing and grants no task execution permission.
 
 Separate `browser --admin-control` enables administrator settings and can accompany review mode. Only the user's Save and enable permits model work; reading the page or changing limits makes no model call. Distinct access codes scope browsing, approval and administration and are not written to the database or logs. See [administrator settings](#optional-administrator-executor) for models, pending work and shared limits.
+
+## Applicability, bilingual recall and startup efficiency (1.1.9)
+
+- Automatic context checks bounded root manifests and skips clearly incompatible project-version snapshots. Conflicting manifests, missing declarations and version ranges remain unknown. Manual access is preserved; compaction checks applicability again. This is not a complete dependency compatibility check.
+- Default full-text retrieval uses a small English/Chinese technical vocabulary shared by knowledge and work-history ranking. It adds no model calls, enables no semantic service and increases no context budgets. Work history prioritizes results, user corrections and explicit constraints, with ordinary previous questions kept as a searchable fallback. It is not general translation or full semantic retrieval.
+- An initialized database with matching schema and index state can open through a read-only path, avoiding repeated migration write locks. Upgrades, structural changes and the first registration of a new host still require writes. The disposable receipt grants no authority.
+- Administrator usage is recorded locally from existing provider reports, without a separate model-written accounting report. Missing usage remains unknown; reservations are not confirmed charges. Full main-chat tokens can only be recorded when supplied by the host.
 
 ## Relevant work-history context (1.1.8)
 

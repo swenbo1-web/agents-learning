@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matched_labels
 from .semantic_retrieval import (SemanticRetrievalMixin, semantic_automatic_allowed,
                                  semantic_exact_anchors_allowed)
 
@@ -52,7 +53,7 @@ tokenize = terms
 def _query_terms(query):
     # 请求修饰语不参与相关度；先保留双字和标识，再限制总量，避免单字占满预算。
     meaningful = _ZH_REQUEST.sub(" ", query[-8000:])
-    selected = [word for word in terms(meaningful) if word not in _EN_REQUEST_WORDS]
+    selected = [word for word in match_terms(meaningful) if word not in _EN_REQUEST_WORDS]
     if any(_CHINESE.fullmatch(word) and len(word) > 1 for word in selected):
         selected = [word for word in selected if not (_CHINESE.fullmatch(word) and len(word) == 1)]
     # 技术标识通常比自然语言连接片段明确，超预算时优先保留。
@@ -64,7 +65,13 @@ def _query_terms(query):
 def normalized_query_plan(query):
     """缓存和检索共享同一有效输入；短语顺序也参与自动匹配判断。"""
     selected, meaningful = _query_terms(query)
-    return {"terms": selected, "meaningful": meaningful}
+    return {"terms": selected, "meaningful": meaningful,
+            "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION}
+
+
+def match_terms(text):
+    """Normalize meanings for scoring; stored FTS tokens stay backward compatible."""
+    return terms(canonical_text(text))
 
 
 def _index_text(body):
@@ -81,11 +88,11 @@ def _match_values(body_json, query_weights, denominator):
     for field, weight in _FIELD_WEIGHTS.items():
         value = body.get(field, "solution" if field == "knowledge_kind" else "")
         if isinstance(value, str):
-            for token in terms(value):
+            for token in match_terms(value):
                 if token in query_weights:
                     matches[token] = max(weight, matches.get(token, 0))
     values = body.get("metadata", {}).values()
-    for token in terms(" ".join(value for value in values if isinstance(value, str))):
+    for token in match_terms(" ".join(value for value in values if isinstance(value, str))):
         if token in query_weights:
             matches[token] = max(2, matches.get(token, 0))
     coverage = sum(query_weights[token] for token in matches) / denominator
@@ -105,19 +112,22 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None):
                                 if _values is None else _values)
     strong = [token for token in matches if len(token) > 1]
     eligible = bool(strong) and coverage >= 0.65
-    if not eligible and len(strong) >= 3:
+    if not eligible and strong:
         # 长中文请求会降低全句覆盖；连续四字的问题短语仍可作为明确命中依据。
+        body = json.loads(body_json)
+        raw_matches = set(terms(" ".join(value for key, value in body.items()
+                                         if key in _FIELD_WEIGHTS and isinstance(value, str))))
         for segment in re.findall(r"[\u3400-\u9fff]+", query):
             run = 0
             for index in range(len(segment) - 1):
-                run = run + 1 if segment[index:index + 2] in matches else 0
+                run = run + 1 if segment[index:index + 2] in raw_matches else 0
                 if run >= 3:
                     eligible = True
                     break
             if eligible:
                 break
     return {"score": round(score, 6), "coverage": round(coverage, 6),
-            "matched_terms": [token for token in query_weights if token in matches][:12],
+            "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
 
 
@@ -179,7 +189,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 count = self._rebuild_knowledge_index()
         return {"status": "rebuilt", "indexed": count, "index_version": INDEX_VERSION}
 
-    def search(self, project, query, limit=5, filters=None, *, _automatic=False):
+    def search(self, project, query, limit=5, filters=None, *, _automatic=False, _environment=None):
         from .runtime import ContractError, digest, encode, knowledge_filters
 
         if not isinstance(query, str):
@@ -215,7 +225,8 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             source_epoch = manifest.pop("source_epoch")
             cache_identity = [self.semantic_signature(project), "hybrid"] if hybrid else "local-fts"
             key = digest([project, plan, limit, filters, manifest, cache_identity, INDEX_VERSION,
-                          bool(_automatic), source_epoch if _automatic else None])
+                          bool(_automatic), source_epoch if _automatic else None,
+                          _environment if _automatic else None])
             cached = self.db.execute("SELECT body FROM cache WHERE key=?", (key,)).fetchone()
             references = None
             if cached:
@@ -256,7 +267,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                     rows.append(row)
             if references is None:
                 self.db.create_function("alp_knowledge_score", 1, lambda body: _rank(body, weights, denominator))
-                match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
+                match = " OR ".join('"' + word.replace('"', '""') + '"' for word in plan["recall_terms"])
                 rows = self.db.execute("SELECT k.* FROM knowledge_fts JOIN active a ON "
                                        "knowledge_fts.project=a.project AND knowledge_fts.id=a.id AND "
                                        "CAST(knowledge_fts.revision AS INTEGER)=a.revision JOIN knowledge k ON "
@@ -300,6 +311,10 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                     if not semantic_exact_anchors_allowed(meaningful, full_matches):
                         explanation["auto_eligible"] = False
                 item = self._public(project, row)
+                if _automatic and _environment:
+                    from .knowledge_applicability import automatic_applicability
+                    if automatic_applicability(item, _environment)["status"] == "incompatible":
+                        explanation["auto_eligible"] = False
                 if item.get("source_health") in {"conflicted", "denied", "missing"}:
                     explanation["auto_eligible"] = False
                 if _automatic and not explanation["auto_eligible"]:

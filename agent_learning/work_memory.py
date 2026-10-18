@@ -114,6 +114,11 @@ def _correction(text):
         r"\s*(?:不对|不是|纠正|更正|我说的是|你理解错|实际上|correction\b|actually\b|that's wrong\b)", text, re.I))
 
 
+def _constraint_request(text):
+    return bool(re.search(r"必须|禁止|不要|不得|保持|保留|仅限|只允许|务必|统一|偏好|以后|希望|"
+                          r"(?:\b(?:must|never|always|keep|preserve|only|require|use)\b)", text, re.I))
+
+
 def _task_key(task_state):
     state = task_state or {}
     if not isinstance(state, dict):
@@ -355,7 +360,7 @@ class WorkMemoryMixin:
             clauses.append("EXISTS(SELECT 1 FROM work_memory_sources s JOIN work_file_links l ON l.project=s.project AND l.event_id=s.event_id WHERE s.project=m.project AND s.memory_id=m.id AND l.checkout_key=? AND l.path_key=?)")
             params.extend((target["checkout_key"], target["path_key"]))
         elif query.strip():
-            selected = normalized_query_plan(query)["terms"][:64]
+            selected = normalized_query_plan(query)["recall_terms"]
             if not selected:
                 return []
             joins = " JOIN work_memory_fts f ON f.project=m.project AND f.id=m.id "
@@ -375,13 +380,13 @@ class WorkMemoryMixin:
                                + ordering + " LIMIT ?", (*params, min(200, limit * 10))).fetchall()
         if query.strip():
             selected = normalized_query_plan(query)["terms"][:64]
-            from .knowledge_index import terms
+            from .knowledge_index import match_terms
             def score(row):
                 body = json.loads(row["body"])
-                values = set(terms(body["title"] + " " + body["summary"]))
+                values = set(match_terms(body["title"] + " " + body["summary"]))
                 return (sum(term in values for term in selected), row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
-        selected_rows, counts = [], {}
+        selected_rows, counts, requests = [], {}, []
         if automatic and query.strip():
             from .knowledge_index import _match_info
             plan = normalized_query_plan(query)
@@ -395,6 +400,12 @@ class WorkMemoryMixin:
                 if not denominator or not _match_info(comparable, weights, denominator,
                                                        plan["meaningful"])["auto_eligible"]:
                     continue
+                # Prefer recorded results over a previous short question about
+                # the same subject. Keep explicit user constraints/corrections;
+                # requests remain the fallback when no useful result exists.
+                if body.get("type") == "user_request" and not _constraint_request(body["summary"]):
+                    requests.append(row)
+                    continue
             parent = body.get("public_message_id", row["id"])
             if counts.get(parent, 0) >= 2:
                 continue
@@ -402,6 +413,16 @@ class WorkMemoryMixin:
             selected_rows.append(row)
             if len(selected_rows) == limit:
                 break
+        if automatic and not selected_rows:
+            for row in requests:
+                body = json.loads(row["body"])
+                parent = body.get("public_message_id", row["id"])
+                if counts.get(parent, 0) >= 2:
+                    continue
+                counts[parent] = counts.get(parent, 0) + 1
+                selected_rows.append(row)
+                if len(selected_rows) == limit:
+                    break
         return selected_rows
 
     def work_search(self, project, query="", *, file_path=None, workspace=None, limit=5, max_chars=3000):
