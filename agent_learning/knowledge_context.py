@@ -107,6 +107,8 @@ class KnowledgeContextMixin:
                 note = (f"知识 {identity} 来源已变：health={state['health']}，"
                         f"tool_success={state['current_tool_success']}，新证据={state['problem_changed']}，"
                         f"待核实反例={state['pending_counterexample_count']}；请用 knowledge_read 核对。")
+                if state["pending_counterexample_count"]:
+                    note += "存在未解决反例，已暂停自动注入；不能继续依赖旧结论，需治理确认。"
                 if state["maturity"] != json.loads(row["state"]).get("maturity", "candidate"):
                     note = note.replace("；请用", f"，成熟度={state['maturity']}；请用")
                 cost = len(note) + int(bool(notes))
@@ -114,6 +116,8 @@ class KnowledgeContextMixin:
                     # 极小预算也交付完整的ID和复查要求，不裁断后确认送达。
                     note = (f"知识 {identity} 状态已变（{state['health']}/{state['maturity']}，"
                             f"反例{state['pending_counterexample_count']}）；执行前用 knowledge_read 核对。")
+                    if state["pending_counterexample_count"]:
+                        note = f"知识 {identity} 有未解决反例；暂停依赖旧结论，knowledge_read 复核。"
                     cost = len(note) + int(bool(notes))
                     if cost > remaining:
                         continue
@@ -365,7 +369,7 @@ class KnowledgeContextMixin:
                     latest = self.read(project, item["knowledge_id"])
                     latest["match"] = item.get("match", {})
                     item = latest
-                if item["source_health"] != "valid":
+                if item["source_health"] != "valid" or item.get("pending_counterexample_count", 0):
                     continue
                 if automatic_applicability(item, environment)["status"] == "incompatible":
                     continue
@@ -393,6 +397,7 @@ class KnowledgeContextMixin:
                         "applicability": item["applicability"], "limitations": item["limitations"],
                         "category": item["category"], "knowledge_kind": item["knowledge_kind"],
                         "validation_level": item["validation_level"], "source_health": item["source_health"],
+                        "knowledge_tier": item.get("knowledge_tier", "source_reference"),
                         "maturity": item.get("maturity", "candidate"),
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
@@ -415,10 +420,16 @@ class KnowledgeContextMixin:
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                             "title": clip(item["title"], 60), "summary_only": True,
                             "read_required": True, "source_health": item["source_health"],
+                            "knowledge_tier": item.get("knowledge_tier", "source_reference"),
                             "maturity": item.get("maturity", "candidate")}
                     card.update(file_state)
                     if item.get("pending_counterexample_count", 0):
                         card["pending_counterexample_count"] = item["pending_counterexample_count"]
+                    # Tiny budgets retain identity, source risk and the evidence
+                    # tier before optional display labels. Never truncate JSON.
+                    for optional in ("title", "maturity"):
+                        if len(encode(card)) > available:
+                            card.pop(optional, None)
                 if len(encode(card)) > available:
                     continue
                 if not delivered:

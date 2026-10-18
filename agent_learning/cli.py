@@ -42,10 +42,11 @@ def parser():
     defer.add_argument("job_id")
     defer.add_argument("--reason", required=True)
     defer.add_argument("--confirm", action="store_true")
-    run = sub.add_parser("history-run", help="用户启动或明确续做历史整理；不自动发布知识")
+    run = sub.add_parser("history-run", help="用户启动或明确续做有限历史整理")
     run.add_argument("job_id")
     run.add_argument("--confirm", action="store_true", help="确认本次有限归档或整理")
     run.add_argument("--allow-review", action="store_true", help="允许已配置管理员执行器调用模型；省略只归档")
+    run.add_argument("--auto-reference", action="store_true", help="仅本次批次允许按分级策略发布带来源参考；保留reported，冲突转人工")
     run.add_argument("--max-calls", type=int, default=10, help="本次显式历史整理最多调用次数，默认10，范围0..20")
     run.add_argument("--max-seconds", type=int, default=600, help="本次历史处理时长预算，默认600秒")
     state = sub.add_parser("history-status", help="查看来源覆盖、审阅进度和用量，不启动吸收")
@@ -512,7 +513,8 @@ def main(argv=None):
                        + [{"path": str(Path(path).absolute()), "kind": "artifacts"} for path in args.artifact_dir])
             result = runtime.history_prepare(project, args.workspace, extra_sources=sources or None, scan_options=options, mode=args.mode)
         elif args.command == "history-run": result = runtime.history_run(
-            project, args.job_id, allow_review=args.allow_review, max_calls=args.max_calls, max_seconds=args.max_seconds)
+            project, args.job_id, allow_review=args.allow_review, max_calls=args.max_calls, max_seconds=args.max_seconds,
+            auto_reference=args.auto_reference)
         elif args.command == "history-status": result = runtime.history_status(project, args.job_id)
         elif args.command == "history-review-worker":
             from .history_review_control import run_history_review

@@ -32,7 +32,8 @@ def request_history_review(runtime, project, body, *, details=True):
     fields = {"request_id", "job_id", "version", "confirmed", "max_calls", "max_seconds",
               "expected_policy_version", "expected_settings_version", "expected_project_budget_version",
               "expected_session_epoch", "expected_governance_epoch"}
-    if not isinstance(body, dict) or set(body) != fields or body["confirmed"] is not True:
+    if (not isinstance(body, dict) or not fields <= set(body) or set(body) - fields - {"auto_reference"}
+            or body["confirmed"] is not True or type(body.get("auto_reference", False)) is not bool):
         raise ContractError("explicit confirmed history review fields required")
     if any(not isinstance(body[k], str) or not body[k].strip() or len(body[k]) > 200 for k in ("request_id", "job_id", "version")):
         raise ContractError("invalid history review identity")
@@ -55,6 +56,9 @@ def request_history_review(runtime, project, body, *, details=True):
         if runtime.db.execute("SELECT 1 FROM admin_control_receipts WHERE project=? AND host_scope=? AND session_epoch=? AND request_id=?", identity).fetchone():
             raise ContractError("administrator request identity already used")
         status = control_status(runtime, project, include_history=False, details=False)
+        auto_reference = body.get("auto_reference", False)
+        if auto_reference and (not status["publication_policy"]["enabled"] or status["publication_policy"]["mode"] != "tiered"):
+            raise ContractError("automatic history references require the tiered publication policy")
         if (status["settings_version"] != body["expected_settings_version"]
                 or status["policy"]["policy_version"] != body["expected_policy_version"]
                 or status["project_budget_policy"]["version"] != body["expected_project_budget_version"]):
@@ -85,7 +89,8 @@ def request_history_review(runtime, project, body, *, details=True):
         runtime.db.execute("INSERT INTO history_review_requests VALUES(?,?,?,?,?,?,?,'reserved',?,?,?,?)",
             (*identity, fingerprint, row["id"], encode(payload), now, now, now + body["max_seconds"] + 60, "{}"))
         response = {"request_id": body["request_id"], "status": "accepted", "history_review": {"job_id": row["id"],
-            "max_calls": body["max_calls"], "max_seconds": body["max_seconds"], "publication_automatic": False},
+            "max_calls": body["max_calls"], "max_seconds": body["max_seconds"], "publication_automatic": auto_reference,
+            "publication_tier": "source_reference" if auto_reference else None},
             "launch": {"status": "unconfirmed"}, "settings": control_status(runtime, project, details=details)}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)", (*identity, fingerprint, encode(response), now))
     try:
@@ -133,10 +138,12 @@ def run_history_review(runtime, project, request_id):
             (time.time(), time.time() + body["max_seconds"] + 30, *identity))
     try:
         status = runtime.history_run(project, body["job_id"], allow_review=True, max_calls=body["max_calls"],
-                                     max_seconds=body["max_seconds"], expected_epoch=body["expected_governance_epoch"])
+                                     max_seconds=body["max_seconds"], expected_epoch=body["expected_governance_epoch"],
+                                     auto_reference=body.get("auto_reference", False))
         job = status["job"]
         result = {"status": "completed", "job_state": job["state"], "counts": job["counts"],
-                  "reason": (job.get("last_result") or {}).get("reason"), "publication_automatic": False}
+                  "reason": (job.get("last_result") or {}).get("reason"),
+                  "publication_automatic": body.get("auto_reference", False)}
     except (OSError, ValueError) as exc:
         result = {"status": "failed", "reason": type(exc).__name__, "automatic_retry": False}
     with runtime.transaction():

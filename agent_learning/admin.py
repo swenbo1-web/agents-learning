@@ -297,7 +297,8 @@ def _settings(cfg):
     return list(command), cfg["timeout_seconds"]
 
 
-def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch, history_job_id=None):
+def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_epoch, history_job_id=None,
+                   history_auto_reference=False):
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
     from .admin_queue import (eligible_query, executor_query, remember_check, scan_signatures,
@@ -309,8 +310,12 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     epoch = runtime.assert_host_epoch(expected_epoch)
     recover_calls(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
+    history_owner = None
     if history_job_id is not None:
-        runtime.history_guard(project, problem_id, history_job_id, require_review=True, expected_epoch=epoch)
+        history_job = runtime.history_guard(project, problem_id, history_job_id, require_review=True, expected_epoch=epoch)
+        history_owner = history_job["owner"]
+        if history_auto_reference and not json.loads(history_job["last_result"]).get("auto_reference_authorized", False):
+            raise ContractError("history reference publication was not authorized for this run")
     summary_enabled = runtime.work_summary_enabled(project)
     query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature, history_job_id=history_job_id,
                                 summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
@@ -363,7 +368,8 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                   runtime.work_summary_packet(project, selected["id"], max_chars=cfg["max_input_chars"] - 800) if summary_context else
                   runtime.review_packet(project, selected["id"]))
         if history_job_id:
-            review_cfg.update(review_purpose="history_review", history_instruction_version=1)
+            review_cfg.update(review_purpose="history_review", history_instruction_version=2,
+                              history_auto_reference=history_auto_reference)
         if summary_context:
             packet["purpose"] = "work_summary"
         instruction = review_instruction(packet)
@@ -460,7 +466,10 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
                 "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id,
                 "provider_plan": provider_plan, "summary_context": summary_context,
-                "publication_enabled_at_reservation": bool(cfg["auto_publish"]), **claim}
+                "history_owner": history_owner,
+                "publication_enabled_at_reservation": bool(cfg["auto_publish"]),
+                "publication_mode_at_reservation": cfg["publication_mode"],
+                "history_reference_authorized": bool(history_job_id and history_auto_reference), **claim}
     return {"status": "executor_not_ready" if routing_skipped else "needs_evidence" if skipped else "scan_complete", "scanned_count": scanned,
             **({"reason": routing_skipped[0]["reason"], "routing_skipped": routing_skipped[:10]} if routing_skipped else {}),
             **({"problem_id": skipped[0], "skipped_problem_ids": skipped,
@@ -497,6 +506,16 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
             "candidate_count": len(candidate_ids), "proposal_id": proposal_ids[0], "proposal_ids": proposal_ids}
 
 
+def _history_acceptance_guard(runtime, project, reserved):
+    job = runtime.history_guard(project, reserved["packet"]["problem"]["id"], reserved["history_job_id"],
+                                require_review=True, expected_epoch=reserved["host_epoch"])
+    if reserved.get("history_owner") is not None and job["owner"] != reserved["history_owner"]:
+        raise ContractError("history review run ownership changed")
+    if reserved.get("history_reference_authorized") and (job["owner"] != reserved.get("history_owner")
+            or not json.loads(job["last_result"]).get("auto_reference_authorized", False)):
+        raise ContractError("history reference publication authorization changed")
+
+
 def _accept_response(runtime, project, reserved, response):
     from .admin_decisions import persist_receipt, review_signature
     from .admin_governance import propose_governance
@@ -526,8 +545,7 @@ def _accept_response(runtime, project, reserved, response):
         runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
                                                require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
-            runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
-                                  require_review=True, expected_epoch=reserved["host_epoch"])
+            _history_acceptance_guard(runtime, project, reserved)
         summary_context = runtime.work_summary_guard(project, packet["problem"]["id"])
         if bool(summary_context) != bool(reserved.get("summary_context")):
             raise ContractError("administrator review purpose changed")
@@ -546,8 +564,11 @@ def _accept_response(runtime, project, reserved, response):
         review_cfg = _review_configuration(runtime.admin_effective_config(project), reserved["provider_plan"])
         if "publication_enabled_at_reservation" in reserved:
             review_cfg["auto_publish"] = reserved["publication_enabled_at_reservation"]
+        if "publication_mode_at_reservation" in reserved:
+            review_cfg["publication_mode"] = reserved["publication_mode_at_reservation"]
         if history_job_id:
-            review_cfg.update(review_purpose="history_review", history_instruction_version=1)
+            review_cfg.update(review_purpose="history_review", history_instruction_version=2,
+                              history_auto_reference=reserved.get("history_reference_authorized", False))
         if summary_context:
             review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
         if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
@@ -607,21 +628,43 @@ def _accept_response(runtime, project, reserved, response):
     if history_job_id and response["decision"] == "candidate" and not candidates:
         result.update(candidate_ids=[result["candidate_id"]], candidate_count=1,
                       proposal_ids=[result["proposal_id"]] if result.get("proposal_id") else [])
-    if (response["decision"] == "candidate" and runtime.admin_effective_config(project)["auto_publish"]
+    current_publication = runtime.admin_effective_config(project)
+    publication_mode = reserved.get("publication_mode_at_reservation", "verified_operation_solutions")
+    if (response["decision"] == "candidate" and current_publication["auto_publish"]
             and reserved.get("publication_enabled_at_reservation", False)
-            and not reserved.get("history_job_id") and not summary_context):
+            and current_publication["publication_mode"] == publication_mode
+            and (not history_job_id or reserved.get("history_reference_authorized") and publication_mode == "tiered")
+            and not summary_context):
         from .admin_publication import publication_gate
-        reason = publication_gate(runtime, project, packet, body, proposal)
-        if reason:
-            result["publication"] = {"status": "not_published", "reason": reason}
-        else:
-            from .admin_governance import execute_governance
-            result["publication"] = execute_governance(runtime, project, result["proposal_id"],
-                                                       expected_epoch=reserved["host_epoch"])["publication"]
+        from .admin_governance import execute_governance
+        identities = result.get("candidate_ids") or [result["candidate_id"]]
+        proposals = result.get("proposal_ids") or [result["proposal_id"]]
+        publications = []
+        for identity, proposal_id in zip(identities, proposals):
+            saved = runtime.db.execute("SELECT body FROM candidates WHERE project=? AND id=?", (project, identity)).fetchone()
+            candidate_body = json.loads(saved[0])
+            saved_proposal = dict(runtime.db.execute("SELECT * FROM governance_proposals WHERE project=? AND id=?",
+                                                    (project, proposal_id)).fetchone())
+            reason = publication_gate(runtime, project, packet, candidate_body, saved_proposal,
+                                      mode=publication_mode, history_reference=bool(history_job_id))
+            publication = ({"status": "not_published", "reason": reason} if reason else
+                execute_governance(runtime, project, proposal_id, expected_epoch=reserved["host_epoch"])["publication"])
+            publications.append({"candidate_id": identity, **publication})
+        result["publication"] = {k: v for k, v in publications[0].items() if k != "candidate_id"}
+        if history_job_id:
+            result["publications"] = publications
+            published = sum(item.get("status") == "published" for item in publications)
+            if len(publications) > 1:
+                result["publication"] = {"status": "published" if published == len(publications) else
+                    "partially_published" if published else "not_published", "published_count": published,
+                    "candidate_count": len(publications), **({"reason": "some_references_require_review"}
+                                                            if published < len(publications) else {})}
     if response["decision"] == "candidate" and "publication" not in result:
         result["publication"] = {"status": "not_published", "reason": (
-            "history_requires_approval" if history_job_id else "work_summary_not_published" if summary_context else
+            "work_summary_not_published" if summary_context else
+            "history_requires_approval" if history_job_id and not reserved.get("history_reference_authorized") else
             "automatic_publication_disabled" if not runtime.admin_effective_config(project)["auto_publish"] else
+            "publication_mode_changed" if current_publication["publication_mode"] != publication_mode else
             "publication_not_enabled_at_reservation")}
     result["status"] = response["decision"]
     persist_receipt(runtime, project, packet, reserved["evidence_signature"], reserved["review_signature"],
@@ -638,8 +681,7 @@ def _accept_response(runtime, project, reserved, response):
         runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
                                                require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
-            runtime.history_guard(project, packet["problem"]["id"], reserved["history_job_id"],
-                                  require_review=True, expected_epoch=reserved["host_epoch"])
+            _history_acceptance_guard(runtime, project, reserved)
         if summary_context:
             runtime.work_summary_guard(project, packet["problem"]["id"],
                                        accepted_call_id=call_id if response["decision"] in {"candidate", "skip", "needs_evidence"} else None)
@@ -661,7 +703,8 @@ def _review_window(deadline, timeout):
     return None
 
 
-def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10, _history_job_id=None):
+def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10, _history_job_id=None,
+               _history_auto_reference=False):
     from .admin_lifecycle import mark_launch_intent, mark_started
     from .admin_providers import build_execution, collect_antigravity_stream, read_response, resolve_command, launch_error, executor_capability
     from .admin_queue import record_executor_failure, clear_executor_failure, record_dispatch_diagnostic
@@ -679,7 +722,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
     if deferred:
         return {**deferred, "scanned_count": 0}
     with runtime.transaction():
-        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch, _history_job_id)
+        reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch, _history_job_id,
+                                  _history_auto_reference)
     if reserved["status"] != "reserved":
         return reserved
     call_id, process, started_at = reserved["call_id"], None, time.monotonic()

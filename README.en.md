@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.12 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.13 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -30,7 +30,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
-**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, automatic publication, update checks and remote services require separate configuration. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
+**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual administrator enable recommends tiered publication, which can be disabled or narrowed; existing choices remain unchanged. A new knowledge base starts empty. Working history becomes searchable before separate knowledge review and publication.
 
 ## Visual control and the knowledge button
 
@@ -53,16 +53,30 @@ The panels passed isolated regressions, fixed-runtime checks and Edge checks wit
 
 ![DSH Composer Memory Button and Quick Control Popover](assets/ui-knowledge-button-en.png)
 
-### Inspect review subjects and publication (1.1.4)
+### Review subjects, tiered publication and disputed knowledge (1.1.13)
 
 Open **Review & settings → Administrator settings** from any host control panel:
 
 1. **Review subjects and publication** shows current, recent, upcoming and locally deferred cases, with sources, purpose, evidence, candidate summaries, applicability, limitations and publication blockers. Checking a candidate's publication conditions is read only and makes no model call.
-2. **Review and publication have separate switches.** Frequency controls review budgets. Automatic publication of future verified operation solutions is saved per project and host, with explicit confirmation. Historical knowledge, facts, professional conclusions and existing candidates still require approval.
-3. **Archive first, review separately.** Each history card separates archived cases, primary reviews, candidates and publications. Confirm a finite review of that frozen batch: defaults are 5 calls and 180 seconds, adjustable up to 20 calls and 600 seconds. This does not scan new sources, automatically resume, or publish historical knowledge. Closing the page does not cancel an approved bounded worker; progress and request receipts remain available.
+2. **Choose the publication scope.** The first confirmed visual enable recommends tiered publication: eligible verified operation solutions and sourced project facts can publish, with facts explicitly labeled as unverified references. Settings are project/host scoped. Existing off choices and legacy policies remain unchanged; pending candidates are not retroactively published.
+3. **Archive first, review separately.** Each history card separates archived cases, primary reviews, candidates and publications. Confirm a finite review of that frozen batch: defaults are 5 calls and 180 seconds, adjustable up to 20 calls and 600 seconds. This does not scan new sources or automatically resume. Under the tiered policy, explicitly permit sourced-reference publication for this one batch together with its call/time budget; without that permission, candidates still await approval. Closing the page does not cancel an approved bounded worker; progress and request receipts remain available.
 4. **Defer bare failures locally.** Daily cases containing only failed tools and no recovery or public explanation wait for more evidence without a model call. Relevant new evidence makes them eligible for reconsideration. Explicit per-case review remains available.
 
 These cards show public records and observable evidence, not internal model reasoning. Reported statements, tool success, candidates and formal publication remain distinct; tool success is not business correctness or user acceptance.
+
+
+#### Tiered publication and wrong-knowledge handling
+
+| Content | Automatic handling | Evidence boundary |
+|---|---|---|
+| Verified operation solutions | Publish with current healthy success evidence, complete input and no unresolved regression; existing lineage checks still govern updates | `tool_success` is not domain correctness or user acceptance |
+| Sourced project facts | Publish as references after administrator extraction | `reported`, labeled **Sourced reference · not verified**, with scope, limitations and provenance |
+| Explicit historical reviews | Permit reference publication for the **one frozen batch** confirmed by the user | Source identity and content hash remain traceable; no automatic scanning, continuation or claims about the current implementation |
+| Disputes, stale sources, revoked entries or incomplete provenance | Keep candidates and blockers for comparison | Never silently restore knowledge, overwrite disputes or dismiss counterexamples; existing candidates retain batch approval |
+
+When knowledge is wrong, submit its exact ID/revision and counterexample: **flag the dispute → suspend automatic injection → administrator compares evidence and proposes revision/revocation → an explicit governance entry executes it → notify conversations exposed to the old version**. Originals and revisions remain auditable; restoration is explicit. A suspicion alone does not delete knowledge. Unresolved counterexamples block related automatic publication; exact deduplication cannot bypass revocation, and different content under the same title needs review.
+
+Publication uses the existing review call and local transaction, with durable replay receipts rather than another model call. Turning publication off or changing scope during a review retains the candidate and checks both the frozen grant and current settings. Title/provenance/revision checks cannot detect every natural-language contradiction; evidence comparison and reference caveats remain necessary. Schema/protocol stay at 19, with a nullable policy field and derived title index.
 
 1.1.1 restores explicit continuation after an interrupted history worker expires, using frozen sources. Requests from previous account or governance epochs no longer block current actions; calls with unknown outcomes still require inspection. Multiple candidates show separate summaries, conditions, limits, evidence references and current approval/publication states. Completed results remain readable after a normal budget pause; user pauses, cancellation and account boundaries retain their access checks. Database schema and protocol remain 19.
 
@@ -386,7 +400,7 @@ The plugin suits projects that require long-term maintenance, frequent tool use 
 
 The source provides **Codex, Antigravity and DSH** profiles using rules, skills, MCP, Hooks and the same runtime core. The v1.0.0 distribution includes the first two; DSH requires `main`. Check event capabilities and acceptance for each host separately. Antigravity differences are documented below; other Agent environments still require their own adapters.
 
-Storage is local by default, and knowledge is managed by project. Administrator execution, background scheduling, automatic publication and remote services are off by default and may be enabled separately as needed.
+Storage is local by default, and knowledge is managed by project. Installation does not enable administrator execution, background scheduling, automatic publication or remote services. The first confirmed visual administrator enable recommends tiered publication; existing project settings remain unchanged.
 
 ## Complete architecture
 
@@ -905,7 +919,7 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-can
 python -B scripts/learning.py --workspace "D:\Projects\your-project" history-skip
 ```
 
-Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Codex, Antigravity and DSH support their own CLI reviewer or manual administration. See [model selection](#optional-administrator-executor). Historical jobs have no explicit source conversation: `current` needs one unambiguous active root-model identifier for that project and host. Different models or missing observations stop the review until the user chooses `fixed` or `default`. Use `history-cases JOB_ID` to page through exact case IDs and propose candidates from existing packets. Publication uses its separate trusted entry; historical jobs never auto-publish.
+Scanning and content deduplication make no model calls. Explicit `--allow-review` admits this bounded run without enabling everyday administrators and remains subject to global usage and concurrency budgets. Codex, Antigravity and DSH support their own CLI reviewer or manual administration. See [model selection](#optional-administrator-executor). Historical jobs have no explicit source conversation: `current` needs one unambiguous active root-model identifier for that project and host. Different models or missing observations stop the review until the user chooses `fixed` or `default`. Use `history-cases JOB_ID` to page through exact case IDs and propose candidates from existing packets. Historical candidates remain pending by default. With tiered publication enabled, `history-run --confirm --allow-review --auto-reference` permits sourced references for this run only, preserving `reported`; it does not authorize the next run.
 
 Enabling the daily administrator, increasing shared limits or running `admin-drain` does not start historical jobs. Current `main` defaults to at most **10 calls/600 seconds** for each explicit historical run; explain that budget before starting or resuming. The `--max-calls 2 --max-seconds 180` example above explicitly selects a smaller budget and remains respected. Users can adjust it; all historical calls remain subject to project admission and global safeguards. Default `first` can use the first valid model already bound to this project, host instance and account epoch; missing observations wait without guessing.
 
@@ -1288,7 +1302,7 @@ Set `admin.dsh_profile` in your existing `ALP_CONFIG` to that file's absolute pa
 
 Antigravity CLI may still load trusted global Hooks, rules or plugins. Empty-tool initialization does not prove that those components did not execute. These CLI options do not provide full OS isolation. Use a separate controlled environment for stronger boundaries. Actual `agy` loading and model calls remain unverified.
 
-`admin.auto_publish` remains `false` by default; administrator configuration does not change it. Successful review produces candidates or governance suggestions. Publication uses its separate trusted entry point.
+Example configuration keeps `admin.auto_publish: false`; installation and upgrades do not start models. The first confirmed visual administrator enable recommends tiered publication; users can turn it off or keep verified-operation-only publication. Existing choices remain unchanged. Historical references need separate permission for each explicitly started batch; old pending candidates are not bulk-published.
 
 ### Capture coverage and review recovery
 
@@ -1322,7 +1336,7 @@ The first schema 19 upgrade invalidates older host connections and governance ex
 
 Administrator MCP `propose_governance` can only propose publish/update/attach/revoke/dismiss_counterexample, not execute them. Trusted operators submit JSON with `governance-propose FILE` and execute with `governance-execute PROPOSAL_ID`. This checks case and target revisions, evidence and host boundaries, committing the governance change and idempotent receipt in one transaction. update must produce a real new revision; equivalent content should use attach. Publishing different knowledge does not resolve an old counterexample. A proposal in model output also remains a proposal.
 
-`auto_publish` is off by default. When enabled, untruncated everyday `operation/solution` candidates with actual tool success evidence may create knowledge. Updates and source attachments additionally require an existing `operation/solution` target, a shared source case or a write to the same file in the same checkout, and no unresolved counterexample. The candidate must cite a healthy success after the latest failure and no earlier than the latest linked write; an uncited newer success cannot validate an old citation. A shared file still requires the administrator to judge whether the solution is the same. Tool success does not establish domain correctness. Historical absorption, work summaries, professional knowledge, patterns, counterexample dispositions and other governance retain explicit confirmation.
+Installation configuration keeps `auto_publish` off. The first visual enable and migration rules are described above. Under the legacy verified-operation-only policy, untruncated everyday `operation/solution` candidates with actual tool success evidence may create knowledge. Updates and source attachments additionally require an existing `operation/solution` target, a shared source case or a write to the same file in the same checkout, and no unresolved counterexample. The candidate must cite a healthy success after the latest failure and no earlier than the latest linked write; an uncited newer success cannot validate an old citation. A shared file still requires the administrator to judge whether the solution is the same. Tool success does not establish domain correctness. Tiered publication additionally permits sourced project facts and explicitly authorized historical references, always retaining their unverified status. Work summaries remain a separate index. Daily professional conclusions, patterns, counterexample dispositions and other governance require explicit confirmation.
 
 Publication lineage stays in `knowledge_sources`, without changing a case's original feedback target. New evidence can support another update of current knowledge, while explicit feedback and counterexamples retain their exact historical revision. Previously backfilled publication targets are interpreted through source lineage without moving counterexample targets or rewriting original evidence.
 
@@ -1409,7 +1423,7 @@ Use `python scripts/learning.py --help` for actual arguments. Global `--home` an
 | `status` | Read runtime status |
 | `update-check`, `update-status` | Check bounded GitHub Release metadata or read cached version state |
 | `update-notice`, `update-choice` | Read notification state or explicitly snooze, ignore or reset a version notice |
-| `history-prepare`, `history-run` | Explicitly select sources and archive or review a bounded historical job; never auto-publish |
+| `history-prepare`, `history-run` | Explicitly archive/review a bounded historical job; optional per-run `--auto-reference` under tiered policy |
 | `history-status`, `history-jobs`, `history-sources`, `history-cases` | Inspect progress and page through source or case lists without starting ingestion |
 | `history-pause`, `history-cancel`, `history-skip` | Pause, cancel or record the initial later choice |
 | `learning-effects`, `knowledge-use` | Windowed effect observations and short adoption declarations for the exact task |

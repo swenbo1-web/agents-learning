@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
         archivedPrefix: "仅归档完成，尚未整理或发布；案例数 ",
         reusedHistory: "已复用历史批次；请打开审批查看进度并继续主审。未调用模型。",
         failed: "操作失败",
-        confirmAdmin: "开启管理员会使用平台模型额度，是否应用此频率？",
+        confirmAdmin: "开启管理员会使用平台模型额度。首次开启默认分级发布：项目事实保留来源且未验证，争议转人工；已有发布设置保留。是否应用此频率？",
         unresolved: "上次设置结果待核对；再次点击可用相同请求重试。",
       },
       en: {
@@ -81,7 +81,7 @@ window.__ModuleLoader__.load({
         archivedPrefix: "Archived only, not reviewed or published; cases ",
         reusedHistory: "Existing history batch reused. Open review for progress; no model call.",
         failed: "Operation failed",
-        confirmAdmin: "Enabling the administrator uses platform model quota. Apply this preset?",
+        confirmAdmin: "Enabling the administrator uses platform model quota. On first enable, tiered publication records sourced project facts as unverified references; disputes need review. Existing publication choices are preserved. Apply this preset?",
         unresolved: "Previous settings result is unconfirmed. Click again to retry the same request.",
       },
     };

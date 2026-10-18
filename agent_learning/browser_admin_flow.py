@@ -43,16 +43,29 @@ flowHistoryResume:['Continue this archived batch…','继续整理此归档批�
 flowHistoryInterrupted:['This batch needs explicit continuation. Calls with unknown results remain blocked until checked.','此批次需要明确续做；结果未知的调用仍需核对，不会自动重试。'],
 superseded:['Previous account or governance request (inactive)','旧账户或治理轮次请求（已失效）'],
 flowPublicationOn:['Future verified operation solutions may publish automatically','后续通过验证的操作解法可自动发布'],
+flowPublicationTiered:['Tiered publication: verified solutions and sourced references; disputes await review','分级发布：验证解法与带来源参考自动进入知识库；争议转人工'],
+publicationMode:['Publication policy','自动发布范围'],
+tiered:['Tiered publication (recommended)','分级自动发布（推荐）'],
+verified_operation_solutions:['Verified operation solutions only (legacy)','仅验证操作解法（原策略）'],
+source_reference:['Sourced reference · not verified','带来源参考 · 尚未验证'],
+knowledgeDisputed:['{count} unresolved counterexample(s). Automatic injection is suspended; compare evidence and explicitly revise or revoke.','存在{count}条未解决反例，已暂停自动注入；需比较证据后明确修订或撤销。'],
+knowledgeReferenceNote:['A sourced statement, not verification of the current implementation. Check scope, source revision and limits before reuse.','这是带来源的陈述，不代表当前实现已验证；复用前核对适用范围、来源版本与限制。'],
+tool_verified:['Observed tool success · not user acceptance','工具成功依据 · 不等于用户验收'],
+partially_published:['Partially published; remaining candidates need review','已部分发布，其余候选待审核'],
+publication_mode_changed:['Publication policy changed during this review','审核期间自动发布范围已变化'],
+flowHistoryReferences:['Allow sourced references from this batch to publish under the tiered policy (still reported, not verified)','允许本批资料按分级策略发布带来源参考（保留reported，不算验证结论）'],
+flowHistoryReferenceConfirm:[' Allow sourced references from this batch to publish automatically? Evidence stays reported; disputes and incomplete sources remain for manual review.',' 允许本批资料自动发布带来源参考？证据仍为reported，冲突或来源不完整的内容留待人工审核。'],
+
 flowPublicationOff:['Automatic publication is off; candidates await approval','自动发布关闭；候选等待批准'],
-autoPublishLabel:['Automatically publish future verified operation solutions for this project and host','为此项目、此宿主自动发布后续已验证的操作解法'],
-autoPublishNote:['Separate from review frequency. Requires current successful tool evidence, a complete packet and no unresolved regression. History, facts and professional conclusions still need approval. Existing candidates are not bulk-published.','与审核频率分开设置；要求当前工具成功证据、完整资料及无未解决回退。历史知识、事实与专业结论仍需批准；不会批量发布已有候选。'],
-autoPublishConfirm:['Allow future verified operation solutions to publish automatically for this project and host? History, facts and existing candidates will still require approval.','允许此项目、此宿主自动发布后续已验证的操作解法？历史知识、事实与已有候选仍需批准。'],
+autoPublishLabel:['Automatically publish eligible future knowledge for this project and host','为此项目、此宿主自动发布后续符合条件的知识'],
+autoPublishNote:['Tiered: verified operation solutions publish with current evidence; sourced project facts publish as unverified references. Historical references require permission for each explicitly started batch. Disputed, stale or incomplete evidence stays for review. Existing settings and pending candidates are preserved.','分级策略：验证操作解法需当前证据；有来源的项目事实以未验证参考发布。历史参考需在每次主动整理批次时授权。争议、过时或不完整依据转人工；保留原设置与已有待批候选。'],
+autoPublishConfirm:['Enable the selected publication policy for future reviews in this project and host? Source references remain unverified. Disputes and existing candidates require review; history needs per-batch permission.','为此项目、此宿主的后续审核开启所选发布策略？带来源参考仍属未验证；争议与已有候选需审核，历史资料需逐批授权。'],
 flowHistoryCounts:['Archived cases {cases} · reviewed {reviewed} · candidates {candidates} · published {published}','已归档案例{cases} · 已主审{reviewed} · 候选{candidates} · 已发布{published}'],
 flowHistoryStart:['Review this archived batch…','整理此归档批次…'],
 flowHistoryCalls:['Calls (1–20)','调用上限（1–20）'],
 flowHistorySeconds:['Seconds (1–600)','秒数上限（1–600）'],
-flowHistoryConfirm:['Review only this already archived batch using the configured model, up to {calls} calls and {seconds} seconds? This uses platform quota, does not scan new sources, and never auto-publishes historical knowledge.','使用已配置模型，仅整理此已归档批次，最多{calls}次调用、{seconds}秒？会使用平台额度；不扩大来源，不自动发布历史知识。'],
-flowHistoryQueued:['History review was requested for this batch. Follow its progress below; no knowledge was approved.','已请求整理此历史批次，可在下方查看进度；本次未批准知识发布。'],
+flowHistoryConfirm:['Review only this already archived batch using the configured model, up to {calls} calls and {seconds} seconds? This uses platform quota and does not scan new sources. Without batch permission, candidates remain for approval.','使用已配置模型，仅整理此已归档批次，最多{calls}次调用、{seconds}秒？会使用平台额度；不扩大来源；未授权自动参考时，候选留待批准。'],
+flowHistoryQueued:['History review was requested for this batch. Follow progress and publication receipts below.','已请求整理此历史批次，可在下方查看进度和发布回执。'],
 flowHistoryRequest:['Review request: {state}','整理请求：{state}'],
 awaiting_recovery_evidence:['Waiting for recovery or an explicit explanation; deferred locally without a model call','等待恢复结果或明确说明；已在本地暂缓，未调用模型'],
 recovery_result_or_explanation:['A linked successful verification or an explanation of the reusable conclusion','关联的成功验证，或可复用结论的明确说明'],
@@ -71,8 +84,23 @@ eligible_future_review_only:['Evidence meets the narrow automatic publication ch
 'requires operation solution':['Only operation solutions qualify','仅操作类解法可自动发布'],
 'target knowledge requires trusted governance':['The target requires explicit governance approval','目标知识需明确治理批准'],
 'existing knowledge requires trusted governance':['The existing knowledge requires explicit governance approval','已有知识需明确治理批准'],
+'requires sourced project fact':['Requires a sourced project fact; other daily conclusions need review','需要有来源的项目事实；其他日常结论仍需审核'],
+'reference requires scope and limitations':['Reference needs explicit scope and limitations','参考需有明确适用范围与限制'],
+'reference source is unhealthy':['Reference source failed or is disputed','参考来源失败或存在冲突'],
+'reference requires archived provenance':['Reference requires frozen source identity and content hash','参考需有冻结来源身份与内容指纹'],
+'reference requires public source evidence':['Requires an observable public source, not only tool results','需有可观察的公开来源，不能只依据工具流水'],
+'equivalent knowledge was revoked':['Equivalent knowledge was revoked; explicit review required','相同知识已撤销，需明确复核'],
+'previous knowledge title requires review':['A prior entry with this title was revoked; compare before publication','同名旧知识已撤销，发布前需比较复核'],
+'equivalent knowledge was superseded':['Equivalent knowledge was replaced by a newer revision','相同知识已有新修订，不自动回写旧版'],
+'unresolved knowledge counterexample':['Related knowledge has an unresolved counterexample','关联知识存在未解决反例'],
+'conflicting knowledge requires review':['Same-title knowledge differs; compare and review before publication','同名知识内容不同，需比较审核后发布'],
+some_references_require_review:['Some references still need manual review','部分参考仍需人工审核'],
 local_preflight:['Local evidence check','本地证据检查'],result_unknown:['Result unknown; inspect before retrying','结果未知，重试前需核对']
 });
+function knowledgeNotice(target,item){
+ if(item.pending_counterexample_count)target.append(node('p',t('knowledgeDisputed',{count:item.pending_counterexample_count}),'note'));
+ if(item.knowledge_tier==='source_reference')target.append(node('p',t('knowledgeReferenceNote'),'note'));
+}
 function renderFlowCandidate(card,item){
  const section=node('section',undefined,'history-item');section.append(node('strong',item.title||item.candidate_id));
  section.append(node('p',item.candidate_id+' · '+label(item.status),'muted'));
@@ -88,7 +116,7 @@ function renderFlowCandidate(card,item){
 function renderAdminFlow(data){
  const root=$('admin-flow');if(!root)return;root.replaceChildren();
  root.append(node('h3',t('flowHeading')),node('p',t('flowNote'),'note'));
- root.append(node('strong',t(data.publication_policy?.enabled?'flowPublicationOn':'flowPublicationOff')));
+ root.append(node('strong',t(data.publication_policy?.enabled?(data.publication_policy?.mode==='tiered'?'flowPublicationTiered':'flowPublicationOn'):'flowPublicationOff')));
  if(!renderAdminReadNotice(root,'activity'))return;
  const activity=data.review_activity||{};
  for(const [heading,key]of [['flowRecent','recent'],['flowUpcoming','upcoming'],['flowDeferred','deferred']]){
@@ -130,20 +158,22 @@ function addHistoryReviewControls(card,item){
  for(const [field,key,value,max]of [['calls','flowHistoryCalls',5,20],['seconds','flowHistorySeconds',180,600]]){
   const id='history-review-'+field+'-'+item.id,input=node('input'),caption=node('label',t(key)),draftKey=state.epoch+':'+id;caption.htmlFor=id;input.id=id;input.type='number';input.min='1';input.max=String(max);input.step='1';input.value=historyReviewDrafts.get(draftKey)??String(value);input.addEventListener('input',()=>historyReviewDrafts.set(draftKey,input.value));card.append(caption,input);
  }
+ if(state.adminData?.publication_policy?.enabled&&state.adminData.publication_policy.mode==='tiered'){const id='history-review-references-'+item.id,check=node('input'),caption=node('label'),draftKey=state.epoch+':'+id;check.id=id;check.type='checkbox';check.checked=historyReviewDrafts.get(draftKey)??true;check.addEventListener('change',()=>historyReviewDrafts.set(draftKey,check.checked));caption.append(check,node('span',t('flowHistoryReferences')));card.append(caption);}
  const button=node('button',t(item.resume_required?'flowHistoryResume':'flowHistoryStart'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>confirmHistoryReview(item)));card.append(button);
 }
 async function confirmHistoryReview(item){
  if(!canAdmin()||state.adminDirty||state.adminPending)throw new Error(t('adminSaveBeforeWake'));
  const calls=Number($('history-review-calls-'+item.id).value),seconds=Number($('history-review-seconds-'+item.id).value);
  if(!Number.isInteger(calls)||calls<1||calls>20||!Number.isInteger(seconds)||seconds<1||seconds>600)throw new Error(t('invalidResponse'));
- if(!window.confirm(t('flowHistoryConfirm',{calls,seconds})))return;
+ const autoReference=Boolean($('history-review-references-'+item.id)?.checked);
+ if(!window.confirm(t('flowHistoryConfirm',{calls,seconds})+(autoReference?t('flowHistoryReferenceConfirm'):'')))return;
  const base=state.adminData;
  return sendAdminRequest('admin-control/history-review',{...adminExpected(base),job_id:item.id,version:item.version,
-  confirmed:true,max_calls:calls,max_seconds:seconds});
+  confirmed:true,max_calls:calls,max_seconds:seconds,auto_reference:autoReference});
 }
 async function saveAdminConfiguration(action){
  const payload=adminConfiguration(action);
- if(payload.auto_publish&&!state.adminData?.publication_policy?.enabled&&!window.confirm(t('autoPublishConfirm')))return;
+ if(payload.auto_publish&&(!state.adminData?.publication_policy?.enabled||payload.publication_mode!==state.adminData?.publication_policy?.mode)&&!window.confirm(t('autoPublishConfirm')))return;
  return sendAdminRequest('admin-control/configure',payload);
 }
 async function loadAdminHistory(force=true){

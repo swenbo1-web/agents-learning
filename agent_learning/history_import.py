@@ -122,6 +122,8 @@ def _summary_snapshot(runtime, row, progress=None):
     blocked = progress["blocked"]
     candidate_states = progress["candidate_states"]
     active = bool(row["owner"] and (row["lease_until"] or 0) > time.time())
+    last_result = json.loads(row["last_result"])
+    auto_reference = bool(last_result.get("auto_reference_authorized", False))
     result = {"job_id": row["id"], "state": row["state"], "workspace": row["workspace"], "counts": counts,
             "coverage": {"incomplete": bool(plan.get("incomplete")), "stats": plan.get("stats", {}),
                          "skipped_count": plan.get("skipped_count", 0), "pending_count": plan.get("pending_count", 0),
@@ -133,10 +135,10 @@ def _summary_snapshot(runtime, row, progress=None):
                                     "blocked_cases": dispositions["blocked"], "complete": review_complete},
                          "publication": {"candidates": counts["candidates"], "published_candidates": counts["published_candidates"],
                                          "awaiting_approval": candidate_states.get("candidate", 0) + candidate_states.get("deferred", 0),
-                                         "rejected_candidates": candidate_states.get("rejected", 0), "automatic": False}},
+                                         "rejected_candidates": candidate_states.get("rejected", 0), "automatic": auto_reference}},
             "remaining_calls": row["remaining_calls"], "review_enabled": bool(row["review_enabled"]),
             "created": row["created"], "updated": row["updated"], "last_result": json.loads(row["last_result"]),
-            "automatic_resume": False, "publication_automatic": False,
+            "automatic_resume": False, "publication_automatic": auto_reference,
             "run_active": active,
             "resume_required": row["state"] == "paused" or row["state"] in {"materializing", "reviewing"} and (row["lease_until"] or 0) <= time.time(),
             "resume": {"automatic": False, "explicit_run_required": row["state"] != "cancelled" and not active
@@ -484,11 +486,19 @@ class HistoryImportMixin:
                 self.db.execute("UPDATE history_job_sources SET materialized=1 WHERE job_id=? AND material_id=?", (job_id, material["id"]))
         return True
 
-    def history_run(self, project, job_id, allow_review=False, max_calls=10, max_seconds=600, expected_epoch=None):
+    def history_run(self, project, job_id, allow_review=False, max_calls=10, max_seconds=600, expected_epoch=None,
+                    *, auto_reference=False):
         from .admin import admin_once
         from .runtime import ContractError, encode
         if not isinstance(allow_review, bool):
             raise ContractError("allow_review must be a boolean")
+        if not isinstance(auto_reference, bool) or auto_reference and not allow_review:
+            raise ContractError("automatic history references require explicit model review")
+        if auto_reference:
+            from .admin_review_flow import publication_policy
+            policy = publication_policy(self, project)
+            if not policy["enabled"] or policy["mode"] != "tiered":
+                raise ContractError("automatic history references require the tiered publication policy")
         if isinstance(max_calls, bool) or not isinstance(max_calls, int) or not 0 <= max_calls <= 20:
             raise ContractError("history max_calls must be 0..20")
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not 1 <= max_seconds <= 600:
@@ -504,8 +514,9 @@ class HistoryImportMixin:
                 raise ContractError("history job already has an active run")
             from .history_workflow import assert_run_head
             assert_run_head(self, project, job_id)
-            self.db.execute("UPDATE history_jobs SET state='materializing',host_epoch=?,review_enabled=?,max_calls=?,remaining_calls=?,owner=?,lease_until=?,updated=? WHERE project=? AND id=?",
-                            (epoch, int(allow_review), max_calls, max_calls, owner, time.time() + max_seconds + 30, time.time(), project, job_id))
+            self.db.execute("UPDATE history_jobs SET state='materializing',host_epoch=?,review_enabled=?,max_calls=?,remaining_calls=?,owner=?,lease_until=?,updated=?,last_result=? WHERE project=? AND id=?",
+                            (epoch, int(allow_review), max_calls, max_calls, owner, time.time() + max_seconds + 30, time.time(),
+                             encode({"auto_reference_authorized": auto_reference}), project, job_id))
         results, state, reason = [], "materialized", "manual_review_available"
         run_queue = None
         try:
@@ -531,9 +542,10 @@ class HistoryImportMixin:
                     if time.monotonic() >= deadline or _job(self, project, job_id)["remaining_calls"] <= 0:
                         state, reason = "paused", "review_budget_exhausted"
                         break
-                    result = admin_once(self, project, problem["problem_id"], expected_epoch=epoch, _deadline=deadline, _history_job_id=job_id)
+                    result = admin_once(self, project, problem["problem_id"], expected_epoch=epoch, _deadline=deadline,
+                                        _history_job_id=job_id, _history_auto_reference=auto_reference)
                     results.append({"problem_id": problem["problem_id"], **{key: result[key] for key in
-                                   ("status", "call_id", "candidate_id", "candidate_ids", "candidate_count", "proposal_id", "proposal_ids", "reused") if key in result}})
+                                   ("status", "call_id", "candidate_id", "candidate_ids", "candidate_count", "proposal_id", "proposal_ids", "reused", "publication", "publications") if key in result}})
                     if result["status"] in {"failed", "timeout_unknown", "account_changed_unknown", "orphaned_unknown", "review_required", "waiting_for_review",
                                              "budget_exhausted", "token_budget_exhausted", "concurrency_limited", "not_started", "batch_time_exhausted",
                                              "executor_not_ready", "disabled"}:
@@ -557,6 +569,7 @@ class HistoryImportMixin:
             if self.host_epoch() != epoch:
                 state, reason = "paused", "host_epoch_changed"
             last_result = {"reason": reason, "reviews": results[:20], "reviews_count": len(results),
+                           "auto_reference_authorized": auto_reference,
                            "reviews_truncated": len(results) > 20}
             if run_queue is not None:
                 last_result["queue_at_start"] = run_queue

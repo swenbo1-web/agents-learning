@@ -385,7 +385,8 @@ class AdminRoutingMixin:
         from .admin_review_flow import publication_policy
         result = json.loads(_encode(admin_budget_config(self)))
         result.update(project_budget_policy(self, project)["values"])
-        result["auto_publish"] = publication_policy(self, project)["enabled"]
+        publication = publication_policy(self, project)
+        result.update(auto_publish=publication["enabled"], publication_mode=publication["mode"])
         result.update(enabled=policy["enabled"] and admission_enabled(self, project), command=validate_executor_command(command), provider=provider,
                       model_mode=policy["model_mode"], model=policy["model"])
         # 全局排队／预算配置不能因无会话的 current 歧义而读取失败；实际认领

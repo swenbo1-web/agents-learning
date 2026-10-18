@@ -146,7 +146,7 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
                 "expected_session_epoch", "expected_governance_epoch"}
     configured = {"enabled", "model_mode", "model", "start"}
     versions = {"expected_budget_version", "expected_project_budget_version"}
-    optional = {"summary_enabled", "auto_publish", "limits", "project_limits"} if not wake else set()
+    optional = {"summary_enabled", "auto_publish", "publication_mode", "limits", "project_limits"} if not wake else set()
     mandatory = required | (set() if wake else configured)
     if (not isinstance(body, dict) or not mandatory <= set(body) or set(body) - (mandatory | versions | optional)
             or not versions.intersection(body)
@@ -155,6 +155,9 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
             or "project_limits" in body and "expected_project_budget_version" not in body
             or any(key in body and not isinstance(body[key], bool) for key in ("summary_enabled", "auto_publish"))):
         raise ContractError("invalid administrator control fields")
+    if "publication_mode" in body and (not isinstance(body["publication_mode"], str)
+                                      or body["publication_mode"] not in {"verified_operation_solutions", "tiered"}):
+        raise ContractError("invalid automatic publication mode")
     request_id = body["request_id"]
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
         raise ContractError("invalid administrator request identity")
@@ -184,6 +187,14 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
         if not wake:
             if not isinstance(body["enabled"], bool) or not isinstance(body["start"], bool):
                 raise ContractError("administrator enable and start flags must be booleans")
+            # Native quick controls also use this path. Only the first explicit
+            # enable receives the new default; an existing off choice stays off.
+            first_enable = (body["enabled"] and not state["version"] and not policy["policy_version"]
+                            and state.get("auto_publish") is None
+                            and not runtime.config["admin"].get("auto_publish", False))
+            automatic = body.get("auto_publish", True if first_enable else state.get("auto_publish"))
+            publication_mode = body.get("publication_mode", "tiered" if first_enable and "auto_publish" not in body
+                                        else state.get("publication_mode"))
             if ("limits" in body and (not isinstance(body["limits"], dict)
                     or set(body["limits"]) - {"max_calls_per_day", "max_calls_per_batch", "max_batch_seconds", "max_run_seconds"})):
                 raise ContractError("invalid visual administrator budget fields")
@@ -212,14 +223,15 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
                 or body["summary_enabled"] != summary_prior["enabled"])
             if "summary_enabled" in body:
                 runtime.configure_work_summary(project, body["summary_enabled"])
-            publication_changed = "auto_publish" in body and (state.get("auto_publish") is None
-                or bool(state["auto_publish"]) != body["auto_publish"])
+            publication_changed = (automatic != state.get("auto_publish")
+                                   or publication_mode != state.get("publication_mode"))
             if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed or publication_changed:
-                runtime.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated,auto_publish) "
-                    "VALUES(?,?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
-                    "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated,auto_publish=excluded.auto_publish",
+                runtime.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated,auto_publish,publication_mode) "
+                    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
+                    "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated,auto_publish=excluded.auto_publish,"
+                    "publication_mode=excluded.publication_mode",
                     (project, runtime._session_scope(), int(body["enabled"]), state["version"] + 1, time.time(),
-                     int(body["auto_publish"]) if "auto_publish" in body else state.get("auto_publish")))
+                     int(automatic) if automatic is not None else None, publication_mode))
         response = {"request_id": request_id, "status": "configured", "settings": control_status(runtime, project, details=details),
                     "launch": {"status": "unconfirmed" if start else "not_requested"}}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)", (*identity, fingerprint, encode(response), time.time()))

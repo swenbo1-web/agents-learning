@@ -143,7 +143,7 @@ def _history_recovery_page(runtime, project, *, offset, limit):
             "can_review": _history_review_available(row) and row["host_epoch"] == runtime.host_epoch()
                 and not active_request and progress["resume"]["explicit_run_required"]
                 and (not head_blocks or row["id"] == selected_id),
-            "publication_automatic": False})
+            "publication_automatic": progress.get("publication_automatic", False)})
     total = db.execute("SELECT COUNT(*) FROM history_jobs WHERE project=?", (project,)).fetchone()[0]
     return {"items": history, "total": total, "offset": offset,
             "next_offset": offset + len(history) if offset + len(history) < total else None}

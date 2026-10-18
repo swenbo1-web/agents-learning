@@ -2,6 +2,99 @@
 from __future__ import annotations
 
 import json
+import re
+
+
+def knowledge_tier(body):
+    return "source_reference" if body.get("validation_level") == "reported" else "tool_verified"
+
+
+def _conflict_gate(runtime, project, packet, body, proposal):
+    """Never let deduplication or a fresh ID evade disputed/revoked knowledge."""
+    from .runtime import knowledge_fingerprint
+    fingerprint = knowledge_fingerprint(body)
+    targets = {value for value in (packet["problem"].get("knowledge_id"), proposal.get("knowledge_id")) if value}
+    targets.update(item.get("knowledge_id", item.get("id")) for item in packet.get("related_knowledge", [])
+                   if item.get("knowledge_id", item.get("id")))
+    for row in runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision FROM knowledge_fingerprints f "
+            "LEFT JOIN active a ON a.project=f.project AND a.id=f.id WHERE f.project=? AND f.fingerprint=?",
+            (project, fingerprint)):
+        targets.add(row["id"])
+        if row["active_revision"] is None:
+            return "equivalent knowledge was revoked"
+        if row["revision"] != row["active_revision"]:
+            return "equivalent knowledge was superseded"
+    for identity in targets:
+        if runtime.db.execute("SELECT 1 FROM knowledge_feedback WHERE project=? AND knowledge_id=? "
+                "AND kind='counterexample' AND disposition='unresolved' LIMIT 1", (project, identity)).fetchone():
+            return "unresolved knowledge counterexample"
+    if proposal["action"] == "publish":
+        # Recheck the indexed title even when retrieval did not offer the old
+        # entry. The program detects exact-title differences, not every semantic
+        # contradiction in natural language.
+        rows = runtime.db.execute("SELECT k.body,a.revision AS active_revision,k.revision FROM knowledge k "
+            "LEFT JOIN active a ON a.project=k.project AND a.id=k.id WHERE k.project=? "
+            "AND (CASE WHEN json_valid(k.body) THEN lower(trim(json_extract(k.body,'$.title'))) END)="
+            "lower(trim(?)) LIMIT 17", (project, body["title"])).fetchall()
+        if len(rows) > 16:
+            return "conflicting knowledge requires review"
+        for row in rows:
+            if row["active_revision"] is None:
+                return "previous knowledge title requires review"
+            if row["revision"] == row["active_revision"] and knowledge_fingerprint(json.loads(row["body"])) != fingerprint:
+                return "conflicting knowledge requires review"
+        title = re.sub(r"\s+", " ", body["title"].strip()).casefold()
+        for related in packet.get("related_knowledge", []):
+            identity = related.get("knowledge_id", related.get("id"))
+            row = runtime.db.execute("SELECT k.body FROM active a JOIN knowledge k ON k.project=a.project "
+                "AND k.id=a.id AND k.revision=a.revision WHERE a.project=? AND a.id=?", (project, identity)).fetchone()
+            if row:
+                existing = json.loads(row[0])
+                if (re.sub(r"\s+", " ", existing["title"].strip()).casefold() == title
+                        and knowledge_fingerprint(existing) != fingerprint):
+                    return "conflicting knowledge requires review"
+    return None
+
+
+def publication_gate(runtime, project, packet, body, proposal, *, mode="verified_operation_solutions",
+                     history_reference=False):
+    if not history_reference and runtime.db.execute("SELECT 1 FROM history_case_links WHERE project=? "
+            "AND problem_id=? LIMIT 1", (project, packet["problem"]["id"])).fetchone():
+        return "history_requires_approval"
+    conflict = _conflict_gate(runtime, project, packet, body, proposal)
+    if conflict:
+        return conflict
+    if mode != "tiered" or body["validation_level"] != "reported":
+        return _verified_gate(runtime, project, packet, body, proposal)
+    if packet.get("evidence_truncated") or packet.get("incomplete"):
+        return "evidence truncated"
+    if proposal["action"] != "publish" or packet["problem"].get("knowledge_id"):
+        return "existing knowledge requires trusted governance"
+    if not history_reference and not (body["category"] == "project" and body.get("knowledge_kind") == "fact"):
+        return "requires sourced project fact"
+    if not body["applicability"].strip() or not body["limitations"].strip():
+        return "reference requires scope and limitations"
+    # Provenance is checked again at acceptance/publication. A bare tool error
+    # cannot become a project fact just because a model changed its category.
+    public_source = False
+    for ref in body["evidence_refs"]:
+        row = runtime.db.execute("SELECT e.*,o.conflict,o.decision FROM problem_events pe JOIN events e ON e.id=pe.event "
+            "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation WHERE pe.problem=? AND e.project=? AND e.id=?",
+            (packet["problem"]["id"], project, ref)).fetchone()
+        if not row or row["conflict"] or row["decision"] == "denied" or row["outcome"] in {"failed", "conflict"}:
+            return "reference source is unhealthy"
+        payload = json.loads(row["payload"])
+        if row["type"] == "Feedback" and payload.get("feedback_kind") == "counterexample":
+            return "unresolved knowledge counterexample"
+        if history_reference:
+            source = payload.get("source") or {}
+            if (row["type"] != "HistoryImport" or row["outcome"] != "reported"
+                    or not source.get("source_key") or not source.get("content_hash")):
+                return "reference requires archived provenance"
+            public_source = True
+        elif row["type"] not in {"PreToolUse", "PostToolUse"} and row["outcome"] == "reported":
+            public_source = True
+    return None if public_source else "reference requires public source evidence"
 
 
 def publication_preview(runtime, project, candidate_id):
@@ -26,15 +119,16 @@ def publication_preview(runtime, project, candidate_id):
             proposal = runtime.db.execute("SELECT action,knowledge_id,expected_revision FROM governance_proposals "
                 "WHERE project=? AND candidate_id=? AND state='proposed' ORDER BY created DESC LIMIT 1", (project, candidate_id)).fetchone()
             reason = publication_gate(runtime, project, packet, body, dict(proposal) if proposal else
-                {"action": "publish", "knowledge_id": None, "expected_revision": None})
+                {"action": "publish", "knowledge_id": None, "expected_revision": None}, mode=policy["mode"])
     return {"candidate_id": candidate_id, "title": body["title"][:200], "category": body["category"],
             "knowledge_kind": body.get("knowledge_kind", "solution"), "validation_level": body["validation_level"],
+            "knowledge_tier": knowledge_tier(body), "publication_mode": policy["mode"],
             "policy_enabled": policy["enabled"], "evidence_eligible": reason is None,
             "reason": reason or ("automatic_publication_disabled" if not policy["enabled"] else "eligible_future_review_only"),
             "existing_candidate_requires_approval": True, "model_called": False, "published": False}
 
 
-def publication_gate(runtime, project, packet, body, proposal):
+def _verified_gate(runtime, project, packet, body, proposal):
     prob_id = packet["problem"]["id"]
     bound_kid = packet["problem"].get("knowledge_id")
     target_kid = proposal.get("knowledge_id")

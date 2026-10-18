@@ -11,6 +11,10 @@ def install_flow(runtime):
     columns = {row[1] for row in runtime.db.execute("PRAGMA table_info(admin_control_state)")}
     if "auto_publish" not in columns:
         runtime.db.execute("ALTER TABLE admin_control_state ADD COLUMN auto_publish INTEGER")
+    if "publication_mode" not in columns:
+        runtime.db.execute("ALTER TABLE admin_control_state ADD COLUMN publication_mode TEXT")
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS knowledge_publication_title "
+                       "ON knowledge(project,CASE WHEN json_valid(body) THEN lower(trim(json_extract(body,'$.title'))) END)")
     runtime.db.execute("""CREATE TABLE IF NOT EXISTS history_review_requests(
         project TEXT NOT NULL,host_scope TEXT NOT NULL,session_epoch INTEGER NOT NULL,
         request_id TEXT NOT NULL,input_digest TEXT NOT NULL,job_id TEXT NOT NULL,
@@ -20,10 +24,15 @@ def install_flow(runtime):
 
 def publication_policy(runtime, project):
     from .admin_control import control_state
-    value = control_state(runtime, project).get("auto_publish")
+    state = control_state(runtime, project)
+    value = state.get("auto_publish")
+    mode = state.get("publication_mode") or "verified_operation_solutions"
     return {"enabled": bool(runtime.config.get("admin", {}).get("auto_publish", False) if value is None else value),
             "configured": value is not None, "scope": "project_host", "host_scope": runtime._session_scope(),
-            "mode": "verified_operation_solutions", "history_automatic": False}
+            "mode": mode, "history_automatic": False, "history_reference_opt_in": mode == "tiered",
+            "first_enable_recommended": value is None and not state["version"]
+                and not runtime.admin_policy(project)["policy_version"]
+                and not runtime.config.get("admin", {}).get("auto_publish", False)}
 
 
 def evidence_readiness(packet):

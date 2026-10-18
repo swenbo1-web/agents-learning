@@ -18,7 +18,9 @@ REVIEW_PREFIX = (
     "needs_evidence给出missing_evidence数组，每项说明所缺事实或验证；其他决定填空数组。"
     "需要治理已有知识时只提出proposal(action,knowledge_id,expected_revision)，update/attach同时给candidate，"
     "revoke/dismiss_counterexample使用decision=governance且candidate=null；新candidate默认publish。"
-    "无治理提议proposal=null。不得将工具成功提升为专业正确，不得自动发布professional或pattern。"
+    "有来源的项目约定可作为project/fact且reported；失败记录、工作流水与猜测不作为项目事实。"
+    "发现已有知识错误或冲突时，明确指出准确ID/修订、证据和适用范围，提出治理建议，不能另起新条绕过旧争议。"
+    "无治理提议proposal=null。不得将工具成功提升为专业正确；发布由程序按用户策略判定。"
     "只返回schema要求的JSON。\n<untrusted_evidence>\n"
 )
 REVIEW_SUFFIX = "\n</untrusted_evidence>"
@@ -28,7 +30,7 @@ HISTORY_REVIEW_PREFIX = (
     "多条时candidate=null且proposal=null，旧单条可用candidate并令candidates=[]。"
     "related_history仅为同批次冻结来源；结合其内容时必须引用实际可见的event ID。"
     "不得仅凭相关标题推断结论；不同历史版本、矛盾和缺失写入limitations。"
-    "相关资料的展示不表示该资料已审核。历史陈述只能reported，不自动发布。"
+    "相关资料的展示不表示该资料已审核。历史陈述只能reported；若用户对本批授权，程序可发布带来源参考，不能宣称已验证。"
     "全部JSON输出UTF-8总量不超过40000字节；skip/needs_evidence时candidates=[]。\n"
 )
 PACKET_FORMAT = 5
@@ -252,7 +254,8 @@ class ReviewPacketMixin:
         item = self._public(project, row)
         result = {key: item[key] for key in ("knowledge_id", "revision", "title", "content", "category",
                   "applicability", "limitations", "validation_level", "knowledge_kind", "metadata",
-                  "source_health", "current_tool_success", "source_version")}
+                  "source_health", "current_tool_success", "source_version", "knowledge_tier",
+                  "pending_counterexample_count", "feedback_status")}
         active = self.db.execute("SELECT revision FROM active WHERE project=? AND id=?",
                                  (project, reference["knowledge_id"])).fetchone()
         result["active_revision"] = active[0] if active else None
@@ -409,6 +412,9 @@ class ReviewPacketMixin:
             knowledge.append({"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                               "title": clip(item["title"], 100), "content": clip(item["content"], 240),
                               "applicability": clip(item["applicability"], 100),
+                              "limitations": clip(item["limitations"], 100),
+                              "validation_level": item["validation_level"], "knowledge_tier": item["knowledge_tier"],
+                              "pending_counterexample_count": item["pending_counterexample_count"],
                               "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
                               "current_tool_success": item["current_tool_success"]})
             seen_kids.add(row["id"])
@@ -439,6 +445,9 @@ class ReviewPacketMixin:
                 knowledge.append({"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                                   "title": clip(item["title"], 100), "content": clip(item["content"], 240),
                                   "applicability": clip(item["applicability"], 100),
+                                  "limitations": clip(item["limitations"], 100),
+                                  "validation_level": item["validation_level"], "knowledge_tier": item["knowledge_tier"],
+                                  "pending_counterexample_count": item["pending_counterexample_count"],
                                   "knowledge_kind": item["knowledge_kind"], "source_health": item["source_health"],
                                   "current_tool_success": item["current_tool_success"]})
                 seen_kids.add(row["id"])

@@ -370,6 +370,7 @@ class KnowledgeStoreMixin:
 
     def _public(self, project, row, include_maturity=True):
         from .runtime import clean, metadata
+        from .admin_publication import knowledge_tier
         body = clean(json.loads(row["body"]))
         sources = []
         combined = {}
@@ -392,6 +393,7 @@ class KnowledgeStoreMixin:
         result = {"knowledge_id": row["id"], "revision": row["revision"],
                 **{k: body[k] for k in ("title", "content", "category", "applicability", "limitations", "validation_level")},
                 "knowledge_kind": body.get("knowledge_kind", "solution"), "metadata": metadata(body.get("metadata")),
+                "knowledge_tier": knowledge_tier(body),
                 "sources": sources, "source_health": self._source_health(evidence),
                 "current_tool_success": any(item["current_tool_success"] for item in evidence), "evidence": evidence,
                 "source_version": source_version[0] if source_version else 0,

@@ -315,7 +315,8 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                     from .knowledge_applicability import automatic_applicability
                     if automatic_applicability(item, _environment)["status"] == "incompatible":
                         explanation["auto_eligible"] = False
-                if item.get("source_health") in {"conflicted", "denied", "missing"}:
+                if (item.get("source_health") in {"conflicted", "denied", "missing"}
+                        or item.get("pending_counterexample_count", 0)):
                     explanation["auto_eligible"] = False
                 if _automatic and not explanation["auto_eligible"]:
                     continue

@@ -105,6 +105,7 @@ def _page(items, total, offset, limit):
 
 
 def _preview(row, public=None):
+    from .admin_publication import knowledge_tier
     body = clean(json.loads(row["body"]))
     result = {"knowledge_id": row["id"], "revision": row["revision"],
               "title": str(body.get("title", ""))[:250],
@@ -112,6 +113,7 @@ def _preview(row, public=None):
               "category": body.get("category", "unknown"),
               "knowledge_kind": body.get("knowledge_kind", "solution"),
               "validation_level": body.get("validation_level", "reported"),
+              "knowledge_tier": knowledge_tier(body),
               "created": row["created"], "active_revision": row["active_revision"],
               "state": "active" if row["active_revision"] == row["revision"] else
                        "revoked" if row["active_revision"] is None else "historical"}
