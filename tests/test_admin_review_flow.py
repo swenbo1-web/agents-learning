@@ -24,7 +24,8 @@ class ReviewFlowTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.workspace = self.root / "project"
         self.workspace.mkdir()
-        self.config = {"admin": {"enabled": True, "command": [sys.executable], "max_calls_per_day": 100}}
+        self.config = {"admin": {"enabled": True, "command": [sys.executable], "max_calls_per_day": 100,
+                                 "timeout_seconds": 10}}
         self.r = Runtime(self.root / "home", config=copy.deepcopy(self.config))
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)

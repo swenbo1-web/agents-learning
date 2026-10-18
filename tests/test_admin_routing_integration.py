@@ -277,6 +277,7 @@ class AdminRoutingIntegrationTests(unittest.TestCase):
         self.assertFalse(native.admin_policy(self.p)["enabled"])
         self.assertEqual(state, "ready")
         self.assertEqual(reason, "")
+        native.config["admin"]["timeout_seconds"] = 1
         with patch("agent_learning.admin.subprocess.Popen", side_effect=fake_reviewer("skip")) as model:
             tick = native.scheduler_tick(self.p, max_jobs=1, max_seconds=3)
         self.assertEqual(model.call_count, 1)

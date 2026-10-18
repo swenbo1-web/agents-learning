@@ -322,6 +322,7 @@ class Module8SchedulerTests(unittest.TestCase):
         for summary in ("compiler alpha error", "filesystem beta permission", "network gamma timeout"):
             self.problem(summary)
         self.r.config["admin"]["max_calls_per_batch"] = 2
+        self.r.config["admin"]["timeout_seconds"] = 1
         with patch("agent_learning.admin.subprocess.Popen", fake_reviewer("skip")):
             result = self.r.scheduler_run(self.p, max_seconds=4)
         self.assertEqual(result["processed"], 2)

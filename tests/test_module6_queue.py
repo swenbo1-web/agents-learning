@@ -233,7 +233,7 @@ class Module6QueueTests(unittest.TestCase):
         self.assertEqual(result["scanned_count"], 3)
         self.assertEqual(result["stop_reason"], "case_limit")
 
-    def test_batch_deadline_stops_next_call_and_limits_current_timeout(self):
+    def test_batch_shorter_than_single_call_defers_without_launching(self):
         self.problem("alphaerror")
         self.problem("betaerror")
         clock = {"value": 0.0}
@@ -247,9 +247,10 @@ class Module6QueueTests(unittest.TestCase):
         with patch("agent_learning.admin.time.monotonic", side_effect=lambda: clock["value"]):
             with patch("agent_learning.admin.subprocess.Popen", fake_reviewer(callback=advance)):
                 result = admin_batch(self.r, self.p)
-        self.assertEqual(timeouts, [1])
-        self.assertEqual(result["invocations"], 1)
+        self.assertEqual(timeouts, [])
+        self.assertEqual(result["invocations"], 0)
         self.assertEqual(result["stop_reason"], "batch_time_exhausted")
+        self.assertEqual(result["reason"], "insufficient_call_window")
 
     def test_batch_bypasses_eleven_blocked_cases_to_reach_later_case(self):
         blocked = [self.problem("blockederror" + str(i), resolution="X" * 8000) for i in range(11)]

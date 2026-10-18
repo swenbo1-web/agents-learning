@@ -134,11 +134,11 @@ class SchedulerScopeRecoveryTests(RecoveryFixture):
         super().setUp()
         self.r.config["scheduler"]["enabled"] = True
         self.r.config["admin"].update(command=[sys.executable], max_input_chars=16000,
-                                      max_calls_per_day=100, max_calls_per_batch=1)
+                                      max_calls_per_day=100, max_calls_per_batch=1, timeout_seconds=1)
         self.r.admin_configure(self.p, True, provider="codex", model_mode="default", command=[sys.executable])
         self.dsh = self.runtime("dsh", config={"scheduler": {"enabled": True}, "admin": {
             "command": [sys.executable], "max_input_chars": 16000, "max_calls_per_day": 100,
-            "max_calls_per_batch": 1}})
+            "max_calls_per_batch": 1, "timeout_seconds": 1}})
         # Explicit deterministic launcher avoids invoking either platform CLI.
         self.dsh.admin_configure(self.p, True, provider="codex", model_mode="default", command=[sys.executable])
 

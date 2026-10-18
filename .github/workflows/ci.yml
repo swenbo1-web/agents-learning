@@ -14,19 +14,26 @@ concurrency:
 
 jobs:
   offline:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }} / part ${{ matrix.shard }}
     runs-on: ${{ matrix.os }}
-    # The full Windows matrix can exceed 20 minutes on shared runners.
-    timeout-minutes: 30
+    # Observed Windows checks exceeded 30 minutes on a shared runner; keep a
+    # finite allowance for the full suite and wheel build on both interpreters.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.10', '3.12']
+        shard: [1, 2]
+        exclude:
+          - os: ubuntu-latest
+            shard: 2
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       ALP_DISABLED: '1'
+      CI_SHARD: ${{ matrix.shard }}
+      CI_SHARD_COUNT: ${{ matrix.os == 'windows-latest' && '2' || '1' }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,14 +90,23 @@ jobs:
           import os
           import subprocess
           import sys
+          from pathlib import Path
 
           environment = dict(os.environ)
           # Fixtures select their own temporary home/config.json and exercise Hook
           # entry behavior. Do not mask them with the job's fallback switches.
           for name in ('ALP_CONFIG', 'ALP_DISABLED', 'ALP_HOOK_MODE', 'ALP_CONTEXT_HANDLE'):
               environment.pop(name, None)
+          shard = int(os.environ['CI_SHARD'])
+          shards = int(os.environ['CI_SHARD_COUNT'])
+          modules = sorted(path.stem for path in Path('tests').glob('test_*.py'))
+          selected = modules[shard - 1::shards]
+          assert 1 <= shard <= shards and selected
+          print(f'Offline part {shard}/{shards}: {len(selected)}/{len(modules)} test modules', flush=True)
+          arguments = (['discover', '-s', 'tests', '-v'] if shards == 1 else
+                       ['-v', *['tests.' + name for name in selected]])
           subprocess.run(
-              [sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+              [sys.executable, '-B', '-m', 'unittest', *arguments],
               env=environment,
               check=True,
           )

@@ -646,6 +646,21 @@ def _accept_response(runtime, project, reserved, response):
     return result
 
 
+def _review_window(deadline, timeout):
+    """Defer before submission instead of spending a shortened execution window."""
+    if deadline is None:
+        return None
+    import math
+    if (not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+            or not math.isfinite(deadline)):
+        raise ContractError("invalid administrator review deadline")
+    remaining = deadline - time.monotonic()
+    if remaining < timeout:
+        return {"status": "batch_time_exhausted", "reason": "insufficient_call_window",
+                "required_seconds": timeout, "remaining_seconds": round(max(0, remaining), 3)}
+    return None
+
+
 def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10, _history_job_id=None):
     from .admin_lifecycle import mark_launch_intent, mark_started
     from .admin_providers import build_execution, collect_antigravity_stream, read_response, resolve_command, launch_error, executor_capability
@@ -660,11 +675,9 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
     timeout = min(timeout, cfg.get("max_run_seconds", 600))
     if cfg["max_calls_per_day"] == 0:
         return {"status": "budget_exhausted", "scanned_count": 0}
-    if _deadline is not None:
-        remaining = int(_deadline - time.monotonic())
-        if remaining < 1:
-            return {"status": "batch_time_exhausted", "scanned_count": 0}
-        timeout = min(timeout, remaining)
+    deferred = _review_window(_deadline, timeout)
+    if deferred:
+        return {**deferred, "scanned_count": 0}
     with runtime.transaction():
         reserved = _select_review(runtime, project, problem_id, _scan_limit, timeout, epoch, _history_job_id)
     if reserved["status"] != "reserved":
@@ -708,12 +721,6 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             # A DSH host configuration can contain provider authentication. It
             # belongs only to our restricted SDK runner, never another launcher.
             env.pop("ALP_DSH_REVIEW_PROFILE", None)
-        if _deadline is not None:
-            remaining = int(_deadline - time.monotonic())
-            if remaining < 1:
-                usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan)
-                return {"status": "batch_time_exhausted", "call_id": call_id, "usage": usage, **context}
-            timeout = min(timeout, remaining)
         with log_path.open("wb") as log:
             with runtime.transaction():
                 with _review_state_guard():
@@ -729,6 +736,12 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 with runtime.transaction():
                     with _review_state_guard():
                         runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
+            deferred = _review_window(_deadline, timeout)
+            if deferred:
+                execution_state.update(phase="launch_preflight", reason_code="insufficient_call_window")
+                usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan,
+                                execution=execution_state)
+                return {**deferred, "call_id": call_id, "usage": usage, **context}
             try:
                 stream_mode = provider_plan["provider"] in {"antigravity", "dsh"}
                 process = subprocess.Popen(args, stdin=subprocess.PIPE,
@@ -751,8 +764,10 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                                                                          provider_plan.get("model", ""))
             try:
                 process_deadline = time.monotonic() + timeout
+                if _deadline is not None:
+                    process_deadline = min(process_deadline, _deadline)
                 if output_thread:
-                    if not output_state["initialized"].wait(timeout=timeout):
+                    if not output_state["initialized"].wait(timeout=max(0, process_deadline - time.monotonic())):
                         raise subprocess.TimeoutExpired(args, timeout)
                     if not output_state["init_safe"] or output_state["error"]:
                         raise ContractError("administrator did not confirm a tool-free initialization")
@@ -909,11 +924,14 @@ def admin_batch(runtime, project, *, dispatch_token=None, expected_epoch=None, _
                 break
             if result.get("scanned_count", 0) == 0:
                 break
+        deferred = ({key: results[-1][key] for key in ("reason", "required_seconds", "remaining_seconds")
+                     if key in results[-1]} if results and results[-1].get("reason") == "insufficient_call_window" else {})
         return {"status": "batch_complete", "items": results, "scanned_count": scanned, "invocations": calls,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
                 "stop_reason": results[-1]["status"] if results and results[-1]["status"] in _ADMIN_STOP_STATES else
                                "case_limit" if scanned >= cfg["max_cases_per_batch"] else
-                               "call_limit" if calls >= cfg["max_calls_per_batch"] else results[-1]["status"] if results else "idle"}
+                               "call_limit" if calls >= cfg["max_calls_per_batch"] else results[-1]["status"] if results else "idle",
+                **deferred}
     finally:
         if owned_dispatch:
             release_dispatch(runtime, project, dispatch_token)

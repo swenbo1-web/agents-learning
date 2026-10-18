@@ -156,7 +156,7 @@ class HostCliAndFailureTests(unittest.TestCase):
     def test_host_backend_overrides_only_bare_default_and_changes_executor_signature(self):
         plan = {"command": ["codex"], "provider": "codex", "model": "model-a", "session_epoch": 0}
         with patch.dict(os.environ, {"CODEX_CLI_PATH": str(self.host)}), patch("shutil.which", return_value=str(self.path_cli)):
-            self.assertEqual(resolve_command(["codex"])["args"], [str(self.host)])
+            self.assertEqual(resolve_command(["codex"])["args"], [str(self.host.resolve())])
             self.assertEqual(resolve_command([str(self.path_cli)])["args"], [str(self.path_cli)])
             first = executor_signature(plan)
         with patch.dict(os.environ, {"CODEX_CLI_PATH": ""}), patch("shutil.which", return_value=str(self.path_cli)):

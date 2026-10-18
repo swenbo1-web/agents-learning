@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.6 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.7 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -994,6 +994,10 @@ The server binds to `127.0.0.1` and validates the access code, Host and Origin. 
 On `main`, explicit `browser --review` opens [visual knowledge review](#visual-knowledge-review-main): inspect full candidate content, conditions, limitations, evidence and publication checks; then approve and publish, reject or defer one entry or a fixed selected batch. Actions recheck candidate and source versions and return per-item receipts. Repeated clicks do not republish knowledge. A model-call budget pause does not prevent explicit approval of existing historical candidates; cancellation and invalid identity retain their separate checks. Review starts no model, resumes no historical processing and grants no task execution permission.
 
 Separate `browser --admin-control` enables administrator settings and can accompany review mode. Only the user's Save and enable permits model work; reading the page or changing limits makes no model call. Distinct access codes scope browsing, approval and administration and are not written to the database or logs. See [administrator settings](#optional-administrator-executor) for models, pending work and shared limits.
+
+## Full review windows (1.1.7)
+
+Daily scheduling, direct batches and historical reviews check that the remaining time can cover the full configured `timeout_seconds`, capped by the project `max_run_seconds`. They check again after executor preparation. Insufficient time defers the case with `batch_time_exhausted` / `insufficient_call_window`; an unstarted attempt does not consume call allowance. The finite runner stops this project and a later event can resume it. Batch, scheduler and history allowances must exceed one call timeout plus preparation time; increase the allowance or lower the configured timeout when needed. Existing unknown attempts retain their records and require explicit review before retry.
 
 ## Real-task paired evaluation
 

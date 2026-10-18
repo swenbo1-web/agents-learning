@@ -242,8 +242,9 @@ class SchedulerMixin:
             # executor, not a project-wide stale deadline. Only an unclassified
             # scheduling exception retains its short unchanged-signature retry.
             if (state == "ready" and prior and prior["signature"] == signature
-                    and prior["wait_reason"] == "retry_backoff" and prior["next_due"] is not None and prior["next_due"] > now):
-                state, due, reason = "waiting", prior["next_due"], "retry_backoff"
+                    and prior["wait_reason"] in {"retry_backoff", "insufficient_call_window"}
+                    and prior["next_due"] is not None and prior["next_due"] > now):
+                state, due, reason = "waiting", prior["next_due"], prior["wait_reason"]
             elif state == "ready" and prior and prior["signature"] == signature and prior["state"] == "ready" and prior["next_due"] is not None and prior["next_due"] > now:
                 # 单批剩余工作等待下次轮询；无增量的重复 Hook 不提前耗尽批次。
                 due = prior["next_due"]
@@ -306,7 +307,8 @@ class SchedulerMixin:
     @staticmethod
     def _scheduler_summary(result):
         # 不复制模型响应、案例或日志；状态页只保存固定的计数及停止原因。
-        keys = ("status", "state", "stop_reason", "processed", "invocations", "scanned_count", "elapsed_seconds", "budget_exhausted", "host_scope")
+        keys = ("status", "state", "stop_reason", "processed", "invocations", "scanned_count", "elapsed_seconds", "budget_exhausted", "host_scope",
+                "required_seconds", "remaining_seconds")
         return {k: result[k] for k in keys if k in result and isinstance(result[k], (bool, int, float, str))}
 
     def _scheduler_admin_run_deadline(self, project, scope, limits):
@@ -346,6 +348,10 @@ class SchedulerMixin:
                     if key in attempted:
                         continue
                     if candidate["kind"] == "admin":
+                        if run_limits.get(candidate["project"], {}).get("deferred"):
+                            attempted.add(key)
+                            exhausted.add(candidate["project"])
+                            continue
                         selection = self._scheduler_admin_selection(candidate["project"], cfg)
                         if selection[1] != "ready":
                             # A wake-up is only a hint. Do not invoke the current
@@ -408,7 +414,15 @@ class SchedulerMixin:
                 self.db.execute("UPDATE scheduler_jobs SET state='idle',owner=NULL,lease_until=NULL,last_run=?,updated=?,summary=?,wait_reason='' "
                                 "WHERE project=? AND kind=? AND owner=?", (now, now, encode(summary), identifier, kind, owner))
                 self._scheduler_refresh(identifier, cfg)
-                if result.get("status") in {"failed", "not_started", "time_exhausted"}:
+                if kind == "admin" and result.get("reason") == "insufficient_call_window":
+                    # Keep this runner from repeatedly probing an execution
+                    # window it cannot fund. A later finite runner can resume.
+                    run_limits[identifier]["deferred"] = True
+                    exhausted.add(identifier)
+                    self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='insufficient_call_window' "
+                                    "WHERE project=? AND kind='admin' AND state='ready'",
+                                    (now + cfg["poll_seconds"], identifier))
+                elif result.get("status") in {"failed", "not_started", "time_exhausted"}:
                     refreshed = self.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind=?",
                                                 (identifier, kind)).fetchone()
                     if refreshed["state"] == "ready":
