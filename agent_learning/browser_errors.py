@@ -43,5 +43,6 @@ function renderBrowserErrors(){
  setError(browserErrors.page);planError(browserErrors.plan);
  $('admin-poll-error').textContent=browserErrors.poll?t('adminPollError',{message:errorText(browserErrors.poll)}):'';
  $('admin-poll-error').hidden=!browserErrors.poll;
+ if(typeof renderAdminReadFailure==='function')renderAdminReadFailure();
 }
 '''

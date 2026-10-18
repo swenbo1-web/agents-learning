@@ -53,12 +53,12 @@ def handle_admin_post(handler):
         try:
             if parsed.path.endswith("/history-review"):
                 from .history_review_control import request_history_review
-                result = request_history_review(runtime, handler.server.project, body)
+                result = request_history_review(runtime, handler.server.project, body, details=False)
             elif parsed.path.endswith("/recovery"):
                 from .admin_recovery import apply_recovery
-                result = apply_recovery(runtime, handler.server.project, body)
+                result = apply_recovery(runtime, handler.server.project, body, details=False)
             else:
-                result = apply_control(runtime, handler.server.project, body, wake=parsed.path.endswith("/wake"))
+                result = apply_control(runtime, handler.server.project, body, wake=parsed.path.endswith("/wake"), details=False)
         finally:
             runtime.close()
         handler._send(200, result)

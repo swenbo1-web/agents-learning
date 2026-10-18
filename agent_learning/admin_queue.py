@@ -389,9 +389,9 @@ def clear_executor_failure(runtime, project, plan):
                        (project, runtime._session_scope(), executor_signature(plan)))
 
 
-def dispatch_diagnostic(runtime, project):
+def dispatch_diagnostic(runtime, project, *, check_queue=True):
     import json
-    result = _dispatch_diagnostic(runtime, project)
+    result = _dispatch_diagnostic(runtime, project, check_queue=check_queue)
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_dispatch_diagnostics'").fetchone()
     last = runtime.db.execute("SELECT reason,details,updated FROM admin_dispatch_diagnostics WHERE project=? AND host_scope=?",
                               (project, runtime._session_scope())).fetchone() if exists else None
@@ -400,7 +400,7 @@ def dispatch_diagnostic(runtime, project):
     return result
 
 
-def _dispatch_diagnostic(runtime, project):
+def _dispatch_diagnostic(runtime, project, *, check_queue=True):
     """Read-only admission/worker/model observation, shared by all hosts and UI."""
     from .admin_usage import admin_admission_status
     from .admin_providers import executor_availability
@@ -420,6 +420,8 @@ def _dispatch_diagnostic(runtime, project):
     if dispatch:
         phase = "worker_claimed" if dispatch["phase"] == "worker_claimed" else "worker_reserved"
         return dict(detail, phase=phase, reason=phase, next_due=dispatch["lease_until"])
+    if not check_queue:
+        return dict(detail, reason="queue_not_checked", queue_checked=False)
     signature, preflight_signature = scan_signatures(runtime, project)
     query, args = eligible_query(signature,
         preflight_signature=preflight_signature,

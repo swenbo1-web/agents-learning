@@ -149,7 +149,7 @@ def _history_recovery_page(runtime, project, *, offset, limit):
             "next_offset": offset + len(history) if offset + len(history) < total else None}
 
 
-def apply_recovery(runtime, project, body):
+def apply_recovery(runtime, project, body, *, details=True):
     """Explicit, versioned, idempotent permission update. No wake or model calls."""
     required = {"request_id", "expected_policy_version", "expected_session_epoch", "expected_governance_epoch",
                 "action", "id", "version", "reason", "confirmed"}
@@ -195,7 +195,7 @@ def apply_recovery(runtime, project, body):
         from .admin_control import control_status
         response = {"request_id": body["request_id"], "status": result["status"],
             "recovery_action": body["action"], "result": result, "models_started": False,
-            "knowledge_published": False, "settings": control_status(runtime, project),
+            "knowledge_published": False, "settings": control_status(runtime, project, details=details),
             "launch": {"status": "not_requested"}}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)",
                            (*identity, fingerprint, encode(response), time.time()))

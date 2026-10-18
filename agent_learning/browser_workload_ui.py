@@ -61,7 +61,7 @@ function renderWorkload(data){
  if(!data.items.length)root.append(node('p',t(data.summary?.available===false?'workload_upgrade_required':'empty'),'muted'));renderPager(data);renderSelection();
 }
 function renderWorkloadQueue(data){
- const root=$('admin-queue-details');root.replaceChildren();const workload=data.queue?.workload;
+ const root=$('admin-queue-details');root.replaceChildren();if(!renderAdminReadNotice(root,'queue'))return;const workload=data.queue?.workload;
  if(workload){for(const stage of workloadStages)root.append(adminStatusRow('stage_'+stage,workload.stages?.[stage]));root.append(adminStatusRow('workloadHistory',workload.history_pending_units),adminStatusRow('workloadStored',workload.pending_total));}
  root.append(adminStatusRow('adminQueueEligible',data.queue?.eligible));
 }

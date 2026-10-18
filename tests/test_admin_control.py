@@ -302,6 +302,53 @@ class AdminControlHttpTests(unittest.TestCase):
         self.assertEqual(self.request("/api/admin-control/history?project=another")[0], 400)
         self.assertEqual(self.request("/api/admin-control/history", Authorization="Bearer invalid")[0], 401)
 
+    def test_settings_remain_available_when_each_detail_section_exceeds_budget(self):
+        for section, target in (("queue", "agent_learning.admin_control._control_queue"),
+                                ("recovery", "agent_learning.admin_recovery.recovery_status"),
+                                ("activity", "agent_learning.admin_review_flow.review_activity")):
+            with self.subTest(section=section), patch(target, side_effect=sqlite3.OperationalError("interrupted")), \
+                    patch("agent_learning.runtime.Runtime.__init__", side_effect=AssertionError("GET initialized Runtime")), \
+                    patch("subprocess.Popen") as model:
+                code, core = self.request("/api/admin-control?view=settings")
+                self.assertEqual(code, 200, core)
+                self.assertTrue(core["details_separate"])
+                self.assertNotIn("queue", core)
+                self.assertNotIn("recovery", core)
+                self.assertNotIn("review_activity", core)
+                code, detail = self.request("/api/admin-control/details?section=" + section)
+                self.assertEqual(code, 503, detail)
+                self.assertEqual(detail["reason"], "query_budget_exceeded")
+                other = "recovery" if section != "recovery" else "activity"
+                code, good = self.request("/api/admin-control/details?section=" + other)
+                self.assertEqual(code, 200, good)
+                self.assertEqual(good["project_id"], self.p)
+                self.assertEqual(good["section"], other)
+                self.assertEqual(good["versions"][0], core["policy"]["policy_version"])
+                self.assertEqual(self.request("/api/admin-control?view=settings")[0], 200)
+            model.assert_not_called()
+
+    def test_split_settings_parameters_and_sections_cannot_select_another_project(self):
+        for path in ("/api/admin-control?view=other", "/api/admin-control?view=settings&project=other",
+                     "/api/admin-control/details", "/api/admin-control/details?section=other",
+                     "/api/admin-control/details?section=queue&project=other"):
+            self.assertEqual(self.request(path)[0], 400, path)
+        self.assertEqual(self.request("/api/admin-control/details?section=queue", Authorization="Bearer invalid")[0], 401)
+
+    def test_browser_save_and_receipt_do_not_scan_detail_panels(self):
+        body = self.body(request_id="compact-save", enabled=False, start=False)
+        with patch("agent_learning.admin_control._control_queue", side_effect=sqlite3.OperationalError("interrupted")), \
+                patch("agent_learning.admin_recovery.recovery_status", side_effect=AssertionError("save read recovery")), \
+                patch("subprocess.Popen") as model:
+            code, saved = self.request("/api/admin-control/configure", body)
+            self.assertEqual(code, 200, saved)
+            self.assertTrue(saved["settings"]["details_separate"])
+            self.assertFalse(saved["settings"]["enabled"])
+            self.assertEqual(self.request("/api/admin-control/configure", body), (200, saved))
+            code, receipt = self.request("/api/admin-control/receipt?request_id=compact-save")
+            self.assertEqual(code, 200, receipt)
+            self.assertEqual(receipt["response"], saved)
+        model.assert_not_called()
+
     def test_review_key_and_cross_origin_never_configure_administrator(self):
         for headers in ({"X-Admin-Token": None}, {"X-Admin-Token": self.server.review_token},
                         {"Origin": "https://outside.example"}, {"Origin": None}):

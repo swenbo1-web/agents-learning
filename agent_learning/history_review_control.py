@@ -26,7 +26,7 @@ def current_history_request(runtime, project, job_id, *, active_only=False):
     return runtime.db.execute(query + "ORDER BY q.created DESC,q.request_id DESC LIMIT 1", args).fetchone()
 
 
-def request_history_review(runtime, project, body):
+def request_history_review(runtime, project, body, *, details=True):
     from .admin_control import control_status, request_receipt
     from .admin_recovery import _history, _version, _history_review_available
     fields = {"request_id", "job_id", "version", "confirmed", "max_calls", "max_seconds",
@@ -54,7 +54,7 @@ def request_history_review(runtime, project, body):
             return request_receipt(runtime, project, body["request_id"])["response"]
         if runtime.db.execute("SELECT 1 FROM admin_control_receipts WHERE project=? AND host_scope=? AND session_epoch=? AND request_id=?", identity).fetchone():
             raise ContractError("administrator request identity already used")
-        status = control_status(runtime, project, include_history=False)
+        status = control_status(runtime, project, include_history=False, details=False)
         if (status["settings_version"] != body["expected_settings_version"]
                 or status["policy"]["policy_version"] != body["expected_policy_version"]
                 or status["project_budget_policy"]["version"] != body["expected_project_budget_version"]):
@@ -86,7 +86,7 @@ def request_history_review(runtime, project, body):
             (*identity, fingerprint, row["id"], encode(payload), now, now, now + body["max_seconds"] + 60, "{}"))
         response = {"request_id": body["request_id"], "status": "accepted", "history_review": {"job_id": row["id"],
             "max_calls": body["max_calls"], "max_seconds": body["max_seconds"], "publication_automatic": False},
-            "launch": {"status": "unconfirmed"}, "settings": control_status(runtime, project)}
+            "launch": {"status": "unconfirmed"}, "settings": control_status(runtime, project, details=details)}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)", (*identity, fingerprint, encode(response), now))
     try:
         runtime._launch_background(workspace, "history-review-worker", ["--request-id", body["request_id"]])

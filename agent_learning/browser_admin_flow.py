@@ -89,6 +89,7 @@ function renderAdminFlow(data){
  const root=$('admin-flow');if(!root)return;root.replaceChildren();
  root.append(node('h3',t('flowHeading')),node('p',t('flowNote'),'note'));
  root.append(node('strong',t(data.publication_policy?.enabled?'flowPublicationOn':'flowPublicationOff')));
+ if(!renderAdminReadNotice(root,'activity'))return;
  const activity=data.review_activity||{};
  for(const [heading,key]of [['flowRecent','recent'],['flowUpcoming','upcoming'],['flowDeferred','deferred']]){
   root.append(node('h4',t(heading)));const items=activity[key]||[];

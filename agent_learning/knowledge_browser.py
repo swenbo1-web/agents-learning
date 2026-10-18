@@ -291,13 +291,18 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                 result = {"project": self.server.project, "review_enabled": self.server.review_enabled,
                           "admin_control_enabled": self.server.admin_control_enabled,
                           "read_only": not (self.server.review_enabled or self.server.admin_control_enabled), "language": self.server.language}
-            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt", "/api/admin-control/publication-preview", "/api/admin-control/history"}:
+            elif parsed.path in {"/api/admin-control", "/api/admin-control/receipt", "/api/admin-control/publication-preview", "/api/admin-control/history", "/api/admin-control/details"}:
                 if not self.server.admin_control_enabled:
                     raise ContractError("administrator control capability was not opened")
                 from .admin_control import readonly_runtime, control_status, request_receipt
                 with self.server.snapshot() as db:
                     view = readonly_runtime(self.server.database, db, self.server.runtime_host, self.server.runtime_instance)
-                    if parsed.path.endswith("/history"):
+                    if parsed.path.endswith("/details"):
+                        if set(params) != {"section"}:
+                            raise ContractError("administrator detail requires section")
+                        from .admin_control import control_detail
+                        result = control_detail(view, self.server.project, params["section"])
+                    elif parsed.path.endswith("/history"):
                         if set(params) - {"offset", "limit"}:
                             raise ContractError("invalid history progress parameters")
                         from .admin_recovery import history_recovery_page
@@ -313,9 +318,9 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
                             raise ContractError("receipt requires request_id")
                         result = request_receipt(view, self.server.project, params["request_id"])
                     else:
-                        if params:
+                        if params and params != {"view": "settings"}:
                             raise ContractError("administrator status takes no parameters")
-                        result = control_status(view, self.server.project, include_history=False)
+                        result = control_status(view, self.server.project, include_history=False, details=not params)
             else:
                 with self.server.snapshot() as db:
                     result = _read_api(db, self.server.project, parsed.path, params)

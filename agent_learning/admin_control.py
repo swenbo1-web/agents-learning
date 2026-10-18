@@ -53,15 +53,9 @@ def readonly_runtime(database, db, host, instance):
     return view
 
 
-def control_status(runtime, project, *, include_history=True):
-    from .admin_queue import eligible_query, scan_signatures, dispatch_diagnostic
-    from .admin_usage import admin_admission_status
-    from .admin_presets import PRESETS
-    from .admin_recovery import recovery_status
-    from .admin_review_flow import publication_policy, review_activity
+def _control_queue(runtime, project, *, include_history=True):
+    from .admin_queue import eligible_query, scan_signatures
     from .admin_workload import workload_summary
-    routing = runtime.admin_routing_status(project)
-    policy, state = routing["policy"], control_state(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
     query, args = eligible_query(signature,
         preflight_signature=preflight_signature,
@@ -75,27 +69,64 @@ def control_status(runtime, project, *, include_history=True):
     blocked = runtime.db.execute("SELECT COUNT(*) FROM admin_calls a WHERE a.project=? AND a.retry_allowed=0 "
         "AND a.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
         "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=a.project AND r.call_id=a.id)", (project,)).fetchone()[0]
-    diagnostic = dispatch_diagnostic(runtime, project)
+    return {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting,
+            "blocked_calls": blocked, "history_excluded": history,
+            "workload": workload_summary(runtime.db, project, history_stages=include_history)}
+
+
+def control_status(runtime, project, *, include_history=True, details=True):
+    """Settings can be read without a scan of cases, events or archived batches."""
+    from .admin_queue import dispatch_diagnostic
+    from .admin_usage import admin_admission_status
+    from .admin_presets import PRESETS
+    from .admin_recovery import recovery_status
+    from .admin_review_flow import publication_policy, review_activity
+    routing = runtime.admin_routing_status(project)
+    policy, state = routing["policy"], control_state(runtime, project)
+    diagnostic = dispatch_diagnostic(runtime, project, check_queue=details)
     running = diagnostic["phase"] in {"worker_claimed", "model_reserved", "model_launching", "model_started"}
     enabled = bool(policy["enabled"] and state["enabled"])
     admission = admin_admission_status(runtime, project)
     project_usage, global_usage = admission["project_usage"], admission["global_usage"]
-    workload = workload_summary(runtime.db, project, history_stages=include_history)
-    return {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
+    result = {"project_id": project, "host_scope": runtime._session_scope(), "session_epoch": runtime.session_epoch(),
         "governance_epoch": runtime.host_epoch(), "settings_version": state["version"], "policy": policy,
         "enabled": enabled, "routing": routing, "budget_policy": global_usage["budget_policy"],
         "project_budget_policy": project_usage["budget_policy"], "global_budget_policy": global_usage["budget_policy"],
         "project_usage": project_usage, "global_usage": global_usage, "admission": admission,
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
-        "recovery": recovery_status(runtime, project, include_history=include_history),
-        "publication_policy": publication_policy(runtime, project), "review_activity": review_activity(runtime, project),
+        "publication_policy": publication_policy(runtime, project),
         "usage": global_usage,
-        "queue": {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting,
-                  "blocked_calls": blocked, "history_excluded": history, "workload": workload},
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
                    "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
         "limitation": "Explicitly enabled, bounded local worker; a later supported event can resume pending daily work. Historical imports require their own approval."}
+    if details:
+        result.update(queue=_control_queue(runtime, project, include_history=include_history),
+                      recovery=recovery_status(runtime, project, include_history=include_history),
+                      review_activity=review_activity(runtime, project))
+    else:
+        result["details_separate"] = True
+    return result
+
+
+def control_detail(runtime, project, section):
+    """One independently budgeted read section, bound to the settings snapshot."""
+    from .admin_usage import project_budget_policy
+    from .runtime import ContractError
+    if section == "queue":
+        data = _control_queue(runtime, project, include_history=False)
+    elif section == "recovery":
+        from .admin_recovery import recovery_status
+        data = recovery_status(runtime, project, include_history=False)
+    elif section == "activity":
+        from .admin_review_flow import review_activity
+        data = review_activity(runtime, project)
+    else:
+        raise ContractError("invalid administrator detail section")
+    return {"project_id": project, "host_scope": runtime._session_scope(), "section": section,
+            "versions": [runtime.admin_policy(project)["policy_version"], project_budget_policy(runtime, project)["version"],
+                         control_state(runtime, project)["version"], runtime.session_epoch(), runtime.host_epoch()],
+            "captured_at": time.time(), "data": data}
 
 
 def request_receipt(runtime, project, request_id):
@@ -107,7 +138,7 @@ def request_receipt(runtime, project, request_id):
     return {"found": bool(row), **({"response": json.loads(row[0])} if row else {})}
 
 
-def apply_control(runtime, project, body, *, wake=False):
+def apply_control(runtime, project, body, *, wake=False, details=True):
     """Commit settings and an idempotent receipt before a single launch attempt."""
     from .runtime import ContractError, digest, encode
     from .admin_usage import admin_budget_policy, configure_admin_budget, project_budget_policy, configure_project_budget
@@ -189,14 +220,14 @@ def apply_control(runtime, project, body, *, wake=False):
                     "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated,auto_publish=excluded.auto_publish",
                     (project, runtime._session_scope(), int(body["enabled"]), state["version"] + 1, time.time(),
                      int(body["auto_publish"]) if "auto_publish" in body else state.get("auto_publish")))
-        response = {"request_id": request_id, "status": "configured", "settings": control_status(runtime, project),
+        response = {"request_id": request_id, "status": "configured", "settings": control_status(runtime, project, details=details),
                     "launch": {"status": "unconfirmed" if start else "not_requested"}}
         runtime.db.execute("INSERT INTO admin_control_receipts VALUES(?,?,?,?,?,?,?)", (*identity, fingerprint, encode(response), time.time()))
     if start:
         launch = wake_admin(runtime, project, expected_session_epoch=body["expected_session_epoch"],
                             expected_governance_epoch=body["expected_governance_epoch"])
         response.update(status=launch["status"], launch=launch)
-        response["settings"] = control_status(runtime, project)
+        response["settings"] = control_status(runtime, project, details=details)
         with runtime.transaction():
             runtime.db.execute("UPDATE admin_control_receipts SET response=? WHERE project=? AND host_scope=? AND session_epoch=? AND request_id=?",
                                (encode(response), *identity))
