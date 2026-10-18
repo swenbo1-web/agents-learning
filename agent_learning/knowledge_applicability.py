@@ -7,7 +7,7 @@ import re
 
 
 _VERSION = r"[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[a-zA-Z0-9.-]+)?"
-_AFTER = re.compile(r"\s*(?:\+|以上|及以上|或更高|及后续|or later|and later|onward|through|至|到|[~^<>])", re.I)
+_AFTER = re.compile(r"\s*(?:\+|\.\*|\.x\b|以上|或|及|和|or\b|and\b|onward|through|至|到|[~^<>]|[,，、/|]\s*v?\d)", re.I)
 _HISTORICAL = re.compile(r"历史快照|文档快照|旧版快照|historical snapshot|old snapshot|document snapshot", re.I)
 
 
@@ -33,10 +33,8 @@ def project_environment(workspace):
             if path.suffix == ".json":
                 data = json.loads(text)
             else:
-                section = "project" if path.name == "pyproject.toml" else "package"
-                match = re.search(r"(?ms)^\[" + section + r"\]\s*\n(.*?)(?=^\[|\Z)", text)
-                data = dict(re.findall(r'''(?m)^\s*(name|version)\s*=\s*["']([^"'\n]+)["']\s*(?:#.*)?$''',
-                                       match[1])) if match else {}
+                from .manifest_versions import toml_fields
+                data = toml_fields(text, "project" if path.name == "pyproject.toml" else "package")
             if not isinstance(data, dict):
                 continue
             name, version = data.get("name"), data.get("version")
@@ -44,7 +42,7 @@ def project_environment(workspace):
                 names.add(_name(name))
             if isinstance(version, str) and re.fullmatch("v?" + _VERSION, version):
                 versions.add(version.removeprefix("v"))
-        except (OSError, UnicodeError, ValueError):
+        except (OSError, UnicodeError, ValueError, RecursionError):
             continue
     # Conflicting root manifests can describe a monorepo. Do not guess which
     # component a generic project note belongs to.
@@ -54,7 +52,9 @@ def project_environment(workspace):
 def _versions(text, pattern):
     values = []
     for match in re.finditer(pattern + r"\s*[:：=、,，`\"'（( ]*v?(" + _VERSION + r")(?![a-zA-Z0-9]|\.\d)", text, re.I):
-        if not _AFTER.match(text[match.end():]) and not re.match(r"\s*[-–—]\s*v?\d", text[match.end():]):
+        numeric_range = re.search(r"-\d+\.\d+", match[1])
+        tail = text[match.end():].lstrip(" `\"'）)")
+        if not numeric_range and not _AFTER.match(tail) and not re.match(r"\s*[-–—]\s*v?\d", tail):
             values.append(match[1])
     return values
 

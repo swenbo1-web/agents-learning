@@ -2,6 +2,24 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
+import time
+
+
+@contextmanager
+def initialization_guard(runtime, timeout=1.5):
+    """Serialize bootstrap across processes; warm opens never need this lock."""
+    from .software_updates import _locked
+    deadline = time.monotonic() + timeout
+    while True:
+        with _locked(runtime.home / ".runtime-initialization.lock") as acquired:
+            if acquired:
+                yield
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise sqlite3.OperationalError("runtime initialization busy; retry")
+        time.sleep(min(.02, remaining))
 
 
 def _signature():
@@ -49,6 +67,13 @@ def ensure_host_scope(runtime):
 def mark_storage_ready(runtime):
     if not runtime.db.in_transaction:
         raise RuntimeError("initialization receipt requires a write transaction")
+    columns = [(row[1], row[2].upper(), row[5]) for row in
+               runtime.db.execute("PRAGMA table_info(runtime_storage_receipt)")]
+    expected = [("id", "INTEGER", 1), ("signature", "TEXT", 0), ("schema_cookie", "INTEGER", 0)]
+    if columns and columns != expected:
+        # Only this disposable cache belongs to us. Never rebuild authority
+        # tables or fabricate epochs as a side effect of receipt recovery.
+        runtime.db.execute("DROP TABLE runtime_storage_receipt")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS runtime_storage_receipt("
                        "id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL,schema_cookie INTEGER NOT NULL)")
     cookie = runtime.db.execute("PRAGMA schema_version").fetchone()[0]

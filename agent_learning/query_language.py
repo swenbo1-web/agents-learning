@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 
 
-LANGUAGE_VERSION = 1
+LANGUAGE_VERSION = 2
 ALIASES = {
     "administrator": ("administrator", "administrators", "admin", "管理员"),
     "project": ("project", "projects", "项目"),
@@ -46,10 +46,23 @@ for _alias in sorted(_LOOKUP, key=lambda item: (-len(item), item)):
     _PARTS.append(_escaped if re.search(r"[\u3400-\u9fff]", _alias) else
                   r"(?<![a-z0-9_./:\\-])" + _escaped + r"(?![a-z0-9_./:\\-])")
 _PATTERN = re.compile("|".join(_PARTS), re.IGNORECASE)
+_TOKEN = re.compile(r'''[^\s"'`()<>，。！？；：,!?;]+''')
+_TECHNICAL = re.compile(r"[/\\_]|(?<=\w)[.:=\-](?=\w)")
+
+
+def _protected_spans(text):
+    return [(match.start(), match.end()) for match in _TOKEN.finditer(text)
+            if _TECHNICAL.search(match[0])]
+
+
+def _protected(match, spans):
+    return any(start <= match.start() < end for start, end in spans)
 
 
 def _rewrite(text):
-    return _PATTERN.sub(lambda match: " " + _LOOKUP[re.sub(r"\s+", " ", match[0].lower())] + " ", text)
+    spans = _protected_spans(text)
+    return _PATTERN.sub(lambda match: match[0] if _protected(match, spans) else
+                        " " + _LOOKUP[re.sub(r"\s+", " ", match[0].lower())] + " ", text)
 
 
 @lru_cache(maxsize=128)
@@ -74,7 +87,10 @@ def recall_terms(selected, tokenizer):
 
 def matched_labels(query, matched, tokenizer):
     aliases, translated = [], set()
+    spans = _protected_spans(query)
     for match in _PATTERN.finditer(query):
+        if _protected(match, spans):
+            continue
         key = _LOOKUP[re.sub(r"\s+", " ", match[0].lower())]
         if key in matched:
             translated.add(key)

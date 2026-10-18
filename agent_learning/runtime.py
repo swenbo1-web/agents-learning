@@ -271,61 +271,71 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             raise ContractError("project_aliases must map workspace paths to project IDs")
         self.db = sqlite3.connect(self.home / "runtime.sqlite3", timeout=1.5, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA foreign_keys=ON")
-        version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(20)):
-            self.db.close()
-            raise ContractError("unsupported runtime database version")
         try:
-            from .runtime_storage import storage_ready, ensure_host_scope, mark_storage_ready
-            if storage_ready(self):
+            from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA foreign_keys=ON")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(20)):
+                raise ContractError("unsupported runtime database version")
+            if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
                 return
-            self.db.executescript(SCHEMA)
-            if version < 2:
-                self._migrate()
-            if version < 3:
-                with self.transaction():
-                    if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
-                        for table in ("operations", "admin_calls"):
-                            existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
-                            if "host_epoch" not in existing:
-                                self.db.execute(f"ALTER TABLE {table} ADD COLUMN host_epoch INTEGER NOT NULL DEFAULT 0")
-                        self.db.execute("PRAGMA user_version=3")
-            if version < 4:
-                self._migrate_execution()
-            if version < 5:
-                self._migrate_knowledge_store()
-            self._migrate_context_storage()
-            self._migrate_case_store()
-            self._migrate_admin_storage()
-            self._migrate_publication_storage()
-            self._migrate_module8_storage()
-            self._migrate_audit_storage()
-            with self.transaction():
-                self._install_host_storage()
-                from .antigravity import install_storage
-                install_storage(self)
-                from .dsh import install_storage as install_dsh_storage
-                install_dsh_storage(self)
-                from .history_import import install_storage as install_history_storage
-                install_history_storage(self)
-                install_admin_routing(self)
-                install_work_memory(self)
-                install_work_summaries(self)
-                from .admin_control import install_control
-                install_control(self)
-                from .admin_review_flow import install_flow
-                install_flow(self)
-                if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
-                    self._fence_runtime_upgrade()
-                self.db.execute("PRAGMA user_version=19")
-                mark_storage_ready(self)
+            with initialization_guard(self):
+                self.db.execute("PRAGMA journal_mode=WAL")
+                # Another opener may have finished while this process waited.
+                if storage_ready(self):
+                    ensure_host_scope(self)
+                    return
+                self._initialize_storage()
         except BaseException:
             self.db.close()
             raise
+
+    def _initialize_storage(self):
+        from .runtime_storage import mark_storage_ready
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version not in set(range(20)):
+            raise ContractError("unsupported runtime database version")
+        self.db.executescript(SCHEMA)
+        if version < 2:
+            self._migrate()
+        if version < 3:
+            with self.transaction():
+                if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
+                    for table in ("operations", "admin_calls"):
+                        existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                        if "host_epoch" not in existing:
+                            self.db.execute(f"ALTER TABLE {table} ADD COLUMN host_epoch INTEGER NOT NULL DEFAULT 0")
+                    self.db.execute("PRAGMA user_version=3")
+        if version < 4:
+            self._migrate_execution()
+        if version < 5:
+            self._migrate_knowledge_store()
+        self._migrate_context_storage()
+        self._migrate_case_store()
+        self._migrate_admin_storage()
+        self._migrate_publication_storage()
+        self._migrate_module8_storage()
+        self._migrate_audit_storage()
+        with self.transaction():
+            self._install_host_storage()
+            from .antigravity import install_storage
+            install_storage(self)
+            from .dsh import install_storage as install_dsh_storage
+            install_dsh_storage(self)
+            from .history_import import install_storage as install_history_storage
+            install_history_storage(self)
+            install_admin_routing(self)
+            install_work_memory(self)
+            install_work_summaries(self)
+            from .admin_control import install_control
+            install_control(self)
+            from .admin_review_flow import install_flow
+            install_flow(self)
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
+                self._fence_runtime_upgrade()
+            self.db.execute("PRAGMA user_version=19")
+            mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
         """Fence old executors without interpreting a protocol upgrade as an account change."""
