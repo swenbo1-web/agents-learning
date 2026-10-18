@@ -90,26 +90,34 @@ class Module6LifecycleTests(unittest.TestCase):
     def test_global_budget_is_atomic_across_connections(self):
         other = self.r.project(Path(self.temp.name) / "other")
         barrier = threading.Barrier(2)
+        initialization = threading.Lock()
         outcomes, failures = [], []
 
         def worker(project):
-            runtime = Runtime(self.home)
+            runtime = None
             try:
+                # Runtime opens also run storage installation writes. Prepare
+                # independent connections before racing the budget transaction;
+                # slow Windows startup is not the operation under test here.
+                with initialization:
+                    runtime = Runtime(self.home)
                 runtime.config["admin"]["max_calls_per_day"] = 1
-                barrier.wait(timeout=5)
+                barrier.wait(timeout=15)
                 with runtime.transaction():
                     outcomes.append(claim_call(runtime, project, project + "-case", 1, project,
                                                runtime.host_epoch(), 120)["status"])
             except Exception as exc:
                 failures.append(repr(exc))
+                barrier.abort()
             finally:
-                runtime.close()
+                if runtime is not None:
+                    runtime.close()
 
         threads = [threading.Thread(target=worker, args=(project,)) for project in (self.p, other)]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=8)
+            thread.join(timeout=30)
         self.assertFalse(any(thread.is_alive() for thread in threads))
         self.assertEqual(failures, [])
         self.assertCountEqual(outcomes, ["reserved", "budget_exhausted"])
