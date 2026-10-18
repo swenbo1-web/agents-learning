@@ -243,10 +243,27 @@ def install_budget(runtime):
             record_usage(runtime, row["id"], json.loads(row["usage"]))
 
 
-def reserve_usage(runtime, call_id):
-    reservation = budget_settings(runtime)["token_reservation_per_call"]
+def reserve_usage(runtime, call_id, *, reserved_tokens=None):
+    reservation = budget_settings(runtime)["token_reservation_per_call"] if reserved_tokens is None else reserved_tokens
+    if type(reservation) is not int or not 1 <= reservation <= 1000000000:
+        raise ContractError("invalid administrator token reservation")
     runtime.db.execute("INSERT INTO admin_call_budgets(call_id,reserved_tokens,updated) VALUES(?,?,?)",
                        (call_id, reservation, time.time()))
+
+
+def estimate_reservation(runtime, project, instruction, *, phase=False):
+    """Local conservative estimate, never a guarantee of provider billing limits."""
+    if not phase:
+        return {"admitted": True, "reserved_tokens": budget_settings(runtime)["token_reservation_per_call"]}
+    from .phase_review import policy
+    cfg = policy(runtime, project)
+    # Host system prompts are not fully visible. Reserve a floor plus the visible UTF-8 payload.
+    estimated_input = 12000 + (len(instruction.encode("utf-8")) + 1963 + 1) // 2
+    amount = estimated_input + cfg["max_output_tokens"]
+    admitted = estimated_input <= cfg["max_input_tokens"]
+    return {"admitted": admitted, "reserved_tokens": amount, "estimated_input_tokens": estimated_input,
+            "estimated_output_tokens": cfg["max_output_tokens"], "estimate_only": True,
+            "reason": "ready" if admitted else "phase_input_token_budget_exceeded"}
 
 
 def record_usage(runtime, call_id, usage):
@@ -332,9 +349,16 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
         reservations += reserved if pending else 0
         accounted += max(reserved, known) if pending else known
     maximum = cfg["max_reported_tokens_per_day"]
+    phase_mode = False
+    if project is not None:
+        from .phase_review import policy as phase_policy
+        phase_cfg = phase_policy(runtime, project)
+        phase_mode = phase_cfg["mode"] == "phase"
+        if phase_mode:
+            maximum = min(maximum, phase_cfg["daily_tokens"]) if maximum is not None else phase_cfg["daily_tokens"]
     remaining = None if maximum is None else max(0, maximum - accounted)
     remaining_calls = max(0, cfg["max_calls_per_day"] - counts["counted_attempts"])
-    admission = ("budget_exhausted" if remaining_calls == 0 else
+    admission = ("budget_exhausted" if remaining_calls == 0 and not phase_mode else
                  "concurrency_limited" if project is None and active >= settings["max_concurrent_calls"] else
                  "token_budget_exhausted" if remaining is not None and remaining < settings["token_reservation_per_call"] else "available")
     scope = "project" if project is not None else "ALP_HOME"
@@ -345,7 +369,8 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
             "remaining_reported_tokens": remaining, "usage_states": usage_states, "admission_status": admission,
             "scope": scope, "budget_scope": scope, "budget_policy": policy,
             **({"project_id": project, "project_active_calls": project_active} if project is not None else {}),
-            "max_calls_per_day": cfg["max_calls_per_day"],
+            "max_calls_per_day": cfg["max_calls_per_day"], "budget_mode": "tokens" if phase_mode else "legacy",
+            "call_limit_enforced": not phase_mode,
             "limitation": "Counted attempts are not confirmed paid model requests. Reported usage admission does not guarantee an executor token or fee cap."}
 
 

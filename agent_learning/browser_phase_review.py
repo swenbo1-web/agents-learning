@@ -1,0 +1,41 @@
+"""Shared offline phase-review controls for all host profiles."""
+
+PHASE_HTML = '''<section class="admin-details" id="phase-settings"><h3 data-i18n="phaseHeading">Stage review and token budget</h3>
+<label for="phase-mode" data-i18n="phaseMode">Review method</label><select id="phase-mode"><option value="phase" data-i18n="phaseModeStage">Completed-stage batches</option><option value="legacy" data-i18n="phaseModeLegacy">Legacy case review</option></select>
+<p class="note" data-i18n="phaseNote">Count real task deliveries, not replies. Raw work remains searchable. Historical imports are separate.</p>
+<div class="admin-limit-grid"><div><label for="phase-every" data-i18n="phaseEvery">Review every N completed stages</label><input id="phase-every" type="number" min="1" max="20" value="1"></div>
+<div><label for="phase-daily" data-i18n="phaseDaily">Project tokens per UTC day</label><input id="phase-daily" type="number" min="0" max="1000000000" value="1000000"></div>
+<div><label for="phase-input" data-i18n="phaseInput">Estimated input tokens per batch</label><input id="phase-input" type="number" min="16000" max="1000000" value="40000"></div>
+<div><label for="phase-output" data-i18n="phaseOutput">Reserved output tokens per batch</label><input id="phase-output" type="number" min="256" max="40000" value="4000"></div></div>
+<p class="note" data-i18n="phaseEstimate">Admission uses estimates; provider receipts settle actual usage. Unknown usage stays reserved. Explicit global protection still applies. Oversized sources remain uncovered.</p>
+<div id="phase-progress" aria-live="polite"></div><div id="phase-results"></div></section>'''
+
+PHASE_JAVASCRIPT = r'''
+Object.assign(strings,{
+phaseHeading:['Stage review and token budget','阶段集中审核与 token 预算'],
+phaseMode:['Review method','审核方式'],phaseModeStage:['Completed-stage batches','按完成阶段集中审核'],phaseModeLegacy:['Legacy case review','原逐案审核（兼容）'],
+phaseNote:['Real task deliveries count once; replies, reconnects and child stops do not. Stages are grouped by executor/model; Run now may process a smaller group. Raw work is searchable immediately; historical imports remain separate.','真实任务或阶段交付只计一次；回复、重连和子任务停止不重复计数。按执行器和模型分组；可点立即整理处理未满频率的分组。原始记录可立即检索，历史吸收仍独立授权。'],
+phaseEvery:['Review every N completed stages (1–20)','每完成几个阶段审核一次（1–20）'],phaseDaily:['Project token budget per UTC day','项目每日 token 预算（UTC）'],
+phaseInput:['Estimated input tokens per batch','每批预估输入 token 上限'],phaseOutput:['Reserved output tokens per batch','每批输出 token 预留'],
+phaseEstimate:['Admission uses estimates, not a hard provider billing limit. Actual receipts settle usage; unknown usage stays reserved. Existing global protection still applies. Uncovered sources remain pending.','准入使用估算，不是平台计费硬上限；按实际回执结算，未知用量继续预留。已有全局保护仍生效；未覆盖资料继续保留。'],
+phaseProgress:['Stages waiting: {waiting} · completed: {done} · partial: {partial}. Reported tokens: {used}; unsettled reservations: {reserved}. Effective runner: {seconds}s.','待整理阶段：{waiting} · 已整理：{done} · 部分覆盖：{partial}。已上报 token：{used}；未结算预留：{reserved}。实际运行上限：{seconds}秒。'],
+phaseInvalid:['Invalid stage frequency or token budget','阶段频率或 token 预算不符合范围'],
+phaseUsed:['Reported project tokens today','项目今日已上报 token'],phaseAvailable:['Estimated tokens remaining','项目估算可用 token'],
+phaseAwaiting:['Awaiting a review result','等待审核结果'],phaseOldBoundary:['{n} stages belong to an earlier login or governance boundary and are retained outside the current queue.','另保留旧登录或治理边界的 {n} 个阶段，不计入当前待办。'],
+phaseSourceLimit:['{n} public sources exceeded the stage scan limit. They remain searchable but were not reviewed; split the stage or explicitly import the selected history. Repeated Run now cannot extend this capture limit.','{n} 条公开来源超出单阶段扫描上限，仍可查阅但尚未审核；请拆分阶段或明确选取历史资料导入。重复立即整理不会扩大此次采集上限。'],
+phaseWindow:['A full call needs {timeout}s. The batch, runner or scheduler window is too short; increase it explicitly before retrying.','完整调用需预留 {timeout}秒，当前批次、运行器或调度窗口不足；请明确调大对应限时后重试。'],
+phaseCoverage:['Coverage complete','所选案例覆盖完成'],phasePartial:['Some sources remain uncovered','仍有未覆盖资料'],
+phaseBatch:['Batch {id}: {state}','批次 {id}：{state}'],phaseItem:['Case {id}: {state}; candidates {count}. {reason}','案例 {id}：{state}；候选 {count} 条。{reason}']
+});
+const PHASE_FIELDS=['phase-mode','phase-every','phase-daily','phase-input','phase-output'];
+ADMIN_FIELDS.push(...PHASE_FIELDS);
+const basePhaseHydrate=hydrateAdminForm;
+hydrateAdminForm=function(data){basePhaseHydrate(data);const cfg=data.phase_review?.policy;if(!cfg)return;const fresh=!cfg.configured&&!data.policy?.policy_version&&!data.policy?.enabled&&!data.enabled;$('phase-mode').value=fresh?'phase':cfg.mode;for(const[id,key]of [['phase-every','every_phases'],['phase-daily','daily_tokens'],['phase-input','max_input_tokens'],['phase-output','max_output_tokens']])$(id).value=String(cfg[key]);};
+const basePhaseConfiguration=adminConfiguration;
+adminConfiguration=function(action){const result=basePhaseConfiguration(action);const base=state.adminFormBase;if(action==='disable'||!base?.phase_review)return result;const cfg={mode:$('phase-mode').value};for(const[id,key,min,max]of [['phase-every','every_phases',1,20],['phase-daily','daily_tokens',0,1000000000],['phase-input','max_input_tokens',16000,1000000],['phase-output','max_output_tokens',256,40000]]){const text=$(id).value,n=Number(text);if(!/^\d+$/.test(text)||!Number.isSafeInteger(n)||n<min||n>max)throw new Error(t('phaseInvalid'));cfg[key]=n;}result.phase_review=cfg;result.expected_phase_version=base.phase_review.policy.version;if(cfg.mode==='phase')result.project_limits.max_reported_tokens_per_day=cfg.daily_tokens;return result;};
+const basePhaseRender=renderAdminState;
+renderAdminState=function(){basePhaseRender();const data=state.adminData,view=data?.phase_review;if(!view)return;const p=view.phases||{},usage=projectUsage(data)||{};$('phase-progress').textContent=t('phaseProgress',{waiting:(p.sealed||0)+(p.queued||0),done:p.completed||0,partial:p.partial||0,used:usage.reported_tokens??'?',reserved:usage.token_reservations??'?',seconds:data.effective_run_seconds??'?'});const area=$('phase-results');area.replaceChildren();if(view.historical_boundary_phases)area.append(node('p',t('phaseOldBoundary',{n:view.historical_boundary_phases}),'note'));if(view.source_scan_omitted)area.append(node('p',t('phaseSourceLimit',{n:view.source_scan_omitted}),'note'));for(const batch of view.recent_batches||[]){const detail=document.createElement('details'),title=document.createElement('summary');title.textContent=t('phaseBatch',{id:batch.id.slice(0,10),state:t(batch.state)})+' · '+t(batch.coverage_complete===true?'phaseCoverage':batch.coverage_complete===false?'phasePartial':'phaseAwaiting');detail.append(title);for(const item of batch.items||[]){const line=document.createElement('p');line.textContent=t('phaseItem',{id:(item.problem_id||'').slice(0,10),state:t(item.status),count:item.candidate_ids?.length||0,reason:item.reason||''});detail.append(line);}area.append(detail);}if(view.policy.mode==='phase'){const cards=$('admin-status-cards');cards.replaceChildren();for(const [key,value]of [['phaseUsed',usage.reported_tokens],['phaseAvailable',usage.remaining_reported_tokens],['adminCompletedReviews',usage.completed_reviews],['adminUsageCalls',usage.counted_attempts]]){const card=node('div',undefined,'stat');card.append(node('span',t(key)),node('strong',value??t('unknown')));cards.append(card);}}const limits=data.project_budget_policy?.values||{};if(view.policy.mode==='phase'&&(Math.min(limits.max_batch_seconds??Infinity,data.effective_run_seconds??Infinity)<(limits.timeout_seconds??120)))area.append(node('p',t('phaseWindow',{timeout:limits.timeout_seconds??120}),'note'));const stage=$('phase-mode').value==='phase';if(stage)for(const id of ['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'])$(id).disabled=true;};
+for(const id of PHASE_FIELDS)$(id).addEventListener('change',()=>{state.adminDirty=true;renderAdminState();controls();});
+const basePhaseControls=controls;
+controls=function(){basePhaseControls();if(!state.adminData?.phase_review||$('phase-mode').value!=='phase')return;for(const id of ['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'])$(id).disabled=true;};
+'''

@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from .phase_review import scope as phase_scope
+
 import json
 import math
 import time
@@ -46,6 +48,30 @@ def _seconds(value, default, maximum):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
         raise ContractError(f"scheduler time allowance must be finite and <= {maximum}")
     return value
+
+
+def phase_batch_rollover(runtime, project, batch, deadline, *, fresh_seconds=None):
+    """Renew a spent child window only after phase work made real progress.
+
+    The new window must fit the original call timeout and both enclosing
+    allowances. This never changes budgets or retries a failed/unknown call.
+    """
+    if (batch.get("status") != "batch_complete"
+            or batch.get("stop_reason") != "batch_time_exhausted"
+            or batch.get("reason") != "insufficient_call_window"
+            or not batch.get("scanned_count", 0)
+            or phase_scope(runtime, project) is None):
+        return False
+    required = batch.get("required_seconds")
+    if (isinstance(required, bool) or not isinstance(required, (int, float))
+            or not math.isfinite(required) or required <= 0):
+        return False
+    cfg = runtime.admin_effective_config(project)
+    available = min(cfg["max_batch_seconds"], cfg.get("max_run_seconds", 600),
+                    deadline - time.monotonic())
+    if fresh_seconds is not None:
+        available = min(available, fresh_seconds)
+    return cfg["enabled"] and available >= required
 
 
 class SchedulerMixin:
@@ -144,7 +170,7 @@ class SchedulerMixin:
                 return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
             query, args = eligible_query(scan, preflight_signature=preflight,
                                          summary_enabled=self.work_summary_enabled(project),
-                                         summary_host_scope=self._session_scope())
+                                         summary_host_scope=self._session_scope(), phase_scope=phase_scope(self, project))
             eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
             if not eligible:
                 unknown = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND retry_allowed=0 "
@@ -320,7 +346,8 @@ class SchedulerMixin:
         limit["deadline"] = min(limit["deadline"], limit["started"] + seconds)
         return limit["deadline"]
 
-    def _scheduler_tick(self, project, max_jobs, deadline, token, epoch, _admin_run_limits=None):
+    def _scheduler_tick(self, project, max_jobs, deadline, token, epoch, _admin_run_limits=None,
+                        _run_deadline=None):
         from .admin import admin_batch
         from .runtime import ContractError, encode
         cfg, items = self._scheduler_config(), []
@@ -415,13 +442,23 @@ class SchedulerMixin:
                                 "WHERE project=? AND kind=? AND owner=?", (now, now, encode(summary), identifier, kind, owner))
                 self._scheduler_refresh(identifier, cfg)
                 if kind == "admin" and result.get("reason") == "insufficient_call_window":
-                    # Keep this runner from repeatedly probing an execution
-                    # window it cannot fund. A later finite runner can resume.
-                    run_limits[identifier]["deferred"] = True
-                    exhausted.add(identifier)
-                    self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='insufficient_call_window' "
-                                    "WHERE project=? AND kind='admin' AND state='ready'",
-                                    (now + cfg["poll_seconds"], identifier))
+                    with self._scheduler_host_scope(admin_plan["host_scope"]):
+                        outer_deadline = min(project_deadline, _run_deadline if _run_deadline is not None else deadline)
+                        rollover = phase_batch_rollover(self, identifier, result, outer_deadline,
+                                                        fresh_seconds=cfg["max_tick_seconds"])
+                    if rollover:
+                        # This tick's tail was short; a new bounded tick still
+                        # fits. Keep unrelated projects eligible in this tick.
+                        self.db.execute("UPDATE scheduler_jobs SET next_due=? WHERE project=? "
+                                        "AND kind='admin' AND state='ready'", (now, identifier))
+                    else:
+                        # No progress or no complete window remains. A later
+                        # finite runner can resume without probing in a loop.
+                        run_limits[identifier]["deferred"] = True
+                        exhausted.add(identifier)
+                        self.db.execute("UPDATE scheduler_jobs SET state='waiting',next_due=?,wait_reason='insufficient_call_window' "
+                                        "WHERE project=? AND kind='admin' AND state='ready'",
+                                        (now + cfg["poll_seconds"], identifier))
                 elif result.get("status") in {"failed", "not_started", "time_exhausted"}:
                     refreshed = self.db.execute("SELECT state FROM scheduler_jobs WHERE project=? AND kind=?",
                                                 (identifier, kind)).fetchone()
@@ -490,7 +527,7 @@ class SchedulerMixin:
             epoch, deadline = self.host_epoch(), started + seconds
             while time.monotonic() < deadline:
                 result = self._scheduler_tick(project, cfg["max_jobs_per_tick"], min(deadline, time.monotonic() + cfg["max_tick_seconds"]),
-                                              token, epoch, _admin_run_limits=admin_run_limits)
+                                              token, epoch, _admin_run_limits=admin_run_limits, _run_deadline=deadline)
                 processed += result["processed"]
                 ticks += 1
                 exhausted.update(result["admin_run_exhausted_projects"])

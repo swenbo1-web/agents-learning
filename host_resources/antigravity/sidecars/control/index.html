@@ -46,6 +46,11 @@
   Object.assign(strings["zh-CN"], {debug:"检查接入",debugTitle:"本地诊断（不调用模型）",uiBridge:"界面连接",mcp:"MCP连接",hook:"当前Hook绑定",responding:"已响应",verified:"已验证",install:"安装校验",home:"知识目录",version:"运行版本／协议",installedVersion:"安装版本／协议",schema:"数据库／索引版本",phase:"管理员阶段",reason:"当前原因",nextDue:"下次尝试",failure:"最近供应商故障",latestUnchecked:"未检查远端最新版本；界面连接不能证明当前Hook或MCP已连通。"});
   Object.assign(strings.en, {host:"Host scope",runtimeMatch:"Running process / installed runtime",matches:"Match",mismatch:"Mismatch (check the entry point)"});
   Object.assign(strings["zh-CN"], {host:"宿主范围",runtimeMatch:"当前进程与安装副本",matches:"匹配",mismatch:"不匹配（需核对运行入口）"});
+  Object.assign(strings.en, {quota:"Enabling review uses platform model allowance. Review and publication follow the selected project policy; historical batches require separate confirmation.",confirmPreset:"Save this administrator setting? It may start model-backed daily review and publication under the selected project policy. Historical review requires separate confirmation."});
+  Object.assign(strings["zh-CN"], {quota:"开启审核会使用平台模型额度。审核与发布按项目所选策略执行；历史批次需单独确认。",confirmPreset:"保存此管理员设置？可能启动日常模型审核，并按项目所选策略发布；历史审核仍需单独确认。"});
+  Object.assign(strings.en, {stageFrequency:"Review every {n} delivered stages together", stageQueue:"Stages: awaiting close / awaiting review / queued / partial / completed", stageCoverage:"Latest batch coverage", coverageFull:"Complete", coveragePartial:"Partial; further work is retained", reportedTokens:"Project reported tokens today", reservedTokens:"Usage awaiting confirmation: reserved", remainingTokens:"Estimated available / daily budget", tokenEstimate:"Incomplete usage retains an estimate; reservations are not actual consumption. Open Approval & settings to change stage frequency and token budgets."});
+  Object.assign(strings["zh-CN"], {stageFrequency:"每 {n} 个交付阶段集中审核", stageQueue:"阶段状态：等待收尾 / 待审核 / 处理中 / 部分覆盖 / 已完成", stageCoverage:"最近一批覆盖", coverageFull:"完整", coveragePartial:"部分，保留后续处理", reportedTokens:"项目今日已报告 token", reservedTokens:"待确认用量预留", remainingTokens:"估算可用 / 每日预算", tokenEstimate:"用量未完整报告时保留估算；预留不等于实际消耗。修改阶段频率与 token 预算，请打开「审批与设置」。"});
+  const stageReview = value => value?.phase_review?.policy?.mode === "phase" && value.phase_review.host_scope === value.host_scope ? value.phase_review : null;
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
   const t = (key) => strings[language][key];
@@ -67,7 +72,7 @@
     $("project").textContent = summary.project_name || "Agent Learning";
     $("workspace").textContent = summary.workspace || "";
     $("stats").replaceChildren();
-    for (const [key,label] of [["active","active"],["work_memory","work"],["pending_problems","pending"],["candidates","candidates"]]) {
+    for (const [key,label] of [["active","active"],["work_memory","work"],["pending_review_cases","pending"],["candidates","candidates"]]) {
       const box = document.createElement("div"); box.className = "stat";
       const number = document.createElement("b"); number.textContent = count(summary.counts?.[key]);
       const description = document.createElement("span"); description.textContent = t(label);
@@ -76,16 +81,27 @@
     const p = summary.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage : null;
     const g = summary.global_usage || {};
     const lines = [`${t(summary.admin_admission_enabled ? "enabled" : "disabled")} · ${t("model")}: ${summary.model || t("waitingModel")}`];
-    if (p) lines.push(`${t("attempts")}: ${count(p.counted_attempts)} · ${t("completed")}: ${count(p.completed_reviews)} · ${t("failedCalls")}: ${count(p.failed_attempts)}`, `${t("remaining")}: ${count(p.remaining_calls)} / ${count(p.max_calls_per_day)}`);
+    const staged = stageReview(summary), tokenMode = !!staged || p?.budget_mode === "tokens";
+    if (p) {
+      lines.push(`${t("attempts")}: ${count(p.counted_attempts)} · ${t("completed")}: ${count(p.completed_reviews)} · ${t("failedCalls")}: ${count(p.failed_attempts)}`);
+      if (tokenMode) lines.push(`${t("reportedTokens")}: ${count(p.reported_tokens)}`, `${t("reservedTokens")}: ${count(p.token_reservations)}`, `${t("remainingTokens")}: ${count(p.remaining_reported_tokens)} / ${count(p.max_reported_tokens_per_day)}`);
+      else lines.push(`${t("remaining")}: ${count(p.remaining_calls)} / ${count(p.max_calls_per_day)}`);
+    }
     else lines.push(t("usageUnavailable"));
     lines.push(`${t("globalCalls")}: ${count(g.counted_attempts ?? g.used_calls)} · ${t("globalLeft")}: ${count(g.remaining_calls)}`);
     if (p?.next_reset_at) lines.push(`${t("reset")}: ${new Date(p.next_reset_at * 1000).toLocaleString(language)}`);
     if (summary.admission?.blocking_scope) lines.push(`${t("blocking")}: ${summary.admission.blocking_scope}`);
     if (summary.reason) lines.push(`${t("reason")}: ${summary.reason}`);
     if (summary.admin_phase) lines.push(`${t("phase")}: ${summary.admin_phase}`);
+    if (staged) {
+      const phases = staged.phases || {}, latest = staged.recent_batches?.[0];
+      lines.push(t("stageFrequency").replace("{n}", staged.policy.every_phases), `${t("stageQueue")}: ${["awaiting_stop","sealed","queued","partial","completed"].map(key => phases[key] || 0).join(" / ")}`);
+      if (latest) lines.push(`${t("stageCoverage")}: ${t(latest.coverage_complete === true ? "coverageFull" : latest.coverage_complete === false ? "coveragePartial" : "unknown")}`);
+    }
+    if (tokenMode) { lines.push(t("tokenEstimate")); $("quota").textContent = t("tokenEstimate"); }
     $("admin").textContent = lines.join("\n");
     $("presets").replaceChildren();
-    for (const preset of ["off","minimal","light","balanced","active"]) {
+    for (const preset of staged ? ["off"] : ["off","minimal","light","balanced","active"]) {
       const button = document.createElement("button"); button.textContent = t(preset === "active" ? "activePreset" : preset);
       button.addEventListener("click", () => changePreset(preset)); button.dataset.projectSetting = "true"; $("presets").append(button);
     }
@@ -152,6 +168,7 @@
   }
 
   function changePreset(preset) {
+    if (stageReview(summary) && preset !== "off") return;
     if (!summary || busy || !window.confirm(t(preset === "off" ? "confirmOff" : "confirmPreset"))) return;
     action("set_admin_preset", {preset,confirm:true,expected:{...summary.expected},request_id:crypto.randomUUID()});
   }

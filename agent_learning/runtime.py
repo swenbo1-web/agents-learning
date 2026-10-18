@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(20)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(21)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(20)):
+        if version not in set(range(21)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -328,13 +328,15 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_admin_routing(self)
             install_work_memory(self)
             install_work_summaries(self)
+            from .phase_review import install as install_phase_review
+            install_phase_review(self)
             from .admin_control import install_control
             install_control(self)
             from .admin_review_flow import install_flow
             install_flow(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 20:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=19")
+            self.db.execute("PRAGMA user_version=20")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
@@ -754,6 +756,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (project, name, value))
 
     def status(self, project):
+        from .phase_review import status as phase_status
         from .admin_control import admission_enabled
         from .admin_queue import dispatch_diagnostic
         from .admin_usage import admin_admission_status
@@ -793,6 +796,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),
                 "admin_dispatch_diagnostic": dispatch, "work_summary_policy": self.work_summary_policy(project),
+                "phase_review": phase_status(self, project),
                 "admin_budget": budget, "global_usage": budget, "project_usage": project_usage,
                 "global_budget_policy": budget.get("budget_policy"),
                 "project_budget_policy": project_usage.get("budget_policy"), "admission": admission,
@@ -1236,7 +1240,11 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         if captured and summarize and conversation:
             self.db.execute("SAVEPOINT work_summary_extension")
             try:
-                self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
+                from .phase_review import seal, scope
+                if scope(self, project) is not None:
+                    seal(self, project, conversation, event_id)
+                else:
+                    self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
             except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
                 self.db.execute("ROLLBACK TO work_summary_extension")
                 self.db.execute("RELEASE work_summary_extension")

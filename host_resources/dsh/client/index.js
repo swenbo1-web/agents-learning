@@ -86,6 +86,20 @@ window.__ModuleLoader__.load({
       },
     };
 
+    Object.assign(TEXT.zh, {stageFrequency:"每 {n} 个交付阶段集中审核", stageQueue:"阶段：等待收尾 / 待审 / 处理中 / 部分 / 完成", stageCoverage:"最近一批覆盖", coverageFull:"完整", coveragePartial:"部分，保留后续处理", reportedTokens:"今日已报告 token", reservedTokens:"待确认用量预留", remainingTokens:"估算可用 / 每日预算", tokenEstimate:"用量未完整报告时保留估算；预留不等于实际消耗。阶段频率与 token 预算请在审批与设置中调整。"});
+    Object.assign(TEXT.en, {stageFrequency:"Review every {n} delivered stages together", stageQueue:"Stages: awaiting close / review / queued / partial / completed", stageCoverage:"Latest batch coverage", coverageFull:"Complete", coveragePartial:"Partial; further work is retained", reportedTokens:"Reported tokens today", reservedTokens:"Usage awaiting confirmation: reserved", remainingTokens:"Estimated available / daily budget", tokenEstimate:"Incomplete usage retains an estimate; reservations are not actual consumption. Change stage frequency and token budgets in Review & settings."});
+
+    function stageReview(summary) {
+      var value = summary?.phase_review || summary?.panel_snapshot?.phase_review;
+      var host = summary?.host_scope || summary?.panel_snapshot?.host_scope;
+      return value?.policy?.mode === "phase" && value.host_scope === host ? value : null;
+    }
+
+    function actionError(error, labels) {
+      var message = String((error && error.message) || labels.failed);
+      return message.includes("stage review uses token budgets") ? labels.tokenEstimate : message;
+    }
+
     function getLabels(activeLocale) {
       var lang = String(
         activeLocale ||
@@ -158,6 +172,7 @@ window.__ModuleLoader__.load({
 
     function currentPresetOf(summary) {
       if (!summary || !summary.admin_admission_enabled) return "off";
+      if (stageReview(summary)) return "custom";
       var daily = summary.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage.max_calls_per_day : null;
       if (daily === 5) return "minimal";
       if (daily === 15) return "light";
@@ -192,7 +207,7 @@ window.__ModuleLoader__.load({
                 setSummary(data);
               })
               .catch(function (err) {
-                setNote(String((err && err.message) || t.failed));
+                setNote(actionError(err, t));
               });
           },
           [cwd, sessionId, t.failed]
@@ -237,14 +252,14 @@ window.__ModuleLoader__.load({
             .catch(function (err) {
               requestCell.busy = false;
               setBusy(false);
-              setNote(String((err && err.message) || t.failed));
+              setNote(actionError(err, t));
               if (action === "set_admin_preset") {
                 postAction("admin_receipt", cwd, sessionId, {project_id: extra.project_id,
                   installation_id: extra.installation_id, request_id: extra.request_id})
                   .then(function (receipt) {
                     if (receipt.found) { requestCell.current = null; setNote(doneFn(receipt.response)); reload(); }
                     else if (err.status === 400 || err.status === 409) {
-                      requestCell.current = null; setNote(String(err.message || t.failed)); reload();
+                      requestCell.current = null; setNote(actionError(err, t)); reload();
                     } else { setNote(t.unresolved); reload(); }
                   }).catch(function () { setNote(t.unresolved); });
               }
@@ -302,6 +317,8 @@ window.__ModuleLoader__.load({
         var projectUsage = summary?.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage : null;
         var globalUsage = summary?.global_usage || {};
         var display = function (value) { return value ?? t.unknown; };
+        var staged = stageReview(summary);
+        var tokenMode = !!staged || projectUsage?.budget_mode === "tokens";
         var activePreset = currentPresetOf(summary);
         var presetChips = [
           ["off", t.freqOff],
@@ -310,6 +327,13 @@ window.__ModuleLoader__.load({
           ["balanced", t.freqBalanced],
           ["active", t.freqActive],
         ];
+        if (staged) presetChips = [["off", t.freqOff]];
+        var phaseNote = "";
+        if (staged) {
+          var phases = staged.phases || {}, latest = staged.recent_batches?.[0];
+          phaseNote = t.stageFrequency.replace("{n}", staged.policy.every_phases) + "\n" + t.stageQueue + ": " + ["awaiting_stop","sealed","queued","partial","completed"].map(function (key) { return phases[key] || 0; }).join(" / ");
+          if (latest) phaseNote += "\n" + t.stageCoverage + ": " + (latest.coverage_complete === true ? t.coverageFull : latest.coverage_complete === false ? t.coveragePartial : t.unknown);
+        }
 
         return h(
           "div",
@@ -388,7 +412,9 @@ window.__ModuleLoader__.load({
                 statCell(t.attempts, display(projectUsage?.counted_attempts)),
                 statCell(t.completed, display(projectUsage?.completed_reviews)),
                 statCell(t.failedAttempts, display(projectUsage?.failed_attempts)),
-                statCell(t.remaining, projectUsage ? display(projectUsage.remaining_calls) + "/" + display(projectUsage.max_calls_per_day) : t.unknown)
+                tokenMode ? statCell(t.reportedTokens, display(projectUsage?.reported_tokens)) : statCell(t.remaining, projectUsage ? display(projectUsage.remaining_calls) + "/" + display(projectUsage.max_calls_per_day) : t.unknown),
+                tokenMode ? statCell(t.reservedTokens, display(projectUsage?.token_reservations)) : null,
+                tokenMode ? statCell(t.remainingTokens, display(projectUsage?.remaining_reported_tokens) + "/" + display(projectUsage?.max_reported_tokens_per_day)) : null
               )
             : h(
                 "div",
@@ -397,6 +423,7 @@ window.__ModuleLoader__.load({
               ),
           summary ? h("div", { style: { fontSize: "11.5px", opacity: 0.85, whiteSpace: "pre-wrap" } },
             (projectUsage ? t.scopeNote : t.projectUnavailable) + "\n" +
+            (phaseNote ? phaseNote + "\n" : "") + (tokenMode ? t.tokenEstimate + "\n" : "") +
             t.globalCalls + ": " + display(globalUsage.counted_attempts ?? globalUsage.used_calls) + " · " +
             t.globalRemaining + ": " + display(globalUsage.remaining_calls) +
             (projectUsage?.next_reset_at ? "\n" + t.reset + ": " + new Date(projectUsage.next_reset_at * 1000).toLocaleString(activeLocale || undefined) : "") +

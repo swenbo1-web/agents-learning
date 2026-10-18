@@ -57,7 +57,7 @@ def recover_calls(runtime, project=None, now=None):
     return {"recovered": recovered, "count": len(recovered)}
 
 
-def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, timeout):
+def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, timeout, *, reserved_tokens=None):
     """取包后的同一 BEGIN IMMEDIATE 内认领项目槽与全局 UTC 日额度。"""
     _require_transaction(runtime)
     runtime.assert_host_epoch(host_epoch)
@@ -75,6 +75,8 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
     budget = admin_admission_status(runtime, project, now=current)
     if budget["admission_status"] != "available":
         return {"status": budget["admission_status"], "blocking_scope": budget["blocking_scope"], "budget": budget}
+    if reserved_tokens is not None and budget["remaining_reported_tokens"] is not None and budget["remaining_reported_tokens"] < reserved_tokens:
+        return {"status": "token_budget_exhausted", "reason": "insufficient_token_reservation", "budget": budget}
     day = budget["utc_day"]
     call_id, owner = str(uuid.uuid4()), str(uuid.uuid4())
     lease_until = current + timeout + 30
@@ -82,7 +84,7 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
         "INSERT INTO admin_calls(id,project,problem,revision,day,state,created,fingerprint,host_epoch,owner,lease_until) "
         "VALUES(?,?,?,?,?,'reserved',?,?,?,?,?)",
         (call_id, project, problem, revision, day, current, fingerprint, host_epoch, owner, lease_until))
-    reserve_usage(runtime, call_id)
+    reserve_usage(runtime, call_id, reserved_tokens=reserved_tokens)
     runtime.db.execute("UPDATE admin_calls SET retry_allowed=2 WHERE project=? AND problem=? AND revision=? "
                        "AND retry_allowed=1 AND id!=?", (project, problem, revision, call_id))
     return {"status": "reserved", "call_id": call_id, "owner": owner, "lease_until": lease_until,
@@ -165,6 +167,8 @@ def retry_call(runtime, project, call_id, reason):
         if row["retry_allowed"] == 2:
             return {"status": "retry_consumed", "call_id": call_id, "previous_state": row["state"],
                     "problem_id": row["problem"], "problem_revision": row["revision"]}
+        from .phase_review import retry as retry_phase
+        retry_phase(runtime, project, row["problem"])
         if not row["retry_allowed"]:
             runtime.db.execute("UPDATE admin_calls SET retry_allowed=1,retry_reason=?,retry_requested=? WHERE id=?",
                                (reason.strip(), time.time(), call_id))

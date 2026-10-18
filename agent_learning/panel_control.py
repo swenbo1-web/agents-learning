@@ -172,6 +172,7 @@ class PanelControl:
                 "global_usage": state.get("global_usage"),
                 "project_budget_policy": state.get("project_budget_policy"),
                 "global_budget_policy": state.get("global_budget_policy"),
+                "phase_review": state.get("phase_review"),
                 "admission": state.get("admission"),
                 "reason": state.get("diagnostic", {}).get("reason")
                     or routing.get("reason") or state.get("admission", {}).get("admission_status"),
@@ -380,6 +381,9 @@ class PanelControl:
             if (not isinstance(expected, dict) or set(expected) != EXPECTED_FIELDS
                     or any(type(value) is not int or value < 0 for value in expected.values())):
                 raise ContractError("panel settings require the displayed versions")
+            from .phase_review import policy as phase_policy
+            if preset != "off" and phase_policy(self.runtime, self.project)["mode"] == "phase":
+                raise ContractError("stage review uses token budgets; open administrator settings to change it")
         self.requests[key] = {"fingerprint": fingerprint, "result": None}
         result = {"visible": True, **({"scope": "project"} if self.project_ui else {})}
         if action in {"open_browser", "open_review"}:

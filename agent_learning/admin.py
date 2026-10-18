@@ -1,6 +1,8 @@
 """一次有限的管理员审核。快照与记账先落盘，模型调用在事务外进行。"""
 from __future__ import annotations
 
+from .phase_review import scope as phase_scope
+
 import copy
 import contextlib
 import json
@@ -121,6 +123,8 @@ def _fingerprint(packet):
     task = packet.get("task") or {}
     problem = packet["problem"]
     summary = clean(problem.get("summary", ""))
+    if summary.startswith("阶段公开记录："):
+        summary = re.sub(r" \[[a-f0-9]{32}\] part [0-9]+$", "", summary)
     if packet.get("purpose") == "work_summary":
         # 阶段请求的传输摘要不是新增工作；变更write-version不能绕过未知调用阻止。
         summary = re.sub(r" \[[a-f0-9]{16}\]$", "", summary)
@@ -133,6 +137,9 @@ def _fingerprint(packet):
                                 ("knowledge_id", "knowledge_revision", "resolution_status")}}
     if packet.get("purpose") == "history_review":
         identity["history_context"] = packet.get("related_history", [])
+    if packet.get("purpose") == "phase_review":
+        identity["items"] = [_fingerprint(item) for item in packet.get("items", [])]
+        identity["phase_ids"] = packet.get("phase_ids", [])
     return digest(identity)
 
 
@@ -275,6 +282,9 @@ def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *
         usage["call_outcome_unknown"] = True
         usage["completeness"] = "partial" if usage["token_totals"] else "unknown"
     row = finish_call(runtime, call_id, state, usage=usage)
+    if row["state"] in {"failed", *UNKNOWN_STATES}:
+        runtime.db.execute("UPDATE phase_review_batches SET state='blocked' WHERE problem_id="
+                           "(SELECT problem FROM admin_calls WHERE id=?) AND state='pending'", (call_id,))
     return json.loads(row["usage"])
 
 
@@ -309,6 +319,9 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         return {"status": "disabled", "scanned_count": 0}
     epoch = runtime.assert_host_epoch(expected_epoch)
     recover_calls(runtime, project)
+    if problem_id is None and history_job_id is None and phase_scope(runtime, project) is not None:
+        from .phase_review import prepare as prepare_phases
+        prepare_phases(runtime, project)
     signature, preflight_signature = scan_signatures(runtime, project)
     history_owner = None
     if history_job_id is not None:
@@ -318,7 +331,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             raise ContractError("history reference publication was not authorized for this run")
     summary_enabled = runtime.work_summary_enabled(project)
     query, args = eligible_query(signature, problem_id, preflight_signature=preflight_signature, history_job_id=history_job_id,
-                                summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
+                                summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     raw_query, raw_args = query, args
     if history_job_id is None:
         query, args = executor_query(runtime, project, query, args)
@@ -331,7 +344,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             return {"status": "executor_not_ready", "reason": unrouted_reason(runtime, project, raw_query, raw_args,
                     "administrator_current_model_unavailable"), "scanned_count": 0}
         query, args = eligible_query(signature, None, include_cached=True, history_job_id=history_job_id,
-                                    summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope())
+                                    summary_enabled=summary_enabled, summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
         blocked = runtime.db.execute(query + "AND EXISTS(SELECT 1 FROM admin_preflights f WHERE "
                                      "f.project=p.project AND f.problem=p.id AND f.revision=p.revision "
                                      "AND f.signature=? AND f.task_updated IS t.updated) ORDER BY p.created,p.id LIMIT 10",
@@ -341,13 +354,16 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                     "reason": "material needs a complete packet or a larger input budget; no invocation reserved"} if blocked else {})}
     for selected in rows:
         scanned += 1
+        from .phase_review import packet as phase_packet
+        phase_context = phase_packet(runtime, project, selected["id"])
         summary_context = runtime.work_summary_select(project, selected["id"])
         if summary_context and summary_context.get("eligible") is False:
             if problem_id is not None:
                 return {"status": "needs_evidence", "problem_id": selected["id"],
                         "purpose": "work_summary", "reason": summary_context["reason"], "scanned_count": scanned}
             continue
-        source_conversation = None if history_job_id is not None else selected["conversation"]
+        source_conversation = (phase_context.get("executor_conversation") if phase_context else
+                               None if history_job_id is not None else selected["conversation"])
         try:
             provider_plan = runtime.resolve_admin_executor(project, source_conversation, require_enabled=history_job_id is None)
             availability = executor_availability(provider_plan)
@@ -364,7 +380,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         review_cfg = _review_configuration(cfg, provider_plan)
         if summary_context:
             review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
-        packet = (_history_packet(runtime, project, selected["id"], history_job_id) if history_job_id else
+        packet = (phase_context if phase_context else _history_packet(runtime, project, selected["id"], history_job_id) if history_job_id else
                   runtime.work_summary_packet(project, selected["id"], max_chars=cfg["max_input_chars"] - 800) if summary_context else
                   runtime.review_packet(project, selected["id"]))
         if history_job_id:
@@ -373,6 +389,10 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         if summary_context:
             packet["purpose"] = "work_summary"
         instruction = review_instruction(packet)
+        if phase_context:
+            from .phase_review import instruction as phase_instruction
+            instruction = phase_instruction(packet)
+            review_cfg.update(review_purpose="phase_review", phase_format=1)
         if summary_context:
             from .work_summaries import SUMMARY_PREFIX
             instruction = SUMMARY_PREFIX + instruction
@@ -451,7 +471,12 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             remember_check(runtime, project, selected, signature, blocked_call=unknown["id"])
             return {"status": "review_required", "problem_id": selected["id"], "previous_call_id": unknown["id"],
                     "previous_state": unknown["state"], "scanned_count": scanned}
-        claim = claim_call(runtime, project, selected["id"], selected["revision"], review, epoch, timeout)
+        from .admin_usage import estimate_reservation
+        token_plan = estimate_reservation(runtime, project, instruction, phase=bool(phase_context))
+        if not token_plan["admitted"]:
+            return {"status": "token_budget_exhausted", "reason": token_plan["reason"], "scanned_count": scanned}
+        claim = claim_call(runtime, project, selected["id"], selected["revision"], review, epoch, timeout,
+                           reserved_tokens=token_plan["reserved_tokens"] if phase_context else None)
         if claim["status"] != "reserved":
             return dict(claim, scanned_count=scanned)
         runtime.record_admin_execution(project, claim["call_id"], provider_plan, require_enabled=history_job_id is None)
@@ -465,7 +490,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 "evidence_wait_signature": evidence_wait_signature(packet, review_cfg, evidence),
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
                 "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id,
-                "provider_plan": provider_plan, "summary_context": summary_context,
+                "provider_plan": provider_plan, "summary_context": summary_context, "phase_context": phase_context,
                 "history_owner": history_owner,
                 "publication_enabled_at_reservation": bool(cfg["auto_publish"]),
                 "publication_mode_at_reservation": cfg["publication_mode"],
@@ -480,21 +505,24 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
     """同一调用的候选全部成功或回滚；每条仍有独立来源与审批身份。"""
     from .admin_governance import propose_governance
     from .history_context import link_history_evidence
-    packet, job_id = reserved["packet"], reserved["history_job_id"]
+    packet, job_id = reserved["packet"], reserved.get("history_job_id")
     prepared = []
     for body in bodies:
         validate(body, CANDIDATE)
         if (body["problem_id"] != packet["problem"]["id"]
                 or body["problem_revision"] != packet["problem"]["revision"]):
             raise ContractError("administrator changed review identity or revision")
-        if body["validation_level"] != "reported":
+        if job_id and body["validation_level"] != "reported":
             raise ContractError("historical public text must remain reported")
+        if not job_id and set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
+            raise ContractError("candidate references evidence outside the review packet")
         if packet.get("evidence_truncated"):
             body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
         prepared.append(body)
     candidate_ids, proposal_ids = [], []
     for body in prepared:
-        link_history_evidence(runtime, project, packet, body["evidence_refs"], job_id)
+        if job_id:
+            link_history_evidence(runtime, project, packet, body["evidence_refs"], job_id)
         candidate = runtime.submit_candidate(project, expected_epoch=reserved["host_epoch"], **body)
         proposal = propose_governance(runtime, project, packet["problem"]["id"], packet["problem"]["revision"],
                                       "publish", candidate_id=candidate["candidate_id"], reason=reason,
@@ -517,6 +545,9 @@ def _history_acceptance_guard(runtime, project, reserved):
 
 
 def _accept_response(runtime, project, reserved, response):
+    if reserved.get("phase_context"):
+        from .phase_review import accept
+        return accept(runtime, project, reserved, response)
     from .admin_decisions import persist_receipt, review_signature
     from .admin_governance import propose_governance
     from .admin_lifecycle import validate_call
@@ -524,7 +555,7 @@ def _accept_response(runtime, project, reserved, response):
     call_id, packet = reserved["call_id"], reserved["packet"]
     history_job_id = reserved.get("history_job_id")
     allowed = {"decision", "reason", "candidate", "missing_evidence", "proposal"}
-    if history_job_id:
+    if history_job_id or reserved.get("multi_candidate_allowed"):
         allowed.add("candidates")
     if (not isinstance(response, dict) or not {"decision", "reason", "candidate"} <= set(response)
             or set(response) - allowed or response["decision"] not in {"candidate", "needs_evidence", "skip", "governance"}
@@ -535,7 +566,7 @@ def _accept_response(runtime, project, reserved, response):
         raise ContractError("invalid missing evidence requirements")
     candidates = response.get("candidates", [])
     if (not isinstance(candidates, list) or len(candidates) > 5
-            or candidates and (not history_job_id or response["decision"] != "candidate"
+            or candidates and (not (history_job_id or reserved.get("multi_candidate_allowed")) or response["decision"] != "candidate"
                                or response["candidate"] is not None or response.get("proposal") is not None)):
         raise ContractError("invalid history candidate batch")
     if history_job_id and len(encode(response).encode("utf-8")) > 40000:
@@ -571,7 +602,7 @@ def _accept_response(runtime, project, reserved, response):
                               history_auto_reference=reserved.get("history_reference_authorized", False))
         if summary_context:
             review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
-        if review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
+        if not reserved.get("frozen_batch_verified") and review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
             raise ContractError("review evidence or comparison context changed")
     result = {"status": response["decision"], "reason": clean(response["reason"])[:1000], "call_id": call_id,
               "problem_id": packet["problem"]["id"], "missing_evidence": missing}
@@ -651,7 +682,7 @@ def _accept_response(runtime, project, reserved, response):
                 execute_governance(runtime, project, proposal_id, expected_epoch=reserved["host_epoch"])["publication"])
             publications.append({"candidate_id": identity, **publication})
         result["publication"] = {k: v for k, v in publications[0].items() if k != "candidate_id"}
-        if history_job_id:
+        if history_job_id or reserved.get("multi_candidate_allowed"):
             result["publications"] = publications
             published = sum(item.get("status") == "published" for item in publications)
             if len(publications) > 1:
@@ -716,7 +747,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         runtime.history_guard(project, problem_id, _history_job_id, require_review=True, expected_epoch=epoch)
     _, timeout = _settings(cfg)
     timeout = min(timeout, cfg.get("max_run_seconds", 600))
-    if cfg["max_calls_per_day"] == 0:
+    if cfg["max_calls_per_day"] == 0 and phase_scope(runtime, project) is None:
         return {"status": "budget_exhausted", "scanned_count": 0}
     deferred = _review_window(_deadline, timeout)
     if deferred:
@@ -744,7 +775,12 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         temp = temporary.name
         directory = Path(temp)
         schema_path, output, log_path = directory / "response.schema.json", directory / "result.json", directory / "events.log"
-        schema_path.write_text(encode(HISTORY_RESPONSE_SCHEMA if _history_job_id else RESPONSE_SCHEMA), encoding="utf-8")
+        if reserved.get("phase_context"):
+            from .phase_review import response_schema
+            schema_body = response_schema()
+        else:
+            schema_body = HISTORY_RESPONSE_SCHEMA if _history_job_id else RESPONSE_SCHEMA
+        schema_path.write_text(encode(schema_body), encoding="utf-8")
         execution = build_execution(provider_plan["command"], provider_plan["provider"], provider_plan.get("model", ""),
                                     directory, schema_path, output, reserved["instruction"], timeout,
                                     selection_mode=provider_plan.get("model_mode", "default"),
@@ -1037,7 +1073,9 @@ def admin_drain(runtime, project, *, dispatch_token=None, expected_epoch=None, m
             summaries = summaries[-20:]
             # Continue only after a successful bounded batch with actual progress.
             # Unknown results, failed calls, missing evidence and empty scans stop here.
-            if (batch["status"] != "batch_complete" or stop_reason not in {"call_limit", "case_limit"}
+            from .scheduler import phase_batch_rollover
+            if (batch["status"] != "batch_complete" or (stop_reason not in {"call_limit", "case_limit"}
+                    and not phase_batch_rollover(runtime, project, batch, deadline))
                     or not batch.get("scanned_count", 0)):
                 break
         else:

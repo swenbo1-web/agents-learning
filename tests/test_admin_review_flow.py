@@ -29,6 +29,8 @@ class ReviewFlowTests(unittest.TestCase):
         self.r = Runtime(self.root / "home", config=copy.deepcopy(self.config))
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
+        from agent_learning.phase_review import configure
+        configure(self.r, self.p, {"mode":"legacy"}, 0)
         self.r.admin_observe_model(self.p, "root", "observed-model")
         self.task = self.r.task_update(self.p, "root", "A bounded project task")
 
@@ -247,7 +249,7 @@ class ReviewFlowTests(unittest.TestCase):
             upgraded = Runtime(self.r.home, config=copy.deepcopy(self.config))
         self.addCleanup(upgraded.close)
         model.assert_not_called()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 19)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 20)
         self.assertGreater(upgraded.session_epoch(), old_epoch)
         self.assertTrue(publication_policy(upgraded, self.p)["enabled"])
         with self.assertRaises(ContractError):

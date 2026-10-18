@@ -24,6 +24,7 @@ Complete the current authorized task. Querying or adopting knowledge never expan
 
 - `PostToolUse` records observable tool outcomes, file relations and explicit errors. Background jobs (`run_in_background: true`) remain `running` until a verified final outcome is observed.
 - Never include or claim access to internal model reasoning (`ReasoningBlock`).
+- With stage review enabled, report a genuinely completed task or stage using `task_update(status="delivered")` with the current task ID/write version before the final public response. Runtime counts the parent delivery once and batches observable sources. Ordinary replies, unfinished tools and child stops do not count. Do not call the administrator or invent tasks to trigger review; unmarked public work remains searchable.
 - Use `case_feedback` for concise professional facts or counterexamples (`feedback_kind="counterexample"`, `knowledge_id`, `knowledge_revision`). Workers do not publish or revoke knowledge.
 - Historical ingestion requires explicit user confirmation (`history-prepare --confirm` / `history-run --confirm`).
 

@@ -28,6 +28,8 @@ class AdminControlTests(unittest.TestCase):
         self.r = Runtime(self.home, config={})
         self.addCleanup(self.r.close)
         self.p = self.r.project(self.workspace)
+        from agent_learning.phase_review import configure
+        configure(self.r, self.p, {"mode":"legacy"}, 0)
         self.r.config["admin"].update(command=[sys.executable], timeout_seconds=10)
         self.r.admin_observe_model(self.p, "root-chat", "observed-model-v1")
         self.r.task_update(self.p, "root-chat", "Project work")

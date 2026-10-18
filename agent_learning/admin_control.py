@@ -1,6 +1,8 @@
 """Explicit local administrator controls; reads never initialize the runtime."""
 from __future__ import annotations
 
+from .phase_review import scope as phase_scope, status as phase_status
+
 import json
 import os
 from pathlib import Path
@@ -60,7 +62,7 @@ def _control_queue(runtime, project, *, include_history=True):
     query, args = eligible_query(signature,
         preflight_signature=preflight_signature,
         summary_enabled=runtime.work_summary_enabled(project),
-        summary_host_scope=runtime._session_scope())
+        summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     eligible = runtime.db.execute("SELECT COUNT(*) FROM (" + query + ")", (project, *args)).fetchone()[0]
     pending = runtime.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
     history = runtime.db.execute("SELECT COUNT(DISTINCT problem_id) FROM history_case_links WHERE project=?", (project,)).fetchone()[0]
@@ -96,6 +98,8 @@ def control_status(runtime, project, *, include_history=True, details=True):
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
         "publication_policy": publication_policy(runtime, project),
+        "phase_review": phase_status(runtime, project),
+        "effective_run_seconds": min(runtime.admin_effective_config(project)["max_run_seconds"], runtime.config["scheduler"]["max_run_seconds"]) if runtime.config["scheduler"]["enabled"] else runtime.admin_effective_config(project)["max_run_seconds"],
         "usage": global_usage,
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
                    "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
@@ -146,7 +150,7 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
                 "expected_session_epoch", "expected_governance_epoch"}
     configured = {"enabled", "model_mode", "model", "start"}
     versions = {"expected_budget_version", "expected_project_budget_version"}
-    optional = {"summary_enabled", "auto_publish", "publication_mode", "limits", "project_limits"} if not wake else set()
+    optional = {"summary_enabled", "auto_publish", "publication_mode", "limits", "project_limits", "phase_review", "expected_phase_version"} if not wake else set()
     mandatory = required | (set() if wake else configured)
     if (not isinstance(body, dict) or not mandatory <= set(body) or set(body) - (mandatory | versions | optional)
             or not versions.intersection(body)
@@ -218,6 +222,11 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
             if body.get("project_limits"):
                 configure_project_budget(runtime, project, body["project_limits"], expected_version=project_budget["version"],
                                          expected_epoch=runtime.session_epoch())
+            phase_prior = phase_status(runtime, project)["policy"]
+            if "phase_review" in body or first_enable and not runtime.config["admin"]["enabled"] and not phase_prior["configured"]:
+                from .phase_review import configure as configure_phases
+                configure_phases(runtime, project, body.get("phase_review", {"mode":"phase"}), body.get("expected_phase_version", 0))
+            phase_changed = phase_status(runtime, project)["policy"]["version"] != phase_prior["version"]
             summary_prior = runtime.work_summary_policy(project)
             summary_changed = "summary_enabled" in body and (not summary_prior["configured"]
                 or body["summary_enabled"] != summary_prior["enabled"])
@@ -225,7 +234,7 @@ def apply_control(runtime, project, body, *, wake=False, details=True):
                 runtime.configure_work_summary(project, body["summary_enabled"])
             publication_changed = (automatic != state.get("auto_publish")
                                    or publication_mode != state.get("publication_mode"))
-            if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed or publication_changed:
+            if bool(state["enabled"]) != body["enabled"] or not state["version"] or summary_changed or publication_changed or phase_changed:
                 runtime.db.execute("INSERT INTO admin_control_state(project,host_scope,enabled,version,updated,auto_publish,publication_mode) "
                     "VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,host_scope) DO UPDATE SET "
                     "enabled=excluded.enabled,version=excluded.version,updated=excluded.updated,auto_publish=excluded.auto_publish,"
@@ -261,6 +270,9 @@ def wake_admin(runtime, project, *, expected_session_epoch=None, expected_govern
         diagnostic = dispatch_diagnostic(runtime, project)
         return {"status": "accepted" if diagnostic["phase"] == "worker_reserved" else "already_running", "reason": diagnostic["reason"]}
     try:
+        from .phase_review import prepare as prepare_phases
+        with runtime.transaction():
+            prepare_phases(runtime, project, force=True)
         token = claim_dispatch(runtime, project, expected_epoch=expected_governance_epoch,
                                _phase_guard=lambda: runtime.assert_session_epoch(expected_session_epoch))
     except ContractError:

@@ -1,6 +1,8 @@
 """Bounded, read-only explanations of review work and publication boundaries."""
 from __future__ import annotations
 
+from .phase_review import scope as phase_scope
+
 import json
 
 
@@ -105,13 +107,13 @@ def review_activity(runtime, project):
     from .admin_queue import eligible_query, executor_query, scan_signatures, REVIEW_ORDER
     signature, preflight = scan_signatures(runtime, project)
     query, args = eligible_query(signature, preflight_signature=preflight,
-        summary_enabled=runtime.work_summary_enabled(project), summary_host_scope=runtime._session_scope())
+        summary_enabled=runtime.work_summary_enabled(project), summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     query, args = executor_query(runtime, project, query, args)
     upcoming = [_case(runtime, project, r["id"]) for r in runtime.db.execute(query + REVIEW_ORDER + "LIMIT 5", (project, *args))]
     recent = []
     for row in runtime.db.execute("SELECT c.id,c.problem,c.revision,c.state,c.created,c.finished,r.response,r.reason "
         "FROM admin_calls c JOIN admin_execution_plans x ON x.call_id=c.id AND x.project=c.project "
-        "LEFT JOIN review_receipts r ON r.project=c.project AND r.call_id=c.id WHERE c.project=? AND x.host_scope=? "
+        "LEFT JOIN review_receipts r ON r.project=c.project AND r.call_id=c.id AND r.problem=c.problem WHERE c.project=? AND x.host_scope=? "
         "ORDER BY c.created DESC,c.id LIMIT 8", (project, runtime._session_scope())):
         item = _case(runtime, project, row["problem"])
         body = json.loads(row["response"] or "{}")

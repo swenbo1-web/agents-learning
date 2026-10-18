@@ -99,6 +99,8 @@ class TaskControlMixin:
                 for table in ("contexts", "subagent_contexts"):
                     self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]' WHERE project=? AND conversation=?",
                                     (project, conversation_id))
+            from .phase_review import arm
+            arm(self, project, conversation_id, previous, self.task(project, conversation_id))
             # 在事务内取得回执，避免提交后被并发写入替换成另一项任务。
             return self.task(project, conversation_id)
 

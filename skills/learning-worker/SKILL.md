@@ -20,6 +20,7 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 - 只有目标或范围改变才增加任务 revision；单纯更新为 `delivered` 不等于新任务，也不应让现有证据失效。
 - 省略 status 会保留现状；恢复非活动任务需 `resume=true`，不恢复旧执行许可。保护模式的许可由受信宿主或操作者设置，不能通过任务 scope 签发。遇到许可过期时保留拒绝并报告所缺接入。
 - 明确交付后更新为 `delivered`。`Stop` 按交付状态的 write_version 记录公开结果；同轮重复停止不重复采集，明确恢复后再次交付会追加历史，无需另写总结。
+- 已开启阶段审核的项目，真实任务或阶段完成时先用当前任务身份和写版本上报 `task_update(status="delivered")`，随后正常交付公开结果；程序按完成阶段计数并集中整理。普通回复、等待工具或未完成事项不能上报交付，子 Agent 不能代报父任务。无需自行调用管理员或为触发审核创建虚假任务；未上报阶段的公开记录仍可检索。
 - 用 `case_feedback` 简短反馈实际问题结果和真实 `event_refs`；父 Agent 同时传 `expected_task_id` 和 `expected_task_revision`。子 Agent 按固定 assignment 反馈；assignment 过期后仍归属原任务，不继承新父任务的权限。没有证据时保留未知。
 - 同一次 `case_feedback` 提供 `idempotency_key`，失败重试沿用原键和原参数；真实再次发生使用新键。知识反例同时传 `knowledge_id`、`knowledge_revision` 和 `feedback_kind=counterexample`，不猜被反馈的修订，也不直接撤销知识。
 - 真正采用已展示知识时，用 `knowledge_use` 简短记录准确知识修订、当前任务 ID/revision/write_version 和幂等键；有实际关联操作时提供 `operation_id`。无需写复盘文档，不为只看到或未采用的知识制造回执。采用声明、工具观察和用户验收分别判断，不能用工具成功推断专业结论正确。

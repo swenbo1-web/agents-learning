@@ -1,6 +1,8 @@
 """送审扫描与后台派发的有界状态；缓存失效只唤醒比较，不直接调用模型。"""
 from __future__ import annotations
 
+from .phase_review import scope as phase_scope, source_conversation as phase_conversation
+
 import time
 import uuid
 
@@ -111,7 +113,7 @@ def scan_signatures(runtime, project):
 
 
 def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None,
-                   summary_enabled=False, summary_host_scope=None):
+                   summary_enabled=False, summary_host_scope=None, phase_scope=None):
     sql = ("SELECT p.*,t.updated AS source_task_updated FROM problems p LEFT JOIN task_snapshots t "
            "ON t.project=p.project AND t.id=p.task_id AND t.revision=p.task_revision "
            "WHERE p.project=? AND p.status='pending' AND (? IS NULL OR p.id=?) "
@@ -122,6 +124,15 @@ def eligible_query(signature, problem_id=None, *, include_cached=False, prefligh
            "AND c.revision=p.revision AND c.retry_allowed=0 AND c.state NOT IN ('not_started','deduplicated') "
            "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) ")
     args = (problem_id, problem_id)
+    if phase_scope is not None and problem_id is None and history_job_id is None:
+        sql += ("AND EXISTS(SELECT 1 FROM phase_review_batches b WHERE b.project=p.project AND b.problem_id=p.id "
+                "AND b.host_scope=? AND b.state='pending' AND b.session_epoch=(SELECT epoch FROM host_scopes WHERE scope=b.host_scope) "
+                "AND b.governance_epoch=(SELECT epoch FROM host_state WHERE id=1)) ")
+        args += (phase_scope,)
+    elif problem_id is None and history_job_id is None:
+        # Also used by read-only pre-v20 browsers, where phase tables do not
+        # exist. The reserved conversation prefix identifies internal batches.
+        sql += "AND p.conversation NOT LIKE 'phase-review:%' "
     if summary_enabled and summary_host_scope:
         sql += ("AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.project=p.project AND w.problem_id=p.id "
                 "AND (w.state!='pending' OR w.host_scope!=?)) ")
@@ -174,7 +185,7 @@ def executor_query(runtime, project, query, args):
                       "WHERE dp.project=p.project AND dp.conversation=p.conversation AND dp.type='DshProfileBound' "
                       "AND json_extract(dp.payload,'$.profile_key')=?)) ")
             args += (key,)
-    if policy["model_mode"] == "current":
+    if policy["model_mode"] == "current" and phase_scope(runtime, project) is None:
         provider = runtime.host if policy["provider"] == "host" else policy["provider"]
         if provider != runtime.host:
             return query + "AND 0 ", args
@@ -189,7 +200,7 @@ def ready_executor(runtime, project, query, args):
     query, args = executor_query(runtime, project, query, args)
     for item in runtime.db.execute(query + REVIEW_ORDER + "LIMIT 40", (project, *args)).fetchall():
         try:
-            plan = runtime.resolve_admin_executor(project, item["conversation"])
+            plan = runtime.resolve_admin_executor(project, phase_conversation(runtime, project, item["id"], item["conversation"]))
             available = executor_availability(plan)["cli_available"]
         except ValueError:
             continue
@@ -203,7 +214,7 @@ def unrouted_reason(runtime, project, query, args, fallback):
     row = runtime.db.execute(query + REVIEW_ORDER + "LIMIT 1", (project, *args)).fetchone()
     if row:
         try:
-            runtime.resolve_admin_executor(project, row["conversation"])
+            runtime.resolve_admin_executor(project, phase_conversation(runtime, project, row["id"], row["conversation"]))
         except ValueError as exc:
             reason = str(exc).split(":", 1)[0]
             if reason.startswith("dsh_profile_"):
@@ -216,14 +227,14 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
     from .admin_usage import admin_admission_status
     cfg = runtime.admin_effective_config(project)
-    if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0:
+    if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0 and phase_scope(runtime, project) is None:
         return None
     with runtime.transaction():
         runtime.assert_host_epoch(expected_epoch)
         if _phase_guard:
             _phase_guard()
         cfg = runtime.admin_effective_config(project)
-        if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0:
+        if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0 and phase_scope(runtime, project) is None:
             return None
         recover_calls(runtime)
         now = time.time()
@@ -250,7 +261,7 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         signature, preflight_signature = scan_signatures(runtime, project)
         query, args = eligible_query(signature, preflight_signature=preflight_signature,
                                      summary_enabled=runtime.work_summary_enabled(project),
-                                     summary_host_scope=runtime._session_scope())
+                                     summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
         if not ready_executor(runtime, project, query, args):
             return None
         token = str(uuid.uuid4())
@@ -426,7 +437,7 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
     query, args = eligible_query(signature,
         preflight_signature=preflight_signature,
         summary_enabled=runtime.work_summary_enabled(project),
-        summary_host_scope=runtime._session_scope())
+        summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     routed, routed_args = executor_query(runtime, project, query, args)
     rows = runtime.db.execute(routed + REVIEW_ORDER + "LIMIT 40", (project, *routed_args)).fetchall()
     if not rows:
@@ -454,7 +465,7 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
     last = dict(detail, reason="model_missing")
     for row in rows:
         try:
-            plan = runtime.resolve_admin_executor(project, row["conversation"])
+            plan = runtime.resolve_admin_executor(project, phase_conversation(runtime, project, row["id"], row["conversation"]))
         except ValueError:
             continue
         availability = executor_availability(plan)

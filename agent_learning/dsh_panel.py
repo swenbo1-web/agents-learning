@@ -27,6 +27,7 @@ def snapshot(runtime, project):
                          "expected_governance_epoch": state["governance_epoch"]},
             "model_mode": policy["model_mode"], "model": policy["model"],
             "project_limits": state["project_budget_policy"]["values"],
+            "phase_review": state.get("phase_review"),
             "diagnostic": state["diagnostic"]}
 
 
@@ -43,6 +44,11 @@ def apply_preset(runtime, project, payload):
             or not isinstance(view.get("model"), str)):
         raise ContractError("panel settings changed or unavailable; refresh before saving")
     mode = view["model_mode"]
+    from .phase_review import policy as phase_policy
+    from .admin_control import request_receipt
+    if (preset != "off" and phase_policy(runtime, project)["mode"] == "phase"
+            and not request_receipt(runtime, project, payload.get("request_id"))["found"]):
+        raise ContractError("stage review uses token budgets; open administrator settings to change it")
     if preset != "off" and view["expected"]["expected_policy_version"] == 0 and mode == "default":
         mode = "first"
     limits = PRESETS.get(preset)

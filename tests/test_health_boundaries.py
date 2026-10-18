@@ -38,7 +38,7 @@ class HealthBoundaryTests(unittest.TestCase):
                 try:
                     self.assertEqual(other.host_epoch(), epoch)
                     self.assertEqual([tuple(row) for row in other.db.execute("SELECT * FROM events ORDER BY id")], evidence)
-                    self.assertEqual(other.db.execute("PRAGMA user_version").fetchone()[0], 19)
+                    self.assertEqual(other.db.execute("PRAGMA user_version").fetchone()[0], 20)
                 finally:
                     other.close()
 

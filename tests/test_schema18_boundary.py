@@ -33,7 +33,7 @@ class Schema18BoundaryTests(unittest.TestCase):
         with patch("subprocess.Popen", side_effect=AssertionError("migration must not launch a model")):
             upgraded = Runtime(self.home, config=config if config is not None else copy.deepcopy(self.r.config), host=host)
         self.addCleanup(upgraded.close)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 19)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 20)
         return upgraded
 
     def test_first_and_current_models_survive_upgrade_without_rebinding_to_next_conversation(self):

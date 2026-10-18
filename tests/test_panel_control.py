@@ -239,6 +239,10 @@ class PanelControlTests(unittest.TestCase):
         self.assertEqual(self.runtime.db.total_changes, before)
 
     def test_preset_uses_project_budget_and_exact_replay_launches_once(self):
+        # This case exercises the existing per-case preset queue. Stage-mode
+        # batching and the first-enable default have their own contract tests.
+        from agent_learning.phase_review import configure
+        configure(self.runtime, self.project, {"mode": "legacy"}, 0)
         self.runtime.config["admin"]["command"] = [sys.executable]
         self.runtime.admin_observe_model(self.project, "current-chat", "observed-model")
         self.runtime.task_update(self.project, "current-chat", "project work")
