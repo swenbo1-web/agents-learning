@@ -34,6 +34,20 @@ class DshAdapterAndV1FeaturesTests(unittest.TestCase):
         self.task = self.r.task_update(self.p, self.c, "fix pwsh pipeline issue", {"mode": "execute"})
         self.adapter = DshAdapter(self.r, self.workspace)
 
+    def test_missing_completion_input_preserves_verification_and_operation_identity(self):
+        base = {"sessionId":"dsh-session-1", "callId":"verify-missing-input", "name":"pwsh"}
+        with patch("subprocess.Popen") as model:
+            self.adapter.handle("PreToolUse", dict(base, arguments={"command":"python -B -m unittest"}))
+            self.adapter.handle("PostToolUse", dict(base, result={"exit_code":0, "output":"Regression complete"}))
+        event = self.r.db.execute("SELECT * FROM events WHERE project=? AND conversation=? AND type='PostToolUse'",
+                                  (self.p, self.c)).fetchone()
+        self.assertNotIn("tool_input", json.loads(event["payload"]))
+        memory = self.r.db.execute("SELECT body FROM work_memories WHERE event_id=?", (event["id"],)).fetchone()
+        self.assertEqual(json.loads(memory[0])["type"], "verification")
+        operation = self.r.db.execute("SELECT conflict,observation FROM operations WHERE id=?", (event["operation"],)).fetchone()
+        self.assertEqual(tuple(operation), (0, "succeeded"))
+        model.assert_not_called()
+
     def test_session_start_user_prompt_and_reasoning_block_filtering(self):
         # 空白未挂载目录的会话安全跳过，不报错
         unbound = DshAdapter(self.r, workspace=None)

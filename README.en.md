@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.1.10 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.1.11 source version on `main`; the original v1.0.0 distribution lacks some newer capabilities. Existing users should read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -994,6 +994,13 @@ The server binds to `127.0.0.1` and validates the access code, Host and Origin. 
 On `main`, explicit `browser --review` opens [visual knowledge review](#visual-knowledge-review-main): inspect full candidate content, conditions, limitations, evidence and publication checks; then approve and publish, reject or defer one entry or a fixed selected batch. Actions recheck candidate and source versions and return per-item receipts. Repeated clicks do not republish knowledge. A model-call budget pause does not prevent explicit approval of existing historical candidates; cancellation and invalid identity retain their separate checks. Review starts no model, resumes no historical processing and grants no task execution permission.
 
 Separate `browser --admin-control` enables administrator settings and can accompany review mode. Only the user's Save and enable permits model work; reading the page or changing limits makes no model call. Distinct access codes scope browsing, approval and administration and are not written to the database or logs. See [administrator settings](#optional-administrator-executor) for models, pending work and shared limits.
+
+## Page messages and automatic work records (1.1.11)
+
+- Query limits, unavailable reads and expired page connections use the page's selected Chinese or English language, including after switching languages. Legacy English errors are supported; API status codes and original diagnostics remain available.
+- Administrator status refreshes every five seconds. Idle history pages refresh every thirty seconds; active history work keeps five-second refreshes and manual refresh remains immediate. Concurrent reads of the same page are shared and stale responses cannot replace newer pages. Database query limits remain unchanged; fewer repeated reads do not guarantee that every large view stays within budget.
+- When a tool completion omits its input, recorded attempts must match its operation, conversation, task, execution epoch, assignment and actor before recovering a missing test/build observation. Explicit or ambiguous inputs are not guessed. Classification records its source; the actual callback still determines the observed result.
+- Automatic summary windows prefer complete available public-message segments over their duplicate parent preview. Raw observations remain searchable; missing or truncated segments retain the parent. Formal candidates and automatic publication retain their existing evidence and authorization requirements.
 
 ## Startup and retrieval boundary fixes (1.1.10)
 

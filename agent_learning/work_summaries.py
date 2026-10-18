@@ -65,6 +65,29 @@ def _link(runtime, project, problem_id):
     return dict(row) if row else None
 
 
+# Apply before LIMIT: covered previews must not fill the bounded scan and hide
+# new work. The derived message index also finds already-consumed segments.
+_PUBLIC_PREVIEW_FILTER = (
+    "AND NOT (m.event_id IS json_extract(m.body,'$.public_message_id') AND EXISTS("
+    "SELECT COUNT(*) FROM work_memories pm JOIN events se ON se.project=pm.project AND se.id=pm.event_id "
+    "WHERE pm.project=m.project AND pm.conversation=m.conversation AND json_valid(pm.body) "
+    "AND json_extract(pm.body,'$.public_message_id')=m.event_id AND se.type='PublicMessageSegment' "
+    "AND pm.workspace_key=m.workspace_key AND pm.task_id IS m.task_id AND pm.task_revision IS m.task_revision AND pm.agent IS m.agent "
+    "AND json_extract(pm.body,'$.type')=json_extract(m.body,'$.type') "
+    "AND json_extract(pm.body,'$.assignment_id') IS json_extract(m.body,'$.assignment_id') "
+    "AND json_extract(pm.body,'$.task_write_version') IS json_extract(m.body,'$.task_write_version') "
+    "AND COALESCE(json_extract(pm.body,'$.completion'),'complete')='complete' "
+    "AND COALESCE(json_extract(pm.body,'$.coverage.truncated'),0)=0 "
+    "AND json_type(pm.body,'$.coverage.segment')='integer' AND json_type(pm.body,'$.coverage.segments')='integer' "
+    "AND json_extract(pm.body,'$.coverage.segments') BETWEEN 1 AND 55 "
+    "HAVING COUNT(*)=MIN(json_extract(pm.body,'$.coverage.segments')) "
+    "AND MIN(json_extract(pm.body,'$.coverage.segments'))=MAX(json_extract(pm.body,'$.coverage.segments')) "
+    "AND COUNT(DISTINCT json_extract(pm.body,'$.coverage.segment'))=MIN(json_extract(pm.body,'$.coverage.segments')) "
+    "AND MIN(json_extract(pm.body,'$.coverage.segment'))=0 "
+    "AND MAX(json_extract(pm.body,'$.coverage.segment'))=MIN(json_extract(pm.body,'$.coverage.segments'))-1)) "
+)
+
+
 class WorkSummaryMixin:
     def work_summary_policy(self, project):
         exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE name='work_summary_policies'").fetchone()
@@ -130,13 +153,14 @@ class WorkSummaryMixin:
                 "AND ((json_extract(j.value,'$.task_id') IS m.task_id AND json_extract(j.value,'$.task_revision') IS m.task_revision) "
                 "OR (s.task_id IS m.task_id AND s.task_revision IS m.task_revision)) "
                 "AND s.state IN ('pending','accepted','skipped','superseded') "
-                "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest) "
+                "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest "
+                "AND json_extract(j.value,'$.projection.classification_input_digest') IS json_extract(m.body,'$.classification_input_digest')) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
                 "JOIN admin_calls c ON c.project=s.project AND c.problem=s.problem_id "
                 "WHERE s.project=m.project AND s.host_scope=? AND j.value=m.id "
                 "AND c.state NOT IN ('not_started','deduplicated') AND c.retry_allowed=0 "
                 "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) "
-                "ORDER BY m.created,m.id LIMIT ?",
+                + _PUBLIC_PREVIEW_FILTER + "ORDER BY m.created,m.id LIMIT ?",
                 (project, conversation, checkout, task.get("id"), task.get("revision"), self._session_scope(),
                  self._session_scope(), self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
             # A full needs-evidence window must make room for a new observation.
@@ -165,7 +189,7 @@ class WorkSummaryMixin:
             overhead = 2200 if configured_max <= 8000 else 5000
             window_budget = max(0, configured_max - overhead)
             for row in rows:
-                signature = row["business_digest"] or row["id"]
+                signature = (row["business_digest"] or row["id"], json.loads(row["body"]).get("classification_input_digest"))
                 if signature not in seen:
                     cost = len(row["body"]) + 350
                     if cost > window_budget:

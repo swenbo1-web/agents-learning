@@ -140,6 +140,30 @@ class WorkSummaryWindowTests(unittest.TestCase):
         self.assertEqual(result["continuation"]["status"], "insufficient_delta")
         self.assertEqual(self.queue()["status"], "insufficient_delta")
 
+    def test_consumed_public_segments_do_not_requeue_the_parent_preview(self):
+        self.r.config["work_memory"].update(summary_max_events=4)
+        self.capture("Public optical analysis still requires hardware validation. " * 45)
+        result, calls = self.review(self.queue())
+        self.assertEqual(calls, 1)
+        self.assertEqual(result["status"], "candidate", result)
+        self.assertEqual(result["continuation"]["status"], "insufficient_delta", result)
+        self.assertEqual(self.queue()["status"], "insufficient_delta")
+
+    def test_covered_previews_cannot_starve_new_work_beyond_scan_limit(self):
+        self.r.config["work_memory"].update(summary_max_events=40)
+        self.r.config["admin"].update(max_input_chars=200000)
+        for index in range(9):
+            self.capture(f"Phase {index}: " + "Public optical results pending hardware validation. " * 30)
+        first, calls = self.review(self.queue())
+        self.assertEqual(calls, 1)
+        self.assertEqual(first["continuation"]["status"], "insufficient_delta", first)
+        self.r.config["work_memory"].update(summary_max_events=2)
+        self.capture("New optical correction with an explicit unit convention.", "UserPromptSubmit")
+        self.capture("New optical result still needs hardware validation.")
+        queued = self.queue()
+        self.assertEqual(queued["status"], "pending", queued)
+        self.assertEqual(queued["source_count"], 2, queued)
+
     def test_last_single_observation_continues_without_waiting_for_another_hook(self):
         self.sources()
         self.capture("The optical calibration still requires a separate hardware comparison.")

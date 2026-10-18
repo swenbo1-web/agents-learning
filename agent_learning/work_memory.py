@@ -39,6 +39,7 @@ def install_work_memory(runtime):
     for sql in (
         "CREATE TABLE IF NOT EXISTS work_memories(project TEXT NOT NULL,id TEXT NOT NULL,event_id TEXT,revision INTEGER NOT NULL,body TEXT NOT NULL,source_hash TEXT NOT NULL,workspace_key TEXT NOT NULL,conversation TEXT NOT NULL,task_id TEXT,task_revision INTEGER,agent TEXT,created REAL NOT NULL,PRIMARY KEY(project,id),UNIQUE(project,event_id))",
         "CREATE INDEX IF NOT EXISTS work_memories_scope ON work_memories(project,conversation,created)",
+        "CREATE INDEX IF NOT EXISTS work_public_message ON work_memories(project,conversation,json_extract(body,'$.public_message_id')) WHERE json_valid(body)",
         "CREATE TABLE IF NOT EXISTS work_event_checkouts(project TEXT NOT NULL,event_id TEXT NOT NULL,checkout_key TEXT NOT NULL,PRIMARY KEY(project,event_id))",
         "CREATE TABLE IF NOT EXISTS work_memory_sources(project TEXT NOT NULL,memory_id TEXT NOT NULL,event_id TEXT NOT NULL,source_hash TEXT NOT NULL,source_version TEXT NOT NULL,PRIMARY KEY(project,memory_id,event_id))",
         "CREATE VIRTUAL TABLE IF NOT EXISTS work_memory_fts USING fts5(project UNINDEXED,id UNINDEXED,text)",
@@ -89,8 +90,10 @@ def _write_snapshot(runtime):
 
 
 def _tool(payload):
-    native = payload.get("toolCall", {})
-    return payload.get("tool_name", native.get("name", "")), payload.get("tool_input", native.get("args", {}))
+    native = payload.get("toolCall")
+    native = native if isinstance(native, dict) else {}
+    name = payload.get("tool_name", native.get("name", ""))
+    return name if isinstance(name, str) else "", payload.get("tool_input", native.get("args", {}))
 
 
 def _learning_tool(name):
@@ -127,6 +130,30 @@ def _task_key(task_state):
 
 
 class WorkMemoryMixin:
+    def _work_verification_source(self, project, event, payload, raw, name):
+        """Classify a missing-input callback using only matching recorded attempts."""
+        if not name or not event.get("operation"):
+            return None
+        for data in (payload, raw):
+            native = data.get("toolCall")
+            if "tool_input" in data or isinstance(native, dict) and "args" in native:
+                return None
+        rows = self.db.execute(
+            "SELECT id,payload FROM events WHERE project=? AND operation=? AND type='PreToolUse' "
+            "AND conversation=? AND agent IS ? AND task_id IS ? AND task_revision IS ? "
+            "AND task_write_version IS ? AND execution_epoch IS ? AND assignment_id IS ? "
+            "AND json_extract(payload,'$.host_epoch') IS ? "
+            "AND rowid<(SELECT rowid FROM events WHERE id=?) ORDER BY rowid DESC LIMIT 3",
+            (project, event["operation"], event["conversation"], event.get("agent"), event.get("task_id"),
+             event.get("task_revision"), event.get("task_write_version"), event.get("execution_epoch"),
+             event.get("assignment_id"), payload.get("host_epoch"), event["id"])).fetchall()
+        if not rows or len(rows) >= 3:
+            return None
+        attempts = [_tool(json.loads(row["payload"])) for row in rows]
+        if any(tool != name for tool, _ in attempts) or len({_json(args) for _, args in attempts}) != 1:
+            return None
+        return rows[0]["id"] if _verification(*attempts[0]) else None
+
     def _work_capture_event(self, project, event_id, workspace, *, raw=None, native_context_hint=False):
         """调用者已保存事件和当前操作状态；不扩大历史读取范围。"""
         from .runtime import clean, clip, digest
@@ -174,12 +201,15 @@ class WorkMemoryMixin:
             return None
         kind = ""
         text = ""
+        classification_source = None
         if event["type"] == "PostToolUse":
             if event["outcome"] in {"failed", "conflict"}:
                 kind = "tool_failure"
             elif any(link["relation"] == "write_target" for link in links):
                 kind = "file_change"
             elif _verification(stored_name or name, stored_args):
+                kind = "verification"
+            elif (classification_source := self._work_verification_source(project, event, payload, raw, stored_name or name)):
                 kind = "verification"
             if not kind:
                 return None
@@ -217,6 +247,14 @@ class WorkMemoryMixin:
                 "assignment_id": event.get("assignment_id"),
                 "coverage": {"projection_only": True, "truncated": bool(payload.get("truncated"))
                              or len(text) > 1400, "full_original_available": not bool(payload.get("truncated"))}}
+        if classification_source:
+            body["classification_source_event"] = classification_source
+            source = self.db.execute("SELECT business_digest,payload FROM events WHERE project=? AND id=?",
+                                     (project, classification_source)).fetchone()
+            body["classification_input_digest"] = source["business_digest"] or digest([classification_source, source["payload"]])
+        if kind == "verification":
+            observed_input = _tool(json.loads(source["payload"]))[1] if classification_source else stored_args
+            body["tool_input_preview"] = clip(_json(observed_input), 350)
         if public:
             body.update(completion=completion, execution_authority=False,
                         public_message_id=payload.get("public_message_id", event_id))

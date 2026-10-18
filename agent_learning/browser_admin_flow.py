@@ -5,6 +5,7 @@ FLOW_HTML = '<section id="admin-flow" class="admin-details" aria-live="polite"><
 FLOW_JAVASCRIPT = r'''
 const historyReviewDrafts=new Map();
 let adminHistoryPage=null,adminHistoryError='',adminHistoryOffset=0;
+let adminHistoryUpdated=0,adminHistoryReadOffset=null,adminHistoryInFlight=null,adminHistorySerial=0;
 Object.assign(strings,{
 flowHistoryUnavailable:['History details are temporarily unavailable: {message}. Administrator settings remain available.','历史详情暂不可用：{message}。管理员设置仍可查看。'],
 flowHistoryReload:['Refresh history','刷新历史进度'],
@@ -144,10 +145,20 @@ async function saveAdminConfiguration(action){
  if(payload.auto_publish&&!state.adminData?.publication_policy?.enabled&&!window.confirm(t('autoPublishConfirm')))return;
  return sendAdminRequest('admin-control/configure',payload);
 }
-async function loadAdminHistory(){
+async function loadAdminHistory(force=true){
  const epoch=state.epoch,offset=adminHistoryOffset;
- try{const page=await api('admin-control/history',{offset,limit:3});if(epoch!==state.epoch||offset!==adminHistoryOffset)return;adminHistoryPage=page;adminHistoryError='';}
- catch(e){if(epoch!==state.epoch)return;adminHistoryError=e.message;}
- if(state.adminData)renderAdminRecovery(state.adminData);
+ const active=adminHistoryPage?.items?.some(item=>['materializing','reviewing'].includes(item.state)||item.review_request?.current&&['reserved','running'].includes(item.review_request.state));
+ const interval=active?5000:30000;
+ if(!force&&adminHistoryReadOffset===offset&&Date.now()-adminHistoryUpdated<interval)return;
+ if(adminHistoryInFlight?.epoch===epoch&&adminHistoryInFlight.offset===offset)return adminHistoryInFlight.promise;
+ const request={epoch,offset,serial:++adminHistorySerial};
+ request.promise=(async()=>{
+  const current=()=>epoch===state.epoch&&offset===adminHistoryOffset&&request.serial===adminHistorySerial;
+  try{const page=await api('admin-control/history',{offset,limit:3});if(!current())return;adminHistoryPage=page;adminHistoryError='';adminHistoryUpdated=Date.now();adminHistoryReadOffset=offset;}
+  catch(error){if(!current())return;adminHistoryError=error;adminHistoryUpdated=Date.now();adminHistoryReadOffset=offset;}
+  finally{if(adminHistoryInFlight===request)adminHistoryInFlight=null;}
+  if(current()&&state.adminData)renderAdminRecovery(state.adminData);
+ })();
+ adminHistoryInFlight=request;return request.promise;
 }
 '''

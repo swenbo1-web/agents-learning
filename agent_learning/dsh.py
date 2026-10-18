@@ -486,7 +486,14 @@ class DshAdapter:
                     return self._deny(event, "context_handle_dsh_conversation_mismatch") if event == "PreToolUse" else {}
             if event == "PreToolUse" and tool_name in _WRITE_LEARNING_TOOLS and "context_handle" not in tool_args:
                 return self._deny(event, "context_handle_required_for_dsh_write")
-            normalized.update(tool_name=tool_name, tool_input=tool_args, tool_use_id=call_id)
+            normalized.update(tool_name=tool_name, tool_use_id=call_id)
+            native_call = raw.get("toolCall")
+            input_present = any(key in raw for key in ("tool_input", "arguments", "args")) or (
+                isinstance(native_call, dict) and "args" in native_call)
+            # Omitted completion arguments are not an explicit empty input.
+            # Preserve that distinction for operation matching and observation capture.
+            if event == "PreToolUse" or input_present:
+                normalized["tool_input"] = tool_args
             if event == "PostToolUse":
                 normalized["tool_response"] = self._normalize_tool_response(tool_name, tool_args, raw)
 
