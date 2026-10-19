@@ -27,6 +27,8 @@ def response_schema():
 
 
 def install(runtime):
+    from .phase_window import install as install_windows
+    install_windows(runtime)
     runtime.db.execute("CREATE TABLE IF NOT EXISTS phase_review_policies("
         "project TEXT NOT NULL,host_scope TEXT NOT NULL,version INTEGER NOT NULL,body TEXT NOT NULL,"
         "updated REAL NOT NULL,PRIMARY KEY(project,host_scope))")
@@ -93,6 +95,9 @@ def configure(runtime, project, values, expected_version):
     runtime.db.execute("INSERT INTO phase_review_policies VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) "
         "DO UPDATE SET version=excluded.version,body=excluded.body,updated=excluded.updated",
         (project, runtime._session_scope(), current["version"] + 1, encode(merged), time.time()))
+    if merged["mode"] == "phase" and current["mode"] != "phase":
+        from .phase_window import activate
+        activate(runtime, project)
     if merged["mode"] == "phase":
         from .admin_usage import configure_project_budget, project_budget_policy
         configure_project_budget(runtime, project, {"max_reported_tokens_per_day": merged["daily_tokens"]},
@@ -137,13 +142,12 @@ def arm(runtime, project, conversation, previous, task):
     if (scope(runtime, project) is None or not previous or previous["status"] != "active"
             or task["status"] != "delivered" or previous["id"] != task["id"]):
         return
-    start = runtime.db.execute("SELECT updated FROM task_states WHERE project=? AND id=? AND revision=? "
-        "AND status='active' ORDER BY write_version DESC LIMIT 1",
-        (project, previous["id"], previous["revision"])).fetchone()
+    from .phase_window import start_time
+    start = start_time(runtime, project, conversation, task)
     runtime.db.execute("INSERT OR IGNORE INTO review_phases VALUES(?,?,?,?,?,?,?,?,?,?,'awaiting_stop',NULL,?,0)",
         (digest([project, runtime._session_scope(), task["id"], task["write_version"]])[:32], project,
          runtime._session_scope(), conversation, task["id"], task["revision"], task["write_version"],
-         start[0] if start else previous["updated"], runtime.session_epoch(), runtime.host_epoch(), time.time()))
+         start, runtime.session_epoch(), runtime.host_epoch(), time.time()))
 
 
 def seal(runtime, project, conversation, event_id):
@@ -171,7 +175,7 @@ def seal(runtime, project, conversation, event_id):
         "AND origin.id=json_extract(e.payload,'$.public_message_id') "
         "WHERE e.project=? AND e.conversation=? AND e.task_id=? AND e.task_revision=? AND e.agent IS NULL "
         "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
-        "AND e.type IN ('UserPromptSubmit','PublicMessageSegment','Stop') " + _PUBLIC_PREVIEW_FILTER)
+        "AND e.type IN ('UserPromptSubmit','PhaseRequestContext','PublicMessageSegment','Stop') " + _PUBLIC_PREVIEW_FILTER)
     params = (project, conversation, task["id"], task["revision"], row["start_time"], stop[0])
     refs = runtime.db.execute("SELECT e.id,length(e.payload) AS chars" + sources +
         " ORDER BY COALESCE(origin.created,e.created),e.created,e.rowid LIMIT 2000", params).fetchall()
@@ -194,6 +198,7 @@ def seal(runtime, project, conversation, event_id):
 
 
 def status(runtime, project):
+    from .phase_metrics import batch_metrics
     cfg = policy(runtime, project)
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='review_phases'").fetchone()
     current = (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())
@@ -208,7 +213,7 @@ def status(runtime, project):
     return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": {r[0]: r[1] for r in rows},
             "historical_boundary_phases": old, "source_scan_omitted": source_limit,
             "token_budget_is_estimated": True, "historical_imports_included": False,
-            "recent_batches": [{"id": row[0], "state": row[1],
+            "recent_batches": [{"id": row[0], "state": row[1], "metrics": batch_metrics(runtime, project, row[0]),
                 "coverage_complete": _result(row[2]).get("coverage_complete"),
                 "items": [{"problem_id": item.get("problem_id"), "status": item.get("status"),
                     "reason": item.get("reason", "")[:250], "candidate_ids": item.get("candidate_ids", [])}

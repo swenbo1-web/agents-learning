@@ -27,7 +27,10 @@ let latest={project_id:'project',host_scope:'codex:default',session_epoch:1,gove
  phase_review:{host_scope:'codex:default',policy:{mode:'phase',configured:true,version:4,every_phases:2,daily_tokens:1000000,max_input_tokens:40000,max_output_tokens:4000},
   phases:{awaiting_stop:1,sealed:3,queued:2,partial:1,completed:4},historical_boundary_phases:7,source_scan_omitted:9,
   recent_batches:[{id:'pending-batch-id',state:'pending',coverage_complete:null,items:[]},
-   {id:'partial-batch-id',state:'completed',coverage_complete:false,items:[{problem_id:'source-case-id',status:'candidate',candidate_ids:['c1','c2'],reason:'Sourced convention'}]},
+   {id:'partial-batch-id',state:'completed',coverage_complete:false,
+    metrics:{submitted_cases:2,evidence_records:7,call_count:1,candidate_count:2,published_count:0,
+     batch_elapsed_seconds:15.4,call_elapsed_seconds:13.132,input_tokens:11465,output_tokens:203,total_tokens:11668},
+    items:[{problem_id:'source-case-id',status:'candidate',candidate_ids:['c1','c2'],reason:'Sourced convention'}]},
    {id:'complete-batch-id',state:'completed',coverage_complete:true,items:[]}]}};
 const calls=[];let writeGate=null;
 context.fetch=async(url,options={})=>{
@@ -115,12 +118,16 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   let text=textOfTree(get('phase-results'));
   assert(text.includes('7 stages belong to an earlier login'));assert(text.includes('9 public sources exceeded'));
   assert(text.includes('Repeated Run now cannot extend'));assert(text.includes('candidates 2'));
+  assert(text.includes('2 submitted cases'));assert(text.includes('7 evidence records'));
+  assert(text.includes('1 execution attempts'));assert(text.includes('0 automatically published'));
+  assert(text.includes('13.132s'));assert(text.includes('not per-knowledge times'));assert(text.includes('11668'));
   const headings=get('phase-results').children.filter(node=>node.tagName==='DETAILS').map(node=>node.children[0].textContent);
   assert.match(headings[0],/Awaiting a review result/);assert(!headings[0].includes('Some sources'));
   assert.match(headings[1],/Some sources remain uncovered/);assert.match(headings[2],/Coverage complete/);
   language('zh-CN');text=textOfTree(get('phase-results'));
   assert(text.includes('旧登录或治理边界的 7 个阶段'));assert(text.includes('9 条公开来源超出'));
   assert(text.includes('等待审核结果'));assert(text.includes('候选 2 条'));assert(!text.includes('Awaiting a review result'));
+  assert(text.includes('本批送审 2 个案例'));assert(text.includes('7 条证据'));assert(text.includes('均不是单条知识耗时'));
   latest.project_budget_policy.values.max_batch_seconds=90;mount(latest);
   assert(textOfTree(get('phase-results')).includes('完整调用需预留 120秒'));
   language('en');assert(textOfTree(get('phase-results')).includes('A full call needs 120s'));

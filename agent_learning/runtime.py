@@ -1041,6 +1041,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 # 收敛本 root 的缺失回执；子 Agent 与已确认后台 running 操作保持各自生命周期。
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
                                 "AND agent IS NULL AND state='started'", (project, conversation))
+            if fresh and not agent_id and kind in {"UserPromptSubmit", "SessionStart"}:
+                from .phase_window import observe
+                observe(self, project, conversation, task, event)
             if fresh and kind == "UserPromptSubmit" and not agent_id and str(raw.get("prompt", "")).strip().lower().strip("。.!！ ") not in {
                     "继续", "继续吧", "接着", "continue", "go on"}:
                 self._execution_fence(project, conversation, "new_user_prompt")
