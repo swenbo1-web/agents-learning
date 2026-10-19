@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
+import uuid
 
 from .runtime import ContractError, clean, digest, encode
 
@@ -68,6 +69,11 @@ def install_storage(runtime):
         host_epoch INTEGER NOT NULL,query TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',
         created REAL NOT NULL,PRIMARY KEY(project,conversation,signature))""")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS dsh_receipt_raw ON dsh_receipts(project,conversation,raw_digest)")
+    runtime.db.execute("""CREATE TABLE IF NOT EXISTS dsh_bridge_bindings(
+        project TEXT NOT NULL,conversation TEXT NOT NULL,instance_id TEXT NOT NULL,
+        agent TEXT,host_epoch INTEGER NOT NULL,generation INTEGER NOT NULL,
+        token TEXT NOT NULL,created REAL NOT NULL,
+        PRIMARY KEY(project,conversation,instance_id))""")
 
 
 def _absolute(value):
@@ -343,6 +349,42 @@ class DshAdapter:
         return dict(self.runtime.db.execute("SELECT * FROM dsh_sessions WHERE project=? AND conversation=?",
                                             (project, conversation)).fetchone())
 
+    def _bridge_context(self, project, conversation, event, raw, agent_id, epoch, generation):
+        """Bind a native bridge instance once; a reset never rebinds old callbacks.
+
+        Legacy event producers work in the initial trajectory only. After a
+        trusted reset, a new bridge instance must explicitly start a session;
+        absent native identity is insufficient to guess the new trajectory.
+        """
+        instance = raw.get("dsh_bridge_instance")
+        supplied = raw.get("dsh_trajectory")
+        if instance is None and supplied is None:
+            if generation == 1:
+                return None
+            raise ContractError("dsh_trajectory_reconnect_required")
+        if not isinstance(instance, str) or not re.fullmatch(r"[a-f0-9-]{32,36}", instance):
+            raise ContractError("dsh_bridge_instance_required")
+        row = self.runtime.db.execute("SELECT * FROM dsh_bridge_bindings WHERE project=? AND conversation=? AND instance_id=?",
+                                      (project, conversation, instance)).fetchone()
+        if row and (row["host_epoch"], row["generation"], row["agent"]) != (epoch, generation, agent_id):
+            raise ContractError("dsh_trajectory_reconnect_required")
+        if not row:
+            if supplied is not None or generation > 1 and event not in {"SessionStart", "SubagentStart"}:
+                raise ContractError("dsh_trajectory_handshake_required")
+            token = uuid.uuid4().hex
+            self.runtime.db.execute("INSERT INTO dsh_bridge_bindings VALUES(?,?,?,?,?,?,?,?)",
+                (project, conversation, instance, agent_id, epoch, generation, token, time.time()))
+        else:
+            token = row["token"]
+            if supplied is None:
+                if event not in {"SessionStart", "SubagentStart"}:
+                    raise ContractError("dsh_trajectory_token_required")
+            elif (not isinstance(supplied, dict) or set(supplied) != {"generation", "token"}
+                  or type(supplied["generation"]) is not int or supplied["generation"] != generation
+                  or supplied["token"] != token):
+                raise ContractError("dsh_trajectory_reconnect_required")
+        return {"generation": generation, "token": token}
+
     def _orphan_fault(self, project, conversation, epoch, normalized):
         r = self.runtime
         current = r.task(project, conversation)
@@ -400,12 +442,18 @@ class DshAdapter:
         conversation = r.host_conversation(native_session)
         with r.transaction():
             epoch = self._epoch()
+            session_state = self._session_state(project, conversation)
+            generation = session_state["generation"]
+            try:
+                trajectory = self._bridge_context(project, conversation, event, raw, agent_id, epoch, generation)
+            except ContractError as exc:
+                if event == "PreToolUse":
+                    return self._deny(event, str(exc))
+                return {"systemMessage": "Agent Learning: " + str(exc), "dsh_reconnect_required": True}
             if not agent_id:
                 from .dsh_profile import bind_conversation_profile
                 bind_conversation_profile(r, project, conversation)
             r.bind_session(project, conversation)
-            session_state = self._session_state(project, conversation)
-            generation = session_state["generation"]
             phase_task_signature = self._task_signature(project, conversation)
 
         def phase_guard():
@@ -426,6 +474,8 @@ class DshAdapter:
             normalized["turn_id"] = f"turn-{turn_val}"
         elif isinstance(turn_val, str) and turn_val.strip():
             normalized["turn_id"] = turn_val.strip()[:200]
+        if generation > 1 and "turn_id" in normalized:
+            normalized["turn_id"] = f"dsh-generation-{generation}:" + normalized["turn_id"]
 
         queried_fault_signature = None
         if event == "SessionStart":
@@ -486,7 +536,8 @@ class DshAdapter:
                     return self._deny(event, "context_handle_dsh_conversation_mismatch") if event == "PreToolUse" else {}
             if event == "PreToolUse" and tool_name in _WRITE_LEARNING_TOOLS and "context_handle" not in tool_args:
                 return self._deny(event, "context_handle_required_for_dsh_write")
-            normalized.update(tool_name=tool_name, tool_use_id=call_id)
+            operation_id = digest(["dsh-generation", generation, call_id]) if generation > 1 else call_id
+            normalized.update(tool_name=tool_name, tool_use_id=operation_id)
             native_call = raw.get("toolCall")
             input_present = any(key in raw for key in ("tool_input", "arguments", "args")) or (
                 isinstance(native_call, dict) and "args" in native_call)
@@ -502,6 +553,8 @@ class DshAdapter:
             normalized, context_delivery=True, expected_epoch=epoch,
             _phase_guard=phase_guard, _context_outcome=context_outcome,
         )
+        if trajectory is not None:
+            result = dict(result, dsh_trajectory=trajectory)
         if event == "PostToolUse" and normalized["tool_response"].get("isError") is True and not agent_id:
             with r.transaction():
                 self._assert_phase(project, conversation, epoch, generation)

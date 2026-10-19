@@ -58,6 +58,10 @@ def install(runtime):
         "signature TEXT NOT NULL,cursor TEXT,deferred INTEGER NOT NULL DEFAULT 0,exhausted INTEGER NOT NULL DEFAULT 0)")
     if "last_checked" not in {row[1] for row in runtime.db.execute("PRAGMA table_info(phase_scan_progress)")}:
         runtime.db.execute("ALTER TABLE phase_scan_progress ADD COLUMN last_checked REAL NOT NULL DEFAULT 0")
+    from .phase_source_changes import install as install_source_changes
+    from .phase_seal_recovery import install as install_seal_recovery
+    install_source_changes(runtime)
+    install_seal_recovery(runtime)
 
 
 def policy(runtime, project):
@@ -107,7 +111,7 @@ def configure(runtime, project, values, expected_version):
         configure_project_budget(runtime, project, {"max_reported_tokens_per_day": merged["daily_tokens"]},
                                  expected_version=project_budget_policy(runtime, project)["version"])
     for row in runtime.db.execute("SELECT problem_id,phase_ids FROM phase_review_batches b WHERE project=? "
-        "AND host_scope=? AND state='pending' AND NOT EXISTS(SELECT 1 FROM admin_calls a WHERE a.problem=b.problem_id "
+        "AND host_scope=? AND state IN ('pending','executor_waiting') AND NOT EXISTS(SELECT 1 FROM admin_calls a WHERE a.problem=b.problem_id "
         "AND a.state NOT IN ('not_started','deduplicated'))", (project, runtime._session_scope())).fetchall():
         runtime.db.execute("UPDATE phase_review_batches SET state='cancelled' WHERE problem_id=?", (row[0],))
         runtime.db.execute("UPDATE problems SET status='superseded' WHERE id=?", (row[0],))
@@ -155,7 +159,6 @@ def arm(runtime, project, conversation, previous, task):
 
 
 def seal(runtime, project, conversation, event_id):
-    from .runtime import encode
     if scope(runtime, project) is None:
         return
     task = runtime.task(project, conversation)
@@ -167,10 +170,28 @@ def seal(runtime, project, conversation, event_id):
         task["revision"], runtime.session_epoch(), runtime.host_epoch())).fetchone()
     if not row:
         return
-    # Bound selection to the real stage. Old delivered tasks cannot generate new phases.
-    stop = runtime.db.execute("SELECT created FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
-    if not stop:
-        return
+    from .phase_seal_recovery import pinned_event, complete
+    event_id = pinned_event(runtime, project, row["id"], event_id)
+    if seal_phase(runtime, project, row, event_id):
+        complete(runtime, project, row["id"], event_id)
+        prepare(runtime, project)
+
+
+def seal_phase(runtime, project, phase, event_id):
+    """Seal one fixed original task/Stop, without recursively preparing work."""
+    row = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND id=?",
+                             (project, phase["id"])).fetchone()
+    if (not row or row["state"] != "awaiting_stop" or row["host_scope"] != runtime._session_scope()
+            or row["session_epoch"] != runtime.session_epoch() or row["governance_epoch"] != runtime.host_epoch()):
+        return False
+    task = runtime.task_snapshot(project, row["task_id"], row["task_revision"], row["delivery_version"])
+    stop = runtime.db.execute("SELECT * FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
+    if (not task or task["status"] != "delivered" or not stop or stop["type"] != "Stop" or stop["agent"]
+            or stop["task_status"] != "delivered"
+            or (stop["conversation"], stop["task_id"], stop["task_revision"], stop["task_write_version"])
+               != (row["conversation"], row["task_id"], row["task_revision"], row["delivery_version"])
+            or stop["created"] < row["start_time"]):
+        return False
     from .work_summaries import _PUBLIC_PREVIEW_FILTER
     # Segments are captured AFTER their parent Stop. Use the original message
     # timestamp and prefer complete segments to the duplicated/truncated preview.
@@ -180,7 +201,7 @@ def seal(runtime, project, conversation, event_id):
         "WHERE e.project=? AND e.conversation=? AND e.task_id=? AND e.task_revision=? AND e.agent IS NULL "
         "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
         "AND e.type IN ('UserPromptSubmit','PhaseRequestContext','PublicMessageSegment','Stop') " + _PUBLIC_PREVIEW_FILTER)
-    params = (project, conversation, task["id"], task["revision"], row["start_time"], stop[0])
+    params = (project, row["conversation"], task["id"], task["revision"], row["start_time"], stop["created"])
     refs = runtime.db.execute("SELECT e.id,length(e.payload) AS chars" + sources +
         " ORDER BY COALESCE(origin.created,e.created),e.created,e.rowid LIMIT 2000", params).fetchall()
     chunks, chunk, chars = [], [], 0
@@ -193,12 +214,12 @@ def seal(runtime, project, conversation, event_id):
     if chunk:
         chunks.append(chunk)
     for index, chunk in enumerate(chunks):
-        runtime._problem(project, conversation, "阶段公开记录：" + task["goal"][:240] + " [" + row["id"] + "] part " + str(index),
+        runtime._problem(project, row["conversation"], "阶段公开记录：" + task["goal"][:240] + " [" + row["id"] + "] part " + str(index),
                          "mixed", chunk, task_binding=task)
     total = runtime.db.execute("SELECT COUNT(*)" + sources, params).fetchone()[0]
     runtime.db.execute("UPDATE review_phases SET state='sealed',event_id=?,omitted_sources=? WHERE id=?",
                        (event_id, max(0, total-len(refs)), row["id"]))
-    prepare(runtime, project)
+    return True
 
 
 def status(runtime, project):
@@ -219,16 +240,27 @@ def status(runtime, project):
         "SELECT 1 FROM phase_review_batches b,json_each(CASE WHEN json_valid(b.phase_ids) THEN b.phase_ids ELSE '[]' END) ids "
         "WHERE b.project=p.project AND b.host_scope=p.host_scope AND b.session_epoch=p.session_epoch "
         "AND b.governance_epoch=p.governance_epoch AND b.state='blocked' AND ids.value=p.id)", current).fetchone()[0] if exists else 0
+    executor_waiting = runtime.db.execute("SELECT COUNT(*) FROM phase_review_batches WHERE project=? AND host_scope=? "
+        "AND session_epoch=? AND governance_epoch=? AND state='executor_waiting'", current).fetchone()[0] if exists else 0
+    seal_table = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='phase_seal_requests'").fetchone()
+    local_seal_pending = runtime.db.execute("SELECT COUNT(*) FROM phase_seal_requests q JOIN review_phases p "
+        "ON p.id=q.phase_id AND p.project=q.project AND p.host_scope=q.host_scope "
+        "AND p.session_epoch=q.session_epoch AND p.governance_epoch=q.governance_epoch "
+        "WHERE q.project=? AND q.host_scope=? AND q.session_epoch=? AND q.governance_epoch=? "
+        "AND p.state='awaiting_stop'", current).fetchone()[0] if exists and seal_table else 0
     counts = {r[0]: r[1] for r in rows}
     return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": counts,
             "locally_deferred_phase_count": counts.get("routine_deferred", 0),
+            "local_seal_pending_count": local_seal_pending,
+            "executor_waiting_batch_count": executor_waiting,
             "blocked_phase_count": blocked, "waiting_phase_count": counts.get("sealed", 0) + max(0, counts.get("queued", 0) - blocked),
             "historical_boundary_phases": old, "source_scan_omitted": source_limit,
             "token_budget_is_estimated": True, "historical_imports_included": False,
             "recent_batches": [{"id": row[0], "state": row[1], "metrics": batch_metrics(runtime, project, row[0]),
                 "coverage_complete": _result(row[2]).get("coverage_complete"),
                 "items": [{"problem_id": item.get("problem_id"), "status": item.get("status"),
-                    "reason": item.get("reason", "")[:250], "candidate_ids": item.get("candidate_ids", [])}
+                    "reason": item.get("reason", "")[:250], "candidate_ids": item.get("candidate_ids")
+                        or ([item["candidate_id"]] if item.get("candidate_id") else [])}
                     for item in _result(row[2]).get("items", [])[:8] if isinstance(item, dict)]} for row in recent]}
 
 
@@ -293,8 +325,18 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     cfg = policy(runtime, project)
     if cfg["mode"] != "phase":
         return
+    from .phase_seal_recovery import recover as recover_seals
+    from .phase_source_changes import prepare as prepare_source_changes
+    recover_seals(runtime, project, limit=8, force=force)
+    prepare_source_changes(runtime, project)
+    from .admin_providers import executor_availability
+    from .admin_queue import executor_backoff
+    def executor_ready(conversation):
+        plan = runtime.resolve_admin_executor(project, conversation)
+        return executor_availability(plan)["cli_available"] and not executor_backoff(runtime, project, plan)
     for old in runtime.db.execute("SELECT b.* FROM phase_review_batches b WHERE b.project=? AND b.host_scope=? "
-        "AND b.state='pending'", (project, runtime._session_scope())).fetchall():
+        "AND b.state IN ('pending','executor_waiting') AND b.session_epoch=? AND b.governance_epoch=?",
+        (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())).fetchall():
         bad = runtime.db.execute("SELECT 1 FROM admin_calls WHERE problem=? AND state IN "
             "('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') AND retry_allowed=0", (old["problem_id"],)).fetchone()
         if bad:
@@ -324,6 +366,8 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                             break
             except ValueError:
                 # A missing current executor is not permission to select another model.
+                runtime.db.execute("UPDATE phase_review_batches SET state='executor_waiting' WHERE problem_id=?",
+                                   (old["problem_id"],))
                 continue
         if changed and not active:
             runtime.db.execute("UPDATE phase_review_batches SET state='stale' WHERE problem_id=?", (old["problem_id"],))
@@ -331,6 +375,13 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             for identity in json.loads(old["phase_ids"]):
                 runtime.db.execute("UPDATE review_phases SET state='sealed' WHERE id=? AND state='queued'", (identity,))
                 runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
+        elif not active:
+            try:
+                ready = executor_ready(json.loads(old["packet"])["executor_conversation"])
+            except ValueError:
+                ready = False
+            runtime.db.execute("UPDATE phase_review_batches SET state=? WHERE problem_id=?",
+                ("pending" if ready else "executor_waiting", old["problem_id"]))
     # Retained evidence-wait stages may remain partial indefinitely. Rotate the
     # bounded check window so their first page cannot hide later real updates.
     phases = runtime.db.execute("SELECT p.* FROM review_phases p LEFT JOIN phase_scan_progress scan ON scan.phase_id=p.id "
@@ -366,6 +417,8 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 phase = dict(phase, state="continuing")
         try:
             plan = runtime.resolve_admin_executor(project, phase["conversation"])
+            if not executor_availability(plan)["cli_available"] or executor_backoff(runtime, project, plan):
+                continue
         except ValueError:
             continue
         key = digest(_executor_semantics(plan))

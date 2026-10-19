@@ -72,6 +72,17 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert.match(get('phase-progress').textContent,/unsettled reservations: 20000/);
   assert(legacyIds.every(id=>get(id).disabled));assert(phaseIds.every(id=>!get(id).disabled));
   assert.equal(get('admin-save').disabled,false);
+ }else if(scenario==='local_recovery_notes'){
+  const value=clone(latest);value.phase_review.local_seal_pending_count=2;value.phase_review.executor_waiting_batch_count=1;
+  mount(value);language('en');let text=textOfTree(get('phase-results'));
+  assert(text.includes('2 delivered stages await local sealing recovery'));
+  assert(text.includes('1 batches await their original executor'));
+  assert.match(get('phase-progress').textContent,/completed: 4/);
+  language('zh-CN');text=textOfTree(get('phase-results'));
+  assert(text.includes('2 个已交付阶段等待本地封存恢复'));
+  assert(text.includes('1 个批次等待原执行器'));
+  mount(clone(latest));text=textOfTree(get('phase-results'));
+  assert(!text.includes('等待本地封存恢复'));assert(!text.includes('批次等待原执行器'));
  }else if(scenario==='locally_deferred_language_and_old_response'){
   const base=clone(latest);
   for(const variant of ['count','phase_fallback','zero','old']){
@@ -140,6 +151,7 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert.equal(disabled.project_limits.max_reported_tokens_per_day,undefined);
   assert.equal(disabled.publication_mode,'tiered');assert.equal(calls.filter(call=>call.options.method==='POST').length,0);
  }else if(scenario==='boundary_coverage_language'){
+  language('en');assert(run("t('check_candidate_reference_source_blocked')").includes('source lineage requires review'));
   let text=textOfTree(get('phase-results'));
   assert(text.includes('7 stages belong to an earlier login'));assert(text.includes('9 public sources exceeded'));
   assert(text.includes('Repeated Run now cannot extend'));assert(text.includes('candidates 2'));
@@ -150,6 +162,7 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert.match(headings[0],/Awaiting a review result/);assert(!headings[0].includes('Some sources'));
   assert.match(headings[1],/Some sources remain uncovered/);assert.match(headings[2],/Coverage complete/);
   language('zh-CN');text=textOfTree(get('phase-results'));
+  assert(run("t('check_candidate_reference_source_blocked')").includes('候选来源链需要复核'));
   assert(text.includes('旧登录或治理边界的 7 个阶段'));assert(text.includes('9 条公开来源超出'));
   assert(text.includes('等待审核结果'));assert(text.includes('候选 2 条'));assert(!text.includes('Awaiting a review result'));
   assert(text.includes('本批送审 2 个案例'));assert(text.includes('7 条证据'));assert(text.includes('均不是单条知识耗时'));
@@ -186,6 +199,7 @@ class PhaseBrowserUITests(unittest.TestCase):
 
     def test_hydration_and_token_status_replace_call_allowance_cards(self): self.scenario("hydrate_and_tokens")
     def test_local_deferral_is_separate_localized_and_compatible_with_old_responses(self): self.scenario("locally_deferred_language_and_old_response")
+    def test_local_seal_and_executor_waits_are_localized_and_optional(self): self.scenario("local_recovery_notes")
     def test_save_posts_project_token_policy_and_frozen_versions_once(self): self.scenario("save_payload")
     def test_pending_save_stays_locked_across_refresh_and_language_change(self): self.scenario("pending_lock")
     def test_stage_fields_preserve_draft_and_legacy_controls_follow_selected_mode(self): self.scenario("draft_and_legacy_lock")

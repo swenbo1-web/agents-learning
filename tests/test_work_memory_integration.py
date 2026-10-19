@@ -112,7 +112,7 @@ class WorkMemoryIntegrationTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='work_memories'").fetchone())
         for _ in range(2):
             with contextlib.closing(Runtime(self.home, config={})) as upgraded:
-                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
+                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 25)
                 self.assertEqual(upgraded.read(self.p, knowledge["knowledge_id"])["revision"], knowledge["revision"])
                 self.assertEqual(upgraded.task(self.p, "chat")["id"], self.task["id"])
                 self.assertEqual(upgraded.review_packet(self.p, problem["id"])["problem"]["revision"], problem["revision"])

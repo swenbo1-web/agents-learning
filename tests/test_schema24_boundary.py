@@ -76,7 +76,7 @@ class Schema24BoundaryTests(unittest.TestCase):
         epoch = self.r.session_epoch()
         with patch("subprocess.Popen", side_effect=AssertionError("Migration cannot launch a model")):
             upgraded = self.open_runtime()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 25)
         self.assertEqual(self.snapshot(upgraded), before)
         self.assertGreater(upgraded.session_epoch(), epoch)
         self.assertEqual(upgraded.session_epoch(), upgraded.host_epoch())
@@ -102,7 +102,7 @@ class Schema24BoundaryTests(unittest.TestCase):
         mark = runtime_storage.mark_storage_ready
 
         def interrupted(runtime):
-            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 24)
+            self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 25)
             self.assertGreater(runtime.session_epoch(), epoch)
             mark(runtime)
             raise sqlite3.OperationalError("Simulated protocol-24 commit interruption")
@@ -117,9 +117,9 @@ class Schema24BoundaryTests(unittest.TestCase):
         self.assertEqual(tuple(self.r.db.execute("SELECT * FROM runtime_storage_receipt").fetchone()), receipt)
         self.assertTrue(self.r.access_context(self.p, self.handle))
 
-    def test_v25_is_rejected_before_any_initializer_or_authority_write(self):
+    def test_v26_is_rejected_before_any_initializer_or_authority_write(self):
         self.old_database()
-        self.r.db.execute("PRAGMA user_version=25")
+        self.r.db.execute("PRAGMA user_version=26")
         before = self.snapshot()
         epoch = self.r.session_epoch()
         with patch.object(Runtime, "_initialize_storage") as initialize, patch("subprocess.Popen") as launch:
@@ -127,7 +127,7 @@ class Schema24BoundaryTests(unittest.TestCase):
                 self.open_runtime()
             initialize.assert_not_called()
             launch.assert_not_called()
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 25)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 26)
         self.assertEqual(self.r.session_epoch(), epoch)
         self.assertEqual(self.snapshot(), before)
 

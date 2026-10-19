@@ -103,8 +103,12 @@ def publication_gate(runtime, project, packet, body, proposal, *, mode="verified
                     or not source.get("source_key") or not source.get("content_hash")):
                 return "reference requires archived provenance"
             public_source = True
-        elif row["type"] not in {"PreToolUse", "PostToolUse"} and row["outcome"] == "reported":
-            public_source = True
+        else:
+            from .public_observations import reference_public
+            if reference_public(row["type"], payload, row["outcome"]):
+                public_source = True
+            elif row["type"] in {"UserPromptSubmit", "Stop", "PublicMessageSegment"}:
+                return "reference requires complete public source evidence"
     return None if public_source else "reference requires public source evidence"
 
 

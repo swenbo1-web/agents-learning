@@ -118,6 +118,8 @@ def install(runtime):
             "coalesce(json_extract(body,'$.content'),'') || ' ' || coalesce(json_extract(body,'$.applicability'),'') "
             "|| ' ' || coalesce(json_extract(body,'$.limitations'),'') FROM candidates WHERE status='candidate'")
         runtime.db.execute("INSERT OR REPLACE INTO candidate_reference_index_state VALUES(1,?)", (INDEX_VERSION,))
+    from .knowledge_lineage import install as install_knowledge_lineage
+    install_knowledge_lineage(runtime)
 
 
 def policy(runtime, project):
@@ -889,13 +891,21 @@ def _lineage_risk(runtime, project, event_id, ancestors=(), evaluation=None):
         reason = current["reason"]
         # A successful publication redirects provenance. It does not resurrect
         # a candidate if that formal revision was later revoked or superseded.
+        formal = None
         if reason == "candidate_published":
             redirect = current.get("redirect")
-            bad = not redirect or not redirect["active"]
+            from .knowledge_lineage import published_reference_state
+            formal = published_reference_state(runtime, project, redirect, evaluation,
+                                               (*ancestors, row["candidate_id"]))
+            bad = formal["blocked"]
+            if bad:
+                reason = formal["reason"]
         else:
             bad = reason is not None
         blocked |= bad or evaluation.exhausted
-        refs.append({**dict(row), "reason": reason, "blocked": bad})
+        refs.append({**dict(row), "reason": reason, "blocked": bad,
+                     "current_version": current.get("reference_version"),
+                     **({"formal_state": formal} if formal is not None else {})})
         if evaluation.exhausted:
             break
     return {"blocked": blocked, "reason": "candidate_reference_lineage_risk" if blocked else None,

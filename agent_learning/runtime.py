@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(25)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(26)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(25)):
+        if version not in set(range(26)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -340,9 +340,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_admin_responses(self)
             from .history_response_recovery import install as install_history_response_recovery
             install_history_response_recovery(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 24:
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 25:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=24")
+            self.db.execute("PRAGMA user_version=25")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
@@ -881,6 +881,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                      if turn and kind in {"UserPromptSubmit", "Stop"} else None)
         payload = {k: raw[k] for k in ("tool_name", "tool_input", "tool_response", "prompt", "source",
                                      "last_assistant_message", "agent_type", "turn_id") if k in raw}
+        if kind in {"UserPromptSubmit", "Stop"}:
+            from .public_observations import observed_public
+            payload.update({key: raw[key] for key in ("completion", "capture_coverage", "truncated",
+                "prompt_truncated", "last_assistant_message_truncated") if key in raw})
+            if observed_public(kind, payload):
+                outcome = "reported"
         payload["agent_identity_known"] = bool(raw.get("agent_id"))
         capture_digest = digest(clean(payload))
         legacy_event_key = event_key
@@ -1243,6 +1249,17 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
         captured = False
+        if summarize and conversation:
+            self.db.execute("SAVEPOINT phase_seal_registration")
+            try:
+                from .phase_seal_recovery import request
+                request(self, project, event_id, workspace, conversation, raw)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                self.db.execute("ROLLBACK TO phase_seal_registration")
+                self.db.execute("RELEASE phase_seal_registration")
+                self._metric(project, "phase_seal_registration_failed")
+            else:
+                self.db.execute("RELEASE phase_seal_registration")
         self.db.execute("SAVEPOINT work_capture_extension")
         try:
             self._work_capture_event(project, event_id, workspace, raw=raw,

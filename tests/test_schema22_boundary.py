@@ -32,7 +32,7 @@ class Schema22BoundaryTests(unittest.TestCase):
         with patch("subprocess.Popen", side_effect=AssertionError("upgrade cannot start a model")):
             upgraded = Runtime(self.r.home, config=copy.deepcopy(self.r.config))
         self.addCleanup(upgraded.close)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 25)
         self.assertEqual(tuple(upgraded.db.execute("SELECT * FROM candidates WHERE id=?", (identity,)).fetchone()), original)
         self.assertEqual(refs.policy(upgraded, self.p), policy)
         self.assertGreater(upgraded.session_epoch(), epoch)

@@ -51,6 +51,13 @@ def publication_lineage_state(runtime, project, body, knowledge_id=None, candida
                        "message": held})
     result = {"issues": issues, "matches": [], "feedback": [], "candidate_concerns": concerns,
               "equivalent_candidate_hold": held}
+    from .knowledge_lineage import source_state
+    lineage = source_state(runtime, project, body.get("evidence_refs", ()),
+                           ancestors=(candidate_id,) if candidate_id else ())
+    result["source_lineage"] = lineage
+    if lineage["blocked"]:
+        issues.append({"code": "candidate_reference_source_blocked",
+                       "message": "Candidate source lineage requires review; approval does not resolve upstream concerns"})
     if knowledge_id is not None:
         return result
     rows = runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision "

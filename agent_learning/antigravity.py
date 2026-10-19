@@ -12,6 +12,7 @@ import sqlite3
 import time
 
 from .runtime import ContractError, clean, clip, digest, encode
+from .public_observations import observed_public
 
 
 EVENTS = {"PreInvocation", "PreToolUse", "PostToolUse", "Stop"}
@@ -327,7 +328,8 @@ class AntigravityAdapter:
                 event_id=key, task_id=task["id"] if task else None,
                 task_revision=task["revision"] if task else None,
                 task_write_version=task["write_version"] if task else None,
-                execution_epoch=task["execution_epoch"] if task else None)
+                execution_epoch=task["execution_epoch"] if task else None,
+                outcome="reported" if observed_public("UserPromptSubmit", payload) else "unknown")
             if fresh:
                 self.runtime._work_capture_safely(project, item["id"], str(self.workspace),
                                                  raw=payload, conversation=conversation)
@@ -361,7 +363,8 @@ class AntigravityAdapter:
                         task_id=task["id"] if task else None,
                         task_revision=task["revision"] if task else None,
                         task_write_version=task["write_version"] if task else None,
-                        execution_epoch=task["execution_epoch"] if task else None)
+                        execution_epoch=task["execution_epoch"] if task else None,
+                        outcome="reported" if observed_public("Stop", payload) else "unknown")
                     if public_fresh:
                         if complete:
                             self.runtime._capture_delivery(project, conversation, task, public, payload)

@@ -19,6 +19,8 @@ import {syncBuiltinESMExports} from 'node:module';
 import childProcess from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const calls = [];
+let nativeGeneration = 1;
+const bridgeBindings = new Map();
 childProcess.spawn = (_python, argv, options) => {
   const child = new EventEmitter();
   child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
@@ -28,9 +30,22 @@ childProcess.spawn = (_python, argv, options) => {
       const event = argv[argv.indexOf('--event') + 1];
       const payload = JSON.parse(input);
       calls.push({event, payload, workspace: options.cwd});
-      const result = event === 'UserPromptSubmit'
+      let result = event === 'UserPromptSubmit'
         ? {hookSpecificOutput:{additionalContext:'context_handle=synthetic-handle; matched project knowledge'}}
         : event === 'SessionStart' ? {hookSpecificOutput:{additionalContext:'context_handle=old-startup; initial context'}} : {};
+      if (scenario === 'trajectory-contract') {
+        assert.match(payload.dsh_bridge_instance,/^[0-9a-f-]{36}$/);
+        let binding = bridgeBindings.get(payload.dsh_bridge_instance);
+        if (!binding) {
+          assert.equal(event,'SessionStart');
+          assert.equal(payload.dsh_trajectory,undefined);
+          binding = {generation:nativeGeneration,token:String(nativeGeneration).repeat(32)};
+          bridgeBindings.set(payload.dsh_bridge_instance,binding);
+        }
+        result = binding.generation !== nativeGeneration
+          ? {dsh_reconnect_required:true}
+          : {...result,dsh_trajectory:binding};
+      }
       child.stdout.emit('data', Buffer.from(JSON.stringify(result)));
       child.emit('close', 0);
     };
@@ -76,7 +91,28 @@ const text = value => [{type:'text',text:value}];
 const scenario = process.argv[2];
 const owner = session('session-a');
 
-if (scenario === 'startup-race') {
+if (scenario === 'trajectory-contract') {
+  await handlers.get('agent/created')({agent:{id:owner.id}});
+  await step(owner,1,1,[user('u1','first requirement')]);
+  const original = calls[0].payload.dsh_bridge_instance;
+  assert.equal(calls[1].payload.dsh_bridge_instance,original);
+  assert.deepEqual(calls[1].payload.dsh_trajectory,{generation:1,token:'1'.repeat(32)});
+  nativeGeneration = 2; // An explicit backend reset; no implicit re-handshake.
+  await step(owner,2,1,[user('u2','late old bridge requirement')]);
+  await step(owner,3,1,[user('u3','still old bridge requirement')]);
+  for (const call of calls.slice(2)) {
+    assert.equal(call.payload.dsh_bridge_instance,original);
+    assert.equal(call.payload.dsh_trajectory.generation,1);
+  }
+  handlers.get('session/disposed')(owner);
+  const replacement = session('session-a');
+  await handlers.get('agent/created')({agent:{id:replacement.id}});
+  await step(replacement,1,1,[user('new','new trajectory requirement')]);
+  const restart = calls.at(-2).payload;
+  assert.notEqual(restart.dsh_bridge_instance,original);
+  assert.equal(restart.dsh_trajectory,undefined);
+  assert.equal(calls.at(-1).payload.dsh_trajectory.generation,2);
+} else if (scenario === 'startup-race') {
   const startup = handlers.get('agent/created')({agent:{id:owner.id}});
   const decision = await step(owner,1,1,[user('u','current requirement')]);
   await startup;
@@ -260,6 +296,9 @@ class DshCaptureBridgeTests(unittest.TestCase):
 
     def test_uninstalled_project_never_dispatches_capture_or_retrieval(self):
         self.run_scenario("workspace-boundary")
+
+    def test_native_bridge_carries_trajectory_and_never_rebinds_after_reset(self):
+        self.run_scenario("trajectory-contract")
 
 
 if __name__ == "__main__":

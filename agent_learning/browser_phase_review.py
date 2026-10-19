@@ -29,6 +29,10 @@ phaseBatch:['Batch {id}: {state}','批次 {id}：{state}'],phaseItem:['Case {id}
 phaseQueueNote:['These stages belong to this host and account boundary. Legacy cases, work summaries and historical units are separate; they are not the stage batch queue.','这里仅统计当前宿主与登录边界的阶段；旧逐案、工作摘要和历史资料分别统计，不等于阶段批次排队。'],
 phaseLocallyDeferred:['Pure status checks retained locally: {n} stages; some material remains unreviewed. Only the remaining material has not been submitted; these stages are not complete. A later normal stage may include it within its remaining budget; use “Check and continue” here to request review.','纯状态检查本地暂存：{n} 个阶段，仍有未审核资料。仅余下资料尚未送审，不算审核完成。后续正常阶段可按剩余预算合批；可在此页点击“检查并继续整理”主动补审。'],
 routine_deferred:['Retained locally; some material remains unreviewed','本地暂存，仍有未审核资料'],
+executor_waiting:['Waiting for executor','等待执行器'],
+check_candidate_reference_source_blocked:['Candidate source lineage requires review; approval does not resolve upstream concerns.','候选来源链需要复核；批准此条不会解决上游来源的疑点。'],
+phaseSealPending:['{n} delivered stages await local sealing recovery. Their original Stop boundaries are retained; this is not model review.','{n} 个已交付阶段等待本地封存恢复；保留原 Stop 边界，尚未送入模型审核。'],
+phaseExecutorWaiting:['{n} batches await their original executor. Other available model groups can continue; existing call locks remain in force.','{n} 个批次等待原执行器；其他可用模型分组可继续，原调用锁保持有效。'],
 phaseBatchCounts:['This batch: {cases} submitted cases · {evidence} evidence records · {calls} execution attempts · {candidates} candidates · {published} automatically published.','本批送审 {cases} 个案例 · {evidence} 条证据 · {calls} 次执行尝试 · 生成 {candidates} 条候选 · 自动发布 {published} 条。'],
 phaseBatchTime:['Batch elapsed {batch}s (includes waiting); recorded call processing {call}s (includes startup and local checks). These are not per-knowledge times.','批次经过 {batch} 秒（含等待）；调用处理 {call} 秒（含启动与本地检查）。均不是单条知识耗时。'],
 phaseBatchTokens:['Host-reported input {input} · output {output} · total {total} tokens. Missing usage stays unknown; execution attempts are not proof of paid requests.','宿主上报输入 {input} · 输出 {output} · 合计 {total} token。未上报用量保持未知；执行尝试数不等于确认计费次数。']
@@ -45,4 +49,6 @@ renderAdminState=function(){basePhaseRender();const data=state.adminData,view=da
 for(const id of PHASE_FIELDS)$(id).addEventListener('change',()=>{state.adminDirty=true;renderAdminState();controls();});
 const basePhaseControls=controls;
 controls=function(){basePhaseControls();if(!state.adminData?.phase_review||$('phase-mode').value!=='phase')return;for(const id of ['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'])$(id).disabled=true;};
+const basePhaseRecoveryRender=renderAdminState;
+renderAdminState=function(){basePhaseRecoveryRender();const view=state.adminData?.phase_review;if(!view)return;const area=$('phase-results');if(view.local_seal_pending_count>0)area.append(node('p',t('phaseSealPending',{n:view.local_seal_pending_count}),'note'));if(view.executor_waiting_batch_count>0)area.append(node('p',t('phaseExecutorWaiting',{n:view.executor_waiting_batch_count}),'note'));};
 '''

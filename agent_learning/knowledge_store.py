@@ -355,7 +355,8 @@ class KnowledgeStoreMixin:
             self._queue_sync(project, knowledge_id, expected_revision, body)
             return response
 
-    def _source_evidence(self, project, refs, problem_id=None):
+    def _source_evidence(self, project, refs, problem_id=None, *, _lineage_evaluation=None):
+        from .knowledge_lineage import source_state
         evidence = []
         for ref in dict.fromkeys(refs):
             row = self.db.execute("SELECT e.type,e.outcome,e.created,e.operation,o.conflict,o.decision "
@@ -367,9 +368,14 @@ class KnowledgeStoreMixin:
                 evidence.append({"event_id": ref, "outcome": "missing", "health": "missing", "current_tool_success": False})
                 continue
             health = "conflicted" if row["conflict"] else "denied" if row["decision"] == "denied" else "valid"
+            lineage = source_state(self, project, [ref], evaluation=_lineage_evaluation)
+            if lineage["blocked"]:
+                health = "conflicted"
             evidence.append({"event_id": ref, "type": row["type"], "outcome": row["outcome"], "created": row["created"],
                              "health": health, "current_tool_success": health == "valid" and row["type"] == "PostToolUse"
                              and row["outcome"] == "succeeded"})
+            if lineage["sources"] or lineage["blocked"]:
+                evidence[-1]["candidate_lineage"] = lineage
         return evidence
 
     @staticmethod
@@ -384,9 +390,12 @@ class KnowledgeStoreMixin:
         body = clean(json.loads(row["body"]))
         sources = []
         combined = {}
+        from .candidate_references import _Assessment
+        lineage_evaluation = _Assessment()
         for source in self.db.execute("SELECT * FROM knowledge_sources WHERE project=? AND knowledge_id=? AND revision=? "
                                       "ORDER BY created,candidate_id", (project, row["id"], row["revision"])).fetchall():
-            evidence = self._source_evidence(project, json.loads(source["evidence_refs"]), source["problem_id"])
+            evidence = self._source_evidence(project, json.loads(source["evidence_refs"]), source["problem_id"],
+                                             _lineage_evaluation=lineage_evaluation)
             problem = self.db.execute("SELECT revision FROM problems WHERE project=? AND id=?", (project, source["problem_id"])).fetchone()
             sources.append({"candidate_id": source["candidate_id"], "problem_id": source["problem_id"],
                             "problem_revision": source["problem_revision"], "problem_changed": not problem or problem[0] != source["problem_revision"],
@@ -396,7 +405,8 @@ class KnowledgeStoreMixin:
                 combined[item["event_id"]] = item
         if not sources:
             # 迁移无法恢复某个旧来源时仍可展示历史证据，但不会凭空生成 source。
-            combined = {item["event_id"]: item for item in self._source_evidence(project, body["evidence_refs"], body.get("problem_id"))}
+            combined = {item["event_id"]: item for item in self._source_evidence(project, body["evidence_refs"], body.get("problem_id"),
+                                                                               _lineage_evaluation=lineage_evaluation)}
         evidence = list(combined.values())
         source_version = self.db.execute("SELECT version FROM knowledge_source_versions WHERE project=? AND knowledge_id=? AND revision=?",
                                          (project, row["id"], row["revision"])).fetchone()

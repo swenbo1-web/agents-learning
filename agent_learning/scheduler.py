@@ -151,6 +151,12 @@ class SchedulerMixin:
         from .admin_usage import admin_admission_status
         from .runtime import digest
         with self._scheduler_host_scope(target_scope):
+            # Only a scheduler write entry may advance local source scans.
+            # Read-only status remains a view of the durable queue.
+            if (self.db.in_transaction and cfg["enabled"]
+                    and self.admin_effective_config(project)["enabled"]):
+                from .phase_review import prepare as prepare_phases
+                prepare_phases(self, project)
             scan, preflight = scan_signatures(self, project)
             signature = digest({"scan": scan, "host_epoch": self.host_epoch(),
                 "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "

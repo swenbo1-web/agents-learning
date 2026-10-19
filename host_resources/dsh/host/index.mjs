@@ -706,6 +706,14 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  // Each bridge instance belongs to one native trajectory. Keep its old token
+  // after a trusted reset: silently claiming a new one would relabel delayed
+  // callbacks as new work. Reloading the host creates a new bridge instance.
+  const trajectoryBindings = new Map();
+  function trajectoryKey(payload) {
+    return JSON.stringify([payload.sessionId, payload.agentId || null, normalizeWinPath(payload.cwd)]);
+  }
+
   async function dispatchEvent(eventName, payload, signal) {
     const envMode = process.env.ALP_HOOK_MODE;
     const denyBridgeFailure = (code, detail) => ({
@@ -746,11 +754,20 @@ export function apply(ctx, config = {}) {
       argv.push("--home", receipt.home);
     }
     const cwd = payload.cwd || effectiveWorkspace || process.cwd();
+    const identityPayload = { ...payload, cwd };
+    const key = trajectoryKey(identityPayload);
+    let binding = trajectoryBindings.get(key);
+    if (!binding) {
+      binding = { instance: randomUUID(), trajectory: null };
+      trajectoryBindings.set(key, binding);
+    }
+    const capturedPayload = { ...identityPayload, dsh_bridge_instance: binding.instance,
+      ...(binding.trajectory ? { dsh_trajectory: { ...binding.trajectory } } : {}) };
     try {
       const { code, stdout } = await runPythonProcess(
         receipt.python,
         argv,
-        JSON.stringify(payload),
+        JSON.stringify(capturedPayload),
         cwd,
         signal,
         10000,
@@ -765,6 +782,11 @@ export function apply(ctx, config = {}) {
         return failClosedOnPre
           ? denyBridgeFailure("response_invalid", "runtime returned an invalid response; its result could not be confirmed.")
           : {};
+      }
+      const trajectory = parsed.dsh_trajectory;
+      if (trajectoryBindings.get(key) === binding && Number.isSafeInteger(trajectory?.generation)
+          && trajectory.generation >= 1 && /^[a-f0-9]{32}$/.test(trajectory?.token || "")) {
+        binding.trajectory = { generation: trajectory.generation, token: trajectory.token };
       }
       return parsed;
     } catch {
@@ -1847,6 +1869,10 @@ export function apply(ctx, config = {}) {
     if (session?.id) {
       forgetSessionCapture(session.id);
       sessionStarts.delete(session.id);
+      for (const key of trajectoryBindings.keys()) {
+        const [root, child] = JSON.parse(key);
+        if (root === session.id || child === session.id) trajectoryBindings.delete(key);
+      }
     }
   });
 }
