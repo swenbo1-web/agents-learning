@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.2.0 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update every Codex, Antigravity and DSH installation sharing a database to a schema-20-compatible runtime before reloading. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.2.1 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update every Codex, Antigravity and DSH installation sharing a database to a schema-20-compatible runtime before reloading. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -111,7 +111,7 @@ Invoke `$learning-browser` (or click **Open Visual Knowledge Browser (Read-Only)
 
 Invoke `$learning-review` (or click **Open Review & Advanced Fine-Tuning** in the DSH **📖 Memory** button popover) for approval or administrator settings. **Opening the page approves nothing and starts no model.** Publication and Save and enable require separate confirmation. New users configure stage frequency and token budgets; existing case-review users can retain Light, Balanced, Active and Minimal count presets. Both languages retain original knowledge and evidence text. [Administrator settings](#optional-administrator-executor)
 
-### Completed-stage review and token budgets (1.2.0)
+### Completed-stage review and token budgets (1.2.1)
 
 Open **Administrator settings → Stage review and token budget** from any host:
 
@@ -119,6 +119,8 @@ Open **Administrator settings → Stage review and token budget** from any host:
 2. Set **daily project tokens, estimated input per batch and output reservations**. The first confirmed visual enable for an unconfigured project defaults to stage mode: every 1 stage, 1,000,000 tokens/day, 40,000 estimated input and 4,000 reserved output per batch. Administrators still require explicit enablement. Existing configurations retain `legacy` case review until changed in settings.
 3. Compatible model/executor groups combine stages within the same project/host. Each case retains its sources, decisions, candidates and publication checks. Different model groups can wait separately even when the total stage count reaches the threshold. Large stages may need multiple batches and retain uncovered progress. Ready increments continue within the authorized token and runner budgets; missing evidence or limits pause further work. A stage scans at most 2,000 public sources; excess records remain searchable and require smaller stages or explicitly selected history ingestion. **A stage trigger guarantees neither exactly one model call nor full coverage.** Explicit immediate organization can process material below the frequency threshold or continue partial coverage.
 4. Business evidence, actual comparison dependencies and valid receipts support deduplication before model calls. Duplicate records are not independent validation; one case cannot borrow another case's success. Failures and unknown outcomes retain records and usage until an explicit bounded retry is allowed after reconciliation.
+
+Version 1.2.1 advances through unready material in bounded pages so missing evidence on an earlier page cannot block reviewable later records. New supporting evidence wakes partially covered stages; a full scan with no newly reviewable material pauses instead of producing endless empty batches. Members already covered by the main review but still awaiting evidence remain eligible to wake when their actual evidence changes; unchanged evidence does not incur repeat spending.
 
 | Usage field | Meaning |
 |---|---|
@@ -659,7 +661,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.2.0 uses database schema **20** and internal publication protocol **20**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-20-compatible version before reloading. Older runtimes cannot open schema 20.
+Current `main` v1.2.1 uses database schema **20** and internal publication protocol **20**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-20-compatible version before reloading. Older runtimes cannot open schema 20.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -970,7 +972,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.2.0 uses database schema/internal publication protocol 20.** It adds completed-stage batches, every-N-stage frequency, dynamic token reservations, incremental deduplication and per-case review receipts. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-20-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
+**Current source version 1.2.1 uses database schema/internal publication protocol 20.** It provides completed-stage batches, every-N-stage frequency, dynamic token reservations, incremental deduplication and per-case review receipts; this patch fixes pagination past unready material and stage wake-up after supporting evidence arrives. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-20-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
 
 The following entries describe changes and release status at the time of each historical version:
 

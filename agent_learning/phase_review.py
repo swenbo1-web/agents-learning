@@ -50,6 +50,8 @@ def install(runtime):
         runtime.db.execute("ALTER TABLE phase_review_members ADD COLUMN context_signature TEXT NOT NULL DEFAULT ''")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS phase_review_queue ON phase_review_batches(project,host_scope,state)")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS phase_member_evidence ON phase_review_members(project,evidence_signature)")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS phase_scan_progress(phase_id TEXT PRIMARY KEY,"
+        "signature TEXT NOT NULL,cursor TEXT,deferred INTEGER NOT NULL DEFAULT 0,exhausted INTEGER NOT NULL DEFAULT 0)")
 
 
 def policy(runtime, project):
@@ -229,7 +231,40 @@ def source_conversation(runtime, project, problem_id, fallback):
     return json.loads(row[0]).get("executor_conversation") if row else fallback
 
 
-def prepare(runtime, project, *, force=False):
+def _case_source(runtime, project, phase):
+    stop = runtime.db.execute("SELECT created FROM events WHERE id=?", (phase["event_id"],)).fetchone()[0]
+    sql = (" FROM problems p WHERE p.project=? AND p.conversation=? AND p.task_id=? AND p.task_revision=? "
+        "AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.problem_id=p.id) "
+        "AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE d.problem_id=p.id) "
+        "AND EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
+        "LEFT JOIN events origin ON e.type='PublicMessageSegment' AND origin.project=e.project "
+        "AND origin.id=json_extract(e.payload,'$.public_message_id') WHERE pe.problem=p.id "
+        "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=?) ")
+    return sql, (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop)
+
+
+def _scan_progress(runtime, project, phase, cfg):
+    from .runtime import digest
+    sql, args = _case_source(runtime, project, phase)
+    # Review outcomes remove eligible rows, but do not move this source version.
+    # Real evidence/context revisions and changed input settings restart a pass.
+    facts = runtime.db.execute("SELECT COUNT(*),COALESCE(SUM(p.revision),0),"
+        "COALESCE(SUM((SELECT revision FROM admin_case_epochs c WHERE c.project=p.project AND c.problem=p.id)),0)" + sql, args).fetchone()
+    knowledge = runtime.db.execute("SELECT generation,source_epoch FROM projects WHERE id=?", (project,)).fetchone()
+    candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
+    signature = digest([list(facts), list(knowledge) if knowledge else None, candidates[0] if candidates else 0,
+                        cfg["version"], runtime.admin_effective_config(project)["max_input_chars"],
+                        runtime.admin_policy(project)["policy_version"]])
+    row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
+    changed = not row or row["signature"] != signature
+    if changed:
+        runtime.db.execute("INSERT INTO phase_scan_progress VALUES(?,?,NULL,0,0) ON CONFLICT(phase_id) "
+            "DO UPDATE SET signature=excluded.signature,cursor=NULL,deferred=0,exhausted=0", (phase["id"], signature))
+        row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
+    return dict(row), changed
+
+
+def prepare(runtime, project, *, force=False, _page_budget=3):
     """Called only in a writer transaction; viewing status never creates jobs."""
     from .admin import _fingerprint, _review_configuration, _executor_semantics
     from .admin_decisions import find_receipt, review_signature, dependency_signature
@@ -273,11 +308,22 @@ def prepare(runtime, project, *, force=False):
             runtime.db.execute("UPDATE problems SET status='superseded' WHERE id=?", (old["problem_id"],))
             for identity in json.loads(old["phase_ids"]):
                 runtime.db.execute("UPDATE review_phases SET state='sealed' WHERE id=? AND state='queued'", (identity,))
+                runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
     phases = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND host_scope=? AND state IN ('sealed','partial','continuing') "
         "AND session_epoch=? AND governance_epoch=? ORDER BY (state='sealed') DESC,created,id LIMIT 100",
         (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())).fetchall()
-    groups = {}
+    groups, progress = {}, {}
     for phase in phases:
+        scan, dirty = _scan_progress(runtime, project, phase, cfg)
+        progress[phase["id"]] = scan
+        if phase["state"] in {"partial", "continuing"}:
+            if scan["exhausted"] and not dirty:
+                state = "partial" if scan["deferred"] or phase["omitted_sources"] else "completed"
+                runtime.db.execute("UPDATE review_phases SET state=? WHERE id=?", (state, phase["id"]))
+                continue
+            if dirty and phase["state"] == "partial":
+                runtime.db.execute("UPDATE review_phases SET state='continuing' WHERE id=?", (phase["id"],))
+                phase = dict(phase, state="continuing")
         try:
             plan = runtime.resolve_admin_executor(project, phase["conversation"])
         except ValueError:
@@ -304,7 +350,8 @@ def prepare(runtime, project, *, force=False):
                                 event_id="phase-review:" + batch_key, outcome="reported")
     parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [request["id"]])
     items, seen, omitted, reused, used = [], set(), [], [], 0
-    duplicates, reused_ready, scanned_remainder = [], set(), 0
+    duplicates, reused_ready, scanned_remainder, prior_deferred = [], set(), 0, 0
+    scan_updates = {}
     try:
         review_cfg = _review_configuration(runtime.admin_effective_config(project),
                                             runtime.resolve_admin_executor(project, phases[-1]["conversation"]))
@@ -312,25 +359,29 @@ def prepare(runtime, project, *, force=False):
         review_cfg = None
     char_limit = runtime.admin_effective_config(project)["max_input_chars"] - 3000
     for phase in phases:
-        stop = runtime.db.execute("SELECT created FROM events WHERE id=?", (phase["event_id"],)).fetchone()[0]
-        rows = runtime.db.execute("SELECT DISTINCT p.id,p.knowledge_id FROM problems p JOIN problem_events pe ON pe.problem=p.id "
-            "JOIN events e ON e.id=pe.event LEFT JOIN events origin ON e.type='PublicMessageSegment' "
-            "AND origin.project=e.project AND origin.id=json_extract(e.payload,'$.public_message_id') "
-            "WHERE p.project=? AND p.conversation=? AND p.task_id=? AND p.task_revision=? "
-            "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
-            "AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.problem_id=p.id) "
-            "AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE d.problem_id=p.id) "
+        source_sql, source_args = _case_source(runtime, project, phase)
+        source_sql += (
             "AND NOT EXISTS(SELECT 1 FROM phase_review_members m WHERE m.project=p.project AND m.problem_id=p.id "
-            "AND m.revision=p.revision AND m.state IN ('candidate','skip','governance')) "
-            "ORDER BY (p.knowledge_id IS NOT NULL) DESC,(p.summary LIKE '阶段公开记录：%') DESC,p.created,p.id LIMIT 101",
-            (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop)).fetchall()
-        if len(rows) > 100:
-            scanned_remainder += 1
-            rows = rows[:100]
+            "AND m.revision=p.revision AND m.state IN ('candidate','skip','governance')) ")
+        scan = progress[phase["id"]]
+        previous_key = json.loads(scan["cursor"]) if scan["cursor"] else [-1, 0, ""]
+        rows = runtime.db.execute("WITH eligible AS (SELECT p.id,p.knowledge_id,p.created,CASE "
+            "WHEN p.knowledge_id IS NOT NULL THEN 0 WHEN p.summary LIKE '阶段公开记录：%' THEN 1 ELSE 2 END priority" +
+            source_sql + ") SELECT * FROM eligible WHERE (priority,created,id)>(?,?,?) "
+            "ORDER BY priority,created,id LIMIT 101", (*source_args, *previous_key)).fetchall()
+        more = len(rows) > 100
+        rows = rows[:100]
+        deferred = 0
+        prior_deferred += scan["deferred"]
+        last_key = previous_key
         for source_index, source in enumerate(rows):
             if used >= char_limit - 1000 or len(items) >= 8:
                 omitted.extend(r["id"] for r in rows[source_index:] if r["id"] not in seen)
+                more = True
                 break
+            current_key = [source["priority"], source["created"], source["id"]]
+            before_current = last_key
+            last_key = current_key
             if source["id"] in seen:
                 continue
             seen.add(source["id"])
@@ -339,16 +390,20 @@ def prepare(runtime, project, *, force=False):
                 "WHERE r.project=a.project AND r.call_id=a.id)", (project, source["id"])).fetchone()
             if blocked:
                 omitted.append(source["id"])
+                deferred += 1
                 continue
             packet = runtime.review_packet(project, source["id"], max_chars=max(1000, char_limit))
             if packet.get("incomplete") or evidence_readiness(packet):
                 omitted.append(source["id"])
+                deferred += 1
                 continue
             signature = _fingerprint(packet)
             if review_cfg:
                 from .admin_workload import hold_unchanged_review
                 if hold_unchanged_review(runtime, project, packet, signature, review_cfg):
                     reused.append(source["id"])
+                    omitted.append(source["id"])
+                    deferred += 1
                     continue
             blocked = runtime.db.execute("SELECT 1 FROM phase_review_members m JOIN admin_calls a "
                 "ON a.project=m.project AND a.problem=m.batch_id WHERE m.project=? AND m.evidence_signature=? "
@@ -357,15 +412,25 @@ def prepare(runtime, project, *, force=False):
                 (project, signature)).fetchone()
             if blocked:
                 omitted.append(source["id"])
+                deferred += 1
                 continue
             previous = find_receipt(runtime, project, review_signature(packet, review_cfg, signature)) if review_cfg else None
             if previous:
-                from .admin_decisions import persist_receipt
-                if previous["problem"] != source["id"]:
+                from .admin_decisions import persist_receipt, receipt_for_problem
+                waiting = previous["decision"] == "needs_evidence"
+                existing = receipt_for_problem(runtime, project, source["id"], packet["problem"]["revision"],
+                                               review_signature(packet, review_cfg, signature))
+                if previous["problem"] != source["id"] and not existing:
                     persist_receipt(runtime, project, packet, signature, review_signature(packet, review_cfg, signature), None,
-                        {"decision": "skip", "reason": "Equivalent reviewed material; not independent verification",
+                        {"decision": "needs_evidence" if waiting else "skip",
+                         "reason": "Equivalent reviewed material; not independent verification",
                          "previous_decision": previous["decision"], "duplicate_of": previous["call_id"]},
                         duplicate_of=previous["call_id"])
+                if waiting:
+                    omitted.append(source["id"])
+                    deferred += 1
+                    reused.append(source["id"])
+                    continue
                 duplicates.append(packet)
                 reused_ready.add(source["id"])
                 reused.append(source["id"])
@@ -377,7 +442,12 @@ def prepare(runtime, project, *, force=False):
                 continue  # Comparison reuse only, never independent verification.
             cost = len(encode(packet))
             if used + cost > char_limit or len(items) >= 8:
+                if items:
+                    last_key = before_current
+                    more = True
+                    break
                 omitted.append(source["id"])
+                deferred += 1
                 continue
             # Test the actual wrapper, not just the sum of member characters.
             # An oversized member remains uncovered; it cannot pin a ready sibling.
@@ -390,18 +460,29 @@ def prepare(runtime, project, *, force=False):
             # Leave room for bounded diagnostic identifiers appended after selection.
             estimate = estimate_reservation(runtime, project, instruction(candidate_body) + " " * 3000, phase=True)
             if not estimate["admitted"]:
+                if items:
+                    last_key = before_current
+                    more = True
+                    break
                 omitted.append(source["id"])
+                deferred += 1
                 continue
             items.append(packet)
             used += cost
+        scan_updates[phase["id"]] = {"cursor": last_key, "more": more,
+            "deferred": scan["deferred"] + deferred}
+        scanned_remainder += int(more)
     body = {"problem": parent, "task": None, "events": [], "related_knowledge": [], "related_candidates": [],
             "purpose": "phase_review", "executor_conversation": phases[-1]["conversation"], "item_max_chars": max(1000, char_limit),
             "phase_ids": ids, "items": items, "incomplete": False,
             "evidence_truncated": False, "omitted_problem_ids": omitted[:32], "reused_problem_ids": reused[:32],
-            "omitted_problem_count": len(omitted), "reused_problem_count": len(reused),
+            "omitted_problem_count": len(omitted) + prior_deferred, "reused_problem_count": len(reused),
             "case_scan_continuation": bool(scanned_remainder),
             "omitted_source_count": sum(p["omitted_sources"] for p in phases),
-            "coverage_complete": not omitted and not scanned_remainder and not any(p["omitted_sources"] for p in phases)}
+            "coverage_complete": not omitted and not prior_deferred and not scanned_remainder and not any(p["omitted_sources"] for p in phases)}
+    for identity, scan in scan_updates.items():
+        runtime.db.execute("UPDATE phase_scan_progress SET cursor=?,deferred=?,exhausted=? WHERE phase_id=?",
+            (encode(scan["cursor"]), scan["deferred"], int(not scan["more"]), identity))
     # The final diagnostics are bounded as well. No queued batch may be too big
     # for the very same admission function that will launch it.
     from .admin_usage import estimate_reservation
@@ -411,6 +492,8 @@ def prepare(runtime, project, *, force=False):
         body["omitted_problem_ids"] = (body["omitted_problem_ids"] + [removed["problem"]["id"]])[:32]
         body["omitted_problem_count"] += 1
         body["coverage_complete"] = False
+        for identity in ids:
+            runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
     included_signatures = {_fingerprint(item) for item in body["items"]}
     supported_duplicates = []
     for item in duplicates:
@@ -444,7 +527,11 @@ def prepare(runtime, project, *, force=False):
         runtime.db.execute("UPDATE problems SET status='deferred' WHERE id=?", (parent["id"],))
         runtime.db.execute("UPDATE phase_review_batches SET state='no_ready_material' WHERE problem_id=?", (parent["id"],))
         for identity in ids:
-            runtime.db.execute("UPDATE review_phases SET state=? WHERE id=?", ("partial" if not body["coverage_complete"] else "completed", identity))
+            state = ("continuing" if scan_updates[identity]["more"] else
+                     "partial" if not body["coverage_complete"] else "completed")
+            runtime.db.execute("UPDATE review_phases SET state=? WHERE id=?", (state, identity))
+        if scanned_remainder and _page_budget > 1:
+            prepare(runtime, project, _page_budget=_page_budget-1)
 
 
 def packet(runtime, project, problem_id):
@@ -497,6 +584,7 @@ def accept(runtime, project, reserved, response):
                 or dependency_signature(fresh, duplicate["evidence_signature"]) != duplicate["context_signature"]):
             raise ContractError("duplicate phase evidence or comparison changed")
         duplicates.append((duplicate, fresh))
+    source_results = {}
     for value in values:
         item = expected[value["problem_id"]]
         child = dict(reserved, packet=item, phase_context=None, multi_candidate_allowed=True, frozen_batch_verified=True,
@@ -506,16 +594,19 @@ def accept(runtime, project, reserved, response):
         from .admin_workload import evidence_wait_signature
         child["evidence_wait_signature"] = evidence_wait_signature(item, cfg, child["evidence_signature"])
         result = _accept_response(runtime, project, child, {k: v for k, v in value.items() if k != "problem_id"})
+        source_results[(child["evidence_signature"], dependency_signature(item, child["evidence_signature"]))] = result
         results.append(result)
         runtime.db.execute("UPDATE phase_review_members SET state=? WHERE batch_id=? AND problem_id=?",
                            (result["status"], parent["problem"]["id"], item["problem"]["id"]))
     for duplicate, fresh in duplicates:
+        source_result = source_results[(duplicate["evidence_signature"], duplicate["context_signature"])]
+        decision = "needs_evidence" if source_result["status"] == "needs_evidence" else "skip"
         persist_receipt(runtime, project, fresh, duplicate["evidence_signature"],
             review_signature(fresh, cfg, duplicate["evidence_signature"]), reserved["call_id"],
-            {"decision": "skip", "reason": "Equivalent reviewed material; not independent verification",
+            {"decision": decision, "reason": "Equivalent reviewed material; not independent verification",
              "duplicate_of": reserved["call_id"]}, duplicate_of=reserved["call_id"])
-        runtime.db.execute("UPDATE phase_review_members SET state='skip' WHERE batch_id=? AND problem_id=?",
-                           (parent["problem"]["id"], duplicate["problem_id"]))
+        runtime.db.execute("UPDATE phase_review_members SET state=? WHERE batch_id=? AND problem_id=?",
+                           (decision, parent["problem"]["id"], duplicate["problem_id"]))
     aggregate = ("candidate" if any(r["status"] == "candidate" for r in results) else
                  "needs_evidence" if any(r["status"] == "needs_evidence" for r in results) else
                  "governance" if any(r["status"] == "governance" for r in results) else "skip")
@@ -530,7 +621,17 @@ def accept(runtime, project, reserved, response):
     runtime.db.execute("UPDATE phase_review_batches SET state='completed',result=? WHERE problem_id=?",
                        (encode(result), parent["problem"]["id"]))
     for identity in parent["phase_ids"]:
+        phase = runtime.db.execute("SELECT * FROM review_phases WHERE id=?", (identity,)).fetchone()
+        source_sql, source_args = _case_source(runtime, project, phase)
+        waiting = runtime.db.execute("SELECT 1" + source_sql +
+            "AND EXISTS(SELECT 1 FROM phase_review_members m WHERE m.batch_id=? AND m.problem_id=p.id "
+            "AND m.revision=p.revision AND m.state='needs_evidence') LIMIT 1",
+            (*source_args, parent["problem"]["id"])).fetchone()
+        if waiting:
+            # A completed main review may still await proof. Keep that phase
+            # dormant but wakeable when its real source revision changes.
+            runtime.db.execute("UPDATE phase_scan_progress SET deferred=deferred+1 WHERE phase_id=?", (identity,))
         runtime.db.execute("UPDATE review_phases SET state=? WHERE id=?",
-                           ("completed" if parent["coverage_complete"] else "continuing", identity))
+                           ("completed" if parent["coverage_complete"] and not waiting else "continuing", identity))
     prepare(runtime, project)
     return result

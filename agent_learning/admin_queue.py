@@ -258,6 +258,10 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
                                         "AND c.state IN ('reserved','launch_intent','started'))").fetchone()[0]
         if dispatched + budget["global_active_calls"] >= budget["max_concurrent_calls"]:
             return None
+        # A bounded local pass can reach later ready sources or notice new
+        # evidence without a model job already existing. Exhausted passes sleep.
+        from .phase_review import prepare as prepare_phases
+        prepare_phases(runtime, project)
         signature, preflight_signature = scan_signatures(runtime, project)
         query, args = eligible_query(signature, preflight_signature=preflight_signature,
                                      summary_enabled=runtime.work_summary_enabled(project),
