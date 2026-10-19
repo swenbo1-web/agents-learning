@@ -19,7 +19,8 @@ MAX_RESERVED_BYTES = 2000000
 _FIELDS = {"call_id", "owner", "host_epoch", "packet", "selected", "evidence_signature",
            "review_signature", "scan_signature", "evidence_wait_signature", "history_job_id",
            "summary_context", "phase_context", "history_owner", "publication_enabled_at_reservation",
-           "publication_mode_at_reservation", "history_reference_authorized"}
+           "publication_mode_at_reservation", "history_reference_authorized", "history_snapshot", "terminal_observation",
+           "history_snapshot_unavailable"}
 _CANDIDATE = {"problem_id", "problem_revision", "title", "content", "category", "applicability",
               "limitations", "evidence_refs", "validation_level", "metadata", "knowledge_kind"}
 _PUBLIC = {"decision", "reason", "candidate", "candidates", "missing_evidence", "proposal", "items"}
@@ -212,9 +213,14 @@ def status(runtime, project, call_id):
     active = runtime.db.execute("SELECT 1 FROM admin_response_rechecks WHERE project=? AND call_id=? "
         "AND state='validating' AND lease_until>? LIMIT 1", (project, call_id, time.time())).fetchone()
     historical = bool(json.loads(row["reserved"]).get("history_job_id"))
+    historical_status = None
+    if historical:
+        from .history_response_recovery import status as history_recovery_status
+        historical_status = history_recovery_status(runtime, project, call_id)
     return {"call_id": call_id, "available": row["response"] is not None, "state": row["state"],
             "version": row["version"], "can_recheck": bool(ready and boundary and not active and not historical),
             **({"reason": "history_run_reapproval_required"} if historical else {}),
+            **({"history_recovery": historical_status} if historical else {}),
             "rejection": {"code": row["rejection_code"], "path": row["rejection_path"]} if row["rejection_code"] else None,
             "models_started": False, "local_recheck": True}
 

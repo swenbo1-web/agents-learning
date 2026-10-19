@@ -316,7 +316,8 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
     responses_exist = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_records'").fetchone()
     recovered = ("EXISTS(SELECT 1 FROM admin_response_records s JOIN review_receipts r "
         "ON r.project=s.project AND r.call_id=s.call_id WHERE s.project=c.project AND s.call_id=c.id "
-        "AND s.state='accepted' AND c.state='failed' AND r.problem=c.problem AND r.revision=c.revision "
+        "AND s.state='accepted' AND c.state IN ('failed','orphaned_unknown','account_changed_unknown') "
+        "AND r.problem=c.problem AND r.revision=c.revision "
         "AND r.decision IN ('candidate','needs_evidence','skip','governance') AND r.duplicate_of IS NULL)"
         if receipts_exist and responses_exist else "0")
     rows = runtime.db.execute("SELECT c.state,c.started," + accepted + " AS accepted_review,"

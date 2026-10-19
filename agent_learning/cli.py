@@ -286,6 +286,15 @@ def parser():
     recheck.add_argument("--request-id", required=True)
     recheck.add_argument("--expected-version", required=True, type=int)
     recheck.add_argument("--confirm", action="store_true")
+    history_recheck = sub.add_parser("history-response-recheck", help="明确验收本次历史调用的冻结公开答复；不扫描、不续审、不调用模型")
+    history_recheck.add_argument("call_id")
+    history_recheck.add_argument("--request-id", required=True, help="同一次操作重试必须沿用相同ID与参数")
+    history_recheck.add_argument("--expected-version", required=True, type=int)
+    history_recheck.add_argument("--expected-job-version", required=True, help="admin-response-status 返回的完整冻结批次版本指纹")
+    history_recheck.add_argument("--confirm", action="store_true", help="仅授权本次调用的冻结资料，本地验收保留原用量和重试锁")
+    history_recheck.add_argument("--acknowledge-boundary", action="store_true", help="额外确认暂停、取消、暂存、中断或账户／治理边界变化")
+    history_recheck.add_argument("--reason", required=True, help="明确说明本次恢复或访问确认的原因")
+    history_recheck.add_argument("--allow-publication", action="store_true", help="额外允许在原批授权与当前策略共同范围内发布；默认只保存候选")
     reviews = sub.add_parser("reviews", help="查看持久审核原因、缺证需求与候选引用")
     reviews.add_argument("--problem")
     reviews.add_argument("--limit", type=int, default=20)
@@ -680,6 +689,13 @@ def main(argv=None):
             result = recheck(runtime, project, args.call_id, request_id=args.request_id,
                 expected_version=args.expected_version, expected_session_epoch=runtime.session_epoch(),
                 expected_governance_epoch=runtime.host_epoch(), confirmed=args.confirm)
+        elif args.command == "history-response-recheck":
+            from .history_response_recovery import recheck
+            result = recheck(runtime, project, args.call_id, request_id=args.request_id,
+                expected_version=args.expected_version, expected_job_version=args.expected_job_version,
+                expected_session_epoch=runtime.session_epoch(), expected_governance_epoch=runtime.host_epoch(),
+                acknowledge_boundary=args.acknowledge_boundary, reason=args.reason,
+                allow_publication=args.allow_publication, confirmed=args.confirm)
         elif args.command == "reviews":
             from .admin_decisions import get_reviews
             result = get_reviews(runtime, project, args.problem, args.limit)

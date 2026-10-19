@@ -399,8 +399,14 @@ class HistoryImportMixin:
                             (time.time(), encode({"reason": "user_paused"}), project, job_id))
         return self.history_status(project, job_id)
 
-    def history_guard(self, project, problem_id, history_job_id=None, *, require_review=False, expected_epoch=None):
+    def history_guard(self, project, problem_id, history_job_id=None, *, require_review=False, expected_epoch=None,
+                      _local_action=None, _local_candidate=None):
         from .runtime import ContractError
+        if _local_action is not None:
+            from .history_response_recovery import local_access
+            local = local_access(self, project, problem_id, history_job_id, action=_local_action, candidate=_local_candidate)
+            if local is not None:
+                return local
         links = self.db.execute("SELECT j.* FROM history_case_links l JOIN history_jobs j ON j.id=l.job_id WHERE l.project=? AND l.problem_id=? ORDER BY j.created DESC",
                                 (project, problem_id)).fetchall()
         if not links:
@@ -422,6 +428,8 @@ class HistoryImportMixin:
 
     def history_reserve_call(self, project, job_id, problem_id, call_id, expected_epoch):
         from .runtime import ContractError
+        from .history_response_recovery import assert_no_model_work
+        assert_no_model_work(self)
         if not self.db.in_transaction:
             raise ContractError("history call reservation requires a write transaction")
         row = self.history_guard(project, problem_id, job_id, require_review=True, expected_epoch=expected_epoch)
@@ -488,6 +496,8 @@ class HistoryImportMixin:
 
     def history_run(self, project, job_id, allow_review=False, max_calls=10, max_seconds=600, expected_epoch=None,
                     *, auto_reference=False):
+        from .history_response_recovery import assert_no_model_work
+        assert_no_model_work(self)
         from .admin import admin_once
         from .runtime import ContractError, encode
         if not isinstance(allow_review, bool):
@@ -507,6 +517,10 @@ class HistoryImportMixin:
         deadline = time.monotonic() + max_seconds
         with self.transaction():
             self.assert_host_epoch(epoch)
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_rechecks'").fetchone() and self.db.execute(
+                    "SELECT 1 FROM admin_response_rechecks WHERE project=? AND state='validating' AND lease_until>? LIMIT 1",
+                    (project, time.time())).fetchone():
+                raise ContractError("wait for local reply acceptance before starting a history run")
             row = _job(self, project, job_id)
             if row["state"] == "cancelled":
                 raise ContractError("cancelled history job requires a new explicit prepare")

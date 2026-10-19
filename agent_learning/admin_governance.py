@@ -99,7 +99,8 @@ def propose_governance(runtime, project, problem_id, problem_revision, action, c
         raise ContractError("evidence_refs must be event IDs")
     with runtime._case_transaction():
         runtime.assert_host_epoch(expected_epoch)
-        runtime.history_guard(project, problem_id, expected_epoch=expected_epoch)
+        runtime.history_guard(project, problem_id, expected_epoch=expected_epoch,
+                              _local_action="propose", _local_candidate=candidate_id)
         problem = _problem(runtime, project, problem_id, problem_revision)
         candidate = None
         if has_candidate:
@@ -150,7 +151,8 @@ def execute_governance(runtime, project, proposal_id, expected_epoch=None):
             return json.loads(proposal["result"])
         if proposal["state"] != "proposed":
             raise ContractError("governance proposal is not executable")
-        runtime.history_guard(project, proposal["problem_id"], expected_epoch=expected_epoch)
+        runtime.history_guard(project, proposal["problem_id"], expected_epoch=expected_epoch,
+                              _local_action="publish", _local_candidate=proposal["candidate_id"])
         problem = _problem(runtime, project, proposal["problem_id"], proposal["problem_revision"])
         action = proposal["action"]
         _sources(runtime, project, problem, json.loads(proposal["evidence_refs"]), dismiss=action == "dismiss_counterexample")

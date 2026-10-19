@@ -189,11 +189,18 @@ class KnowledgeStoreMixin:
             body = clean(json.loads(candidate["body"]))
             body["metadata"] = metadata(body.get("metadata"))
             body.setdefault("knowledge_kind", "solution")
-            if _review_approval:
+            from .history_response_recovery import result_access
+            recovered = result_access(self, project, body["problem_id"], candidate_id=candidate_id,
+                                      expected_epoch=expected_epoch)
+            if recovered is not None:
+                pass
+            elif _review_approval:
                 from .candidate_review import history_publication_guard
-                history_publication_guard(self, project, body["problem_id"], expected_epoch=expected_epoch)
+                history_publication_guard(self, project, body["problem_id"], expected_epoch=expected_epoch,
+                                          candidate_id=candidate_id)
             else:
-                self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
+                self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch,
+                                   _local_action="publish", _local_candidate=candidate_id)
             self._validate_sources(project, body)
             lineage = publication_lineage_state(self, project, body, knowledge_id, candidate_id)
             if lineage["issues"]:

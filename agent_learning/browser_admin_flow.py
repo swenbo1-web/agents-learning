@@ -147,6 +147,7 @@ function renderAdminFlow(data){
    else if(!item.history_access_required){if(item.candidate_title)card.append(node('p',item.candidate_title));if(item.candidate_summary)card.append(node('p',item.candidate_summary));if(item.applicability)card.append(node('p',t('flowApplies',{value:item.applicability})));if(item.limitations)card.append(node('p',t('flowLimits',{value:item.limitations}),'note'));}
    if(item.candidates_truncated)card.append(node('p',t('flowCandidatesMore'),'note'));
    if(item.history_access_required)card.append(node('p',t('flowHistoryAccess'),'note'));
+   if(item.saved_response?.history_recovery?.needs_access_reconfirmation)addHistoryResponseControl(card,{...item,id:item.call_id});
    if(item.publication)card.append(node('p',t('flowPublication',{value:label(item.publication.reason||item.publication.status)})));
    root.append(card);
   }

@@ -77,7 +77,7 @@ def _primary(runtime, project, packet, job_id):
     problem = packet.get("problem")
     if not isinstance(problem, dict) or not isinstance(problem.get("id"), str):
         raise ContractError("history context requires a primary problem")
-    runtime.history_guard(project, problem["id"], job_id, require_review=True)
+    runtime.history_guard(project, problem["id"], job_id, require_review=True, _local_action="evidence")
     row = runtime.db.execute(
         "SELECT p.*,u.id AS unit_id,u.material_id,u.body AS unit_body,m.source_key,m.content_hash "
         "FROM history_case_links l JOIN problems p ON p.project=l.project AND p.id=l.problem_id "

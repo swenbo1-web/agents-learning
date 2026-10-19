@@ -147,7 +147,8 @@ def review_activity(runtime, project):
         saved = runtime.db.execute("SELECT state,updated FROM admin_response_records WHERE project=? AND call_id=?",
                                   (project, row["id"])).fetchone() if runtime.db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='admin_response_records'").fetchone() else None
-        local_recheck = bool(accepted and saved and saved[0] == "accepted" and row["state"] == "failed")
+        local_recheck = bool(accepted and saved and saved[0] == "accepted"
+                             and row["state"] in {"failed", "orphaned_unknown", "account_changed_unknown"})
         item.update(call_id=row["id"], reviewed_revision=row["revision"], state=decision if accepted else row["state"],
             execution_state=row["state"], local_recheck=local_recheck,
             decision_finished=saved[1] if local_recheck else row["finished"], created=row["created"],
@@ -172,10 +173,13 @@ def review_activity(runtime, project):
         item["candidate_count"] = len(item["candidate_ids"])
         item["candidates_truncated"] = len(item["candidate_ids"]) > len(item["candidates"])
         if item["history_job_id"]:
+            if local_recheck:
+                from .admin_response_store import status as response_status
+                item["saved_response"] = response_status(runtime, project, row["id"])
             from .runtime import ContractError
             from .candidate_review import history_result_guard
             try:
-                history_result_guard(runtime, project, row["problem"])
+                history_result_guard(runtime, project, row["problem"], call_id=row["id"])
             except ContractError:
                 for key in ("candidate_summary", "candidate_title", "reason", "applicability", "limitations"):
                     item[key] = ""

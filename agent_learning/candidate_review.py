@@ -47,11 +47,18 @@ def _history_rows(view, project, problem):
         "WHERE l.project=? AND l.problem_id=? ORDER BY j.created DESC,j.id", (project, problem))]
 
 
-def history_result_guard(runtime, project, problem, expected_epoch=None):
+def history_result_guard(runtime, project, problem, expected_epoch=None, *, candidate_id=None, call_id=None):
     """Read completed results after known budget pauses without resuming execution."""
     from .history_import import ACCESS_STATES
+    from .history_response_recovery import result_access
 
     epoch = runtime.assert_host_epoch(expected_epoch)
+    # A recovered artifact has its own narrow authorization. Check it before
+    # normal job access so a later budget pause cannot revive a revoked grant.
+    recovered = result_access(runtime, project, problem, candidate_id=candidate_id,
+                              call_id=call_id, expected_epoch=epoch)
+    if recovered is not None:
+        return recovered
     rows = _history_rows(runtime, project, problem)
     if not rows:
         return None
@@ -70,9 +77,9 @@ def history_result_guard(runtime, project, problem, expected_epoch=None):
     raise ContractError("history job is paused or cancelled; explicit approval is unavailable")
 
 
-def history_publication_guard(runtime, project, problem, expected_epoch=None):
+def history_publication_guard(runtime, project, problem, expected_epoch=None, *, candidate_id=None):
     """Publication retains the same explicit history access boundary."""
-    return history_result_guard(runtime, project, problem, expected_epoch)
+    return history_result_guard(runtime, project, problem, expected_epoch, candidate_id=candidate_id)
 
 
 class _ValidationView:
@@ -126,7 +133,7 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
     history = _history_rows(view, project, body["problem_id"])
     history_budget = False
     try:
-        allowed = history_publication_guard(probe, project, body["problem_id"])
+        allowed = history_publication_guard(probe, project, body["problem_id"], candidate_id=candidate["id"])
         history_budget = bool(allowed and allowed["state"] == "paused")
     except ContractError as exc:
         issues.append({"code": "history_blocked", "message": str(exc)})
@@ -156,7 +163,10 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
            event["operation_state"]["decision"] == "denied") for event in events):
         warnings.append({"code": "operation_conflict", "message": "a source operation is conflicted or denied"})
     task = probe.task_snapshot(project, problem["task_id"], problem["task_revision"]) if problem and problem["task_id"] else None
-    snapshot = {"candidate": candidate, "candidate_reference_feedback": concerns, "problem": dict(problem) if problem else None,
+    from .history_response_recovery import result_snapshot
+    snapshot = {"candidate": candidate, "candidate_reference_feedback": concerns,
+                "history_response_recovery": result_snapshot(view, project, candidate_id=candidate["id"]),
+                "problem": dict(problem) if problem else None,
                 "task_snapshot": dict(task) if task else None,
                 "events": events, "history": history, "target": target, "duplicates": duplicates,
                 "publication_lineage": publication_lineage}

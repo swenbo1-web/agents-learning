@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(23)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(24)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(23)):
+        if version not in set(range(24)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -338,9 +338,11 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_candidate_references(self)
             from .admin_response_store import install as install_admin_responses
             install_admin_responses(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 22:
+            from .history_response_recovery import install as install_history_response_recovery
+            install_history_response_recovery(self)
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 23:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=22")
+            self.db.execute("PRAGMA user_version=23")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
@@ -715,7 +717,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         ident = identity[:32]
         with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
-            self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
+            self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch,
+                               _local_action="submit", _local_candidate=body)
             previous = self.db.execute("SELECT c.id,c.status,c.body FROM candidate_identity i JOIN candidates c "
                                        "ON i.project=c.project AND i.candidate_id=c.id WHERE i.project=? AND i.fingerprint=?",
                                        (project, identity)).fetchone()

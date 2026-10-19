@@ -32,6 +32,9 @@ class ResponseRejected(ContractError):
 
 def validate_review_call(runtime, reserved):
     """A local recovery owns a separate lease, never revives a failed paid call."""
+    if reserved.get("_history_local_recovery"):
+        from .history_response_recovery import validate
+        return validate(runtime, reserved)
     if reserved.get("_local_recheck"):
         from .admin_response_store import validate_recheck
         return validate_recheck(runtime, reserved)
@@ -504,7 +507,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         if history_job_id is not None:
             runtime.history_reserve_call(project, history_job_id, selected["id"], claim["call_id"], epoch)
         from .admin_workload import evidence_wait_signature
-        return {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
+        reservation = {"status": "reserved", "packet": packet, "selected": dict(selected), "instruction": instruction,
                 "evidence_wait_signature": evidence_wait_signature(packet, review_cfg, evidence),
                 "evidence_signature": evidence, "review_signature": review, "scan_signature": signature,
                 "scanned_count": scanned, "skipped_problem_ids": skipped, "history_job_id": history_job_id,
@@ -513,6 +516,16 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 "publication_enabled_at_reservation": bool(cfg["auto_publish"]),
                 "publication_mode_at_reservation": cfg["publication_mode"],
                 "history_reference_authorized": bool(history_job_id and history_auto_reference), **claim}
+        if history_job_id:
+            from .history_response_recovery import freeze
+            try:
+                reservation["history_snapshot"] = freeze(runtime, project, reservation)
+            except ContractError as exc:
+                if str(exc) != "history_comparison_budget_exceeded":
+                    raise
+                # Optional recovery cannot block the authorized normal review.
+                reservation["history_snapshot_unavailable"] = "history_comparison_budget_exceeded"
+        return reservation
     return {"status": "executor_not_ready" if routing_skipped else "needs_evidence" if skipped else "scan_complete", "scanned_count": scanned,
             **({"reason": routing_skipped[0]["reason"], "routing_skipped": routing_skipped[:10]} if routing_skipped else {}),
             **({"problem_id": skipped[0], "skipped_problem_ids": skipped,
@@ -556,6 +569,9 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
 
 
 def _history_acceptance_guard(runtime, project, reserved):
+    if reserved.get("_history_local_recovery"):
+        from .history_response_recovery import validate
+        return validate(runtime, reserved)
     job = runtime.history_guard(project, reserved["packet"]["problem"]["id"], reserved["history_job_id"],
                                 require_review=True, expected_epoch=reserved["host_epoch"])
     if reserved.get("history_owner") is not None and job["owner"] != reserved["history_owner"]:
@@ -600,8 +616,9 @@ def _accept_response(runtime, project, reserved, response):
         raise ContractError("history response exceeds total output budget")
     with _review_state_guard():
         validate_review_call(runtime, reserved)
-        runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
-                                               require_enabled=reserved.get("history_job_id") is None)
+        if not reserved.get("_history_local_recovery"):
+            runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
+                                                   require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
             _history_acceptance_guard(runtime, project, reserved)
         summary_context = runtime.work_summary_guard(project, packet["problem"]["id"])
@@ -613,7 +630,8 @@ def _accept_response(runtime, project, reserved, response):
                                       (project, packet["problem"]["id"])).fetchone()
         if not revision or revision[0] != packet["problem"]["revision"]:
             raise ContractError("reviewed problem changed")
-        current_packet = (_history_packet(runtime, project, packet["problem"]["id"], history_job_id) if history_job_id else
+        current_packet = (packet if reserved.get("_history_local_recovery") else
+                          _history_packet(runtime, project, packet["problem"]["id"], history_job_id) if history_job_id else
                           runtime.work_summary_packet(project, packet["problem"]["id"],
                               max_chars=runtime.admin_effective_config(project)["max_input_chars"] - 800) if summary_context else
                           runtime.review_packet(project, packet["problem"]["id"]))
@@ -629,7 +647,10 @@ def _accept_response(runtime, project, reserved, response):
                               history_auto_reference=reserved.get("history_reference_authorized", False))
         if summary_context:
             review_cfg.update(review_purpose="work_summary", summary_instruction_version=summary_context["instruction_version"])
-        if not reserved.get("frozen_batch_verified") and review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
+        if reserved.get("_history_local_recovery"):
+            from .history_response_recovery import validate as validate_history_recovery
+            validate_history_recovery(runtime, reserved, comparisons=True)
+        elif not reserved.get("frozen_batch_verified") and review_signature(current_packet, review_cfg, _fingerprint(current_packet)) != reserved["review_signature"]:
             raise ContractError("review evidence or comparison context changed")
     result = {"status": response["decision"], "reason": clean(response["reason"])[:1000], "call_id": call_id,
               "problem_id": packet["problem"]["id"], "missing_evidence": missing}
@@ -740,8 +761,9 @@ def _accept_response(runtime, project, reserved, response):
     with _review_state_guard():
         # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
         validate_review_call(runtime, reserved)
-        runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
-                                               require_enabled=reserved.get("history_job_id") is None)
+        if not reserved.get("_history_local_recovery"):
+            runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
+                                                   require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
             _history_acceptance_guard(runtime, project, reserved)
         if summary_context:
@@ -767,6 +789,8 @@ def _review_window(deadline, timeout):
 
 def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadline=None, _scan_limit=10, _history_job_id=None,
                _history_auto_reference=False):
+    from .history_response_recovery import assert_no_model_work
+    assert_no_model_work(runtime)
     from .admin_lifecycle import mark_launch_intent, mark_started
     from .admin_providers import build_execution, collect_antigravity_stream, read_response, resolve_command, launch_error, executor_capability
     from .admin_queue import record_executor_failure, clear_executor_failure, record_dispatch_diagnostic
@@ -911,6 +935,9 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             raise ContractError("administrator produced no usable response")
         execution_state["phase"] = "response_validation"
         response = read_response(provider_plan["provider"], output, log_path)
+        reserved["terminal_observation"] = {"version": 1, "returncode": 0,
+            "bounded_public_response_collected": True, "response_digest": digest(clean(response)),
+            "provider": provider_plan["provider"]}
         # This transaction is deliberately separate from decision acceptance:
         # a later rollback must retain the bounded public reply for local repair.
         from .admin_response_store import capture, mark_accepted
