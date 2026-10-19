@@ -163,6 +163,9 @@ class WorkMemoryMixin:
         if not event or event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PublicMessageSegment"}:
             return None
         event = dict(event)
+        if event["type"] in {"Stop", "PublicMessageSegment"}:
+            from .candidate_references import record_possible_influence
+            record_possible_influence(self, project, event_id)
         self.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)",
                         (project, event_id, checkout_key(workspace)))
         payload = json.loads(event["payload"])
@@ -362,8 +365,12 @@ class WorkMemoryMixin:
                 item["version_changed"] = item["version"] != item["current_version"]
                 states[item["relative_path"]] = digest(item["current_version"])
         file_state = states or None
+        from .candidate_references import lineage_risk
+        reference_risks = [risk for source in sources
+                           if (risk := lineage_risk(self, project, source["event_id"])) and risk.get("blocked", True)]
         return {"memory_id": row["id"], "revision": row["revision"],
-                "source_version": digest([row["revision"], row["body"], snapshots]), "state": state,
+                "source_version": digest([row["revision"], row["body"], snapshots, reference_risks]), "state": state,
+                **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
                 "type": body["type"], "title": body["title"], "summary": body["summary"][:240],
                 "completion": body.get("completion", "complete"), "execution_authority": False,
                 "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],

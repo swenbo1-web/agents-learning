@@ -11,6 +11,8 @@ PHASE_PREFIX = (
     "逐项返回一个结果，保持problem_id和problem_revision；每项可提出最多5条独立候选。"
     "公开项目事实保留reported；流水不强行提炼知识。重复返回skip，缺证返回needs_evidence。"
     "不得以新条目绕过已有知识反例、撤销或修订。只审核可见范围，未覆盖材料仍待后续。\n"
+    "批次外层candidate和proposal均为null；逐项候选可使用candidate单条，或candidate=null加candidates数组，不能同时使用。"
+    "多候选统一使用proposal=null（兼容空目标publish）；需要update或attach时只返回单候选和明确目标。\n"
 )
 
 
@@ -210,7 +212,14 @@ def status(runtime, project):
         "AND host_scope=? AND session_epoch=? AND governance_epoch=?", current).fetchone()[0] if exists else 0
     recent = runtime.db.execute("SELECT problem_id,state,substr(result,1,60001) FROM phase_review_batches WHERE project=? "
         "AND host_scope=? ORDER BY created DESC LIMIT 3", (project, runtime._session_scope())).fetchall() if exists else []
-    return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": {r[0]: r[1] for r in rows},
+    blocked = runtime.db.execute("SELECT COUNT(*) FROM review_phases p WHERE p.project=? AND p.host_scope=? "
+        "AND p.session_epoch=? AND p.governance_epoch=? AND p.state='queued' AND EXISTS("
+        "SELECT 1 FROM phase_review_batches b,json_each(CASE WHEN json_valid(b.phase_ids) THEN b.phase_ids ELSE '[]' END) ids "
+        "WHERE b.project=p.project AND b.host_scope=p.host_scope AND b.session_epoch=p.session_epoch "
+        "AND b.governance_epoch=p.governance_epoch AND b.state='blocked' AND ids.value=p.id)", current).fetchone()[0] if exists else 0
+    counts = {r[0]: r[1] for r in rows}
+    return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": counts,
+            "blocked_phase_count": blocked, "waiting_phase_count": counts.get("sealed", 0) + max(0, counts.get("queued", 0) - blocked),
             "historical_boundary_phases": old, "source_scan_omitted": source_limit,
             "token_budget_is_estimated": True, "historical_imports_included": False,
             "recent_batches": [{"id": row[0], "state": row[1], "metrics": batch_metrics(runtime, project, row[0]),
@@ -539,14 +548,15 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             prepare(runtime, project, _page_budget=_page_budget-1)
 
 
-def packet(runtime, project, problem_id):
+def packet(runtime, project, problem_id, *, _local_recheck=False):
     from .runtime import ContractError
     row = runtime.db.execute("SELECT * FROM phase_review_batches WHERE project=? AND problem_id=?",
                              (project, problem_id)).fetchone()
     if not row:
         return None
     cfg = policy(runtime, project)
-    if (row["state"] != "pending" or row["host_scope"] != runtime._session_scope()
+    states = {"pending", "blocked"} if _local_recheck else {"pending"}
+    if (row["state"] not in states or row["host_scope"] != runtime._session_scope()
             or row["session_epoch"] != runtime.session_epoch() or row["governance_epoch"] != runtime.host_epoch()
             or row["policy_version"] != cfg["version"] or cfg["mode"] != "phase"):
         raise ContractError("phase review context changed")
@@ -554,15 +564,20 @@ def packet(runtime, project, problem_id):
 
 
 def accept(runtime, project, reserved, response):
-    from .admin import _accept_response, _fingerprint, _review_configuration
+    from .admin import _accept_response, _fingerprint, _review_configuration, validate_review_call, ResponseRejected
     from .mcp import validate
     from .admin_decisions import persist_receipt, review_signature, dependency_signature
     from .admin_lifecycle import validate_call
     from .runtime import ContractError, encode
     parent = reserved["packet"]
-    validate(response, response_schema())
-    live = packet(runtime, project, parent["problem"]["id"])
-    validate_call(runtime, reserved["call_id"], reserved["owner"], reserved["host_epoch"])
+    try:
+        validate(response, response_schema())
+    except ContractError as exc:
+        raise ResponseRejected("response_schema_invalid", "response") from exc
+    if response["candidate"] is not None or response.get("proposal") is not None:
+        raise ResponseRejected("phase_aggregate_ambiguous", "response.candidate")
+    validate_review_call(runtime, reserved)
+    live = packet(runtime, project, parent["problem"]["id"], _local_recheck=bool(reserved.get("_local_recheck")))
     runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"))
     current = runtime.db.execute("SELECT revision FROM problems WHERE project=? AND id=?", (project, parent["problem"]["id"])).fetchone()
     if live != parent or not current or current[0] != parent["problem"]["revision"] or len(encode(response).encode("utf-8")) > 60000:
@@ -579,7 +594,8 @@ def accept(runtime, project, reserved, response):
     # must not appear to be concurrent external evidence changes in later items.
     for item in expected.values():
         fresh = runtime.review_packet(project, item["problem"]["id"], max_chars=parent["item_max_chars"])
-        if review_signature(fresh, cfg, _fingerprint(fresh)) != review_signature(item, cfg, _fingerprint(item)):
+        if (fresh["problem"]["revision"] != item["problem"]["revision"]
+                or review_signature(fresh, cfg, _fingerprint(fresh)) != review_signature(item, cfg, _fingerprint(item))):
             raise ContractError("phase case evidence or comparison changed")
     duplicates = []
     for duplicate in runtime.db.execute("SELECT * FROM phase_review_members WHERE batch_id=? AND state='duplicate_pending'",
@@ -590,7 +606,7 @@ def accept(runtime, project, reserved, response):
             raise ContractError("duplicate phase evidence or comparison changed")
         duplicates.append((duplicate, fresh))
     source_results = {}
-    for value in values:
+    for index, value in enumerate(values):
         item = expected[value["problem_id"]]
         child = dict(reserved, packet=item, phase_context=None, multi_candidate_allowed=True, frozen_batch_verified=True,
                      evidence_signature=_fingerprint(item), review_signature=review_signature(item, cfg, _fingerprint(item)),
@@ -598,7 +614,10 @@ def accept(runtime, project, reserved, response):
                                "source_task_updated": None})
         from .admin_workload import evidence_wait_signature
         child["evidence_wait_signature"] = evidence_wait_signature(item, cfg, child["evidence_signature"])
-        result = _accept_response(runtime, project, child, {k: v for k, v in value.items() if k != "problem_id"})
+        try:
+            result = _accept_response(runtime, project, child, {k: v for k, v in value.items() if k != "problem_id"})
+        except ResponseRejected as exc:
+            raise ResponseRejected(exc.code, "response.items[" + str(index) + "]." + exc.path.removeprefix("response.")) from exc
         source_results[(child["evidence_signature"], dependency_signature(item, child["evidence_signature"]))] = result
         results.append(result)
         runtime.db.execute("UPDATE phase_review_members SET state=? WHERE batch_id=? AND problem_id=?",

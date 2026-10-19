@@ -264,6 +264,28 @@ def parser():
     retry = sub.add_parser("admin-retry", help="核对失败或未知调用后明确允许一次再审，原额度记录保留")
     retry.add_argument("call_id")
     retry.add_argument("--reason", required=True)
+    ref_status = sub.add_parser("candidate-reference-status", help="只读查看候选参考策略，不调用模型")
+    ref_configure = sub.add_parser("candidate-reference-configure", help="明确开启或关闭本项目候选参考，与发布策略独立")
+    ref_configure.add_argument("enabled", choices=["on", "off"])
+    ref_configure.add_argument("--expected-version", required=True, type=int)
+    ref_configure.add_argument("--confirm", action="store_true")
+    ref_history = sub.add_parser("candidate-reference-history", help="明确授权或撤回一个已冻结历史批次的候选参考")
+    ref_history.add_argument("job_id")
+    ref_history.add_argument("enabled", choices=["on", "off"])
+    ref_history.add_argument("--expected-version", required=True, type=int)
+    ref_history.add_argument("--confirm", action="store_true")
+    ref_resolve = sub.add_parser("candidate-reference-resolve", help="明确核对候选疑问后恢复参考资格检查，不发布知识")
+    ref_resolve.add_argument("candidate_id")
+    ref_resolve.add_argument("--expected-version", required=True, help="审批详情中的疑问快照版本")
+    ref_resolve.add_argument("--reason", required=True)
+    ref_resolve.add_argument("--confirm", action="store_true")
+    response_status = sub.add_parser("admin-response-status", help="查看管理员公开答复是否可本地重验，不调用模型")
+    response_status.add_argument("call_id")
+    recheck = sub.add_parser("admin-response-recheck", help="明确重新验收已保存公开答复，不重新调用模型或修改原用量")
+    recheck.add_argument("call_id")
+    recheck.add_argument("--request-id", required=True)
+    recheck.add_argument("--expected-version", required=True, type=int)
+    recheck.add_argument("--confirm", action="store_true")
     reviews = sub.add_parser("reviews", help="查看持久审核原因、缺证需求与候选引用")
     reviews.add_argument("--problem")
     reviews.add_argument("--limit", type=int, default=20)
@@ -634,6 +656,30 @@ def main(argv=None):
         elif args.command == "admin-retry":
             from .admin_lifecycle import retry_call
             result = retry_call(runtime, project, args.call_id, args.reason)
+        elif args.command == "candidate-reference-status":
+            from .candidate_references import policy
+            result = policy(runtime, project)
+        elif args.command in {"candidate-reference-configure", "candidate-reference-history"}:
+            from .candidate_references import configure, grant_history
+            if not args.confirm:
+                raise ContractError("candidate reference changes require --confirm")
+            if args.command == "candidate-reference-configure":
+                result = configure(runtime, project, args.enabled == "on", args.expected_version)
+            else:
+                result = grant_history(runtime, project, args.job_id, args.enabled == "on", args.expected_version)
+        elif args.command == "admin-response-status":
+            from .admin_response_store import status
+            result = status(runtime, project, args.call_id)
+        elif args.command == "candidate-reference-resolve":
+            from .candidate_references import resolve_feedback
+            if not args.confirm:
+                raise ContractError("candidate concern resolution requires --confirm")
+            result = resolve_feedback(runtime, project, args.candidate_id, args.expected_version, args.reason)
+        elif args.command == "admin-response-recheck":
+            from .admin_response_store import recheck
+            result = recheck(runtime, project, args.call_id, request_id=args.request_id,
+                expected_version=args.expected_version, expected_session_epoch=runtime.session_epoch(),
+                expected_governance_epoch=runtime.host_epoch(), confirmed=args.confirm)
         elif args.command == "reviews":
             from .admin_decisions import get_reviews
             result = get_reviews(runtime, project, args.problem, args.limit)

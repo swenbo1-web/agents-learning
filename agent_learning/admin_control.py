@@ -83,6 +83,7 @@ def control_status(runtime, project, *, include_history=True, details=True):
     from .admin_presets import PRESETS
     from .admin_recovery import recovery_status
     from .admin_review_flow import publication_policy, review_activity
+    from .candidate_references import policy as reference_policy
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
     diagnostic = dispatch_diagnostic(runtime, project, check_queue=details)
@@ -99,6 +100,7 @@ def control_status(runtime, project, *, include_history=True, details=True):
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
         "publication_policy": publication_policy(runtime, project),
         "phase_review": phase_status(runtime, project),
+        "candidate_reference_policy": reference_policy(runtime, project),
         "effective_run_seconds": min(runtime.admin_effective_config(project)["max_run_seconds"], runtime.config["scheduler"]["max_run_seconds"]) if runtime.config["scheduler"]["enabled"] else runtime.admin_effective_config(project)["max_run_seconds"],
         "usage": global_usage,
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],

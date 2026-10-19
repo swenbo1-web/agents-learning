@@ -66,7 +66,10 @@ def recovery_status(runtime, project, *, include_history=True):
             diagnostic = diagnostic or safe_diagnostic(usage.get("provider_diagnostic"))
         except (ValueError, TypeError, AttributeError):
             usage, execution, diagnostic = {}, {}, None
+        from .admin_response_store import status as response_status
+        saved_response = response_status(runtime, project, row["id"])
         calls.append({"id": row["id"], "version": _version(row), "state": row["state"],
+            "saved_response": saved_response,
             "created": row["created"], "reported_turns": usage.get("reported_turns"),
             "usage_known": bool(usage.get("token_totals")),
             "reason": diagnostic["reason_code"] if diagnostic else (
@@ -124,7 +127,9 @@ def _history_recovery_page(runtime, project, *, offset, limit):
                     "result_unknown" if request["state"] in {"reserved", "running"}
                     and (request["lease_until"] or 0) <= time.time() else request["state"],
                     "result": json.loads(request["result"])}
+        from .candidate_references import history_grant
         history.append({"id": row["id"], "version": _version(row), "state": row["state"],
+            "candidate_reference_grant": history_grant(runtime, project, row["id"]),
             "epoch_matches": row["host_epoch"] == runtime.host_epoch(),
             "review_enabled": bool(row["review_enabled"]), "remaining_calls": row["remaining_calls"],
             "files_read": stats.get("files_read", 0), "incomplete": bool(plan.get("incomplete")),

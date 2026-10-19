@@ -113,6 +113,10 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
         events.append(event)
     if candidate["status"] not in {"candidate", "deferred"}:
         issues.append({"code": "candidate_state", "message": "candidate is already published or rejected"})
+    from .candidate_references import feedback_state
+    concerns = feedback_state(view, project, candidate["id"])
+    if concerns["unresolved"]:
+        issues.append({"code": "candidate_reference_disputed", "message": "Candidate reference concerns require explicit resolution"})
     if candidate["problem"] != body["problem_id"] or candidate["problem_revision"] != body["problem_revision"]:
         issues.append({"code": "candidate_identity", "message": "candidate source identity does not match its body"})
     try:
@@ -150,7 +154,7 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
            event["operation_state"]["decision"] == "denied") for event in events):
         warnings.append({"code": "operation_conflict", "message": "a source operation is conflicted or denied"})
     task = probe.task_snapshot(project, problem["task_id"], problem["task_revision"]) if problem and problem["task_id"] else None
-    snapshot = {"candidate": candidate, "problem": dict(problem) if problem else None,
+    snapshot = {"candidate": candidate, "candidate_reference_feedback": concerns, "problem": dict(problem) if problem else None,
                 "task_snapshot": dict(task) if task else None,
                 "events": events, "history": history, "target": target, "duplicates": duplicates}
     preflight = {"publishable": not issues, "issues": issues, "warnings": warnings,
@@ -213,6 +217,7 @@ def candidate_review_detail(view, project, candidate_id, section="content", offs
         evidence.append(item)
     problem = snapshot["problem"]
     return {**_preview(candidate, body, preflight),
+            "candidate_reference_feedback": snapshot["candidate_reference_feedback"],
             "body": clean({key: value for key, value in body.items() if key not in {"content", "applicability", "limitations"}}),
             "problem": {key: clean(problem[key]) for key in ("id", "revision", "summary", "status")} if problem else None,
             "field": {"name": section, "text": text[offset:offset + limit], "total_chars": len(text), "offset": offset,

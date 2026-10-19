@@ -36,7 +36,7 @@ def handle_admin_post(handler):
         if len(content_types) != 1 or content_types[0].split(";", 1)[0].strip().lower() != "application/json":
             raise ContractError("administrator requests require application/json")
         parsed = urlsplit(handler.path)
-        if parsed.query or parsed.path not in {"/api/admin-control/configure", "/api/admin-control/wake", "/api/admin-control/recovery", "/api/admin-control/history-review"}:
+        if parsed.query or parsed.path not in {"/api/admin-control/configure", "/api/admin-control/wake", "/api/admin-control/recovery", "/api/admin-control/history-review", "/api/admin-control/candidate-reference", "/api/admin-control/response-recheck"}:
             handler._send(404, {"error": "unknown administrator endpoint"})
             return
         old_timeout = handler.request.gettimeout()
@@ -51,7 +51,13 @@ def handle_admin_post(handler):
         from .admin_control import apply_control
         runtime = handler._review_runtime()
         try:
-            if parsed.path.endswith("/history-review"):
+            if parsed.path.endswith("/candidate-reference"):
+                from .candidate_reference_control import apply_reference_control
+                result = apply_reference_control(runtime, handler.server.project, body)
+            elif parsed.path.endswith("/response-recheck"):
+                from .admin_response_control import apply_response_control
+                result = apply_response_control(runtime, handler.server.project, body)
+            elif parsed.path.endswith("/history-review"):
                 from .history_review_control import request_history_review
                 result = request_history_review(runtime, handler.server.project, body, details=False)
             elif parsed.path.endswith("/recovery"):

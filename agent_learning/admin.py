@@ -23,6 +23,22 @@ class ReviewStateChanged(ContractError):
     """A valid response lost its frozen local context; not an executor failure."""
 
 
+class ResponseRejected(ContractError):
+    """Bounded, public rejection identity; never contains the model's text."""
+    def __init__(self, code, path="response"):
+        self.code, self.path = code, path
+        super().__init__(code)
+
+
+def validate_review_call(runtime, reserved):
+    """A local recovery owns a separate lease, never revives a failed paid call."""
+    if reserved.get("_local_recheck"):
+        from .admin_response_store import validate_recheck
+        return validate_recheck(runtime, reserved)
+    from .admin_lifecycle import validate_call
+    return validate_call(runtime, reserved["call_id"], reserved["owner"], reserved["host_epoch"])
+
+
 @contextlib.contextmanager
 def _review_state_guard():
     try:
@@ -58,7 +74,7 @@ RESPONSE_SCHEMA = _strict_schema({
     }, "required": ["decision", "reason", "candidate"], "additionalProperties": False,
 })
 
-# 多条输出只用于用户显式启动的历史批次；日常审核与工作摘要保持单条契约。
+# 历史与阶段明细允许多条输出；逐案审核与工作摘要保持单条契约。
 HISTORY_RESPONSE_SCHEMA = copy.deepcopy(RESPONSE_SCHEMA)
 HISTORY_RESPONSE_SCHEMA["properties"]["candidates"] = {
     "type": "array", "maxItems": 5, "items": _strict_schema(CANDIDATE)}
@@ -116,6 +132,8 @@ def _fingerprint(packet):
                 "current_tool_success": event.get("current_tool_success", event["type"] == "PostToolUse"
                                                     and event["outcome"] == "succeeded"),
                 "actor": actor_slot, "assignment": assignment_slot}
+        if event.get("candidate_reference_provenance"):
+            item["candidate_reference_provenance"] = event["candidate_reference_provenance"]
         identity = encode(item)
         if identity not in seen:
             events.append(item)
@@ -507,8 +525,11 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
     from .history_context import link_history_evidence
     packet, job_id = reserved["packet"], reserved.get("history_job_id")
     prepared = []
-    for body in bodies:
-        validate(body, CANDIDATE)
+    for index, body in enumerate(bodies):
+        try:
+            validate(body, CANDIDATE)
+        except ContractError as exc:
+            raise ResponseRejected("candidate_schema_invalid", "response.candidates[" + str(index) + "]") from exc
         if (body["problem_id"] != packet["problem"]["id"]
                 or body["problem_revision"] != packet["problem"]["revision"]):
             raise ContractError("administrator changed review identity or revision")
@@ -565,14 +586,20 @@ def _accept_response(runtime, project, reserved, response):
     if not isinstance(missing, list) or len(missing) > 8 or not all(isinstance(v, str) and len(v) <= 1000 for v in missing):
         raise ContractError("invalid missing evidence requirements")
     candidates = response.get("candidates", [])
+    # The structured schema permits a publish proposal. For a multi-candidate
+    # result it is redundant: each candidate already receives its own proposal.
+    # A targeted update/attach must remain a separate single-candidate decision.
+    batch_proposal = response.get("proposal")
     if (not isinstance(candidates, list) or len(candidates) > 5
             or candidates and (not (history_job_id or reserved.get("multi_candidate_allowed")) or response["decision"] != "candidate"
-                               or response["candidate"] is not None or response.get("proposal") is not None)):
-        raise ContractError("invalid history candidate batch")
+                               or response["candidate"] is not None
+                               or batch_proposal not in (None, {"action": "publish", "knowledge_id": None,
+                                                               "expected_revision": None}))):
+        raise ResponseRejected("candidate_batch_ambiguous", "response.candidates")
     if history_job_id and len(encode(response).encode("utf-8")) > 40000:
         raise ContractError("history response exceeds total output budget")
     with _review_state_guard():
-        validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+        validate_review_call(runtime, reserved)
         runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
                                                require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
@@ -613,8 +640,12 @@ def _accept_response(runtime, project, reserved, response):
         raise ContractError("work summary cannot propose knowledge governance")
     if candidates:
         result.update(_accept_history_candidates(runtime, project, reserved, candidates, result["reason"]))
+        proposal = None
     elif response["decision"] == "candidate":
-        validate(body, CANDIDATE)
+        try:
+            validate(body, CANDIDATE)
+        except ContractError as exc:
+            raise ResponseRejected("candidate_schema_invalid", "response.candidate") from exc
         if body["problem_id"] != packet["problem"]["id"] or body["problem_revision"] != packet["problem"]["revision"]:
             raise ContractError("administrator changed review identity or revision")
         if history_job_id:
@@ -708,7 +739,7 @@ def _accept_response(runtime, project, reserved, response):
     remember_check(runtime, project, reserved["selected"], scan_signature(runtime, project))
     with _review_state_guard():
         # 取包和写决定可能跨过租约截止点，最终提交前再校验一次。
-        validate_call(runtime, call_id, reserved["owner"], reserved["host_epoch"])
+        validate_review_call(runtime, reserved)
         runtime.assert_admin_executor_snapshot(project, reserved["provider_plan"], reserved["provider_plan"].get("conversation"),
                                                require_enabled=reserved.get("history_job_id") is None)
         if reserved.get("history_job_id"):
@@ -880,6 +911,10 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             raise ContractError("administrator produced no usable response")
         execution_state["phase"] = "response_validation"
         response = read_response(provider_plan["provider"], output, log_path)
+        # This transaction is deliberately separate from decision acceptance:
+        # a later rollback must retain the bounded public reply for local repair.
+        from .admin_response_store import capture, mark_accepted
+        capture(runtime, project, reserved, response)
         execution_state.update(phase="decision_commit", terminal_observed=True)
         with runtime.transaction():
             result = _accept_response(runtime, project, reserved, response)
@@ -892,6 +927,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             # A spawned process is not a healthy executor. Reset accumulated
             # failures only with the committed, validated administrator decision.
             clear_executor_failure(runtime, project, provider_plan)
+            mark_accepted(runtime, call_id, result)
         return dict(result, **context)
     except (OSError, ValueError, TypeError, ContractError) as exc:
         execution_state["reason_code"] = {
@@ -901,6 +937,11 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             "response_validation": "executor_response_invalid", "decision_commit": "executor_decision_uncommitted",
         }[execution_state["phase"]]
         execution_state["error_type"] = type(exc).__name__
+        from .admin_response_store import reject
+        rejection = reject(runtime, call_id, exc)
+        if rejection:
+            execution_state["rejection_code"] = rejection["code"]
+            execution_state["rejection_path"] = rejection["path"]
         if output_state is not None:
             execution_state["terminal_observed"] = bool(output_state.get("terminal"))
         if process is not None and isinstance(process.returncode, int) and not isinstance(process.returncode, bool):

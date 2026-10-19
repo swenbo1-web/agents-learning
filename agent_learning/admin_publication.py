@@ -12,6 +12,14 @@ def knowledge_tier(body):
 def _conflict_gate(runtime, project, packet, body, proposal):
     """Never let deduplication or a fresh ID evade disputed/revoked knowledge."""
     from .runtime import knowledge_fingerprint
+    from .candidate_references import lineage_risk, held_equivalent
+    held = held_equivalent(runtime, project, body)
+    if held:
+        return held
+    for ref in body.get("evidence_refs", ()):
+        risk = lineage_risk(runtime, project, ref)
+        if risk and risk.get("blocked", True):
+            return "candidate reference source requires review"
     fingerprint = knowledge_fingerprint(body)
     targets = {value for value in (packet["problem"].get("knowledge_id"), proposal.get("knowledge_id")) if value}
     targets.update(item.get("knowledge_id", item.get("id")) for item in packet.get("related_knowledge", [])
@@ -66,6 +74,9 @@ def publication_gate(runtime, project, packet, body, proposal, *, mode="verified
         return conflict
     if mode != "tiered" or body["validation_level"] != "reported":
         return _verified_gate(runtime, project, packet, body, proposal)
+    from .candidate_references import lineage_risk
+    if any(lineage_risk(runtime, project, ref) for ref in body.get("evidence_refs", ())):
+        return "candidate reference requires independent source evidence"
     if packet.get("evidence_truncated") or packet.get("incomplete"):
         return "evidence truncated"
     if proposal["action"] != "publish" or packet["problem"].get("knowledge_id"):

@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(21)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(22)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(21)):
+        if version not in set(range(22)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -334,9 +334,13 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_control(self)
             from .admin_review_flow import install_flow
             install_flow(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 20:
+            from .candidate_references import install as install_candidate_references
+            install_candidate_references(self)
+            from .admin_response_store import install as install_admin_responses
+            install_admin_responses(self)
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 21:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=20")
+            self.db.execute("PRAGMA user_version=21")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
@@ -756,6 +760,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (project, name, value))
 
     def status(self, project):
+        from .candidate_references import policy as reference_policy
         from .phase_review import status as phase_status
         from .admin_control import admission_enabled
         from .admin_queue import dispatch_diagnostic
@@ -789,6 +794,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+                "candidate_reference_policy": reference_policy(self, project),
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,
                 "workload": workload,

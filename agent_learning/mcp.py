@@ -65,6 +65,19 @@ CANDIDATE = schema({
     "metadata": METADATA, "knowledge_kind": KNOWLEDGE_KIND,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
 WORKER_TOOLS = [
+    ("candidate_reference_read", "读取已允许参考的未发布候选；不是验证结论或执行授权。按注入卡的版本分页，状态或来源变化时停止旧版读取。", schema({
+        "candidate_id": NONEMPTY, "context_handle": NONEMPTY,
+        "expected_version": {"type": "string", "minLength": 64, "maxLength": 64},
+        "section": {"type": "string", "enum": ["content", "applicability", "limitations", "evidence"]},
+        "offset": {"type": "integer", "minimum": 0},
+        "max_chars": {"type": "integer", "minimum": 512, "maximum": 4000}}, ["candidate_id", "expected_version"])),
+    ("candidate_reference_feedback", "报告已展示候选不适用或有疑问，暂停其自动参考；这是reported反馈，不证明已证伪，不发布或重试管理员。", schema({
+        "candidate_id": NONEMPTY, "context_handle": NONEMPTY,
+        "expected_version": {"type": "string", "minLength": 64, "maxLength": 64},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+        "event_refs": STRINGS}, ["candidate_id", "expected_version", "summary", "idempotency_key"])),
     ("knowledge_search", "检索本项目正式知识的有限预览；完整正文使用knowledge_read。预算是JSON正文字符数，默认6000。", schema({
         "query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS,
         "context_handle": NONEMPTY, "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}}, ["query"])),
@@ -346,6 +359,22 @@ class Server:
         if name in {"learning_panel", "learning_panel_action"}:
             return self._panel_call(name, args)
         p, r = self.project, self.runtime
+        if name in {"candidate_reference_read", "candidate_reference_feedback"}:
+            from .candidate_references import read as candidate_read, feedback as candidate_feedback
+            handle = self._handle(args)
+            if handle is None:
+                raise ContractError("candidate reference requires a verified context_handle")
+            r.access_context(p, handle, expected_epoch=self.epoch)
+            if name == "candidate_reference_read":
+                result = candidate_read(r, p, handle, args["candidate_id"], args["expected_version"],
+                    section=args.get("section", "content"), offset=args.get("offset", 0), max_chars=args.get("max_chars", 2000), workspace=self.workspace)
+            else:
+                result = candidate_feedback(r, p, handle, args["candidate_id"], args["expected_version"],
+                    summary=args["summary"], idempotency_key=args["idempotency_key"], event_refs=args.get("event_refs", []),
+                    expected_task_id=args.get("expected_task_id"), expected_task_revision=args.get("expected_task_revision"))
+            r.assert_session_epoch(self.epoch)
+            self._bind(handle)
+            return result
         if name in {"work_memory_search", "work_memory_read"}:
             handle = self._handle(args)
             access = r.access_context(p, handle, expected_epoch=self.epoch) if handle is not None else None

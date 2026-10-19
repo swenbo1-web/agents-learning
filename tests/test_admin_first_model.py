@@ -274,7 +274,7 @@ class FirstModelQueueTests(unittest.TestCase):
         self.r.close()
         upgraded = Runtime(home, config={})
         self.addCleanup(upgraded.close)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 20)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 21)
         after = dict(upgraded.db.execute("SELECT * FROM knowledge WHERE project=? AND id=?", (self.p, published["knowledge_id"])).fetchone())
         self.assertEqual(before, after)
         self.assertEqual(upgraded.db.execute("SELECT revision FROM active WHERE project=? AND id=?", (self.p, published["knowledge_id"])).fetchone()[0], published["revision"])

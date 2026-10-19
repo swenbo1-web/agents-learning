@@ -300,6 +300,8 @@ class KnowledgeContextMixin:
                 seen.add(ident)
         work_settings = self.config.get("work_memory", {})
         work_items = []
+        candidate_items = []
+        candidate_context_failed = False
         work_context_failed = False
         work_context_epoch = initial["epoch"] + int(compact)
         if (work_settings.get("enabled", True) and work_settings.get("automatic_context", True)
@@ -320,6 +322,19 @@ class KnowledgeContextMixin:
                 raise
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
                 work_context_failed = True
+        if context_handle and not tool_only and effective.strip() and (not agent_id or task):
+            from .candidate_references import search as candidate_search
+            try:
+                if _phase_guard:
+                    _phase_guard()
+                found = candidate_search(self, project, effective[-8000:], limit=1, context_handle=context_handle,
+                                         delivery=delivery, context_epoch=work_context_epoch, task_state=task_state,
+                                         compact=compact, filters=filters, workspace=workspace)
+                candidate_items = found.get("items", []) if isinstance(found, dict) else found
+            except ContractError:
+                raise
+            except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                candidate_context_failed = True
         if project_environment(workspace) != environment:
             raise ContractError("context_changed: project version changed during retrieval")
         with self.transaction():
@@ -339,6 +354,27 @@ class KnowledgeContextMixin:
             def remaining():
                 return budget - len("\n".join(lines)) - int(bool(lines))
             lines.extend(self._notifications(project, conversation, agent_id, remaining()))
+            if context_handle:
+                from .candidate_references import notifications, ack_notifications
+                self.db.execute("SAVEPOINT candidate_notifications")
+                notice_start = len(lines)
+                try:
+                    for notice in notifications(self, project, context_handle):
+                        text = notice["text"]
+                        if len(text) <= remaining():
+                            lines.append(text)
+                            ack_notifications(self, project, context_handle, [notice])
+                except ContractError:
+                    self.db.execute("ROLLBACK TO candidate_notifications")
+                    self.db.execute("RELEASE candidate_notifications")
+                    raise
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    self.db.execute("ROLLBACK TO candidate_notifications")
+                    del lines[notice_start:]
+                    candidate_context_failed = True
+                    self.db.execute("RELEASE candidate_notifications")
+                else:
+                    self.db.execute("RELEASE candidate_notifications")
             def append_complete(note):
                 if len(note) <= remaining():
                     lines.append(note)
@@ -442,6 +478,40 @@ class KnowledgeContextMixin:
             new_delivered = [item for item in delivered
                              if f"{item['knowledge_id']}@{item['revision']}" not in json.loads(row[0])]
             self._record_exposure(project, conversation, agent_id, delivered, injected=True)
+            # Candidate references and work history use one optional pool. A
+            # candidate fault must not remove formal cards or task boundaries.
+            optional_budget = min(max(0, remaining()), work_settings.get("max_context_chars", 600))
+            candidate_delivered, candidate_used = [], 0
+            if candidate_items and context_handle:
+                from .candidate_references import revalidate, record_exposure
+                from .candidate_reference_context import card
+                self.db.execute("SAVEPOINT optional_candidate_context")
+                candidate_start = len(lines)
+                try:
+                    for selected in candidate_items[:1]:
+                        item = revalidate(self, project, selected, context_handle=context_handle, workspace=workspace)
+                        if not item:
+                            continue
+                        note = card(item, max_chars=min(400, optional_budget, max(0, remaining())))
+                        if note is None:
+                            continue
+                        record_exposure(self, project, context_handle, item, delivery=delivery,
+                                        context_epoch=work_context_epoch, task_state=task_state, method="hook")
+                        lines.append(note)
+                        candidate_used += len(note) + 1
+                        candidate_delivered.append(item)
+                except ContractError:
+                    self.db.execute("ROLLBACK TO optional_candidate_context")
+                    self.db.execute("RELEASE optional_candidate_context")
+                    raise
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    self.db.execute("ROLLBACK TO optional_candidate_context")
+                    del lines[candidate_start:]
+                    candidate_delivered, candidate_used = [], 0
+                    candidate_context_failed = True
+                    self.db.execute("RELEASE optional_candidate_context")
+                else:
+                    self.db.execute("RELEASE optional_candidate_context")
             work_delivered = []
             if work_items:
                 work_line_start = len(lines)
@@ -450,9 +520,12 @@ class KnowledgeContextMixin:
                     work_header = "工作历史索引（非正式解法/执行授权；详情用 work_memory_read）："
                     # 正式知识、完整失效提醒及任务边界已优先分配预算。工作历史只能使用
                     # 剩余空间，并共享 injection_max_chars，不额外叠加一个注入预算。
-                    work_budget = min(remaining(), work_settings.get("max_context_chars", 600))
+                    work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     for work_item in self.work_validate_items(project, work_items, workspace=workspace):
+                        from .candidate_reference_context import suppress_work
+                        if suppress_work(self, project, work_item, [*delivered, *candidate_delivered]):
+                            continue
                         card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
                                 "title": clip(work_item.get("title", ""), 50),
                                 "summary": clip(work_item.get("summary", ""), 80),
@@ -515,6 +588,10 @@ class KnowledgeContextMixin:
                     self.db.execute("RELEASE optional_work_context")
             if work_context_failed:
                 self._metric(project, "work_context_failed")
+            if candidate_context_failed:
+                self._metric(project, "candidate_context_failed")
+            if candidate_delivered:
+                self._metric(project, "candidate_reference_injected", len(candidate_delivered))
             if new_delivered:
                 self._metric(project, "knowledge_injected", len(new_delivered))
             if delivered and delivery == "ephemeral":

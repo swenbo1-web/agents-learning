@@ -19,6 +19,7 @@ REVIEW_PREFIX = (
     "需要治理已有知识时只提出proposal(action,knowledge_id,expected_revision)，update/attach同时给candidate，"
     "revoke/dismiss_counterexample使用decision=governance且candidate=null；新candidate默认publish。"
     "有来源的项目约定可作为project/fact且reported；失败记录、工作流水与猜测不作为项目事实。"
+    "candidate_reference_provenance表示公开说明可能受已展示候选影响，不表示实际采用；复述、重复引用不算独立验证。"
     "发现已有知识错误或冲突时，明确指出准确ID/修订、证据和适用范围，提出治理建议，不能另起新条绕过旧争议。"
     "无治理提议proposal=null。不得将工具成功提升为专业正确；发布由程序按用户策略判定。"
     "只返回schema要求的JSON。\n<untrusted_evidence>\n"
@@ -33,7 +34,7 @@ HISTORY_REVIEW_PREFIX = (
     "相关资料的展示不表示该资料已审核。历史陈述只能reported；若用户对本批授权，程序可发布带来源参考，不能宣称已验证。"
     "全部JSON输出UTF-8总量不超过40000字节；skip/needs_evidence时candidates=[]。\n"
 )
-PACKET_FORMAT = 5
+PACKET_FORMAT = 6
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
@@ -139,6 +140,11 @@ class ReviewPacketMixin:
                 if anchor and anchor["linked_id"] not in seen_ids:
                     events.append(self._review_event(dict(anchor)))
                     seen_ids.add(anchor["linked_id"])
+        from .candidate_references import lineage_risk
+        for event in events:
+            provenance = lineage_risk(self, project, event["id"])
+            if provenance:
+                event["candidate_reference_provenance"] = provenance
         packet = {"problem": problem, "task": task, "events": [], "incomplete": bool(count),
                   "evidence_truncated": False, "evidence_count": count,
                   "related_knowledge": [], "related_candidates": [], "offset": offset,
