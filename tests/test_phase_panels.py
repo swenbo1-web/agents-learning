@@ -88,6 +88,91 @@ class PhasePanelUITests(unittest.TestCase):
                                 capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_codex_local_deferral_is_separate_localized_and_old_response_safe(self):
+        from tests.test_panel_ui import HARNESS
+        body = r"""
+ await boot();
+ element('preset').options=['off','minimal','light','balanced','active','custom'].map(value=>({value}));
+ for(const variant of ['count','phase_fallback','zero','old']){
+  const staged={...snapshot,phase_review:{host_scope:'codex:default',policy:{mode:'phase',every_phases:1},
+   phases:{sealed:2,queued:1,partial:1,completed:4},recent_batches:[{coverage_complete:true}]}};
+  const view=staged.phase_review;
+  if(variant!=='old')view.phases.routine_deferred=3;
+  if(variant==='count')view.locally_deferred_phase_count=3;
+  if(variant==='zero')view.locally_deferred_phase_count=0;
+  const promise=element('refresh').onclick(),request=sent.filter(m=>m.method==='tools/call').at(-1);
+  assert.equal(request.params.arguments.action,'status');respond(request,result(false,staged));await promise;await flush();
+  const visible=['count','phase_fallback'].includes(variant);
+  for(const language of ['en','zh-CN']){
+   element('language').onchange({target:{value:language}});const text=element('budget').textContent;
+   assert.match(text,/0 \/ 2 \/ 1 \/ 1 \/ 4/,'deferred stages must not alter the five review counts');
+   assert.equal(text.includes(language==='en'?'Pure status checks retained locally: 3':'纯状态检查本地暂存：3 个阶段'),visible,variant);
+   if(visible){assert(text.includes(language==='en'?'some material remains unreviewed':'仍有未审核资料'));assert(text.includes(language==='en'?'Only the remaining material has not been submitted':'仅余下资料尚未送审，不算审核完成'));assert(!text.includes(language==='en'?'not model-reviewed':'尚未模型审核'));assert(text.includes(language==='en'?'Check and continue':'检查并继续整理'));}
+   assert(text.includes(language==='en'?'Latest batch coverage: Complete':'最近一批覆盖: 完整'));
+  }
+ }
+ assert(!sent.some(m=>['ui/message','ui/update-model-context'].includes(m.method)));
+ assert(!sent.some(m=>m.method==='tools/call'&&!['learning_panel_open','learning_panel_action'].includes(m.params.name)));
+"""
+        harness = HARNESS.replace("else throw Error('unknown scenario');", "else if(scenario==='phase_deferred'){" + body + "}else throw Error('unknown scenario');")
+        script = re.search(r"<script>([\s\S]*)</script>", HTML).group(1)
+        self.node(harness, {"script": script, "scenario": "phase_deferred"})
+
+    def test_dsh_local_deferral_is_separate_localized_and_old_response_safe(self):
+        self.node(r"""
+const {script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const vm=require('node:vm'),assert=require('node:assert/strict');let factory,language='en';
+const window={__ModuleLoader__:{load:value=>factory=value.factory}};
+vm.runInNewContext(script.replace('exports.apply = apply;', 'exports.buildControlPanel = buildControlPanel; exports.apply = apply;'),{window,navigator:{language:'en'}});
+const plugin=factory(()=>({}));
+const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),useState:value=>[value,()=>{}],useCallback:fn=>fn,useEffect(){}};
+const Panel=plugin.buildControlPanel(react,{current:{getSnapshot:()=>({active:language})}});
+const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
+for(const variant of ['count','phase_fallback','zero','old']){
+ const view={host_scope:'dsh:default',policy:{mode:'phase',every_phases:1},phases:{sealed:2,queued:1,partial:1,completed:4},recent_batches:[{coverage_complete:true}]};
+ if(variant!=='old')view.phases.routine_deferred=3;
+ if(variant==='count')view.locally_deferred_phase_count=3;
+ if(variant==='zero')view.locally_deferred_phase_count=0;
+ const summary={project_id:'p',counts:{},panel_snapshot:{host_scope:'dsh:default',phase_review:view}};
+ const visible=['count','phase_fallback'].includes(variant);
+ for(language of ['en','zh-CN']){
+  const text=nodes(Panel({initialSummary:summary})).flatMap(n=>(n.children||[]).filter(v=>typeof v==='string')).join('\n');
+  assert.match(text,/0 \/ 2 \/ 1 \/ 1 \/ 4/,'deferred stages must not alter the five review counts');
+  assert.equal(text.includes(language==='en'?'Pure status checks retained locally: 3':'纯状态检查本地暂存：3 个阶段'),visible,variant);
+  if(visible){assert(text.includes(language==='en'?'some material remains unreviewed':'仍有未审核资料'));assert(text.includes(language==='en'?'Only the remaining material has not been submitted':'仅余下资料尚未送审，不算审核完成'));assert(!text.includes(language==='en'?'not model-reviewed':'尚未模型审核'));assert(text.includes(language==='en'?'Check and continue':'检查并继续整理'));}
+  assert(text.includes(language==='en'?'Latest batch coverage: Complete':'最近一批覆盖: 完整'));
+ }
+}
+""", {"script": (ROOT / "host_resources/dsh/client/index.js").read_text(encoding="utf-8")})
+
+    def test_antigravity_local_deferral_is_separate_localized_and_old_response_safe(self):
+        html = (ROOT / "host_resources/antigravity/sidecars/control/index.html").read_text(encoding="utf-8")
+        script = re.search(r"<script>([\s\S]*)</script>", html).group(1)
+        self.node(r"""
+const {script}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const vm=require('node:vm'),assert=require('node:assert/strict'),nodes=new Map();
+function element(id){if(!nodes.has(id))nodes.set(id,{id,children:[],dataset:{},listeners:{},addEventListener(name,fn){this.listeners[name]=fn;},append(...values){this.children.push(...values);},replaceChildren(){this.children=[];}});return nodes.get(id);}
+const window={parent:{},addEventListener(){}},document={documentElement:{},getElementById:element,createElement:()=>({children:[],dataset:{},addEventListener(){},append(...values){this.children.push(...values);}}),querySelectorAll:()=>[]};
+const exportAt='  render(); hide("waiting");';
+const exposed=script.slice(0,script.indexOf(exportAt))+'\n globalThis.show=(s)=>{summary=s;capability="cap";render();};})();';
+const context={window,document,navigator:{language:'en'}};vm.createContext(context);vm.runInContext(exposed,context);
+for(const variant of ['count','phase_fallback','zero','old']){
+ const view={host_scope:'antigravity:default',policy:{mode:'phase',every_phases:1},phases:{sealed:2,queued:1,partial:1,completed:4},recent_batches:[{coverage_complete:true}]};
+ if(variant!=='old')view.phases.routine_deferred=3;
+ if(variant==='count')view.locally_deferred_phase_count=3;
+ if(variant==='zero')view.locally_deferred_phase_count=0;
+ context.show({project_id:'p',host_scope:'antigravity:default',counts:{},phase_review:view});
+ const visible=['count','phase_fallback'].includes(variant);
+ for(const language of ['en','zh-CN']){
+  element('language').value=language;element('language').listeners.change();const text=element('admin').textContent;
+  assert.match(text,/0 \/ 2 \/ 1 \/ 1 \/ 4/,'deferred stages must not alter the five review counts');
+  assert.equal(text.includes(language==='en'?'Pure status checks retained locally: 3':'纯状态检查本地暂存：3 个阶段'),visible,variant);
+  if(visible){assert(text.includes(language==='en'?'some material remains unreviewed':'仍有未审核资料'));assert(text.includes(language==='en'?'Only the remaining material has not been submitted':'仅余下资料尚未送审，不算审核完成'));assert(!text.includes(language==='en'?'not model-reviewed':'尚未模型审核'));assert(text.includes(language==='en'?'Check and continue':'检查并继续整理'));}
+  assert(text.includes(language==='en'?'Latest batch coverage: Complete':'最近一批覆盖: 完整'));
+ }
+}
+""", {"script": script})
+
     def test_codex_card_displays_tokens_stage_progress_and_only_allows_pause(self):
         from tests.test_panel_ui import HARNESS
         body = r"""

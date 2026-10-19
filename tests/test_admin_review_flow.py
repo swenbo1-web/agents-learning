@@ -249,7 +249,7 @@ class ReviewFlowTests(unittest.TestCase):
             upgraded = Runtime(self.r.home, config=copy.deepcopy(self.config))
         self.addCleanup(upgraded.close)
         model.assert_not_called()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 23)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
         self.assertGreater(upgraded.session_epoch(), old_epoch)
         self.assertTrue(publication_policy(upgraded, self.p)["enabled"])
         with self.assertRaises(ContractError):

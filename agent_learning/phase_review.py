@@ -221,6 +221,7 @@ def status(runtime, project):
         "AND b.governance_epoch=p.governance_epoch AND b.state='blocked' AND ids.value=p.id)", current).fetchone()[0] if exists else 0
     counts = {r[0]: r[1] for r in rows}
     return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": counts,
+            "locally_deferred_phase_count": counts.get("routine_deferred", 0),
             "blocked_phase_count": blocked, "waiting_phase_count": counts.get("sealed", 0) + max(0, counts.get("queued", 0) - blocked),
             "historical_boundary_phases": old, "source_scan_omitted": source_limit,
             "token_budget_is_estimated": True, "historical_imports_included": False,
@@ -288,6 +289,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     from .admin_decisions import find_receipt, review_signature, dependency_signature
     from .admin_review_flow import evidence_readiness
     from .runtime import digest, encode
+    from .phase_local_triage import is_routine
     cfg = policy(runtime, project)
     if cfg["mode"] != "phase":
         return
@@ -332,14 +334,28 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     # Retained evidence-wait stages may remain partial indefinitely. Rotate the
     # bounded check window so their first page cannot hide later real updates.
     phases = runtime.db.execute("SELECT p.* FROM review_phases p LEFT JOIN phase_scan_progress scan ON scan.phase_id=p.id "
-        "WHERE p.project=? AND p.host_scope=? AND p.state IN ('sealed','partial','continuing') "
+        "WHERE p.project=? AND p.host_scope=? AND p.state IN ('sealed','partial','continuing','routine_deferred') "
         "AND p.session_epoch=? AND p.governance_epoch=? "
         "ORDER BY COALESCE(scan.last_checked,0),(p.state='sealed') DESC,p.created,p.id LIMIT 100",
         (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())).fetchall()
-    groups, progress = {}, {}
+    groups, progress, routine_ids = {}, {}, set()
     for phase in phases:
         scan, dirty = _scan_progress(runtime, project, phase, cfg)
         progress[phase["id"]] = scan
+        if not force and is_routine(runtime, project, phase):
+            routine_ids.add(phase["id"])
+            if phase["state"] != "routine_deferred":
+                runtime.db.execute("UPDATE review_phases SET state='routine_deferred' WHERE id=?", (phase["id"],))
+                phase = dict(phase, state="routine_deferred")
+        elif phase["state"] == "routine_deferred":
+            # A new case/changed public source must reopen local triage even if
+            # it did not change the old case-scan signature. Never reuse a model
+            # verdict here: this stage has only been held locally.
+            runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (phase["id"],))
+            scan, _ = _scan_progress(runtime, project, phase, cfg)
+            progress[phase["id"]] = scan
+            runtime.db.execute("UPDATE review_phases SET state='sealed' WHERE id=?", (phase["id"],))
+            phase = dict(phase, state="sealed")
         if phase["state"] in {"partial", "continuing"}:
             if scan["exhausted"] and not dirty:
                 state = "partial" if scan["deferred"] or phase["omitted_sources"] else "completed"
@@ -354,35 +370,46 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             continue
         key = digest(_executor_semantics(plan))
         groups.setdefault(key, []).append(phase)
-    phases = next((group for group in groups.values() if force or any(r["state"] == "continuing" for r in group)
-                   or sum(r["state"] == "sealed" for r in group) >= cfg["every_phases"]), [])
-    fresh = [row for row in phases if row["state"] == "sealed"]
+    phases = next((group for group in groups.values() if force or
+        (any(r["id"] not in routine_ids for r in group) and
+         (any(r["state"] == "continuing" for r in group) or
+          sum(r["state"] in {"sealed", "routine_deferred"} for r in group) >= cfg["every_phases"]))), [])
+    fresh = [row for row in phases if row["state"] in {"sealed", "routine_deferred"}]
     if not phases or len(fresh) < cfg["every_phases"] and not force and not any(r["state"] == "continuing" for r in phases):
         return
     if runtime.db.execute("SELECT 1 FROM phase_review_batches WHERE project=? AND host_scope=? AND state='pending' "
                           "AND session_epoch=? AND governance_epoch=?",
                           (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())).fetchone():
         return
-    phases = ([row for row in phases if row["state"] == "continuing"][:5] + fresh[:cfg["every_phases"]]
-              + [row for row in phases if row["state"] == "partial"][:5]) if not force else phases
+    # Real work always owns the first slots. Routine material can only fill
+    # remaining capacity in an otherwise useful batch, never launch by itself.
+    phases = ([row for row in phases if row["state"] == "continuing"][:5]
+              + [row for row in fresh if row["id"] not in routine_ids][:cfg["every_phases"]]
+              + [row for row in phases if row["state"] == "partial"][:5]
+              + [row for row in fresh if row["id"] in routine_ids][:2]) if not force else phases
     phases = phases[:20]
     ids = [r["id"] for r in phases]
     ordinal = runtime.db.execute("SELECT COUNT(*) FROM phase_review_batches WHERE project=?", (project,)).fetchone()[0]
     batch_key = digest([project, runtime._session_scope(), ids, cfg["version"], ordinal])[:32]
     conversation = "phase-review:" + batch_key
-    request, _ = runtime._event(project, conversation, "PhaseReviewRequested", {"phase_ids": ids},
-                                event_id="phase-review:" + batch_key, outcome="reported")
-    parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [request["id"]])
+    # Assemble under this writer transaction before recording the final scope.
+    # The parent gains its source/revision once unused local stages are removed.
+    parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [])
+    executor_conversation = next((phase["conversation"] for phase in reversed(phases)
+                                  if phase["id"] not in routine_ids), phases[-1]["conversation"])
     items, seen, omitted, reused, used = [], set(), [], [], 0
     duplicates, reused_ready, scanned_remainder, prior_deferred = [], set(), 0, 0
     scan_updates = {}
     try:
         review_cfg = _review_configuration(runtime.admin_effective_config(project),
-                                            runtime.resolve_admin_executor(project, phases[-1]["conversation"]))
+                                            runtime.resolve_admin_executor(project, executor_conversation))
     except ValueError:
         review_cfg = None
     char_limit = runtime.admin_effective_config(project)["max_input_chars"] - 3000
     for phase in phases:
+        if phase["id"] in routine_ids and (not items or len(items) >= 8 or used >= char_limit - 1000):
+            continue
+        before_phase = (len(items), len(duplicates), len(omitted), len(reused))
         source_sql, source_args = _case_source(runtime, project, phase)
         source_sql += (
             "AND NOT EXISTS(SELECT 1 FROM phase_review_members m WHERE m.project=p.project AND m.problem_id=p.id "
@@ -396,7 +423,6 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
         more = len(rows) > 100
         rows = rows[:100]
         deferred = 0
-        prior_deferred += scan["deferred"]
         last_key = previous_key
         for source_index, source in enumerate(rows):
             if used >= char_limit - 1000 or len(items) >= 8:
@@ -476,7 +502,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             # Test the actual wrapper, not just the sum of member characters.
             # An oversized member remains uncovered; it cannot pin a ready sibling.
             candidate_body = {"problem": parent, "task": None, "events": [], "related_knowledge": [],
-                "related_candidates": [], "purpose": "phase_review", "executor_conversation": phases[-1]["conversation"],
+                "related_candidates": [], "purpose": "phase_review", "executor_conversation": executor_conversation,
                 "item_max_chars": max(1000, char_limit), "phase_ids": ids, "items": items + [packet],
                 "incomplete": False, "evidence_truncated": False, "omitted_problem_ids": [],
                 "reused_problem_ids": [], "omitted_source_count": 0, "coverage_complete": False}
@@ -493,11 +519,25 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 continue
             items.append(packet)
             used += cost
+        if phase["id"] in routine_ids and (len(items), len(duplicates)) == before_phase[:2]:
+            # Merely probing a routine packet is not evidence of inclusion.
+            # Preserve its cursor and local state when the remaining character
+            # or token budget cannot carry a single item or supported reuse.
+            del omitted[before_phase[2]:]
+            del reused[before_phase[3]:]
+            continue
+        prior_deferred += scan["deferred"]
         scan_updates[phase["id"]] = {"cursor": last_key, "more": more,
             "deferred": scan["deferred"] + deferred}
         scanned_remainder += int(more)
+    # Unused locally held stages do not become queued or count as reviewed.
+    phases = [phase for phase in phases if phase["id"] in scan_updates]
+    ids = [phase["id"] for phase in phases]
+    request, _ = runtime._event(project, conversation, "PhaseReviewRequested", {"phase_ids": ids},
+                                event_id="phase-review:" + batch_key, outcome="reported")
+    parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [request["id"]])
     body = {"problem": parent, "task": None, "events": [], "related_knowledge": [], "related_candidates": [],
-            "purpose": "phase_review", "executor_conversation": phases[-1]["conversation"], "item_max_chars": max(1000, char_limit),
+            "purpose": "phase_review", "executor_conversation": executor_conversation, "item_max_chars": max(1000, char_limit),
             "phase_ids": ids, "items": items, "incomplete": False,
             "evidence_truncated": False, "omitted_problem_ids": omitted[:32], "reused_problem_ids": reused[:32],
             "omitted_problem_count": len(omitted) + prior_deferred, "reused_problem_count": len(reused),

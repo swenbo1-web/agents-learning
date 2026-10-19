@@ -188,7 +188,7 @@ class Module6IntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Runtime(home)
         with contextlib.closing(Runtime(home)) as recovered:
-            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 23)
+            self.assertEqual(recovered.db.execute("PRAGMA user_version").fetchone()[0], 24)
 
     def test_duplicate_origin_new_evidence_invalidates_without_losing_history(self):
         original = self.problem()

@@ -185,7 +185,7 @@ class AdminDeliveryTests(unittest.TestCase):
         self.r.db.execute("PRAGMA user_version=16")
         other = Runtime(self.home, config={})
         self.addCleanup(other.close)
-        self.assertEqual(other.db.execute("PRAGMA user_version").fetchone()[0], 23)
+        self.assertEqual(other.db.execute("PRAGMA user_version").fetchone()[0], 24)
         row = other.db.execute("SELECT * FROM admin_dispatch WHERE token='old'").fetchone()
         self.assertEqual(row["phase"], "reserved")
         self.assertIsNone(row["claimed_at"])

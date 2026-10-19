@@ -89,6 +89,9 @@ window.__ModuleLoader__.load({
     Object.assign(TEXT.zh, {stageFrequency:"每 {n} 个交付阶段集中审核", stageQueue:"阶段：等待收尾 / 待审 / 处理中 / 部分 / 完成", stageCoverage:"最近一批覆盖", coverageFull:"完整", coveragePartial:"部分，保留后续处理", reportedTokens:"今日已报告 token", reservedTokens:"待确认用量预留", remainingTokens:"估算可用 / 每日预算", tokenEstimate:"用量未完整报告时保留估算；预留不等于实际消耗。阶段频率与 token 预算请在审批与设置中调整。"});
     Object.assign(TEXT.en, {stageFrequency:"Review every {n} delivered stages together", stageQueue:"Stages: awaiting close / review / queued / partial / completed", stageCoverage:"Latest batch coverage", coverageFull:"Complete", coveragePartial:"Partial; further work is retained", reportedTokens:"Reported tokens today", reservedTokens:"Usage awaiting confirmation: reserved", remainingTokens:"Estimated available / daily budget", tokenEstimate:"Incomplete usage retains an estimate; reservations are not actual consumption. Change stage frequency and token budgets in Review & settings."});
 
+    Object.assign(TEXT.zh, {stageLocallyDeferred:"纯状态检查本地暂存：{n} 个阶段，仍有未审核资料。仅余下资料尚未送审，不算审核完成。后续正常阶段可按剩余预算合批；在管理员页点击“检查并继续整理”可主动补审。"});
+    Object.assign(TEXT.en, {stageLocallyDeferred:"Pure status checks retained locally: {n} stages; some material remains unreviewed. Only the remaining material has not been submitted; these stages are not complete. A later normal stage may include it within its remaining budget. Use “Check and continue” in administrator settings to request review."});
+
     function stageReview(summary) {
       var value = summary?.phase_review || summary?.panel_snapshot?.phase_review;
       var host = summary?.host_scope || summary?.panel_snapshot?.host_scope;
@@ -332,6 +335,8 @@ window.__ModuleLoader__.load({
         if (staged) {
           var phases = staged.phases || {}, latest = staged.recent_batches?.[0];
           phaseNote = t.stageFrequency.replace("{n}", staged.policy.every_phases) + "\n" + t.stageQueue + ": " + ["awaiting_stop","sealed","queued","partial","completed"].map(function (key) { return phases[key] || 0; }).join(" / ");
+          var deferred = staged.locally_deferred_phase_count ?? phases.routine_deferred ?? 0;
+          if (deferred) phaseNote += "\n" + t.stageLocallyDeferred.replace("{n}", deferred);
           if (latest) phaseNote += "\n" + t.stageCoverage + ": " + (latest.coverage_complete === true ? t.coverageFull : latest.coverage_complete === false ? t.coveragePartial : t.unknown);
         }
 

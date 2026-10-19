@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(24)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(25)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(24)):
+        if version not in set(range(25)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -340,9 +340,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_admin_responses(self)
             from .history_response_recovery import install as install_history_response_recovery
             install_history_response_recovery(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 23:
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 24:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=23")
+            self.db.execute("PRAGMA user_version=24")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):

@@ -72,6 +72,31 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert.match(get('phase-progress').textContent,/unsettled reservations: 20000/);
   assert(legacyIds.every(id=>get(id).disabled));assert(phaseIds.every(id=>!get(id).disabled));
   assert.equal(get('admin-save').disabled,false);
+ }else if(scenario==='locally_deferred_language_and_old_response'){
+  const base=clone(latest);
+  for(const variant of ['count','phase_fallback','zero','old']){
+   const value=clone(base),view=value.phase_review;
+   view.waiting_phase_count=5;
+   if(variant!=='old')view.phases.routine_deferred=3;
+   if(variant==='count')view.locally_deferred_phase_count=3;
+   if(variant==='zero')view.locally_deferred_phase_count=0;
+   mount(value);language('en');
+   const visible=['count','phase_fallback'].includes(variant);
+   let text=textOfTree(get('phase-results'));
+   assert.equal(text.includes('Pure status checks retained locally: 3'),visible,variant);
+   assert.match(get('phase-progress').textContent,/Stages waiting: 5/);
+   assert.match(get('phase-progress').textContent,/completed: 4/);
+   assert.match(get('phase-progress').textContent,/partial: 1/);
+   assert(!get('phase-progress').textContent.includes('retained locally'));
+   if(visible){assert(text.includes('some material remains unreviewed'));assert(text.includes('Only the remaining material has not been submitted'));assert(text.includes('these stages are not complete'));assert(!text.includes('not been reviewed by a model'));assert(text.includes('remaining budget'));assert(text.includes('Check and continue'));}
+   language('zh-CN');text=textOfTree(get('phase-results'));
+   assert.equal(text.includes('纯状态检查本地暂存：3 个阶段'),visible,variant);
+   assert.match(get('phase-progress').textContent,/待整理阶段：5/);
+   assert.match(get('phase-progress').textContent,/已整理：4/);
+   assert.match(get('phase-progress').textContent,/部分覆盖：1/);
+   assert(!text.includes('Pure status checks retained locally'));
+   if(visible){assert(text.includes('仍有未审核资料'));assert(text.includes('仅余下资料尚未送审，不算审核完成'));assert(!text.includes('尚未模型审核'));assert(text.includes('剩余预算'));assert(text.includes('检查并继续整理'));}
+  }
  }else if(scenario==='save_payload'){
   fire('phase-every',3);fire('phase-daily',750000);fire('phase-input',48000);fire('phase-output',6000);
   assert.equal(run('state.adminDirty'),true);assert.equal(get('admin-wake').disabled,true);
@@ -160,6 +185,7 @@ class PhaseBrowserUITests(unittest.TestCase):
         self.assertIn("ok", result.stdout)
 
     def test_hydration_and_token_status_replace_call_allowance_cards(self): self.scenario("hydrate_and_tokens")
+    def test_local_deferral_is_separate_localized_and_compatible_with_old_responses(self): self.scenario("locally_deferred_language_and_old_response")
     def test_save_posts_project_token_policy_and_frozen_versions_once(self): self.scenario("save_payload")
     def test_pending_save_stays_locked_across_refresh_and_language_change(self): self.scenario("pending_lock")
     def test_stage_fields_preserve_draft_and_legacy_controls_follow_selected_mode(self): self.scenario("draft_and_legacy_lock")

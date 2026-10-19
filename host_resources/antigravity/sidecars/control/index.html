@@ -50,6 +50,8 @@
   Object.assign(strings["zh-CN"], {quota:"开启审核会使用平台模型额度。审核与发布按项目所选策略执行；历史批次需单独确认。",confirmPreset:"保存此管理员设置？可能启动日常模型审核，并按项目所选策略发布；历史审核仍需单独确认。"});
   Object.assign(strings.en, {stageFrequency:"Review every {n} delivered stages together", stageQueue:"Stages: awaiting close / awaiting review / queued / partial / completed", stageCoverage:"Latest batch coverage", coverageFull:"Complete", coveragePartial:"Partial; further work is retained", reportedTokens:"Project reported tokens today", reservedTokens:"Usage awaiting confirmation: reserved", remainingTokens:"Estimated available / daily budget", tokenEstimate:"Incomplete usage retains an estimate; reservations are not actual consumption. Open Approval & settings to change stage frequency and token budgets."});
   Object.assign(strings["zh-CN"], {stageFrequency:"每 {n} 个交付阶段集中审核", stageQueue:"阶段状态：等待收尾 / 待审核 / 处理中 / 部分覆盖 / 已完成", stageCoverage:"最近一批覆盖", coverageFull:"完整", coveragePartial:"部分，保留后续处理", reportedTokens:"项目今日已报告 token", reservedTokens:"待确认用量预留", remainingTokens:"估算可用 / 每日预算", tokenEstimate:"用量未完整报告时保留估算；预留不等于实际消耗。修改阶段频率与 token 预算，请打开「审批与设置」。"});
+  Object.assign(strings["zh-CN"], {stageLocallyDeferred:"纯状态检查本地暂存：{n} 个阶段，仍有未审核资料。仅余下资料尚未送审，不算审核完成。后续正常阶段可按剩余预算合批；在管理员页点击“检查并继续整理”可主动补审。"});
+  Object.assign(strings.en, {stageLocallyDeferred:"Pure status checks retained locally: {n} stages; some material remains unreviewed. Only the remaining material has not been submitted; these stages are not complete. A later normal stage may include it within its remaining budget. Use “Check and continue” in administrator settings to request review."});
   const stageReview = value => value?.phase_review?.policy?.mode === "phase" && value.phase_review.host_scope === value.host_scope ? value.phase_review : null;
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
@@ -96,6 +98,8 @@
     if (staged) {
       const phases = staged.phases || {}, latest = staged.recent_batches?.[0];
       lines.push(t("stageFrequency").replace("{n}", staged.policy.every_phases), `${t("stageQueue")}: ${["awaiting_stop","sealed","queued","partial","completed"].map(key => phases[key] || 0).join(" / ")}`);
+      const deferred = staged.locally_deferred_phase_count ?? phases.routine_deferred ?? 0;
+      if (deferred) lines.push(t("stageLocallyDeferred").replace("{n}", deferred));
       if (latest) lines.push(`${t("stageCoverage")}: ${t(latest.coverage_complete === true ? "coverageFull" : latest.coverage_complete === false ? "coveragePartial" : "unknown")}`);
     }
     if (tokenMode) { lines.push(t("tokenEstimate")); $("quota").textContent = t("tokenEstimate"); }

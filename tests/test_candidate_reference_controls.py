@@ -102,7 +102,7 @@ class ReferenceProvenanceTests(unittest.TestCase):
             upgraded = Runtime(self.r.home, config=copy.deepcopy(self.r.config))
             self.addCleanup(upgraded.close)
             launch.assert_not_called()
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 23)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
         self.assertFalse(refs.policy(upgraded, self.p)["enabled"])
         self.assertEqual(upgraded.db.execute("SELECT body,status FROM candidates WHERE id=?", (identity,)).fetchone(), before)
 

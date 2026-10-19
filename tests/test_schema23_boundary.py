@@ -30,7 +30,7 @@ class Schema23BoundaryTests(unittest.TestCase):
         with patch("subprocess.Popen", side_effect=AssertionError("Migration cannot run a model")):
             upgraded = Runtime(self.r.home, config=copy.deepcopy(self.r.config))
         self.addCleanup(upgraded.close)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 23)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 24)
         self.assertEqual(tuple(upgraded.db.execute("SELECT * FROM admin_calls WHERE id=?", (call,)).fetchone()), paid)
         self.assertEqual(tuple(upgraded.db.execute("SELECT * FROM history_jobs WHERE id=?", (job,)).fetchone()), batch)
         current = upgraded.admin_effective_config(self.p)
@@ -67,10 +67,10 @@ class Schema23BoundaryTests(unittest.TestCase):
 
     def test_newer_unknown_schema_is_rejected_before_creating_tables(self):
         self.old_database()
-        self.r.db.execute("PRAGMA user_version=24")
+        self.r.db.execute("PRAGMA user_version=25")
         with self.assertRaises(ContractError):
             Runtime(self.r.home, config=copy.deepcopy(self.r.config))
-        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 24)
+        self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 25)
         self.assertIsNone(self.r.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_response_accepts'").fetchone())
 
 
