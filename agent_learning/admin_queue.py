@@ -404,6 +404,15 @@ def clear_executor_failure(runtime, project, plan):
                        (project, runtime._session_scope(), executor_signature(plan)))
 
 
+def clear_recovered_executor_failure(runtime, project, plan, call_id):
+    """Clear only the recovered decision failure, never a newer provider failure."""
+    call = runtime.db.execute("SELECT finished FROM admin_calls WHERE project=? AND id=?", (project, call_id)).fetchone()
+    if call and call[0] is not None:
+        runtime.db.execute("DELETE FROM admin_executor_failures WHERE project=? AND host_scope=? AND signature=? "
+            "AND reason='executor_decision_uncommitted' AND updated<=?",
+            (project, runtime._session_scope(), executor_signature(plan), call[0]))
+
+
 def dispatch_diagnostic(runtime, project, *, check_queue=True):
     import json
     result = _dispatch_diagnostic(runtime, project, check_queue=check_queue)
@@ -451,9 +460,9 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
             "AND p.task_id IS o.task_id AND p.task_revision IS o.task_revision WHERE p.project=? AND p.status='pending' "
             "AND o.state IN ('running','started') LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="awaiting_tool_completion")
-        if runtime.db.execute("SELECT 1 FROM admin_calls c WHERE c.project=? AND c.retry_allowed=0 "
-            "AND c.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
-            "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.call_id=c.id) LIMIT 1", (project,)).fetchone():
+        from .admin_lifecycle import unresolved_failure_sql
+        if runtime.db.execute("SELECT 1 FROM admin_calls c WHERE c.project=? AND "
+            + unresolved_failure_sql("c") + " LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="unknown_call_requires_review")
         if runtime.db.execute("SELECT 1 FROM admin_preflights WHERE project=? LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="awaiting_evidence")

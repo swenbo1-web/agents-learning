@@ -69,7 +69,11 @@ def _sources(runtime, project, problem, refs, dismiss=False):
             raise ContractError("governance source is absent or outside this problem")
         payload = json.loads(event["payload"])
         # 反例自身不能同时充当驳回反例的唯一依据，允许额外真实检查或观察。
-        supporting |= (not event["conflict"] and event["decision"] != "denied" and event["outcome"] != "conflict"
+        public_observation = event["type"] in {
+            "Feedback", "Stop", "PublicMessageSegment", "AssistantMessage", "PublicMessage", "WorkSummary"}
+        supporting |= (not event["conflict"] and event["decision"] != "denied"
+                       and (event["type"] == "PostToolUse" and event["outcome"] in {"succeeded", "call_completed"}
+                            or public_observation and event["outcome"] == "reported")
                        and not (event["type"] == "Feedback" and payload.get("feedback_kind") == "counterexample"))
     if dismiss and not supporting:
         raise ContractError("dismissing a counterexample requires additional supporting evidence")

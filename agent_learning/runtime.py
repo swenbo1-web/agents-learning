@@ -275,7 +275,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             from .runtime_storage import storage_ready, ensure_host_scope, initialization_guard
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA foreign_keys=ON")
-            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(22)):
+            if self.db.execute("PRAGMA user_version").fetchone()[0] not in set(range(23)):
                 raise ContractError("unsupported runtime database version")
             if storage_ready(self) and self.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
                 ensure_host_scope(self)
@@ -294,7 +294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
     def _initialize_storage(self):
         from .runtime_storage import mark_storage_ready
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in set(range(22)):
+        if version not in set(range(23)):
             raise ContractError("unsupported runtime database version")
         self.db.executescript(SCHEMA)
         if version < 2:
@@ -338,9 +338,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_candidate_references(self)
             from .admin_response_store import install as install_admin_responses
             install_admin_responses(self)
-            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 21:
+            if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 22:
                 self._fence_runtime_upgrade()
-            self.db.execute("PRAGMA user_version=21")
+            self.db.execute("PRAGMA user_version=22")
             mark_storage_ready(self)
 
     def _fence_runtime_upgrade(self):
@@ -668,6 +668,11 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (ident, project, conversation, task_id, task_revision, agent_id,
                          operation_id, kind, outcome, text, time.time(), task_write_version, execution_epoch, assignment_id,
                          task_status, capture_digest, input_digest, business_evidence_digest(payload)))
+        # Provenance protects publication even when the optional work-memory
+        # projection is disabled or unavailable. Only public records qualify.
+        from .candidate_references import PUBLIC_EVENTS, record_possible_influence
+        if kind in PUBLIC_EVENTS:
+            record_possible_influence(self, project, ident)
         return dict(self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()), True
 
     def record_event(self, project, conversation, kind, payload, *, _phase_guard=None, **kwargs):

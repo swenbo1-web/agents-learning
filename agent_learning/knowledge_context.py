@@ -359,11 +359,14 @@ class KnowledgeContextMixin:
                 self.db.execute("SAVEPOINT candidate_notifications")
                 notice_start = len(lines)
                 try:
-                    for notice in notifications(self, project, context_handle):
+                    complete_notices = []
+                    for notice in notifications(self, project, context_handle, workspace=workspace):
                         text = notice["text"]
                         if len(text) <= remaining():
                             lines.append(text)
-                            ack_notifications(self, project, context_handle, [notice])
+                            complete_notices.append(notice)
+                    if complete_notices:
+                        ack_notifications(self, project, context_handle, complete_notices, workspace=workspace)
                 except ContractError:
                     self.db.execute("ROLLBACK TO candidate_notifications")
                     self.db.execute("RELEASE candidate_notifications")
@@ -495,8 +498,9 @@ class KnowledgeContextMixin:
                         note = card(item, max_chars=min(400, optional_budget, max(0, remaining())))
                         if note is None:
                             continue
-                        record_exposure(self, project, context_handle, item, delivery=delivery,
-                                        context_epoch=work_context_epoch, task_state=task_state, method="hook")
+                        if not record_exposure(self, project, context_handle, item, delivery=delivery,
+                                               context_epoch=work_context_epoch, task_state=task_state, method="hook", workspace=workspace):
+                            continue
                         lines.append(note)
                         candidate_used += len(note) + 1
                         candidate_delivered.append(item)

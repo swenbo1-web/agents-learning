@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.3.0 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update every Codex, Antigravity and DSH installation sharing a database to a schema-21-compatible runtime before reloading. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.3.1 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update every Codex, Antigravity and DSH installation sharing a database to a schema-22-compatible runtime before reloading. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -38,9 +38,18 @@ No real-task net token, speed or quality gains have been established by paired e
 - **Small indexes, progressive reads:** At most one 400-character candidate card shares the existing 600-character optional pool with work history, inside the default 2,400-character total context budget. Cards state that they are unpublished and include an evidence level and read requirement. `candidate_reference_read` pages through an exact content/source version. Local retrieval adds no generation-model call; material included in model input still uses tokens.
 - **Source checks and feedback:** Rejected or deferred candidates, changed case revisions, conflicted/missing sources, linked revocation or disputes, changed file metadata and known incompatible environments are excluded. Published candidates redirect to formal knowledge and cannot revive a revoked entry. File checks use recorded size/mtime, not complete content verification. `candidate_reference_feedback` records reported concerns against a displayed version; operators can resolve concerns with an explicit reason in candidate details. Later supported events notify exposed conversations; an exposure does not prove the model read it or erase earlier context.
 - **No circular verification:** Public replies may carry a same-task possible-influence link to displayed references. This is not proof of adoption. Restatements alone cannot provide independent evidence for automatic publication. New tool observations must still support the actual target conclusion; repeated sources do not become independent validation.
-- **Recover a saved review locally:** New runs retain a bounded, sanitized public structured reply before acceptance, with machine-readable rejection reasons. No private reasoning or full execution logs are retained. A failed-review card can revalidate a saved reply against current sources and policies without another model call. Eligible results may publish under existing permission; original call state, usage and retry locks remain intact. “Allow one retry” remains a separate operation that may use model quota. Replies already deleted by older versions cannot be recovered.
+- **Recover a saved review locally:** New runs retain a bounded, sanitized public structured reply before acceptance, with machine-readable rejection reasons. No private reasoning or full execution logs are retained. Eligible daily/stage reviews can revalidate a saved reply against current sources and policies without another model call. Results may publish under existing permission; original call state, usage and retry locks remain intact. A completed historical run cannot regain its expired batch permission through local revalidation; its UI requires explicit batch handling without authorizing an automatic model rerun. “Allow one retry” remains a separate operation that may use model quota. Replies already deleted by older versions cannot be recovered.
 
 Codex/DSH persistent delivery and Antigravity ephemeral delivery keep their own deduplication semantics. Compression rechecks current eligibility. Candidate-index failures omit this optional channel while formal knowledge remains available; identity and task failures still reject. Installation and upgrades never enable references or rerun old reviews automatically.
+
+### Flow corrections and efficiency (1.3.1)
+
+- Successful local revalidation reconciles scheduler and UI state through acceptance receipts. Original failed attempts, tokens and execution time remain intact, with local recoveries counted separately. Accepted calls cannot regain model-retry permission.
+- Evidence-incomplete stages rotate through a bounded scan; each member's comparison packet is read once per pass. Candidate derivation checks reuse visited nodes and limit total work, omitting a reference when its limit is reached.
+- File/environment changes for displayed candidates queue durable warnings until the output budget can carry them. Disabling work history does not disable provenance. Dismissing a counterexample needs an additional healthy observation; failed, unfinished or denied tools cannot provide its sole support.
+- New equivalent publications cannot evade revocation, superseded knowledge or unresolved concerns. Manual approval and automatic publication share the underlying governance barrier; explicit revision, restoration and counterexample handling retain their separate entry points.
+
+These checks enforce known workflow boundaries, not the truth of arbitrary natural-language claims. Actual model latency, token savings and task benefit still need real-task comparisons; offline regression does not replace host acceptance.
 
 ## Visual control and the knowledge button
 
@@ -461,6 +470,8 @@ flowchart TD
     Entry --> Task["Current task contract and subagent assignment"]
     Task --> Retrieve["Local full-text / optional semantic retrieval, summaries and restoration"]
     Knowledge[("Published knowledge: content, conditions, revisions and sources")] --> Retrieve
+    Pending[("Unpublished candidates: opt-in, separate historical-batch permission")] --> CheckRef["Check relevance, sources, environment, disputes and derivation"]
+    CheckRef -->|"Small index; versioned details on demand"| Retrieve
     Retrieve --> Worker["Worker Agent analyzes and executes the task"]
     Worker --> Guard["Integrated PreToolUse: execution rules and state checks"]
     Guard -->|"Allowed or observation mode"| Result["Tool events and actual outcomes"]
@@ -481,11 +492,17 @@ flowchart TD
     Stage --> Packet["Bounded review packet and existing knowledge comparison"]
     Cases -.->|"Legacy case review"| Packet
     Packet --> Admin["Administrator review when enabled"]
-    Admin --> Candidate["Knowledge candidates or governance proposals"]
+    Admin --> Saved["Retain bounded public response and original usage"]
+    Saved --> Accept["Validate frozen material and current policy"]
+    Accept --> Candidate["Knowledge candidates or governance proposals"]
+    Candidate --> Pending
+    Accept -->|"Local acceptance failed"| Recheck["Explicit local revalidation of eligible daily/stage replies"]
+    Recheck -->|"Separate lease; no model call"| Accept
     Candidate --> Publish["Trusted entry: evidence, identity and revision checks"]
     Publish --> Knowledge
     Knowledge --> Governance["Counterexamples, maturity, revocation and batch governance"]
     Governance --> Knowledge
+    Governance --> CheckRef
     Schedule["Optional: bounded scheduling, budgets and receipts"] -.-> Packet
     Schedule -.-> Publish
     Retrieve --> Exposure["Exposure and declared adoption records"]
@@ -495,6 +512,8 @@ flowchart TD
 ```
 
 The main task, knowledge retrieval and experience organization proceed independently. Task delivery does not wait for background organization. Tool failures first register follow-up retrieval, which runs at the next supported prompt, restoration or tool pre-event. Administrator model calls, automatic publication and knowledge batches are configured separately; nodes in the diagram do not imply that everything is enabled by default.
+
+**State reconciliation:** Original model attempts and usage form the accounting record; local acceptance receipts separately show whether knowledge was accepted. Repeated events and source restatements add no independent validation. Disabling work history disables only its optional index, not candidate provenance or publication checks. Both manual and automatic publication check revocation and counterexamples; restoration uses its explicit governance entry. Bounded stage scans rotate so older evidence-incomplete stages cannot permanently hide later stages with new evidence.
 
 ### Roles and responsibilities
 
@@ -675,11 +694,11 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.3.0 uses database schema **21** and internal publication protocol **21**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-21-compatible version before reloading. Older runtimes cannot open schema 21.
+Current `main` v1.3.1 uses database schema **22** and internal publication protocol **22**; work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. Version 1.3.0 uses 21. This update adds derived scan-rotation and environment-notification state while preserving knowledge, tasks and usage. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-22-compatible version before reloading. Older runtimes cannot open schema 22.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
-Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation to the same compatible version, and reload. A partial upgrade leaves schema 19 and earlier runtimes, including 1.1.14, unable to open schema 21. Retaining an old export does not make an already migrated database readable by old code.
+Before sharing a database with older installations, stop the relevant runtimes, back up the database, update every installation to the same compatible version, and reload. A partial upgrade leaves schema 21 and earlier runtimes, including 1.3.0, unable to open schema 22. Retaining an old export does not make an already migrated database readable by old code.
 
 ### Custom knowledge directory in Codex
 
@@ -739,7 +758,7 @@ The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and m
 
 The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
 
-Restart Codex after updating the local source directory and review changed Hook definitions. Existing MCP processes may still use the old runtime; an update receipt does not confirm that they switched. Reload the plugin through the host installation entry if its cache remains old. Refresh Antigravity's registered UI bridge with `install-ui --upgrade` and update the active DSH profile's export as applicable. All shared-database hosts must use a schema-21-compatible runtime before reconnecting. Upgrading does not enable administrators, historical review or publication. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
+Restart Codex after updating the local source directory and review changed Hook definitions. Existing MCP processes may still use the old runtime; an update receipt does not confirm that they switched. Reload the plugin through the host installation entry if its cache remains old. Refresh Antigravity's registered UI bridge with `install-ui --upgrade` and update the active DSH profile's export as applicable. All shared-database hosts must use a schema-22-compatible runtime before reconnecting. Upgrading does not enable administrators, historical review or publication. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
 
 ### Interpreter diagnostics and repair (1.1.5)
 
@@ -986,7 +1005,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.3.0 uses database schema/internal publication protocol 21.** It provides completed-stage batches, every-N-stage frequency, dynamic token reservations, incremental deduplication and per-case review receipts; this patch fixes pagination past unready material and stage wake-up after supporting evidence arrives. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-21-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
+**Current source version 1.3.1 uses database schema/internal publication protocol 22.** It provides completed-stage batches, every-N-stage frequency, dynamic token reservations, incremental deduplication and per-case review receipts; this patch fixes pagination past unready material and stage wake-up after supporting evidence arrives. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. Work index **1**, knowledge full-text index **4** and optional semantic index **1** are unchanged. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-22-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1383,7 +1402,7 @@ Frequency presets, daily calls, batch calls, batch time and runner time on a pro
 
 Project cards show the project's budget occupancy, valid review decisions, failed attempts and remaining allowance. Combined usage appears separately and is never substituted for project usage. A started process does not prove a successful model request. Missing token reports remain unknown; multiple candidates from one review are not multiple calls. Existing records already identify their project and need no regeneration or reimport.
 
-The schema 21 upgrade invalidates older host connections and governance executors. Update and reload every shared-database host, then bind again through a new session event. Knowledge, project attribution and recorded usage remain intact. Reviews whose completion was not confirmed retain an unknown outcome and are not automatically retried.
+The schema 22 upgrade invalidates older host connections and governance executors. Update and reload every shared-database host, then bind again through a new session event. Knowledge, project attribution and recorded usage remain intact. Reviews whose completion was not confirmed retain an unknown outcome and are not automatically retried.
 
 `admin-once` scans at most ten requests; a stage request may contain several independent cases. The compatible `admin-batch` defaults are 40 requests and at most 5 calls/180 seconds, overridden by project presets or custom settings. `admin-drain` retains one lease with a default 600-second budget and shared concurrency 1; outer scheduler limits may shorten it. Stage frequency does not guarantee a fixed number of calls. Insufficient tokens or time retain uncovered material; empty queues, unknown outcomes, errors or exhausted quotas stop processing. Failures preserve cooldown, and cleanup/finalization may slightly exceed the allowance.
 

@@ -18,7 +18,27 @@ MAX_RECALL = 64
 MAX_EVIDENCE = 64
 MAX_LINEAGE = 32
 MAX_ANCESTORS = 8
+MAX_ASSESSMENTS = 128
+MAX_SOURCE_VISITS = 512
+MAX_LINEAGE_VISITS = 512
 PUBLIC_EVENTS = {"Stop", "PublicMessageSegment", "WorkSummary", "AssistantMessage", "PublicMessage"}
+
+
+class _Assessment:
+    """One bounded traversal, including shared DAG branches and recall results."""
+
+    def __init__(self):
+        self.memo = {}
+        self.remaining = {"candidates": MAX_ASSESSMENTS, "sources": MAX_SOURCE_VISITS,
+                          "lineage": MAX_LINEAGE_VISITS}
+        self.exhausted = False
+
+    def take(self, category, count=1):
+        if count > self.remaining[category]:
+            self.exhausted = True
+            return False
+        self.remaining[category] -= count
+        return True
 
 
 class ReferenceUnavailable(ValueError):
@@ -48,7 +68,7 @@ def _project(runtime, project):
 
 
 def install(runtime):
-    """Install schema-21 storage in the caller's migration transaction."""
+    """Install candidate storage in the caller's migration transaction."""
     error, _, _, _ = _helpers()
     if not runtime.db.in_transaction:
         raise error("candidate reference migration requires a write transaction")
@@ -72,7 +92,9 @@ def install(runtime):
     columns = {row[1] for row in runtime.db.execute("PRAGMA table_info(candidate_reference_exposures)")}
     for name, declaration in {"delivery": "TEXT NOT NULL DEFAULT 'persistent'",
                               "context_epoch": "INTEGER NOT NULL DEFAULT 0",
-                              "method": "TEXT NOT NULL DEFAULT 'hook'"}.items():
+                              "method": "TEXT NOT NULL DEFAULT 'hook'",
+                              "environment_state": "TEXT NOT NULL DEFAULT ''",
+                              "pending_notice": "TEXT NOT NULL DEFAULT ''"}.items():
         if name not in columns:
             runtime.db.execute(f"ALTER TABLE candidate_reference_exposures ADD COLUMN {name} {declaration}")
     text = ("coalesce(json_extract(NEW.body,'$.title'),'') || ' ' || "
@@ -240,7 +262,7 @@ def resolve_feedback(runtime, project, candidate_id, expected_version, reason):
                 "published": False, "models_started": False}
 
 
-def held_equivalent(runtime, project, body):
+def held_equivalent(runtime, project, body, *, include_held=True):
     """No fresh source identity may bypass an equivalent held candidate."""
     from .runtime import knowledge_fingerprint
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='candidate_reference_feedback'").fetchone():
@@ -253,7 +275,7 @@ def held_equivalent(runtime, project, body):
     for row in rows:
         if knowledge_fingerprint(json.loads(row["body"])) != fingerprint:
             continue
-        if row["status"] in {"deferred", "rejected"}:
+        if include_held and row["status"] in {"deferred", "rejected"}:
             return "equivalent candidate is held"
         if runtime.db.execute("SELECT 1 FROM candidate_reference_feedback WHERE project=? AND candidate_id=? "
                               "AND state='unresolved' LIMIT 1", (project, row["id"])).fetchone():
@@ -261,11 +283,25 @@ def held_equivalent(runtime, project, body):
     return None
 
 
-def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=True):
+def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=True, _evaluation=None):
     """Read one current snapshot. Eligible means usable as a clue, not correct."""
     error, clean, digest, _ = _helpers()
     if not isinstance(candidate_id, str) or not candidate_id or len(candidate_id) > 200:
         raise error("invalid candidate reference identity")
+    evaluation = _evaluation if _evaluation is not None else _Assessment()
+    # Check the active path before using a shared result: a shorter-path cache
+    # must never bypass a longer path's depth limit or an actual cycle.
+    blocked = ("candidate_lineage_cycle" if candidate_id in _ancestors or len(_ancestors) >= MAX_ANCESTORS
+               else "candidate_lineage_budget_exceeded" if evaluation.exhausted else None)
+    if blocked:
+        return {"candidate_id": candidate_id, "eligible": False, "reason": blocked,
+                "reference_version": digest([project, candidate_id, blocked]), "body_digest": ""}
+    memo_key = (candidate_id, MAX_ANCESTORS - len(_ancestors), _respect_policy)
+    if memo_key in evaluation.memo:
+        return dict(evaluation.memo[memo_key])
+    if not evaluation.take("candidates"):
+        return {"candidate_id": candidate_id, "eligible": False, "reason": "candidate_lineage_budget_exceeded",
+                "reference_version": digest([project, candidate_id, "candidate_lineage_budget_exceeded"]), "body_digest": ""}
     _project(runtime, project)
     row = runtime.db.execute("SELECT * FROM candidates WHERE project=? AND id=?", (project, candidate_id)).fetchone()
     if not row:
@@ -311,6 +347,9 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
         reason = reason or "source_reference_invalid"
     events, successes, failed_sequence, succeeded_sequence = [], False, 0, 0
     for ref in dict.fromkeys(refs):
+        if not evaluation.take("sources"):
+            reason = reason or "candidate_lineage_budget_exceeded"
+            break
         observed = runtime.db.execute("SELECT e.*,e.rowid AS sequence,pe.role,o.conflict AS operation_conflict,o.decision AS operation_decision "
             "FROM problem_events pe JOIN events e ON e.id=pe.event LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
             "WHERE pe.problem=? AND e.project=? AND e.id=?", (row["problem"], project, ref)).fetchone()
@@ -336,7 +375,7 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
             successes = True
             succeeded_sequence = max(succeeded_sequence, event["sequence"])
         if candidate_id not in _ancestors and len(_ancestors) < MAX_ANCESTORS:
-            risk = _lineage_risk(runtime, project, ref, (*_ancestors, candidate_id))
+            risk = _lineage_risk(runtime, project, ref, (*_ancestors, candidate_id), evaluation)
             snapshot.setdefault("lineage", []).append(risk)
             if risk and risk["blocked"]:
                 reason = reason or "source_candidate_lineage_blocked"
@@ -401,6 +440,8 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
             reason = reason or "equivalent_candidate_disputed"
     if len(alternatives) == 17:
         reason = reason or "candidate_title_requires_review"
+    if evaluation.exhausted:
+        reason = reason or "candidate_lineage_budget_exceeded"
     result = {"candidate_id": candidate_id, "reference_version": digest(snapshot), "body_digest": digest(body),
         "eligible": reason is None, "reason": reason, "status": row["status"], "reference_only": True, "execution_authority": False,
         "unpublished": True, "title": clean(body["title"])[:100], "content_summary": clean(body["content"])[:180],
@@ -414,6 +455,7 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
     redirect = _redirect(runtime, project, candidate_id)
     if redirect:
         result["redirect"] = redirect
+    evaluation.memo[memo_key] = result
     return result
 
 
@@ -487,8 +529,11 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
         ranked.append((row["candidate_id"], info))
     ranked.sort(key=lambda match: (-match[1]["score"], match[0]))
     matches = []
+    evaluation = _Assessment()
     for identity, info in ranked:
-        item = assess(runtime, project, identity)
+        item = assess(runtime, project, identity, _evaluation=evaluation)
+        if evaluation.exhausted:
+            break
         if item["eligible"]:
             item = _environment_check(runtime, project, item, workspace)
             if not item:
@@ -505,6 +550,40 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
             if len(matches) >= limit:
                 break
     return matches[:limit]
+
+
+def _environment_state(runtime, project, item, workspace):
+    """Bounded observable applicability/file metadata, never a content hash."""
+    if workspace is None:
+        return None
+    from .knowledge_applicability import project_environment, automatic_applicability
+    from .work_files import checkout_key, current_file_version
+    environment = project_environment(workspace)
+    state = {"checkout": checkout_key(workspace), "environment": environment,
+             "applicability": automatic_applicability(item, environment), "files": []}
+    refs = list(dict.fromkeys(item.get("source_event_refs", ())))[:20]
+    if refs:
+        marks = ",".join("?" for _ in refs)
+        rows = runtime.db.execute(f"SELECT relative_path,version FROM work_file_links WHERE project=? "
+            f"AND checkout_key=? AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
+            (project, state["checkout"], *refs)).fetchall()
+        for row in rows:
+            try:
+                recorded = json.loads(row["version"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(recorded, dict) or recorded.get("status") != "stat_observed":
+                continue
+            current = current_file_version(row["relative_path"], workspace)
+            fields = lambda version: {key: version.get(key) for key in ("status", "size", "mtime_ns")}
+            state["files"].append({"path": row["relative_path"], "recorded": fields(recorded),
+                                   "current": fields(current)})
+    return state
+
+
+def _environment_blocked(state):
+    return bool(state and (state["applicability"]["status"] == "incompatible" or
+        any(item["recorded"] != item["current"] for item in state["files"])))
 
 
 def _environment_check(runtime, project, item, workspace):
@@ -535,7 +614,7 @@ def revalidate(runtime, project, item, context_handle=None, *, workspace=None):
 
 
 def record_exposure(runtime, project, context_handle, item, *, delivery="persistent", context_epoch=0,
-                    task_state=None, method="mcp"):
+                    task_state=None, method="mcp", workspace=None):
     """Record only a complete response actually returned by the caller."""
     with _transaction(runtime):
         access, task, assignment = _access(runtime, project, context_handle)
@@ -546,20 +625,22 @@ def record_exposure(runtime, project, context_handle, item, *, delivery="persist
         if task_state is not None and (task_state.get("id"), task_state.get("revision"), task_state.get("assignment_id")) != (
                 task["id"] if task else None, task["revision"] if task else None, assignment["assignment_id"] if assignment else None):
             raise error("candidate reference task changed before exposure")
-        current = revalidate(runtime, project, item)
+        current = revalidate(runtime, project, item, workspace=workspace)
         if current is None:
             return False
+        environment_state = _environment_state(runtime, project, current, workspace)
         now = time.time()
         runtime.db.execute("INSERT INTO candidate_reference_exposures(project,conversation,agent,host_epoch,candidate_id,"
-            "reference_version,body_digest,task_id,task_revision,assignment_id,notified_version,checked,updated,delivery,context_epoch,method) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,'',?,?,?,?,?) ON CONFLICT(project,conversation,agent,host_epoch,candidate_id) DO UPDATE SET "
+            "reference_version,body_digest,task_id,task_revision,assignment_id,notified_version,checked,updated,delivery,context_epoch,method,environment_state,pending_notice) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'',?,?,?,?,?,?,'') ON CONFLICT(project,conversation,agent,host_epoch,candidate_id) DO UPDATE SET "
             "reference_version=excluded.reference_version,body_digest=excluded.body_digest,task_id=excluded.task_id,"
             "task_revision=excluded.task_revision,assignment_id=excluded.assignment_id,notified_version='',checked=excluded.checked,updated=excluded.updated,"
-            "delivery=excluded.delivery,context_epoch=excluded.context_epoch,method=excluded.method",
+            "delivery=excluded.delivery,context_epoch=excluded.context_epoch,method=excluded.method,"
+            "environment_state=excluded.environment_state,pending_notice=''",
             (project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], current["candidate_id"],
              current["reference_version"], current["body_digest"], task["id"] if task else None,
              task["revision"] if task else None, assignment["assignment_id"] if assignment else None, now, now,
-             delivery, context_epoch, method))
+             delivery, context_epoch, method, json.dumps(environment_state, ensure_ascii=False, sort_keys=True) if environment_state is not None else ""))
         return True
 
 
@@ -618,12 +699,28 @@ def read(runtime, project, context_handle, candidate_id, expected_version, secti
         result["next_offset"] = offset + low if low < remaining else None
         if len(encode(result)) > max_chars or remaining and low == 0:
             raise error("candidate reference read budget too small for identity and status")
-        if not record_exposure(runtime, project, context_handle, item):
+        if not record_exposure(runtime, project, context_handle, item, workspace=workspace):
             raise error("candidate reference changed before response")
         return result
 
 
-def notifications(runtime, project, context_handle):
+def _notification_state(runtime, project, row, item, workspace):
+    _, _, digest, _ = _helpers()
+    environment = _environment_state(runtime, project, item, workspace)
+    prior_environment = json.loads(row["environment_state"]) if row["environment_state"] else None
+    environmental_change = bool(environment is not None and (
+        prior_environment is not None and environment != prior_environment or
+        prior_environment is None and _environment_blocked(environment)))
+    changed = item["reference_version"] != row["reference_version"] or environmental_change
+    reason = item["reason"] or ("reference_environment_or_files_changed" if environmental_change else "reference_source_changed")
+    # An older/non-file caller must not manufacture a second notice merely
+    # because it cannot re-observe the workspace captured by a Hook.
+    token_environment = environment if environment is not None else prior_environment
+    token = digest([row["reference_version"], item["reference_version"], reason, token_environment])
+    return changed, reason, token, environment
+
+
+def notifications(runtime, project, context_handle, *, workspace=None):
     """Bounded rotating checks. Only explicit acknowledgements dismiss notices."""
     _, _, digest, _ = _helpers()
     with _transaction(runtime):
@@ -631,43 +728,54 @@ def notifications(runtime, project, context_handle):
         rows = runtime.db.execute("SELECT * FROM candidate_reference_exposures WHERE project=? AND conversation=? "
             "AND agent=? AND host_epoch=? ORDER BY checked,candidate_id LIMIT 32",
             (project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"])).fetchall()
-        notes = []
+        notes, evaluation = [], _Assessment()
         for row in rows:
-            item = assess(runtime, project, row["candidate_id"])
-            changed = item["reference_version"] != row["reference_version"]
-            notice = digest([row["reference_version"], item["reference_version"], item["reason"]])
+            item = assess(runtime, project, row["candidate_id"], _evaluation=evaluation)
+            changed, reason, notice, environment = _notification_state(runtime, project, row, item, workspace)
+            pending = json.loads(row["pending_notice"]) if row["pending_notice"] else None
             if changed and row["notified_version"] != notice:
-                reason = item["reason"] or "reference_source_changed"
-                notes.append({"id": notice, "notice_version": notice, "candidate_id": row["candidate_id"],
+                pending = {"id": notice, "notice_version": notice, "candidate_id": row["candidate_id"],
                     "reference_version": item["reference_version"], "previous_version": row["reference_version"],
                     "reason": reason, "eligible": item["eligible"],
-                    "text": f"待定参考 {row['candidate_id']} 状态或来源已变化（{reason}）；请停止依据旧摘要执行，重新检索。"})
+                    "text": f"待定参考 {row['candidate_id']} 状态、来源或文件环境已变化（{reason}）；请停止依据旧摘要执行，重新检索。"}
+                runtime.db.execute("UPDATE candidate_reference_exposures SET pending_notice=? WHERE project=? AND conversation=? "
+                    "AND agent=? AND host_epoch=? AND candidate_id=?", (json.dumps(pending, ensure_ascii=False, sort_keys=True),
+                    project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], row["candidate_id"]))
+            if pending:
+                # A transient change cannot erase an already queued, incomplete
+                # warning simply by restoring the captured size/mtime.
+                notes.append(pending)
             runtime.db.execute("UPDATE candidate_reference_exposures SET checked=? WHERE project=? AND conversation=? "
                 "AND agent=? AND host_epoch=? AND candidate_id=?", (time.time(), project, access["conversation_id"],
                 access["agent_id"] or "", access["host_epoch"], row["candidate_id"]))
         return notes
 
 
-def ack_notifications(runtime, project, context_handle, items):
+def ack_notifications(runtime, project, context_handle, items, *, workspace=None):
     """Caller passes only notices fully included in its final response budget."""
     error, _, digest, _ = _helpers()
     if not isinstance(items, list) or len(items) > 32:
         raise error("invalid candidate reference notification acknowledgement")
     with _transaction(runtime):
         access = runtime.access_context(project, context_handle)
-        count = 0
+        count, evaluation = 0, _Assessment()
         for item in items:
-            current = assess(runtime, project, item["candidate_id"])
-            row = runtime.db.execute("SELECT reference_version FROM candidate_reference_exposures WHERE project=? "
+            current = assess(runtime, project, item["candidate_id"], _evaluation=evaluation)
+            row = runtime.db.execute("SELECT * FROM candidate_reference_exposures WHERE project=? "
                 "AND conversation=? AND agent=? AND host_epoch=? AND candidate_id=?", (project, access["conversation_id"],
                 access["agent_id"] or "", access["host_epoch"], item["candidate_id"])).fetchone()
             if not row:
                 continue
-            expected = digest([row[0], current["reference_version"], current["reason"]])
-            if item.get("id", item.get("notice_version")) != expected:
+            pending = json.loads(row["pending_notice"]) if row["pending_notice"] else None
+            changed, _, expected, environment = _notification_state(runtime, project, row, current, workspace)
+            identity = item.get("id", item.get("notice_version"))
+            if pending and pending.get("reason") == "reference_environment_or_files_changed" and workspace is None:
+                continue  # No current file observation means no environment acknowledgement.
+            if not pending or pending.get("id") != identity or changed and identity != expected:
                 continue
-            count += runtime.db.execute("UPDATE candidate_reference_exposures SET notified_version=? WHERE project=? "
-                "AND conversation=? AND agent=? AND host_epoch=? AND candidate_id=?", (expected, project,
+            state = json.dumps(environment, ensure_ascii=False, sort_keys=True) if environment is not None else row["environment_state"]
+            count += runtime.db.execute("UPDATE candidate_reference_exposures SET notified_version=?,pending_notice='',environment_state=? WHERE project=? "
+                "AND conversation=? AND agent=? AND host_epoch=? AND candidate_id=?", (identity, state, project,
                 access["conversation_id"], access["agent_id"] or "", access["host_epoch"], item["candidate_id"])).rowcount
         return count
 
@@ -754,8 +862,9 @@ def influence_for_event(runtime, project, event):
         return []
     rows = runtime.db.execute("SELECT candidate_id,reference_version FROM candidate_reference_exposures "
         "WHERE project=? AND conversation=? AND agent=? AND host_epoch=? AND task_id IS ? AND task_revision IS ? "
+        "AND assignment_id IS ? "
         "AND updated<=? ORDER BY updated DESC,candidate_id LIMIT ?", (project, event["conversation"], event["agent"] or "",
-        runtime.session_epoch(), event["task_id"], event["task_revision"], event["created"], MAX_LINEAGE)).fetchall()
+        runtime.session_epoch(), event["task_id"], event["task_revision"], event["assignment_id"], event["created"], MAX_LINEAGE)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -764,14 +873,19 @@ def record_possible_influence(runtime, project, event_id):
     return record_lineage(runtime, project, event_id, items, "possible_influence") if items else 0
 
 
-def _lineage_risk(runtime, project, event_id, ancestors=()):
+def _lineage_risk(runtime, project, event_id, ancestors=(), evaluation=None):
+    evaluation = evaluation if evaluation is not None else _Assessment()
     rows = runtime.db.execute("SELECT candidate_id,reference_version,relation FROM candidate_reference_lineage "
         "WHERE project=? AND event_id=? ORDER BY candidate_id,reference_version LIMIT ?", (project, event_id, MAX_LINEAGE + 1)).fetchall()
     if not rows:
         return None
+    if not evaluation.take("lineage", len(rows)):
+        return {"blocked": True, "reason": "candidate_lineage_budget_exceeded", "references": [],
+                "possible_influence": any(row["relation"] == "possible_influence" for row in rows)}
     refs, blocked = [], len(rows) > MAX_LINEAGE
     for row in rows[:MAX_LINEAGE]:
-        current = assess(runtime, project, row["candidate_id"], _ancestors=ancestors, _respect_policy=False)
+        current = assess(runtime, project, row["candidate_id"], _ancestors=ancestors, _respect_policy=False,
+                         _evaluation=evaluation)
         reason = current["reason"]
         # A successful publication redirects provenance. It does not resurrect
         # a candidate if that formal revision was later revoked or superseded.
@@ -780,8 +894,10 @@ def _lineage_risk(runtime, project, event_id, ancestors=()):
             bad = not redirect or not redirect["active"]
         else:
             bad = reason is not None
-        blocked |= bad
+        blocked |= bad or evaluation.exhausted
         refs.append({**dict(row), "reason": reason, "blocked": bad})
+        if evaluation.exhausted:
+            break
     return {"blocked": blocked, "reason": "candidate_reference_lineage_risk" if blocked else None,
         "references": refs, "possible_influence": any(row["relation"] == "possible_influence" for row in rows)}
 

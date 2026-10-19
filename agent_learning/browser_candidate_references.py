@@ -31,6 +31,7 @@ responseUnavailable:['This old attempt has no saved public response. A model-fre
 'candidate reference source requires review':['Source may be influenced by disputed candidate references','来源可能受争议候选参考影响，需核对'],
 'candidate reference requires independent source evidence':['Referenced candidate restatements require independent evidence','候选参考的复述需要独立来源证据'],
 public_response_unavailable:['No saved public response','没有留存公开答复'],
+history_run_reapproval_required:['This historical batch requires explicit permission handling; local revalidation cannot restore it or authorize a model rerun.','此历史批次需先明确处理批次权限；本地重验不能恢复权限，也不授权重新调用模型。'],
 response_schema_invalid:['Invalid structured response','结构化答复不符合契约'],
 candidate_batch_ambiguous:['Inconsistent multi-candidate decision','多候选决定与治理提议不一致'],
 candidate_tool_success_missing:['No directly observed successful tool evidence','缺少直接观察到的工具成功证据'],

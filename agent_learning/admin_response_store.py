@@ -211,8 +211,10 @@ def status(runtime, project, call_id):
     boundary = row["session_epoch"] == runtime.session_epoch() and row["governance_epoch"] == runtime.host_epoch()
     active = runtime.db.execute("SELECT 1 FROM admin_response_rechecks WHERE project=? AND call_id=? "
         "AND state='validating' AND lease_until>? LIMIT 1", (project, call_id, time.time())).fetchone()
+    historical = bool(json.loads(row["reserved"]).get("history_job_id"))
     return {"call_id": call_id, "available": row["response"] is not None, "state": row["state"],
-            "version": row["version"], "can_recheck": bool(ready and boundary and not active),
+            "version": row["version"], "can_recheck": bool(ready and boundary and not active and not historical),
+            **({"reason": "history_run_reapproval_required"} if historical else {}),
             "rejection": {"code": row["rejection_code"], "path": row["rejection_path"]} if row["rejection_code"] else None,
             "models_started": False, "local_recheck": True}
 
@@ -270,6 +272,8 @@ def recheck(runtime, project, call_id, *, request_id, expected_version, expected
         if record["state"] == "accepted":
             return {"status": "already_accepted", "call_id": call_id, "local_recheck": True, "models_started": False,
                     "result": json.loads(record["result"] or "{}")}
+        if json.loads(record["reserved"]).get("history_job_id"):
+            raise ContractError("history_run_reapproval_required: retained history output requires its explicit batch workflow")
         if record["state"] not in {"captured", "rejected"} or not _terminal(runtime, record):
             raise ContractError("local recheck requires a failed call with a successful observed terminal response")
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN ('reserved','launch_intent','started') "
@@ -297,6 +301,8 @@ def recheck(runtime, project, call_id, *, request_id, expected_version, expected
             validate_recheck(runtime, reserved)
             result["local_recheck"] = True
             mark_accepted(runtime, call_id, result)
+            from .admin_queue import clear_recovered_executor_failure
+            clear_recovered_executor_failure(runtime, project, reserved["provider_plan"], call_id)
             answer = {"status": "accepted", "call_id": call_id, "local_recheck": True,
                       "models_started": False, "result": result}
             runtime.db.execute("UPDATE admin_response_rechecks SET state='accepted',response=?,updated=? "

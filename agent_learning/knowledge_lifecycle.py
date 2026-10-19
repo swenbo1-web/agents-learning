@@ -31,6 +31,52 @@ def lifecycle_state(runtime, project, knowledge_id):
             "lifecycle_version": version[0] if version else 0}
 
 
+def publication_lineage_state(runtime, project, body, knowledge_id=None, candidate_id=None):
+    """A new publication cannot silently restore an equivalent retired claim.
+
+    Explicit updates keep their own active-revision contract. A revoked record
+    can only be reactivated through restore; a counterexample has its separate
+    governance action. Return the exact comparison state for approval snapshots.
+    """
+    from .runtime import knowledge_fingerprint
+    from .candidate_references import feedback_state, held_equivalent
+
+    concerns = feedback_state(runtime, project, candidate_id) if candidate_id else None
+    held = held_equivalent(runtime, project, body, include_held=False)
+    issues = []
+    if concerns and concerns["unresolved"]:
+        issues.append({"code": "candidate_reference_disputed", "message": "Candidate reference concerns require explicit resolution"})
+    elif held:
+        issues.append({"code": "equivalent_candidate_disputed" if "unresolved concerns" in held else "candidate_comparison_limit",
+                       "message": held})
+    result = {"issues": issues, "matches": [], "feedback": [], "candidate_concerns": concerns,
+              "equivalent_candidate_hold": held}
+    if knowledge_id is not None:
+        return result
+    rows = runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision "
+        "FROM knowledge_fingerprints f LEFT JOIN active a ON a.project=f.project AND a.id=f.id "
+        "WHERE f.project=? AND f.fingerprint=? ORDER BY f.id,f.revision LIMIT 65",
+        (project, knowledge_fingerprint(body))).fetchall()
+    matches, feedback = [dict(row) for row in rows], []
+    result.update(matches=matches, feedback=feedback)
+    if len(rows) > 64:
+        issues.append({"code": "equivalent_knowledge_limit", "message": "Too many equivalent knowledge revisions; explicit governance is required"})
+        return result
+    current_equivalent = {row["id"] for row in rows if row["revision"] == row["active_revision"]}
+    if any(row["active_revision"] is None for row in rows):
+        issues.append({"code": "equivalent_knowledge_revoked", "message": "Equivalent knowledge was revoked; use explicit restore after checking the evidence"})
+    elif any(row["id"] not in current_equivalent for row in rows):
+        issues.append({"code": "equivalent_knowledge_superseded", "message": "Equivalent knowledge was superseded; compare the current revision through explicit governance"})
+    for identity in sorted({row["id"] for row in rows}):
+        feedback.extend(dict(row) for row in runtime.db.execute(
+            "SELECT knowledge_id,revision,problem_id,disposition,disposition_reason,disposition_receipt "
+            "FROM knowledge_feedback WHERE project=? AND knowledge_id=? AND kind='counterexample' "
+            "AND disposition='unresolved' ORDER BY revision,problem_id LIMIT 65", (project, identity)))
+    if feedback:
+        issues.append({"code": "equivalent_knowledge_disputed", "message": "Equivalent knowledge has an unresolved counterexample; resolve it through explicit governance"})
+    return result
+
+
 def request_identity(request_id, reason, actor, evidence_refs=None):
     from .runtime import ContractError, clean
 

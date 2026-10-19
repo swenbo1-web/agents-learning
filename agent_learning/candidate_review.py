@@ -96,7 +96,7 @@ class _ValidationView:
 def _inspection(view, project, candidate, body, knowledge_id=None, expected_revision=None):
     """All source data contributes to the snapshot; output stays bounded."""
     from .runtime import Runtime
-    from .knowledge_lifecycle import lifecycle_state
+    from .knowledge_lifecycle import lifecycle_state, publication_lineage_state
 
     probe, issues, warnings = _ValidationView(view.db), [], []
     problem = view.db.execute("SELECT * FROM problems WHERE project=? AND id=?",
@@ -140,6 +140,8 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
             issues.append({"code": "target_changed", "message": "knowledge revision changed or is revoked"})
     elif expected_revision is not None:
         raise ContractError("expected_revision requires a knowledge_id")
+    publication_lineage = publication_lineage_state(view, project, body, knowledge_id, candidate["id"])
+    issues.extend(item for item in publication_lineage["issues"] if item["code"] not in {issue["code"] for issue in issues})
     duplicates = [dict(row) for row in view.db.execute(
         "SELECT a.id,a.revision FROM active a JOIN knowledge_fingerprints f ON "
         "f.project=a.project AND f.id=a.id AND f.revision=a.revision "
@@ -156,7 +158,8 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
     task = probe.task_snapshot(project, problem["task_id"], problem["task_revision"]) if problem and problem["task_id"] else None
     snapshot = {"candidate": candidate, "candidate_reference_feedback": concerns, "problem": dict(problem) if problem else None,
                 "task_snapshot": dict(task) if task else None,
-                "events": events, "history": history, "target": target, "duplicates": duplicates}
+                "events": events, "history": history, "target": target, "duplicates": duplicates,
+                "publication_lineage": publication_lineage}
     preflight = {"publishable": not issues, "issues": issues, "warnings": warnings,
                  "history_budget_paused": history_budget}
     return snapshot, preflight

@@ -14,6 +14,15 @@ RETRYABLE_STATES = ("failed", *UNKNOWN_STATES)
 TERMINAL_STATES = ("not_started", "candidate", "needs_evidence", "skip", "governance", "failed", *UNKNOWN_STATES)
 
 
+def unresolved_failure_sql(alias="a"):
+    """A failed paid attempt can already own a successful local decision."""
+    if alias not in {"a", "c", "admin_calls"}:
+        raise ValueError("unsupported administrator call alias")
+    return (f"{alias}.retry_allowed=0 AND {alias}.state IN "
+            "('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
+            f"AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project={alias}.project AND r.call_id={alias}.id)")
+
+
 def _transaction(runtime):
     return contextlib.nullcontext() if runtime.db.in_transaction else runtime.transaction()
 
@@ -70,6 +79,11 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
         "ORDER BY created,id LIMIT 1", (project,)).fetchone()
     if active:
         return {"status": "waiting_for_review", "call_id": active["id"], "active_state": active["state"]}
+    if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_rechecks'").fetchone():
+        local = runtime.db.execute("SELECT call_id FROM admin_response_rechecks WHERE project=? "
+            "AND state='validating' AND lease_until>? LIMIT 1", (project, time.time())).fetchone()
+        if local:
+            return {"status": "waiting_for_review", "call_id": local[0], "active_state": "local_recheck"}
     from .admin_usage import admin_admission_status, reserve_usage
     current = time.time()
     budget = admin_admission_status(runtime, project, now=current)
@@ -162,6 +176,9 @@ def retry_call(runtime, project, call_id, reason):
         row = runtime.db.execute("SELECT * FROM admin_calls WHERE id=? AND project=?", (call_id, project)).fetchone()
         if row is None:
             raise ContractError("unknown administrator call in project")
+        if runtime.db.execute("SELECT 1 FROM review_receipts WHERE project=? AND call_id=? LIMIT 1",
+                              (project, call_id)).fetchone():
+            raise ContractError("administrator call already has an accepted review receipt")
         if row["state"] not in RETRYABLE_STATES:
             raise ContractError("administrator call is not retryable")
         if row["retry_allowed"] == 2:

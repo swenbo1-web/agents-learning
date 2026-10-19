@@ -114,6 +114,52 @@ class PhaseScanProgressTests(unittest.TestCase):
                         "Superseding an unpaid frozen batch must retain every original member")
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 1)
 
+    def test_retained_partial_stages_cannot_hide_a_later_source_update(self):
+        from agent_learning import phase_review
+        # Preserve genuine phase identities and public source cases, while
+        # seeding the durable exhausted state left by earlier evidence waits.
+        with patch("agent_learning.phase_review.prepare"):
+            for number in range(101):
+                self.phase(f"retained-{number:03}", f"Independent sourced convention {number}")
+        phases = self.r.db.execute("SELECT * FROM review_phases ORDER BY created,id").fetchall()
+        self.r.db.execute("UPDATE review_phases SET state='partial'")
+        cfg = policy(self.r, self.p)
+        with self.r.transaction():
+            for phase in phases[:100]:
+                phase_review._scan_progress(self.r, self.p, phase, cfg)
+                self.r.db.execute("UPDATE phase_scan_progress SET deferred=1,exhausted=1,last_checked=0 "
+                                  "WHERE phase_id=?", (phase["id"],))
+            phase_review.prepare(self.r, self.p)
+            phase_review.prepare(self.r, self.p)
+        pending = self.r.db.execute("SELECT packet FROM phase_review_batches WHERE state='pending'").fetchone()
+        self.assertIsNotNone(pending, "A later evidence-ready stage must become reachable after bounded rotation")
+        self.assertIn(phases[-1]["id"], json.loads(pending[0])["phase_ids"])
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_pending_batch_comparison_reads_each_member_once(self):
+        from agent_learning import phase_review
+        members = self.pending_members()
+        original = self.r.review_packet
+        with patch.object(self.r, "review_packet", wraps=original) as read_packet:
+            with self.r.transaction():
+                phase_review.prepare(self.r, self.p)
+        counts = {identity: sum(call.args[1] == identity for call in read_packet.call_args_list)
+                  for identity in members}
+        self.assertEqual(set(counts.values()), {1}, counts)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM phase_review_batches WHERE state='pending'").fetchone()[0], 1)
+
+    def test_scan_check_column_upgrade_preserves_progress(self):
+        from agent_learning import phase_review
+        self.phase("old-store")
+        phase = self.r.db.execute("SELECT * FROM review_phases LIMIT 1").fetchone()
+        with self.r.transaction():
+            phase_review._scan_progress(self.r, self.p, phase, policy(self.r, self.p))
+            self.r.db.execute("UPDATE phase_scan_progress SET cursor='[1,2,\"source\"]',deferred=3,exhausted=1")
+            self.r.db.execute("ALTER TABLE phase_scan_progress DROP COLUMN last_checked")
+            phase_review.install(self.r)
+        row = self.r.db.execute("SELECT cursor,deferred,exhausted,last_checked FROM phase_scan_progress").fetchone()
+        self.assertEqual(tuple(row), ('[1,2,"source"]', 3, 1, 0))
+
     def test_input_policy_change_releases_unpaid_batch_without_losing_members(self):
         members = self.pending_members()
         cfg = policy(self.r, self.p)

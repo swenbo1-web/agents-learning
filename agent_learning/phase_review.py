@@ -56,6 +56,8 @@ def install(runtime):
     runtime.db.execute("CREATE INDEX IF NOT EXISTS phase_member_evidence ON phase_review_members(project,evidence_signature)")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS phase_scan_progress(phase_id TEXT PRIMARY KEY,"
         "signature TEXT NOT NULL,cursor TEXT,deferred INTEGER NOT NULL DEFAULT 0,exhausted INTEGER NOT NULL DEFAULT 0)")
+    if "last_checked" not in {row[1] for row in runtime.db.execute("PRAGMA table_info(phase_scan_progress)")}:
+        runtime.db.execute("ALTER TABLE phase_scan_progress ADD COLUMN last_checked REAL NOT NULL DEFAULT 0")
 
 
 def policy(runtime, project):
@@ -272,9 +274,11 @@ def _scan_progress(runtime, project, phase, cfg):
     row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
     changed = not row or row["signature"] != signature
     if changed:
-        runtime.db.execute("INSERT INTO phase_scan_progress VALUES(?,?,NULL,0,0) ON CONFLICT(phase_id) "
+        runtime.db.execute("INSERT INTO phase_scan_progress(phase_id,signature,cursor,deferred,exhausted) "
+            "VALUES(?,?,NULL,0,0) ON CONFLICT(phase_id) "
             "DO UPDATE SET signature=excluded.signature,cursor=NULL,deferred=0,exhausted=0", (phase["id"], signature))
         row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
+    runtime.db.execute("UPDATE phase_scan_progress SET last_checked=? WHERE phase_id=?", (time.time(), phase["id"]))
     return dict(row), changed
 
 
@@ -303,10 +307,12 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             try:
                 live_cfg = _review_configuration(runtime.admin_effective_config(project),
                     runtime.resolve_admin_executor(project, frozen["executor_conversation"]))
-                changed = any(review_signature(runtime.review_packet(project, item["problem"]["id"],
-                        max_chars=frozen["item_max_chars"]), live_cfg,
-                        _fingerprint(runtime.review_packet(project, item["problem"]["id"], max_chars=frozen["item_max_chars"])))
-                    != review_signature(item, live_cfg, _fingerprint(item)) for item in frozen["items"])
+                for item in frozen["items"]:
+                    fresh_packet = runtime.review_packet(project, item["problem"]["id"], max_chars=frozen["item_max_chars"])
+                    if (review_signature(fresh_packet, live_cfg, _fingerprint(fresh_packet))
+                            != review_signature(item, live_cfg, _fingerprint(item))):
+                        changed = True
+                        break
                 if not changed:
                     for duplicate in runtime.db.execute("SELECT * FROM phase_review_members WHERE batch_id=? "
                                                         "AND state='duplicate_pending'", (old["problem_id"],)).fetchall():
@@ -323,8 +329,12 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             for identity in json.loads(old["phase_ids"]):
                 runtime.db.execute("UPDATE review_phases SET state='sealed' WHERE id=? AND state='queued'", (identity,))
                 runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
-    phases = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND host_scope=? AND state IN ('sealed','partial','continuing') "
-        "AND session_epoch=? AND governance_epoch=? ORDER BY (state='sealed') DESC,created,id LIMIT 100",
+    # Retained evidence-wait stages may remain partial indefinitely. Rotate the
+    # bounded check window so their first page cannot hide later real updates.
+    phases = runtime.db.execute("SELECT p.* FROM review_phases p LEFT JOIN phase_scan_progress scan ON scan.phase_id=p.id "
+        "WHERE p.project=? AND p.host_scope=? AND p.state IN ('sealed','partial','continuing') "
+        "AND p.session_epoch=? AND p.governance_epoch=? "
+        "ORDER BY COALESCE(scan.last_checked,0),(p.state='sealed') DESC,p.created,p.id LIMIT 100",
         (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())).fetchall()
     groups, progress = {}, {}
     for phase in phases:

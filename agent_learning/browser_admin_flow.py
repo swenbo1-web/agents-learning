@@ -21,6 +21,8 @@ flowHeading:['Review subjects and publication','审核内容与发布去向'],
 flowNote:['Read visible records and evidence only; this is not model internal reasoning. Refreshing makes no model call.','展示可见记录与证据，不代表读取模型内部思考；刷新不调用模型。'],
 flowUpcoming:['Next daily cases (up to 5)','接下来可审的日常案例（最多5项）'],
 flowRecent:['Current and recent reviews (up to 8)','正在进行与最近审核（最多8项）'],
+flowLocallyAccepted:['Local revalidation accepted this review without a new model call. Original execution record: {state}; original usage is preserved.','此审核已通过本地重验，未新增模型调用。原执行记录：{state}；原用量保留。'],
+adminLocallyRecovered:['Of these, locally recovered','其中本地恢复完成'],
 flowDeferred:['Local checks: no model call','本地待补证：未调用模型'],
 flowNone:['No records in this view.','此范围暂无记录。'],
 flowPurpose:['Purpose: {purpose}','审核用途：{purpose}'],
@@ -75,6 +77,12 @@ publication_not_enabled_at_reservation:['Publication was not enabled when this r
 history_requires_approval:['Historical knowledge requires explicit approval','历史知识需明确批准'],
 work_summary_not_published:['Work summary only; not formal knowledge','仅为工作摘要，不作为正式知识发布'],
 candidate_not_pending:['Candidate is not awaiting approval','候选当前不在待审批状态'],
+check_equivalent_knowledge_revoked:['Equivalent knowledge was revoked; use its explicit restoration workflow','等价知识已被撤销，请使用对应的显式恢复治理入口'],
+check_equivalent_knowledge_superseded:['Equivalent knowledge was superseded; compare its current revision before publication','等价旧知识已被替换，请先比较当前修订再决定发布'],
+check_equivalent_knowledge_disputed:['Equivalent knowledge has unresolved counterexamples','等价知识存在未处置反例，请先完成治理'],
+check_equivalent_knowledge_limit:['Too many equivalent revisions to compare safely; review the exact knowledge target','等价修订超过安全比较范围，请明确目标知识后治理'],
+check_equivalent_candidate_disputed:['An equivalent candidate has unresolved concerns','等价候选存在未解决疑问，请先明确处理'],
+check_candidate_comparison_limit:['Candidate comparisons reached their bound; resolve the exact candidate before publication','候选比较达到上限，请明确核对目标候选后再发布'],
 candidate_evidence_changed:['Evidence changed; review the current case first','依据已变化，请先重新审核当前案例'],
 eligible_future_review_only:['Evidence meets the narrow automatic publication checks','证据满足窄范围自动发布检查'],
 'evidence truncated':['Evidence is incomplete or truncated','证据不完整或被截断'],
@@ -125,6 +133,7 @@ function renderAdminFlow(data){
   for(const item of items){
    const card=node('article',undefined,'history-item');card.append(node('strong',item.title||item.problem_id));
    card.append(node('p',t('flowPurpose',{purpose:label(item.purpose)})+' · '+item.problem_id+(item.state?' · '+label(item.state):''),'muted'));
+   if(item.local_recheck)card.append(node('p',t('flowLocallyAccepted',{state:label(item.execution_state)}),'note'));
    if(item.reviewed_revision!==undefined)card.append(node('p',t('flowRevision',{reviewed:item.reviewed_revision,current:item.revision}),'muted'));
    if(item.case_changed_since_review)card.append(node('p',t('flowCaseChanged'),'note'));
    card.append(node('p',t('flowSource',{host:item.source_host||t('unknown'),category:label(item.category)}),'muted'));

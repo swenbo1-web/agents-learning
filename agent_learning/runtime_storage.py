@@ -26,14 +26,14 @@ def _signature():
     from . import __version__
     from .knowledge_index import INDEX_VERSION
     from .work_memory import WORK_INDEX_VERSION
-    return f"{__version__}:schema21:knowledge{INDEX_VERSION}:work{WORK_INDEX_VERSION}:startup6"
+    return f"{__version__}:schema22:knowledge{INDEX_VERSION}:work{WORK_INDEX_VERSION}:startup7"
 
 
 def storage_ready(runtime):
     """Check one read snapshot; an external schema/index change invalidates the receipt."""
     runtime.db.execute("BEGIN")
     try:
-        if runtime.db.execute("PRAGMA user_version").fetchone()[0] != 21:
+        if runtime.db.execute("PRAGMA user_version").fetchone()[0] != 22:
             return False
         receipt = runtime.db.execute(
             "SELECT signature,schema_cookie FROM runtime_storage_receipt WHERE id=1").fetchone()

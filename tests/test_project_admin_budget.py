@@ -345,7 +345,7 @@ class ProjectAdminBudgetTests(unittest.TestCase):
         self.assertEqual(record["state"], "orphaned_unknown")
         self.assertEqual(record["retry_allowed"], 0)
         self.assertEqual(admin_project_budget_status(upgraded, self.a)["used_calls"], 1)
-        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 21)
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 22)
         reopened = Runtime(self.home, config={})
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.host_epoch(), upgraded.host_epoch())

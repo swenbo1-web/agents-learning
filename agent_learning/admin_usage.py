@@ -313,7 +313,14 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
     accepted = ("EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.problem=c.problem "
                 "AND r.revision=c.revision AND r.call_id=c.id AND r.decision=c.state AND r.duplicate_of IS NULL)"
                 if receipts_exist else "0")
-    rows = runtime.db.execute("SELECT c.state,c.started," + accepted + " AS accepted_review,b.* "
+    responses_exist = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_records'").fetchone()
+    recovered = ("EXISTS(SELECT 1 FROM admin_response_records s JOIN review_receipts r "
+        "ON r.project=s.project AND r.call_id=s.call_id WHERE s.project=c.project AND s.call_id=c.id "
+        "AND s.state='accepted' AND c.state='failed' AND r.problem=c.problem AND r.revision=c.revision "
+        "AND r.decision IN ('candidate','needs_evidence','skip','governance') AND r.duplicate_of IS NULL)"
+        if receipts_exist and responses_exist else "0")
+    rows = runtime.db.execute("SELECT c.state,c.started," + accepted + " AS accepted_review,"
+                              + recovered + " AS locally_recovered_review,b.* "
                               "FROM admin_calls c LEFT JOIN admin_call_budgets b ON b.call_id=c.id "
                               "WHERE c.day=?" + (" AND c.project=?" if project is not None else ""),
                               (day, project) if project is not None else (day,)).fetchall()
@@ -324,6 +331,7 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
     usage_states = {"complete": 0, "partial": 0, "unknown": 0, "conflict": 0}
     reported, reservations, accounted = 0, 0, 0
     counts = {key: 0 for key in ("counted_attempts", "started_attempts", "completed_reviews", "failed_attempts",
+                                "locally_recovered_reviews", "effective_completed_reviews",
                                 "result_unknown_attempts", "usage_unknown_attempts", "active_attempts",
                                 "not_started_attempts", "deduplicated_attempts")}
     for row in rows:
@@ -334,6 +342,7 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
         counts["started_attempts"] += int(row["started"] is not None)
         counts["completed_reviews"] += int(row["state"] in {"candidate", "needs_evidence", "skip", "governance"}
                                            and bool(row["accepted_review"]))
+        counts["locally_recovered_reviews"] += int(bool(row["locally_recovered_review"]))
         counts["failed_attempts"] += int(row["state"] == "failed")
         counts["result_unknown_attempts"] += int(row["state"] in {"timeout_unknown", "account_changed_unknown", "orphaned_unknown"})
         counts["active_attempts"] += int(row["state"] in {"reserved", "launch_intent", "started"})
@@ -348,6 +357,7 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
         reported += known
         reservations += reserved if pending else 0
         accounted += max(reserved, known) if pending else known
+    counts["effective_completed_reviews"] = counts["completed_reviews"] + counts["locally_recovered_reviews"]
     maximum = cfg["max_reported_tokens_per_day"]
     phase_mode = False
     if project is not None:

@@ -65,7 +65,7 @@ class SoftwareUpdateIntegrationTests(unittest.TestCase):
         self.assertFalse(runtime.config["admin"]["enabled"])
         self.assertFalse(runtime.config["scheduler"]["enabled"])
         self.assertFalse(runtime.config["hindsight"]["enabled"])
-        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 21)
+        self.assertEqual(runtime.db.execute("PRAGMA user_version").fetchone()[0], 22)
 
     def test_invalid_update_config_rejected_before_database_open(self):
         for supplied in ([], {"enabled": "yes"}, {"repository": "https://example.org/code"},

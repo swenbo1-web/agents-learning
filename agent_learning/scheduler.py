@@ -165,6 +165,11 @@ class SchedulerMixin:
             now = time.time()
             active = self.db.execute("SELECT MIN(lease_until) FROM admin_calls WHERE project=? AND state "
                                       "IN ('reserved','launch_intent','started')", (project,)).fetchone()[0]
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_rechecks'").fetchone():
+                local = self.db.execute("SELECT MIN(lease_until) FROM admin_response_rechecks WHERE project=? "
+                    "AND state='validating' AND lease_until>?", (project, now)).fetchone()[0]
+                if local is not None:
+                    active = min(active, local) if active is not None else local
             dispatch = self.db.execute("SELECT lease_until FROM admin_dispatch WHERE project=?", (project,)).fetchone()
             if active is not None or dispatch:
                 return signature, "waiting", min(v for v in (active, dispatch[0] if dispatch else None) if v is not None), "active_review"
@@ -173,8 +178,9 @@ class SchedulerMixin:
                                          summary_host_scope=self._session_scope(), phase_scope=phase_scope(self, project))
             eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
             if not eligible:
-                unknown = self.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND retry_allowed=0 "
-                    "AND state IN ('timeout_unknown','account_changed_unknown','orphaned_unknown','failed') LIMIT 1", (project,)).fetchone()
+                from .admin_lifecycle import unresolved_failure_sql
+                unknown = self.db.execute("SELECT 1 FROM admin_calls a WHERE a.project=? AND "
+                    + unresolved_failure_sql("a") + " LIMIT 1", (project,)).fetchone()
                 blocked = self.db.execute("SELECT 1 FROM admin_preflights f JOIN problems p ON p.id=f.problem AND p.project=f.project "
                     "WHERE f.project=? AND p.status='pending' AND f.revision=p.revision LIMIT 1", (project,)).fetchone()
                 awaiting = self.db.execute("SELECT 1 FROM review_states s JOIN problems p ON p.id=s.problem AND p.project=s.project "

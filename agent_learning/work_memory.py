@@ -163,9 +163,6 @@ class WorkMemoryMixin:
         if not event or event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PublicMessageSegment"}:
             return None
         event = dict(event)
-        if event["type"] in {"Stop", "PublicMessageSegment"}:
-            from .candidate_references import record_possible_influence
-            record_possible_influence(self, project, event_id)
         self.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)",
                         (project, event_id, checkout_key(workspace)))
         payload = json.loads(event["payload"])

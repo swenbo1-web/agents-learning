@@ -103,6 +103,30 @@ def _candidate_previews(runtime, project, problem, revision, identities):
     return items
 
 
+def _phase_candidates(runtime, project, call_id, body):
+    """Read the actual per-case receipts; a phase parent owns no candidates."""
+    identities, previews = [], []
+    for item in body.get("items", [])[:8]:
+        if not isinstance(item, dict) or not isinstance(item.get("problem_id"), str):
+            continue
+        values = item.get("candidate_ids") or ([item["candidate_id"]] if item.get("candidate_id") else [])
+        if not isinstance(values, list):
+            continue
+        for identity in values[:5]:
+            if not isinstance(identity, str) or identity in identities:
+                continue
+            identities.append(identity)
+            if len(previews) >= 5:
+                continue
+            row = runtime.db.execute("SELECT c.problem_revision FROM candidates c WHERE c.project=? AND c.id=? "
+                "AND c.problem=? AND EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project "
+                "AND r.problem=c.problem AND r.revision=c.problem_revision AND r.call_id=?)",
+                (project, identity, item["problem_id"], call_id)).fetchone()
+            if row:
+                previews.extend(_candidate_previews(runtime, project, item["problem_id"], row[0], [identity]))
+    return identities, previews
+
+
 def review_activity(runtime, project):
     from .admin_queue import eligible_query, executor_query, scan_signatures, REVIEW_ORDER
     signature, preflight = scan_signatures(runtime, project)
@@ -118,7 +142,15 @@ def review_activity(runtime, project):
         item = _case(runtime, project, row["problem"])
         body = json.loads(row["response"] or "{}")
         candidate = body.get("candidate") or {}
-        item.update(call_id=row["id"], reviewed_revision=row["revision"], state=row["state"], created=row["created"],
+        decision = body.get("decision", body.get("status"))
+        accepted = decision in {"candidate", "needs_evidence", "skip", "governance"}
+        saved = runtime.db.execute("SELECT state,updated FROM admin_response_records WHERE project=? AND call_id=?",
+                                  (project, row["id"])).fetchone() if runtime.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='admin_response_records'").fetchone() else None
+        local_recheck = bool(accepted and saved and saved[0] == "accepted" and row["state"] == "failed")
+        item.update(call_id=row["id"], reviewed_revision=row["revision"], state=decision if accepted else row["state"],
+            execution_state=row["state"], local_recheck=local_recheck,
+            decision_finished=saved[1] if local_recheck else row["finished"], created=row["created"],
             evidence_scope="current_case", case_changed_since_review=row["revision"] != item["revision"],
             finished=row["finished"], reason=(row["reason"] or "")[:500],
             missing_evidence=[(v.get("description", "") if isinstance(v, dict) else str(v))[:300]
@@ -128,6 +160,16 @@ def review_activity(runtime, project):
             candidate_summary=candidate.get("content", "")[:400],
             applicability=candidate.get("applicability", "")[:200], limitations=candidate.get("limitations", "")[:200])
         item["candidates"] = _candidate_previews(runtime, project, row["problem"], row["revision"], item["candidate_ids"])
+        if body.get("purpose") == "phase_review":
+            item["purpose"], item["evidence_scope"] = "phase_review", "phase_batch"
+            item["candidate_ids"], item["candidates"] = _phase_candidates(runtime, project, row["id"], body)
+            from .phase_metrics import _outcomes
+            _, candidate_count, published_count = _outcomes(body, "completed")
+            if candidate_count:
+                item["publication"] = {"status": "published" if published_count == candidate_count else
+                    "partially_published" if published_count else "not_published",
+                    "candidate_count": candidate_count, "published_count": published_count}
+        item["candidate_count"] = len(item["candidate_ids"])
         item["candidates_truncated"] = len(item["candidate_ids"]) > len(item["candidates"])
         if item["history_job_id"]:
             from .runtime import ContractError

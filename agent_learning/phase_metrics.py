@@ -105,11 +105,23 @@ def batch_metrics(runtime, project, batch_id):
                 if value else None for value in tokens]
         totals[key] = sum(values) if values and not truncated and all(_number(value) for value in values) else None
     reported = any(value and value["token_totals"] for value in tokens)
+    # A recovered decision can finish much later than its original paid process.
+    # Preserve provider timing/usage while including that wait in batch timing.
+    recovered, completed_at = 0, count_row[3]
+    if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='admin_response_records'").fetchone():
+        local = runtime.db.execute("SELECT COUNT(*),MAX(r.updated) FROM admin_response_records r "
+            "JOIN admin_calls c ON c.project=r.project AND c.id=r.call_id WHERE r.project=? AND r.host_scope=? "
+            "AND c.problem=? AND c.state='failed' AND r.state='accepted'",
+            (project, runtime._session_scope(), batch_id)).fetchone()
+        recovered = local[0]
+        if recovered and _number(local[1]):
+            completed_at = max(completed_at or 0, local[1])
     return {"submitted_cases": submitted, "evidence_records": evidence, "result_cases": result_cases,
         "candidate_count": candidates, "published_count": published, "call_count": call_count,
         "call_records": count_row[0], "call_count_scope": "recorded_execution_attempts",
-        "batch_elapsed_seconds": round(count_row[3] - row[1], 3)
-            if count_row[0] and not count_row[4] and _number(count_row[3]) and count_row[3] >= row[1] else None,
+        "batch_elapsed_seconds": round(completed_at - row[1], 3)
+            if count_row[0] and not count_row[4] and _number(completed_at) and completed_at >= row[1] else None,
+        "local_recheck_count": recovered,
         "call_elapsed_seconds": round(sum(elapsed), 3)
             if elapsed and not truncated and all(_number(value) for value in elapsed) else None,
         "call_elapsed_scope": "execution_and_local_processing", "usage_scope": "host_reported_per_call",

@@ -161,7 +161,7 @@ class KnowledgeStoreMixin:
     def publish(self, project, candidate_id, expected_generation=None, knowledge_id=None, expected_revision=None,
                 expected_epoch=None, *, _review_approval=False):
         from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint, metadata
-        from .knowledge_lifecycle import lifecycle_state
+        from .knowledge_lifecycle import lifecycle_state, publication_lineage_state
         with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
             candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
@@ -195,6 +195,9 @@ class KnowledgeStoreMixin:
             else:
                 self.history_guard(project, body["problem_id"], expected_epoch=expected_epoch)
             self._validate_sources(project, body)
+            lineage = publication_lineage_state(self, project, body, knowledge_id, candidate_id)
+            if lineage["issues"]:
+                raise ContractError(lineage["issues"][0]["message"])
             version = self.db.execute("SELECT generation FROM projects WHERE id=?", (project,)).fetchone()
             if not version:
                 raise ContractError("unknown project")

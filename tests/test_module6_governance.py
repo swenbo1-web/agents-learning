@@ -45,7 +45,7 @@ class Module6GovernanceTests(unittest.TestCase):
             candidate_id=candidate["candidate_id"] if candidate else None,
             knowledge_id=knowledge["knowledge_id"] if knowledge else None,
             expected_revision=knowledge["revision"] if knowledge else None,
-            reason="Only the referenced actual observations", evidence_refs=self.refs(problem), **kwargs)
+            reason="Only the referenced actual observations", evidence_refs=kwargs.pop("evidence_refs", self.refs(problem)), **kwargs)
 
     def test_proposal_alone_does_not_publish_and_execution_replays_receipt(self):
         problem = self.r.feedback(self.p, "chat", "New fact", category="operation")
@@ -235,6 +235,46 @@ class Module6GovernanceTests(unittest.TestCase):
         proposal = self.propose(new_problem, "attach", knowledge, changed)
         with self.assertRaisesRegex(ContractError, "equivalent"):
             execute_governance(self.r, self.p, proposal["proposal_id"])
+
+    def test_dismiss_rejects_failed_denied_unfinished_and_pre_events(self):
+        knowledge = self.knowledge()
+        problem = self.counterexample(knowledge)
+        feedback_ref = self.refs(problem)[0]
+        for kind, outcome in (("PostToolUse", "failed"), ("PostToolUse", "denied"),
+                              ("PostToolUse", "running"), ("PreToolUse", "succeeded"),
+                              ("Feedback", "failed"), ("PostToolUse", "unknown")):
+            with self.subTest(kind=kind, outcome=outcome):
+                event = self.r.record_event(self.p, "chat", kind, {"tool_name": "verify"},
+                    task_id=self.task["id"], task_revision=self.task["revision"], outcome=outcome)
+                problem = self.r._attach_case_evidence(problem["id"], [(event["id"], "observation")])
+                with self.assertRaisesRegex(ContractError, "additional supporting evidence"):
+                    self.propose(problem, "dismiss_counterexample", knowledge,
+                                 evidence_refs=[feedback_ref, event["id"]])
+        self.assertEqual(self.r.read(self.p, knowledge["knowledge_id"])["pending_counterexample_count"], 1)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM governance_proposals WHERE action='dismiss_counterexample'").fetchone()[0], 0)
+
+    def test_dismiss_rechecks_supporting_observation_before_commit(self):
+        knowledge = self.knowledge()
+        problem = self.counterexample(knowledge)
+        event = self.r.record_event(self.p, "chat", "PostToolUse", {"tool_name": "verify"},
+            task_id=self.task["id"], task_revision=self.task["revision"], outcome="succeeded")
+        problem = self.r._attach_case_evidence(problem["id"], [(event["id"], "observation")])
+        proposal = self.propose(problem, "dismiss_counterexample", knowledge)
+        self.r.db.execute("UPDATE events SET outcome='failed' WHERE id=?", (event["id"],))
+        with self.assertRaisesRegex(ContractError, "additional supporting evidence"):
+            execute_governance(self.r, self.p, proposal["proposal_id"])
+        self.assertEqual(self.r.read(self.p, knowledge["knowledge_id"])["pending_counterexample_count"], 1)
+        self.assertEqual(self.r.db.execute("SELECT state FROM governance_proposals WHERE id=?", (proposal["proposal_id"],)).fetchone()[0], "proposed")
+
+    def test_dismiss_allows_explicit_public_observation_without_claiming_verification(self):
+        knowledge = self.knowledge()
+        problem = self.counterexample(knowledge)
+        event = self.r.record_event(self.p, "chat", "Stop", {"last_assistant_message": "Observed the counterexample applied to a different environment"},
+            task_id=self.task["id"], task_revision=self.task["revision"], outcome="reported")
+        problem = self.r._attach_case_evidence(problem["id"], [(event["id"], "observation")])
+        result = execute_governance(self.r, self.p, self.propose(problem, "dismiss_counterexample", knowledge)["proposal_id"])
+        self.assertEqual(result["disposition"]["state"], "dismissed")
+        self.assertEqual(self.r.read(self.p, knowledge["knowledge_id"])["validation_level"], "reported")
 
     def test_unchanged_update_cannot_clear_counterexample(self):
         knowledge = self.knowledge()

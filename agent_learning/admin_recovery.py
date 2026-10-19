@@ -6,7 +6,7 @@ import re
 import time
 
 from .runtime import ContractError, digest, encode
-from .admin_lifecycle import RETRYABLE_STATES, retry_call
+from .admin_lifecycle import RETRYABLE_STATES, retry_call, unresolved_failure_sql
 from .candidate_review import BUDGET_PAUSES
 
 
@@ -52,9 +52,7 @@ def recovery_status(runtime, project, *, include_history=True):
     calls = []
     identities = db.execute(
         "SELECT a.id FROM admin_calls a JOIN admin_execution_plans p ON p.call_id=a.id AND p.project=a.project "
-        "WHERE a.project=? AND p.host_scope=? AND a.retry_allowed=0 "
-        "AND a.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
-        "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=a.project AND r.call_id=a.id) "
+        "WHERE a.project=? AND p.host_scope=? AND " + unresolved_failure_sql("a") + " "
         "ORDER BY a.created DESC,a.id LIMIT 20", (project, scope)).fetchall()
     for item in identities:
         row = _call(runtime, project, item[0])

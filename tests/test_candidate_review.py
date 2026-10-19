@@ -115,6 +115,63 @@ class CandidateReviewTests(unittest.TestCase):
         self.commit(self.plan(deferred), "approve-deferred")
         self.assertEqual(candidate_review_list(self.r, self.p, status="published")["total"], 1)
 
+    def independent_candidate(self, original, conversation="independent-source", **changes):
+        body = json.loads(self.r.db.execute("SELECT body FROM candidates WHERE id=?", (original,)).fetchone()[0])
+        self.r.task_update(self.p, conversation, "Record an independent project observation")
+        problem = self.r.feedback(self.p, conversation, "Independent reported source", category="project")
+        refs = [row[0] for row in self.r.db.execute("SELECT event FROM problem_events WHERE problem=?", (problem["id"],))]
+        body.update(problem_id=problem["id"], problem_revision=problem["revision"], evidence_refs=refs, **changes)
+        return self.r.submit_candidate(self.p, **body)["candidate_id"]
+
+    def test_equivalent_revoked_content_requires_explicit_restore(self):
+        _, original = self.source()
+        knowledge = self.r.publish(self.p, original)
+        self.r.revoke(self.p, knowledge["knowledge_id"], knowledge["revision"])
+        new_candidate = self.independent_candidate(original)
+        plan = self.plan(new_candidate)
+        self.assertFalse(plan["ready"])
+        self.assertIn("equivalent_knowledge_revoked", {item["code"] for item in plan["items"][0]["preflight"]["issues"]})
+        with self.assertRaisesRegex(ContractError, "revoked"):
+            self.r.publish(self.p, new_candidate)
+        with self.assertRaises(ContractError):
+            self.commit(plan, "cannot-resurrect")
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM active").fetchone()[0], 0)
+        self.r.restore(self.p, knowledge["knowledge_id"], knowledge["revision"])
+        result = self.commit(self.plan(new_candidate), "attach-after-explicit-restore")
+        self.assertEqual(result["results"][0]["knowledge_id"], knowledge["knowledge_id"])
+
+    def test_equivalent_superseded_content_cannot_return_as_new_knowledge(self):
+        _, original = self.source()
+        knowledge = self.r.publish(self.p, original)
+        revision_two = self.independent_candidate(original, content="Use the newer project storage convention")
+        updated = self.r.publish(self.p, revision_two, knowledge_id=knowledge["knowledge_id"], expected_revision=1)
+        self.assertEqual(updated["revision"], 2)
+        stale = self.independent_candidate(original, conversation="stale-report")
+        plan = self.plan(stale)
+        self.assertFalse(plan["ready"])
+        self.assertIn("equivalent_knowledge_superseded", {item["code"] for item in plan["items"][0]["preflight"]["issues"]})
+        with self.assertRaisesRegex(ContractError, "superseded"):
+            self.r.publish(self.p, stale)
+        revision_three = self.independent_candidate(original, conversation="newer-report", content="New explicit revision")
+        self.assertEqual(self.r.publish(self.p, revision_three, knowledge_id=knowledge["knowledge_id"], expected_revision=2)["revision"], 3)
+
+    def test_new_counterexample_invalidates_prepared_equivalent_approval(self):
+        _, original = self.source()
+        knowledge = self.r.publish(self.p, original)
+        new_candidate = self.independent_candidate(original)
+        plan = self.plan(new_candidate)
+        self.assertTrue(plan["ready"])
+        self.r.feedback(self.p, "counterexample", "The project storage claim is wrong", category="project",
+                        knowledge_id=knowledge["knowledge_id"], knowledge_revision=1, feedback_kind="counterexample")
+        with self.assertRaisesRegex(ContractError, "changed"):
+            self.commit(plan, "old-preview-must-not-approve")
+        refreshed = self.plan(new_candidate)
+        self.assertFalse(refreshed["ready"])
+        self.assertIn("equivalent_knowledge_disputed", {item["code"] for item in refreshed["items"][0]["preflight"]["issues"]})
+        with self.assertRaisesRegex(ContractError, "counterexample"):
+            self.r.publish(self.p, new_candidate)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM publication_receipts").fetchone()[0], 1)
+
     def test_changed_body_invalidates_plan(self):
         _, identity = self.source()
         plan = self.plan(identity)
