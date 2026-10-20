@@ -6,9 +6,6 @@ unrelated tool observations have no candidate lineage and remain separate.
 """
 from __future__ import annotations
 
-import json
-
-
 def source_state(view, project, refs, *, evaluation=None, ancestors=()):
     from .candidate_references import _Assessment, _lineage_risk, MAX_EVIDENCE
     if not view.db.execute("SELECT 1 FROM sqlite_master WHERE name='candidate_reference_lineage'").fetchone():
@@ -42,8 +39,9 @@ def source_state(view, project, refs, *, evaluation=None, ancestors=()):
 def published_reference_state(view, project, redirect, evaluation, ancestors):
     """Do not mistake an active redirect for healthy formal evidence.
 
-    This reads bounded authority rows directly, avoiding _public/assess recursion.
-    The same traversal budget covers all published and unpublished branches.
+    SQL checks ordinary authority without materializing every source event.
+    Only actual candidate dependencies consume the shared traversal budget;
+    accumulating independent sources must not turn healthy evidence invalid.
     """
     if not redirect or not redirect.get("active"):
         return {"blocked": True, "reason": "published_reference_inactive"}
@@ -51,28 +49,37 @@ def published_reference_state(view, project, redirect, evaluation, ancestors):
     if view.db.execute("SELECT 1 FROM knowledge_feedback WHERE project=? AND knowledge_id=? AND revision=? "
             "AND kind='counterexample' AND disposition='unresolved' LIMIT 1", (project, identity, revision)).fetchone():
         return {"blocked": True, "reason": "published_reference_disputed"}
-    rows = view.db.execute("SELECT s.problem_id,s.problem_revision,s.evidence_refs,p.revision AS current_revision "
-        "FROM knowledge_sources s LEFT JOIN problems p ON p.project=s.project AND p.id=s.problem_id "
-        "WHERE s.project=? AND s.knowledge_id=? AND s.revision=? ORDER BY s.candidate_id LIMIT 65",
-        (project, identity, revision)).fetchall()
-    if not rows or len(rows) > 64:
+    key = (project, identity, revision)
+    sources = "FROM knowledge_sources s WHERE s.project=? AND s.knowledge_id=? AND s.revision=?"
+    if not view.db.execute("SELECT 1 " + sources + " LIMIT 1", key).fetchone():
         return {"blocked": True, "reason": "published_reference_source_unavailable"}
-    for row in rows:
-        if row["current_revision"] != row["problem_revision"]:
-            return {"blocked": True, "reason": "published_reference_source_changed"}
-        refs = json.loads(row["evidence_refs"])
-        for ref in refs:
-            if not evaluation.take("sources"):
-                return {"blocked": True, "reason": "candidate_lineage_budget_exceeded"}
-            event = view.db.execute("SELECT e.outcome,o.conflict,o.decision FROM problem_events pe "
-                "JOIN events e ON e.id=pe.event LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
-                "WHERE pe.problem=? AND e.project=? AND e.id=?", (row["problem_id"], project, ref)).fetchone()
-            if (not event or event["conflict"] or event["decision"] == "denied"
-                    or event["outcome"] in {"failed", "conflict", "denied"}):
-                return {"blocked": True, "reason": "published_reference_source_unhealthy"}
-        state = source_state(view, project, refs, evaluation=evaluation, ancestors=ancestors)
-        if state["blocked"]:
-            return state
+    if view.db.execute("SELECT 1 " + sources + " AND NOT EXISTS (SELECT 1 FROM problems p "
+            "WHERE p.project=s.project AND p.id=s.problem_id AND p.revision=s.problem_revision) LIMIT 1", key).fetchone():
+        return {"blocked": True, "reason": "published_reference_source_changed"}
+    if view.db.execute("SELECT 1 " + sources + " AND CASE WHEN json_valid(s.evidence_refs) "
+            "THEN json_type(s.evidence_refs) IS NOT 'array' OR json_array_length(s.evidence_refs)=0 "
+            "ELSE 1 END LIMIT 1", key).fetchone():
+        return {"blocked": True, "reason": "published_reference_source_unavailable"}
+    references = "json_each(CASE WHEN json_valid(s.evidence_refs) THEN s.evidence_refs ELSE '[]' END) ref "
+    authority = ("FROM knowledge_sources s JOIN " + references +
+        "LEFT JOIN problem_events pe ON pe.problem=s.problem_id AND pe.event=ref.value "
+        "LEFT JOIN events e ON e.project=s.project AND e.id=pe.event "
+        "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
+        "WHERE s.project=? AND s.knowledge_id=? AND s.revision=?")
+    if view.db.execute("SELECT 1 " + authority + " AND (ref.type!='text' OR e.id IS NULL OR o.conflict "
+            "OR o.decision='denied' OR e.outcome IN ('failed','conflict','denied')) LIMIT 1", key).fetchone():
+        return {"blocked": True, "reason": "published_reference_source_unhealthy"}
+    # The graph bound applies to linked observations, not the number of normal
+    # source rows. DISTINCT also avoids charging repeated citations twice.
+    from .candidate_references import MAX_EVIDENCE
+    linked = view.db.execute("SELECT DISTINCT ref.value FROM knowledge_sources s JOIN " + references +
+        "JOIN candidate_reference_lineage l "
+        "ON l.project=s.project AND l.event_id=ref.value "
+        "WHERE s.project=? AND s.knowledge_id=? AND s.revision=? LIMIT ?",
+        (*key, MAX_EVIDENCE + 1)).fetchall()
+    state = source_state(view, project, [row[0] for row in linked], evaluation=evaluation, ancestors=ancestors)
+    if state["blocked"]:
+        return state
     version = view.db.execute("SELECT version FROM knowledge_source_versions WHERE project=? AND knowledge_id=? AND revision=?",
                               (project, identity, revision)).fetchone()
     return {"blocked": False, "reason": None, "source_version": version[0] if version else 0}

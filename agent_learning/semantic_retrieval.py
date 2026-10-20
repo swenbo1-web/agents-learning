@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import hashlib
+from http.client import HTTPConnection, HTTPException
 import ipaddress
 import json
 import math
 import re
+import socket
 import struct
 import time
 from urllib import error, parse, request
@@ -138,18 +140,89 @@ class _NoRedirect(request.HTTPRedirectHandler):
         raise ValueError("embedding_redirect_rejected")
 
 
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("embedding deadline exceeded")
+    return remaining
+
+
+class _DeadlineSocket(socket.socket):
+    """SocketIO must renew the remaining total budget, not the original timeout."""
+    def __init__(self, *args, deadline, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+
+    def connect(self, address):
+        self.settimeout(_remaining(self.deadline))
+        return super().connect(address)
+
+    def sendall(self, data, flags=0):
+        self.settimeout(_remaining(self.deadline))
+        return super().sendall(data, flags)
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        self.settimeout(_remaining(self.deadline))
+        return super().recv_into(buffer, nbytes, flags)
+
+
+class _DeadlineHTTPConnection(HTTPConnection):
+    def __init__(self, *args, deadline, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+        self._create_connection = self._connect_socket
+
+    def _connect_socket(self, address, timeout, source_address):
+        host, port = address
+        # Configuration only permits loopback. Avoid even a local resolver stall;
+        # try the two literal localhost addresses within the same total budget.
+        hosts = ("127.0.0.1", "::1") if host.lower() == "localhost" else (host,)
+        last_error = None
+        for host in hosts:
+            for family, kind, protocol, _, target in socket.getaddrinfo(
+                    host, port, 0, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST):
+                sock = None
+                try:
+                    sock = _DeadlineSocket(family, kind, protocol, deadline=self.deadline)
+                    if source_address:
+                        sock.bind(source_address)
+                    sock.connect(target)
+                    return sock
+                except OSError as exc:
+                    last_error = exc
+                    if sock is not None:
+                        sock.close()
+                    _remaining(self.deadline)
+        if last_error is not None:
+            raise last_error
+        raise OSError("no loopback address available")
+
+
+class _DeadlineHTTPHandler(request.HTTPHandler):
+    def __init__(self, deadline):
+        super().__init__()
+        self.deadline = deadline
+
+    def http_open(self, req):
+        def connection(host, **kwargs):
+            return _DeadlineHTTPConnection(host, deadline=self.deadline, **kwargs)
+        return self.do_open(connection, req)
+
+
 def embed_texts(config, texts, expected_dimension=None):
     """One bounded request to an explicitly configured, already-running local model."""
     if not texts or len(texts) > config["sync_batch_size"]:
         raise ValueError("invalid_embedding_batch")
     payload = json.dumps({"model": config["model"], "input": texts, "truncate": False},
                          ensure_ascii=False, allow_nan=False).encode("utf-8")
-    opener = request.build_opener(request.ProxyHandler({}), _NoRedirect())
+    deadline = time.monotonic() + config["timeout_seconds"]
+    opener = request.build_opener(request.ProxyHandler({}), _NoRedirect(), _DeadlineHTTPHandler(deadline))
     req = request.Request(config["url"] + "/api/embed", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with opener.open(req, timeout=config["timeout_seconds"]) as response:
+        with opener.open(req, timeout=_remaining(deadline)) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        _remaining(deadline)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError("embedding_response_too_large")
         try:
@@ -164,7 +237,7 @@ def embed_texts(config, texts, expected_dimension=None):
             normalized.append(_normalize(vector, expected_dimension))
             expected_dimension = len(normalized[0])
         return normalized
-    except (error.URLError, OSError, UnicodeError, json.JSONDecodeError):
+    except (HTTPException, error.URLError, OSError, UnicodeError, json.JSONDecodeError):
         # Do not persist server bodies, paths, headers, credentials, or provider exception text.
         raise ValueError("embedding_provider_unavailable") from None
 
@@ -373,7 +446,14 @@ class SemanticRetrievalMixin:
             scanned += 1
             if scanned > config["scan_limit"]:
                 break
-            if row["content_hash"] != _document(row["body"], config["document_max_chars"])[1]:
+            try:
+                content_hash = _document(row["body"], config["document_max_chars"])[1]
+            except json.JSONDecodeError:
+                # One unreadable authoritative body invalidates its optional vector,
+                # not the other healthy candidates. SQL/identity errors still escape.
+                invalid += 1
+                continue
+            if row["content_hash"] != content_hash:
                 invalid += 1
                 continue
             try:

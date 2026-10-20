@@ -71,6 +71,36 @@ class Module4MCPTests(unittest.TestCase):
             self.assertIn("source_version", item)
             self.assertIn("problem_changed", item)
 
+    def test_search_preview_preserves_query_and_scan_safety_with_minimum_budget(self):
+        diagnostics = {"input_truncated": True, "identity_scan_complete": False,
+                       "identity_limit_exceeded": True, "terms_truncated": True, "automatic_safe": False}
+        result = {"status": "no_match", "generation": 1, "revocation_epoch": 0, "items": [],
+                  "query_diagnostics": diagnostics,
+                  "recall_diagnostics": {"pages": 4, "examined": 512, "scan_limit_reached": True,
+                                         "unreadable_records": 2},
+                  "retrieval": {"mode": "hybrid", "semantic_status": "degraded", "reason": "x" * 80,
+                                "query_cache_hit": False, "query_truncated": True, "retryable": True,
+                                "retry_after_seconds": 5, "scanned": 512, "candidates": 0}}
+        preview = search_preview(result, max_chars=512)
+        self.assertLessEqual(len(encode(preview)), 512)
+        self.assertEqual(preview["query_diagnostics"], diagnostics)
+        self.assertTrue(preview["recall_diagnostics"]["scan_limit_reached"])
+        self.assertEqual(preview["recall_diagnostics"]["examined"], 512)
+        self.assertEqual(preview["recall_diagnostics"]["unreadable_records"], 2)
+        self.assertEqual(preview["items"], [])
+
+    def test_search_preview_filters_diagnostic_payloads_and_has_no_normal_overhead(self):
+        result = {"status": "no_match", "items": [], "query_diagnostics": {
+            "automatic_safe": False, "original_query": "private prompt", "input_truncated": "yes"},
+            "recall_diagnostics": {"pages": True, "examined": "untrusted", "scan_limit_reached": False,
+                                   "provider_body": "private response"}}
+        preview = search_preview(result)
+        self.assertEqual(preview["query_diagnostics"], {"automatic_safe": False})
+        self.assertEqual(preview["recall_diagnostics"], {"scan_limit_reached": False})
+        ordinary = search_preview({"status": "no_match", "items": []})
+        self.assertNotIn("query_diagnostics", ordinary)
+        self.assertNotIn("recall_diagnostics", ordinary)
+
     def test_body_page_reassembles_escaped_and_unicode_content(self):
         published = self.published("compiler recovery " + ('中文\\\"\n修复步骤' * 700))
         original = self.runtime.read(self.project, published["knowledge_id"])

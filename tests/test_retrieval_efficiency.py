@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_learning.knowledge_applicability import automatic_applicability, project_environment
-from agent_learning.knowledge_index import normalized_query_plan
+from agent_learning.knowledge_index import INDEX_VERSION, normalized_query_plan
 from agent_learning.runtime import ContractError, Runtime
 
 
@@ -194,7 +194,7 @@ class RetrievalEfficiencyTests(unittest.TestCase):
     def test_index_drift_and_schema_change_invalidate_the_startup_receipt(self):
         self.r.db.execute("UPDATE knowledge_index_state SET version=0 WHERE id=1")
         other = Runtime(self.home)
-        self.assertEqual(other.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0], 4)
+        self.assertEqual(other.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0], INDEX_VERSION)
         other.close()
         self.r.db.execute("DROP INDEX work_memories_scope")
         other = Runtime(self.home)

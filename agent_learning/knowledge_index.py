@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matched_labels
 from .semantic_retrieval import SemanticRetrievalMixin
 
 
-INDEX_VERSION = 4
-_WORDS = re.compile(r"c\+\+(?:[0-9]+)?|c#|[a-z0-9_]+(?:[./:-][a-z0-9_]+)*|[\u3400-\u9fff]+")
+INDEX_VERSION = 5
+_WORDS = re.compile(r"c\+\+(?:[0-9]+)?|c#|[a-z0-9_]+(?:(?:[./:-]|:/)[a-z0-9_]+)*|[\u3400-\u9fff]+")
 _CHINESE = re.compile(r"[\u3400-\u9fff]+\Z")
 _FIELD_WEIGHTS = {"title": 4, "content": 2, "applicability": 2, "limitations": 1,
                   "category": 1, "knowledge_kind": 1}
@@ -24,7 +25,9 @@ _ZH_REQUEST = re.compile("|".join(sorted({"请先", "帮我", "请问", "一下"
                        key=lambda value: (-len(value), value))))
 _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
-_MATCH_POLICY_VERSION = 2
+_MAX_RECALL_PAGES = 4
+_MAX_QUERY_CHARS = 65536
+_MATCH_POLICY_VERSION = 3
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
                         "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
@@ -34,7 +37,7 @@ _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "�
 def _exact_anchors(query):
     """Keep full identifiers; fragments such as ``auth`` cannot stand for an error code."""
     result = []
-    for word in _WORDS.findall(query.lower()):
+    for word in _WORDS.findall(query.lower().replace("\\", "/")):
         if (_CHINESE.fullmatch(word) or word in _TOOL_FIELDS
                 or re.fullmatch(r"\d+(?:\.\d+)*", word)):
             continue
@@ -60,7 +63,7 @@ def _specific_anchor(anchor):
 def terms(text):
     """索引与评分共用词元；技术标识同时保留整体及其可独立检索的组件。"""
     result = []
-    for word in _WORDS.findall(text.lower()):
+    for word in _WORDS.findall(text.lower().replace("\\", "/")):
         if word.startswith("c++"):
             result.append("cplusplus")
             if word[3:]:
@@ -80,27 +83,52 @@ def terms(text):
 tokenize = terms
 
 
-def _query_terms(query):
+def _query_terms(query, anchors=()):
     # 请求修饰语不参与相关度；先保留双字和标识，再限制总量，避免单字占满预算。
     meaningful = _ZH_REQUEST.sub(" ", query[-8000:])
     selected = [word for word in match_terms(meaningful) if word not in _EN_REQUEST_WORDS]
     if any(_CHINESE.fullmatch(word) and len(word) > 1 for word in selected):
         selected = [word for word in selected if not (_CHINESE.fullmatch(word) and len(word) == 1)]
     # 技术标识通常比自然语言连接片段明确，超预算时优先保留。
-    anchors = [word for word in _exact_anchors(meaningful) if word in selected]
     technical = [word for word in selected if not _CHINESE.fullmatch(word)]
     chinese = [word for word in selected if _CHINESE.fullmatch(word)]
     ordered = list(dict.fromkeys(technical + chinese))
-    keep = set(list(dict.fromkeys(anchors + ordered))[:_MAX_QUERY_TERMS])
-    return [word for word in ordered if word in keep], meaningful
+    complete = list(dict.fromkeys(list(anchors) + ordered))
+    preferred = list(dict.fromkeys(list(anchors) + technical))[:_MAX_QUERY_TERMS]
+    remaining = _MAX_QUERY_TERMS - len(preferred)
+    if len(chinese) > remaining and remaining:
+        # Natural-language problems often appear after background. Keep both
+        # ends while the full question remains available to phrase validation.
+        head = (remaining + 1) // 2
+        chinese = chinese[:head] + (chinese[-(remaining - head):] if remaining > head else [])
+    keep = set((preferred + chinese)[:_MAX_QUERY_TERMS])
+    return [word for word in dict.fromkeys(ordered + list(anchors)) if word in keep], meaningful, len(complete) > _MAX_QUERY_TERMS
 
 
 def normalized_query_plan(query):
     """缓存和检索共享同一有效输入；短语顺序也参与自动匹配判断。"""
-    selected, meaningful = _query_terms(query)
+    # Scoring is bounded, but a forgotten error/path must never become permission
+    # to inject unrelated knowledge. Scan a separate bounded original-input lane;
+    # if that lane cannot represent the complete identity, only manual recall is
+    # allowed. No model or larger context budget is required.
+    scanned = query[:_MAX_QUERY_CHARS]
+    complete_anchors = _exact_anchors(scanned)
+    complete_anchors.sort(key=lambda anchor: bool("/" in anchor or "." in anchor))
+    anchors = complete_anchors[:_MAX_QUERY_TERMS]
+    selected, meaningful, terms_truncated = _query_terms(query, anchors)
+    diagnostics = {"input_truncated": len(query) > 8000,
+                   "identity_scan_complete": len(query) <= _MAX_QUERY_CHARS,
+                   "identity_limit_exceeded": len(complete_anchors) > _MAX_QUERY_TERMS,
+                   "terms_truncated": terms_truncated}
+    automatic_safe = (diagnostics["identity_scan_complete"] and not diagnostics["identity_limit_exceeded"]
+                      and (bool(anchors) or not diagnostics["input_truncated"]))
+    diagnostics["automatic_safe"] = automatic_safe
     return {"terms": selected, "meaningful": meaningful,
             "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION,
-            "exact_anchors": [word for word in _exact_anchors(meaningful) if word in selected],
+            "exact_anchors": anchors, "automatic_safe": automatic_safe,
+            "query_diagnostics": diagnostics,
+            "input_fingerprint": hashlib.sha256(query.encode("utf-8", errors="surrogatepass")).hexdigest()
+                                 if any(diagnostics[key] for key in ("input_truncated", "terms_truncated")) else None,
             "match_policy_version": _MATCH_POLICY_VERSION}
 
 
@@ -153,12 +181,13 @@ def _positive_anchors_allowed(body_json, anchors):
     return all(anchor in positive for anchor in anchors)
 
 
-def _match_info(body_json, query_weights, denominator, query, *, _values=None):
+def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
     score, coverage, matches = (_match_values(body_json, query_weights, denominator)
                                 if _values is None else _values)
     strong = [token for token in matches if len(token) > 1]
-    anchors = [word for word in _exact_anchors(query) if word in query_weights]
+    anchors = ([word for word in _exact_anchors(query) if word in query_weights]
+               if _anchors is None else _anchors)
     exact = _positive_anchors_allowed(body_json, anchors)
     eligible = exact and bool(strong) and (coverage >= 0.65 or any(
         _specific_anchor(anchor) for anchor in anchors))
@@ -179,7 +208,7 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None):
             "auto_eligible": eligible}
 
 
-def lexical_rows(db, project, plan, filters=None):
+def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
     """Bound FTS recall without installing per-query SQLite functions.
 
     Explicit identifiers have a separate lane so common prose cannot crowd them
@@ -192,7 +221,7 @@ def lexical_rows(db, project, plan, filters=None):
             "CAST(knowledge_fts.revision AS INTEGER)=a.revision JOIN knowledge k ON "
             "k.project=a.project AND k.id=a.id AND k.revision=a.revision "
             "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions +
-            " ORDER BY bm25(knowledge_fts),k.id LIMIT ?")
+            " ORDER BY bm25(knowledge_fts),k.id LIMIT ? OFFSET ?")
     quote = lambda word: '"' + word.replace('"', '""') + '"'
     anchors = plan.get("exact_anchors", [])
     lanes = []
@@ -203,7 +232,10 @@ def lexical_rows(db, project, plan, filters=None):
     rows = {}
     for expression, maximum in lanes:
         if expression:
-            for row in db.execute(base, (expression, project, *filters.values(), maximum)).fetchall():
+            found = db.execute(base, (expression, project, *filters.values(), maximum, page * maximum)).fetchall()
+            if diagnostics is not None and len(found) == maximum:
+                diagnostics["page_may_have_more"] = True
+            for row in found:
                 rows[row["id"]] = row
     return list(rows.values())
 
@@ -213,11 +245,12 @@ def _filter_sql(filters):
     conditions = []
     for field in filters:
         if field == "knowledge_kind":
-            conditions.append(" AND COALESCE(json_extract(k.body,'$.knowledge_kind'),'solution')=?")
+            conditions.append(" AND COALESCE(CASE WHEN json_valid(k.body) THEN "
+                              "json_extract(k.body,'$.knowledge_kind') END,'solution')=?")
         elif field == "category":
-            conditions.append(" AND json_extract(k.body,'$.category')=?")
+            conditions.append(" AND CASE WHEN json_valid(k.body) THEN json_extract(k.body,'$.category') END=?")
         else:
-            conditions.append(" AND json_extract(k.body,'$.metadata." + field + "')=?")
+            conditions.append(" AND CASE WHEN json_valid(k.body) THEN json_extract(k.body,'$.metadata." + field + "') END=?")
     return "".join(conditions)
 
 
@@ -275,8 +308,8 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
         filters = knowledge_filters(filters)
         plan = normalized_query_plan(query)
         selected, meaningful = plan["terms"], plan["meaningful"]
-        if not selected:
-            return {"status": "no_match", "items": []}
+        if not selected or (_automatic and not plan["automatic_safe"]):
+            return {"status": "no_match", "items": [], "query_diagnostics": plan["query_diagnostics"]}
 
         # Prepare the one query embedding before acquiring the SQLite snapshot. Index
         # construction remains an explicit operation, never part of a prompt query.
@@ -323,10 +356,17 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             denominator = sum(weights.values())
             # 只在本次快照中复用分析结果；缓存校验、解释和语义门槛共用同一修订的词元。
             analyses = {}
+            unreadable = set()
             def analyze(row):
                 identity = (row["id"], row["revision"])
                 if identity not in analyses:
-                    analyses[identity] = _match_values(row["body"], weights, denominator)
+                    try:
+                        analyses[identity] = _match_values(row["body"], weights, denominator)
+                    except json.JSONDecodeError:
+                        if not _automatic:
+                            raise
+                        unreadable.add(identity)
+                        analyses[identity] = (0, 0, {})
                 return analyses[identity]
             semantic_matches = self._semantic_candidates(project, semantic, filters) if hybrid else {}
             rows = []
@@ -342,12 +382,16 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         rows = []
                         break
                     rows.append(row)
+            recall = {"pages": 0, "examined": 0, "scan_limit_reached": False}
+            page_state = {}
+            from_cache = references is not None
+            def lexical_order(row):
+                values = analyze(row)
+                exact = all(anchor in values[2] for anchor in plan["exact_anchors"])
+                return (-int(exact), -values[0], row["id"])
             if references is None:
-                rows = lexical_rows(self.db, project, plan, filters)
-                def lexical_order(row):
-                    values = analyze(row)
-                    exact = all(anchor in values[2] for anchor in plan["exact_anchors"])
-                    return (-int(exact), -values[0], row["id"])
+                rows = lexical_rows(self.db, project, plan, filters, diagnostics=page_state)
+                recall["pages"] = 1
                 rows.sort(key=lexical_order)
                 if hybrid:
                     lexical_ranks = {row["id"]: rank for rank, row in enumerate(rows, 1)}
@@ -360,13 +404,25 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             # 正文及来源都在同一快照读取，禁止通过 read() 跳转到刚发布的新修订。
             items = []
             retained = []
-            for row in rows:
+            seen = set()
+            # Refill only when rejected records would otherwise crowd out useful
+            # knowledge. Each query stays bounded to four FTS pages; no health
+            # protection or authority row is removed to make retrieval succeed.
+            while rows:
+                row = rows.pop(0)
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                recall["examined"] += 1
                 values = analyze(row)
-                explanation = _match_info(row["body"], weights, denominator, meaningful, _values=values)
+                identity = (row["id"], row["revision"])
+                explanation = (_match_info(row["body"], weights, denominator, meaningful, _values=values,
+                                           _anchors=plan["exact_anchors"]) if identity not in unreadable else
+                               {"score": 0, "coverage": 0, "matched_terms": [], "auto_eligible": False})
                 # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
                 semantic_match = semantic_matches.get(row["id"])
                 if explanation["score"] <= 0 and semantic_match is None:
-                    continue
+                    explanation["auto_eligible"] = False
                 if hybrid:
                     # Cached references preserve ranking; scores remain query-specific.
                     explanation.update(method="hybrid", semantic_score=round(semantic_match["score"], 6)
@@ -380,23 +436,46 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 # All channels, including a disabled or degraded semantic provider,
                 # use the same complete identifier gate. Public matched_terms is
                 # bounded for display and must never decide this check.
-                if explanation["auto_eligible"] and not _positive_anchors_allowed(row["body"], plan["exact_anchors"]):
+                if (identity not in unreadable and explanation["auto_eligible"]
+                        and not _positive_anchors_allowed(row["body"], plan["exact_anchors"])):
                     explanation["auto_eligible"] = False
-                item = self._public(project, row)
-                if _automatic and _environment:
-                    from .knowledge_applicability import automatic_applicability
-                    if automatic_applicability(item, _environment)["status"] == "incompatible":
+                if not plan["automatic_safe"] or identity in unreadable:
+                    explanation["auto_eligible"] = False
+                if (explanation["score"] > 0 or semantic_match is not None) and (
+                        not _automatic or explanation["auto_eligible"]):
+                    try:
+                        item = self._public(project, row)
+                    except json.JSONDecodeError:
+                        if not _automatic:
+                            raise
+                        # An unreadable record is kept for explicit inspection;
+                        # it must not abort optional automatic memory delivery.
+                        unreadable.add(identity)
+                        item = None
                         explanation["auto_eligible"] = False
-                if (item.get("source_health") in {"conflicted", "denied", "missing"}
-                        or item.get("pending_counterexample_count", 0)):
-                    explanation["auto_eligible"] = False
-                if _automatic and not explanation["auto_eligible"]:
-                    continue
-                item["match"] = explanation
-                items.append(item)
-                retained.append({"knowledge_id": row["id"], "revision": row["revision"]})
+                    if item is not None and _automatic and _environment:
+                        from .knowledge_applicability import automatic_applicability
+                        if automatic_applicability(item, _environment)["status"] == "incompatible":
+                            explanation["auto_eligible"] = False
+                    if item is not None and (item.get("source_health") in {"conflicted", "denied", "missing"}
+                            or item.get("pending_counterexample_count", 0)):
+                        explanation["auto_eligible"] = False
+                    if item is not None and (not _automatic or explanation["auto_eligible"]):
+                        item["match"] = explanation
+                        items.append(item)
+                        retained.append({"knowledge_id": row["id"], "revision": row["revision"]})
                 if len(items) == limit:
                     break
+                while not rows and _automatic and not from_cache and page_state.get("page_may_have_more"):
+                    if recall["pages"] >= _MAX_RECALL_PAGES:
+                        recall["scan_limit_reached"] = True
+                        break
+                    else:
+                        page_state = {}
+                        next_page = lexical_rows(self.db, project, plan, filters, page=recall["pages"],
+                                                 diagnostics=page_state)
+                        recall["pages"] += 1
+                        rows = sorted((item for item in next_page if item["id"] not in seen), key=lexical_order)
             references = retained
             if owns_snapshot:
                 self.db.execute("COMMIT")
@@ -409,7 +488,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
         def write_derived():
             # Retryable provider failure must not cache a hybrid absence and suppress
             # recovery. Existing lexical cache may still be read safely.
-            if not semantic["diagnostics"].get("retryable"):
+            if not semantic["diagnostics"].get("retryable") and not recall["scan_limit_reached"] and not unreadable:
                 self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, encode(references)))
                 self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
                                 "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT 256)")
@@ -431,6 +510,13 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
         else:
             write_derived()
         result = {"status": "matched" if items else "no_match", "items": items, **manifest}
+        if (plan["query_diagnostics"]["input_truncated"] or plan["query_diagnostics"]["terms_truncated"]
+                or not plan["automatic_safe"]):
+            result["query_diagnostics"] = plan["query_diagnostics"]
+        if unreadable:
+            recall["unreadable_records"] = len(unreadable)
+        if recall["pages"] > 1 or recall["scan_limit_reached"] or unreadable:
+            result["recall_diagnostics"] = recall
         if semantic["config"]["enabled"]:
             result["retrieval"] = semantic["diagnostics"]
         return result

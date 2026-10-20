@@ -198,7 +198,7 @@ class KnowledgeContextMixin:
         from .runtime import ContractError, clean, clip, digest, encode
         if _outcome is not None and not isinstance(_outcome, dict):
             raise ContractError("context outcome must be a dictionary")
-        from .knowledge_index import normalized_query_plan
+        from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
         from .knowledge_output import _summary
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
         with self.transaction():
@@ -233,6 +233,7 @@ class KnowledgeContextMixin:
             effective = task["goal"]
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
+        effective_plan = normalized_query_plan(effective)
         filters = self._retrieval_filters(task)
         from .knowledge_applicability import project_environment, automatic_applicability
         environment = project_environment(workspace)
@@ -302,23 +303,28 @@ class KnowledgeContextMixin:
             work_query = ("" if tool_only or (self.host == "antigravity" and delivery == "ephemeral"
                                               and not query.strip()) else effective)
             try:
-                work_items = self.work_context_items(
-                    project, conversation, query=work_query[-8000:], workspace=workspace, raw=raw,
-                    agent_id=agent_id, limit=work_settings.get("max_items", 3),
-                    task_state=task_state, delivery=delivery, compact=compact,
-                    context_epoch=work_context_epoch, file_only=tool_only,
-                    exclude_event_id=_source_event_id)
+                if effective_plan["automatic_safe"] or not work_query:
+                    work_items = self.work_context_items(
+                        project, conversation, query=work_query, workspace=workspace, raw=raw,
+                        agent_id=agent_id, limit=work_settings.get("max_items", 3),
+                        task_state=task_state, delivery=delivery, compact=compact,
+                        context_epoch=work_context_epoch, file_only=tool_only,
+                        exclude_event_id=_source_event_id)
+                else:
+                    # Safety/expiry notices stay independent of optional recall.
+                    work_items = self.work_exposure_updates(project, conversation, agent_id)
             except ContractError:
                 # 身份与任务契约失败仍必须由主上下文拒绝，不能当作派生索引故障。
                 raise
             except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
                 work_context_failed = True
-        if context_handle and not tool_only and effective.strip() and (not agent_id or task):
+        if (context_handle and not tool_only and effective.strip() and (not agent_id or task)
+                and effective_plan["automatic_safe"] and len(effective) <= 30000):
             from .candidate_references import search as candidate_search
             try:
                 if _phase_guard:
                     _phase_guard()
-                found = candidate_search(self, project, effective[-8000:], limit=1, context_handle=context_handle,
+                found = candidate_search(self, project, effective, limit=1, context_handle=context_handle,
                                          delivery=delivery, context_epoch=work_context_epoch, task_state=task_state,
                                          compact=compact, filters=filters, workspace=workspace)
                 candidate_items = found.get("items", []) if isinstance(found, dict) else found
@@ -602,7 +608,11 @@ class KnowledgeContextMixin:
                 self.db.execute(f"UPDATE {table} SET retrieval_signature=?,retrieval_refs=? WHERE {where}",
                                 (saved_signature, encode(refs), *key))
             if not tool_only:
-                self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}", (effective[-8000:], *key))
+                # Preserve the identity guard on continuation/compaction. One
+                # extra character preserves the unsafe boundary for huge input;
+                # its truncated prefix can never silently become a safe query.
+                self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}",
+                                (effective[:_MAX_QUERY_CHARS + 1], *key))
             if fault:
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})}
                         for i in items[:5] if i.get("match", {}).get("auto_eligible", False) and i["source_health"] == "valid"]

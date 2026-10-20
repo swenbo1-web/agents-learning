@@ -42,7 +42,7 @@ def publication_lineage_state(runtime, project, body, knowledge_id=None, candida
     from .candidate_references import feedback_state, held_equivalent
 
     concerns = feedback_state(runtime, project, candidate_id) if candidate_id else None
-    held = held_equivalent(runtime, project, body, include_held=False)
+    held = held_equivalent(runtime, project, body, include_held=False, compare_variants=knowledge_id is None)
     issues = []
     if concerns and concerns["unresolved"]:
         issues.append({"code": "candidate_reference_disputed", "message": "Candidate reference concerns require explicit resolution"})

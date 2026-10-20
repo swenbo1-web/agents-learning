@@ -109,6 +109,22 @@ def search_preview(result, max_chars=6000):
     max_chars = _budget(max_chars, 512, 20000)
     source_items = result.get("items", [])
     output = {key: result[key] for key in ("status", "generation", "revocation_epoch") if key in result}
+    # Query safety survives the MCP preview boundary. Diagnostics contain only
+    # bounded flags/counts, never the original prompt or arbitrary error text.
+    for name, flags, counts in (
+            ("query_diagnostics", ("input_truncated", "identity_scan_complete", "identity_limit_exceeded",
+                                   "terms_truncated", "automatic_safe"), ()),
+            ("recall_diagnostics", ("scan_limit_reached",), ("pages", "examined", "unreadable_records"))):
+        supplied = result.get(name)
+        if not isinstance(supplied, dict):
+            continue
+        diagnostics = {key: supplied[key] for key in flags if isinstance(supplied.get(key), bool)}
+        for key in counts:
+            value = supplied.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000000:
+                diagnostics[key] = value
+        if diagnostics:
+            output[name] = diagnostics
     if isinstance(result.get("retrieval"), dict):
         # 仅保留有限诊断，不把服务端响应或任意异常文本带入上下文。
         diagnostics = {}
@@ -118,7 +134,7 @@ def search_preview(result, max_chars=6000):
         for key in ("retryable", "query_cache_hit", "query_truncated", "scan_truncated"):
             if isinstance(result["retrieval"].get(key), bool):
                 diagnostics[key] = result["retrieval"][key]
-        for key in ("retry_after_seconds", "scanned", "candidates"):
+        for key in ("retry_after_seconds", "scanned", "candidates", "invalid_vectors"):
             if isinstance(result["retrieval"].get(key), (int, float)):
                 diagnostics[key] = result["retrieval"][key]
         if diagnostics:

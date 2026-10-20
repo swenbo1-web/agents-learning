@@ -264,7 +264,7 @@ def resolve_feedback(runtime, project, candidate_id, expected_version, reason):
                 "published": False, "models_started": False}
 
 
-def held_equivalent(runtime, project, body, *, include_held=True):
+def held_equivalent(runtime, project, body, *, include_held=True, compare_variants=True):
     """Find an exact risky equivalent without limiting ordinary source history.
 
     Equality follows ``knowledge_fingerprint``: evidence and source identity do
@@ -297,14 +297,22 @@ def held_equivalent(runtime, project, body, *, include_held=True):
     if runtime.db.execute(source + " AND EXISTS (SELECT 1 FROM candidate_reference_feedback f "
             "WHERE f.project=c.project AND f.candidate_id=c.id AND f.state='unresolved') AND " + equality + " LIMIT 1", args).fetchone():
         return "equivalent candidate has unresolved concerns"
-    # Keep the existing comparison bound for genuinely different claims under
-    # the same title. Count business variants, never repeated source identities;
-    # sorted metadata fields preserve the fingerprint's key-order independence.
+    # An explicit active-revision update has already selected its comparison
+    # target. Exact attachment likewise has a fixed active claim. Neither needs
+    # an unbounded generic title comparison; exact concerns above still apply.
+    from .runtime import knowledge_fingerprint
+    if not compare_variants or runtime.db.execute("SELECT 1 FROM knowledge_fingerprints f JOIN active a "
+            "ON a.project=f.project AND a.id=f.id AND a.revision=f.revision "
+            "WHERE f.project=? AND f.fingerprint=? LIMIT 1", (project, knowledge_fingerprint(body))).fetchone():
+        return None
+    # Keep the comparison bound for genuinely different unresolved claims.
+    # Rejecting an unrelated alternative is an explicit recovery path; rejected
+    # exact equivalents and concerns were checked above, regardless of age.
     variants = [f"json_extract(c.body,'$.{field}')" for field in fields]
     variants.append("coalesce(json_extract(c.body,'$.knowledge_kind'),'solution')")
     variants.extend(f"json_extract(c.body,'$.metadata.{field}')" for field in sorted(METADATA_KEYS))
     if runtime.db.execute("SELECT 1 FROM (SELECT DISTINCT " + ",".join(variants) + " FROM candidates c "
-            "WHERE c.project=? AND lower(trim(json_extract(c.body,'$.title')))=lower(trim(?)) "
+            "WHERE c.project=? AND c.status!='rejected' AND lower(trim(json_extract(c.body,'$.title')))=lower(trim(?)) "
             "LIMIT 33) LIMIT 1 OFFSET 32", (project, body["title"])).fetchone():
         return "candidate comparison requires review"
     return None
@@ -486,9 +494,9 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
     return result
 
 
-def _recall(runtime, project, query):
+def _recall(runtime, project, query, anchors=()):
     from .query_language import canonical_text
-    original = query[-8000:]
+    original = " ".join(anchors) + " " + query[-8000:] if anchors else query[-8000:]
     canonical = canonical_text(original)
     chunks = []
     for word in re.findall(r"[\u3400-\u9fff]+|[a-z0-9_]+(?:[./:+#-][a-z0-9_+#-]*)*", (original + " " + canonical).lower()):
@@ -496,6 +504,10 @@ def _recall(runtime, project, query):
             chunks.extend(word[index:index + 3] for index in range(max(0, len(word) - 2)))
         elif len(word) >= 3:
             chunks.append(word)
+    # Candidate FTS stores raw text. A slash-normalized query must also recall
+    # a Windows-spelled source; complete path qualification still happens after
+    # recall, so matching a basename cannot borrow another directory's claim.
+    chunks = [part for anchor in anchors for part in anchor.split("/") if len(part) >= 3] + chunks
     chunks = list(dict.fromkeys(chunks))[:96]
     if chunks:
         expression = " OR ".join('"' + word.replace('"', '""') + '"' for word in chunks)
@@ -533,15 +545,15 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
         return []
     if context_handle is not None:
         access = _access(runtime, project, context_handle)[0]
-    from .knowledge_index import normalized_query_plan, _match_info
+    from .knowledge_index import normalized_query_plan, _match_info, _positive_anchors_allowed
     plan = normalized_query_plan(query)
     selected = plan["terms"]
-    if not selected:
+    if not selected or not plan["automatic_safe"]:
         return []
     weights = {term: 2 if len(term) > 1 else 1 for term in selected}
     denominator = sum(weights.values())
     ranked = []
-    for row in _recall(runtime, project, query):
+    for row in _recall(runtime, project, query, plan["exact_anchors"]):
         candidate = runtime.db.execute("SELECT body FROM candidates WHERE project=? AND id=? AND status='candidate'",
             (project, row["candidate_id"])).fetchone()
         if not candidate:
@@ -550,8 +562,8 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
         if any((body.get(key, "solution" if key == "knowledge_kind" else "") if key in {"category", "knowledge_kind"}
                 else body.get("metadata", {}).get(key)) != value for key, value in filters.items()):
             continue
-        info = _match_info(candidate[0], weights, denominator, plan["meaningful"])
-        if not info["auto_eligible"]:
+        info = _match_info(candidate[0], weights, denominator, plan["meaningful"], _anchors=plan["exact_anchors"])
+        if not info["auto_eligible"] or not _positive_anchors_allowed(candidate[0], plan["exact_anchors"]):
             continue
         ranked.append((row["candidate_id"], info))
     ranked.sort(key=lambda match: (-match[1]["score"], match[0]))

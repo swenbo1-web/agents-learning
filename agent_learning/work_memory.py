@@ -380,10 +380,11 @@ class WorkMemoryMixin:
     def _work_search_rows(self, project, query, *, file_path=None, workspace=None, limit=5,
                           conversation=None, agent_id=None, task_state=None, exclude_event_id=None,
                           automatic=False):
-        from .knowledge_index import normalized_query_plan
+        from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
         from .runtime import ContractError
-        if not isinstance(query, str) or len(query) > 8000:
-            raise ContractError("work query must be text of at most 8000 characters")
+        query_limit = _MAX_QUERY_CHARS if automatic else 8000
+        if not isinstance(query, str) or len(query) > query_limit:
+            raise ContractError(f"work query must be text of at most {query_limit} characters")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ContractError("work search limit must be 1..20")
         clauses, params = ["m.project=?"], [project]
@@ -432,6 +433,8 @@ class WorkMemoryMixin:
         if automatic and query.strip():
             from .knowledge_index import _match_info
             plan = normalized_query_plan(query)
+            if not plan["automatic_safe"]:
+                return []
             weights = {word: 2 if re.fullmatch(r"[\u3400-\u9fff]+", word) and len(word) > 1 else 1
                        for word in plan["terms"]}
             denominator = sum(weights.values())
@@ -440,7 +443,7 @@ class WorkMemoryMixin:
             if automatic and query.strip():
                 comparable = _json({"title": body["title"], "content": body["summary"], "knowledge_kind": ""})
                 if not denominator or not _match_info(comparable, weights, denominator,
-                                                       plan["meaningful"])["auto_eligible"]:
+                                                       plan["meaningful"], _anchors=plan["exact_anchors"])["auto_eligible"]:
                     continue
                 # Prefer recorded results over a previous short question about
                 # the same subject. Keep explicit user constraints/corrections;
@@ -645,7 +648,7 @@ class WorkMemoryMixin:
                 return result[:limit]
             rows = []
             for link in links[:3]:
-                rows.extend(self._work_search_rows(project, query,
+                rows.extend(self._work_search_rows(project, query[:8000],
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
                     exclude_event_id=exclude_event_id))
             if not links:

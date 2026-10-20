@@ -108,10 +108,16 @@ class Module4SearchTests(unittest.TestCase):
     def test_match_explanation_is_bounded_for_long_exact_query(self):
         words = [f"errorcode{index}" for index in range(160)]
         self.publish(title="diagnosis", content=" ".join(words))
-        item = self.r.search(self.p, " ".join(words))["items"][0]
+        result = self.r.search(self.p, " ".join(words))
+        item = result["items"][0]
         self.assertEqual(item["match"]["coverage"], 1)
         self.assertLessEqual(len(item["match"]["matched_terms"]), 12)
-        self.assertTrue(item["match"]["auto_eligible"])
+        # Manual recall and its bounded explanation remain available. More
+        # identities than the safety plan can represent cannot qualify for
+        # automatic injection just because the retained scoring terms match.
+        self.assertFalse(item["match"]["auto_eligible"])
+        self.assertTrue(result["query_diagnostics"]["identity_limit_exceeded"])
+        self.assertEqual(self.r.search(self.p, " ".join(words), _automatic=True)["items"], [])
 
     def test_cache_reference_to_unrelated_active_record_is_rejected(self):
         expected = self.publish(title="memory leak")
