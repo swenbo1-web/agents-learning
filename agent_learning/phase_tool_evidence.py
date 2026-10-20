@@ -66,20 +66,42 @@ def _partial(value):
     return isinstance(value, list) and any(_partial(child) for child in value)
 
 
+def _budget_preview(runtime, project, problem, phase, packet=None):
+    """Measure bounded envelope fields, not thousands of imaginary spaces.
+
+    This is a size-only preview, never a stored phase or citable source. Optional
+    tools leave room for the bounded diagnostics of a later multi-stage batch.
+    """
+    from .phase_review import batch_packet, item_char_budget
+    maximum = runtime.admin_effective_config(project)["max_input_chars"]
+    parent = dict(problem, id="0" * 36, revision=2, task_id=None, task_revision=None,
+                  summary="阶段集中审核 [" + "0" * 32 + "]", category="mixed",
+                  knowledge_id=None, knowledge_revision=None)
+    phase_ids = [phase["id"]] + ["0" * 36] * 19
+    identities = ["0" * 36] * 32
+    empty = batch_packet(parent, phase_ids, [], phase["conversation"], maximum,
+                         omitted=identities, reused=identities, continuation=True)
+    limit = item_char_budget(maximum, empty)
+    items = []
+    if packet is not None:
+        item = dict(packet)
+        item["phase_tool_context"] = {"policy_version": VERSION, "scope": "selected_related_tools_only",
+            "stage_status": "delivered", "selected_count": MAX_TOOLS, "omitted_matching": SCAN_LIMIT,
+            "scan_limited": True, "selection_unavailable": False,
+            "excluded": {key: SCAN_LIMIT for key in ("existing_case", "partial_source", "budget", "duplicate")},
+            "max_tools_per_stage": MAX_TOOLS, "tool_payload_budget": TOOL_CHARS}
+        items.append(item)
+    return batch_packet(parent, phase_ids, items, phase["conversation"], limit,
+                        omitted=identities, reused=identities, continuation=True), limit
+
+
 def _token_fits(runtime, project, packet, phase):
-    """Use the same single-item wrapper estimate as prepare, with headroom."""
     from .admin_usage import estimate_reservation
     from .phase_review import instruction
-    body = {"problem": {"id": "0" * 32, "revision": 1, "summary": "阶段集中审核 [" + "0" * 32 + "]"},
-            "task": None, "events": [], "related_knowledge": [], "related_candidates": [],
-            "purpose": "phase_review", "executor_conversation": phase["conversation"],
-            "item_max_chars": runtime.admin_effective_config(project)["max_input_chars"] - 3000,
-            "phase_ids": [phase["id"]], "items": [packet], "incomplete": False,
-            "evidence_truncated": False, "omitted_problem_ids": [], "reused_problem_ids": [],
-            "omitted_source_count": 0, "coverage_complete": False}
-    # prepare reserves 3,000 diagnostic bytes; also allow for its real parent,
-    # up to 20 stage IDs and the selection receipt added after this preview.
-    return estimate_reservation(runtime, project, instruction(body) + " " * 6000, phase=True)["admitted"]
+    body, _ = _budget_preview(runtime, project, packet["problem"], phase, packet)
+    visible = instruction(body)
+    return (len(visible) <= runtime.admin_effective_config(project)["max_input_chars"]
+            and estimate_reservation(runtime, project, visible, phase=True)["admitted"])
 
 
 def _public_text(runtime, project, refs):
@@ -244,8 +266,9 @@ def _attach(runtime, project, phase, task, stop, cases):
         seen.add(signature)
         candidates.append({"event": dict(event), "problem_id": problem_id, "public_event_id": identity,
                            "anchors": anchors[:8], "score": len(anchors)})
-    maximum = max(1000, runtime.admin_effective_config(project)["max_input_chars"] - 3000)
-    budget = min(TOOL_CHARS, max(0, (maximum - 2000) // 2))
+    # Payload cap and complete-request admission are independent. Avoid shrinking
+    # evidence twice using character guesses; each full observation is checked below.
+    budget = TOOL_CHARS
     selected = []
     for item in sorted(candidates, key=lambda item: (-item["score"], -item["event"]["created"], item["event"]["id"])):
         event = item["event"]
@@ -257,7 +280,10 @@ def _attach(runtime, project, phase, task, stop, cases):
         runtime.db.execute("SAVEPOINT phase_tool_fit")
         try:
             runtime._attach_case_evidence(item["problem_id"], [(event["id"], "observation")])
-            packet = runtime.review_packet(project, item["problem_id"], max_chars=max(1000, maximum - 1200))
+            problem = runtime.db.execute("SELECT * FROM problems WHERE project=? AND id=?",
+                                         (project, item["problem_id"])).fetchone()
+            _, item_limit = _budget_preview(runtime, project, dict(problem), phase)
+            packet = runtime.review_packet(project, item["problem_id"], max_chars=item_limit)
             fits = (not packet.get("incomplete") and not packet.get("evidence_truncated")
                     and _token_fits(runtime, project, packet, phase))
         except BaseException:

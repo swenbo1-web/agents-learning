@@ -338,19 +338,39 @@ class PhaseLocalDeferralTests(unittest.TestCase):
     def test_small_character_budget_keeps_unincluded_routine_locally_deferred(self):
         from agent_learning.phase_review import instruction
         runtime, project, send, conversation = self.setup_host(suffix="-char-priority")
-        runtime.config["admin"]["max_input_chars"] = 6500
+        runtime.config["admin"]["max_input_chars"] = 64000
         self.begin(runtime, project, send, conversation)
         routine = self.finish(runtime, project, send, conversation)
         normal_send, normal_conversation = self.host_events(runtime, native="normal-char-budget")
         normal_send("start", turn=0)
         self.begin(runtime, project, normal_send, normal_conversation, goal="Deliver professional constraints")
-        normal = self.finish(runtime, project, normal_send, normal_conversation,
-            reply="The project release constraint uses a dedicated isolated runtime directory. " * 7)
+        with patch("agent_learning.phase_review.prepare"):
+            normal = self.finish(runtime, project, normal_send, normal_conversation,
+                reply="The project release constraint uses a dedicated isolated runtime directory. " * 7)
+        # Measure the current complete wrapper rather than rely on a historical
+        # fixed cap that transport/schema improvements may make spacious again.
+        runtime.db.execute("SAVEPOINT measure_normal_character_budget")
+        try:
+            prepare(runtime, project)
+            measured = self.pending_packet(runtime)
+            self.assertEqual(len(measured["items"]), 2)
+            single = json.loads(json.dumps(measured))
+            single["items"] = [item for item in single["items"]
+                               if item["problem"]["task_id"] == normal["task_id"]]
+            single["phase_ids"] = [normal["id"]]
+            maximum = len(instruction(single)) + 128
+            self.assertLess(maximum, len(instruction(measured)), "the routine source must exceed the measured cap")
+        finally:
+            runtime.db.execute("ROLLBACK TO measure_normal_character_budget")
+            runtime.db.execute("RELEASE measure_normal_character_budget")
+        runtime.config["admin"]["max_input_chars"] = maximum
+        with runtime.transaction():
+            prepare(runtime, project)
         packet = self.pending_packet(runtime)
         self.assertIsNotNone(packet, "a small budget must still admit the available normal source")
         self.assertEqual(len(packet["items"]), 1)
         self.assertEqual(packet["items"][0]["problem"]["task_id"], normal["task_id"])
-        self.assertLessEqual(len(instruction(packet)), 6500)
+        self.assertLessEqual(len(instruction(packet)), maximum)
         self.assertEqual(packet["phase_ids"], [normal["id"]], "an unincluded routine stage is not part of this batch")
         request = runtime.db.execute("SELECT e.payload FROM problem_events pe JOIN events e ON e.id=pe.event "
             "WHERE pe.problem=? AND e.type='PhaseReviewRequested'", (packet["problem"]["id"],)).fetchone()

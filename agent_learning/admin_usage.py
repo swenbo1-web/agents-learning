@@ -8,6 +8,7 @@ import time
 from .runtime import ContractError, digest, encode
 
 TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
+RESERVATION_ESTIMATE_VERSION = 2
 ADMIN_BUDGET_DEFAULTS = {
     "max_calls_per_day": 100, "max_calls_per_batch": 5, "max_cases_per_batch": 40,
     "max_batch_seconds": 180, "max_run_seconds": 600, "timeout_seconds": 120,
@@ -255,14 +256,19 @@ def estimate_reservation(runtime, project, instruction, *, phase=False):
     """Local conservative estimate, never a guarantee of provider billing limits."""
     if not phase:
         return {"admitted": True, "reserved_tokens": budget_settings(runtime)["token_reservation_per_call"]}
-    from .phase_review import policy
+    from .phase_review import policy, response_schema
     cfg = policy(runtime, project)
     # Host system prompts are not fully visible. Reserve a floor plus the visible UTF-8 payload.
-    estimated_input = 12000 + (len(instruction.encode("utf-8")) + 1963 + 1) // 2
+    instruction_bytes = len(instruction.encode("utf-8"))
+    schema_bytes = len(encode(response_schema()).encode("utf-8"))
+    estimated_input = 12000 + (instruction_bytes + schema_bytes + 1) // 2
     amount = estimated_input + cfg["max_output_tokens"]
     admitted = estimated_input <= cfg["max_input_tokens"]
     return {"admitted": admitted, "reserved_tokens": amount, "estimated_input_tokens": estimated_input,
             "estimated_output_tokens": cfg["max_output_tokens"], "estimate_only": True,
+            "estimate_version": RESERVATION_ESTIMATE_VERSION,
+            "instruction_chars": len(instruction), "instruction_bytes": instruction_bytes,
+            "schema_bytes": schema_bytes, "host_reserve_tokens": 12000,
             "reason": "ready" if admitted else "phase_input_token_budget_exceeded"}
 
 

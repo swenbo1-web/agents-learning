@@ -369,7 +369,9 @@ class PhaseToolEvidenceTests(unittest.TestCase):
             measured["items"] = [expanded]
             measured.update(omitted_problem_ids=[], reused_problem_ids=[], omitted_source_count=0,
                             coverage_complete=False)
-            narrow = estimate_reservation(self.r, self.p, instruction(measured) + " " * 3000,
+            # Admission now measures the actual request and response schema;
+            # an imaginary padding block is not part of the boundary.
+            narrow = estimate_reservation(self.r, self.p, instruction(measured),
                                           phase=True)["estimated_input_tokens"] - 1
         finally:
             self.r.db.execute("ROLLBACK TO measure_twenty_phase_wrapper")

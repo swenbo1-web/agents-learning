@@ -22,6 +22,11 @@ def response_schema():
     from copy import deepcopy
     from .admin import RESPONSE_SCHEMA, HISTORY_RESPONSE_SCHEMA
     result = deepcopy(RESPONSE_SCHEMA)
+    # The aggregate is only a per-case envelope; accept() already requires
+    # these fields to be null. Do not resend an unusable candidate/proposal
+    # definition on every stage review. Keep each item's full contract below.
+    result["properties"]["candidate"] = {"type": "null"}
+    result["properties"]["proposal"] = {"type": "null"}
     item = deepcopy(HISTORY_RESPONSE_SCHEMA)
     item["properties"]["problem_id"] = {"type": "string", "minLength": 1}
     item["required"].append("problem_id")
@@ -129,6 +134,28 @@ def scope(runtime, project):
 def instruction(packet):
     from .review_packet import review_instruction
     return PHASE_PREFIX + review_instruction(packet)
+
+
+def batch_packet(parent, phase_ids, items, executor_conversation, item_max_chars, *, omitted=(), reused=(),
+                 prior_deferred=0, continuation=False, omitted_sources=0, complete=False):
+    """One envelope for selection, optional-tool preview and final admission."""
+    return {"problem": parent, "task": None, "events": [], "related_knowledge": [],
+            "related_candidates": [], "purpose": "phase_review", "executor_conversation": executor_conversation,
+            "item_max_chars": item_max_chars, "phase_ids": list(phase_ids), "items": list(items),
+            "incomplete": False, "evidence_truncated": False,
+            "omitted_problem_ids": list(omitted)[:32], "reused_problem_ids": list(reused)[:32],
+            "omitted_problem_count": len(omitted) + prior_deferred, "reused_problem_count": len(reused),
+            "case_scan_continuation": bool(continuation), "omitted_source_count": omitted_sources,
+            "coverage_complete": bool(complete)}
+
+
+def item_char_budget(maximum, empty_batch):
+    """Review-packet limits include its own rules; subtract only the outer increment."""
+    from .review_packet import review_instruction
+    from .runtime import encode
+    rules = len(review_instruction({})) - len(encode({}))
+    outer = len(instruction(empty_batch)) - rules
+    return max(1000, min(maximum, maximum - outer))
 
 
 def retry(runtime, project, problem_id):
@@ -312,6 +339,8 @@ def _case_source(runtime, project, phase):
 
 def _scan_progress(runtime, project, phase, cfg):
     from .runtime import digest
+    from .review_packet import PACKET_FORMAT
+    from .admin_usage import RESERVATION_ESTIMATE_VERSION
     sql, args = _case_source(runtime, project, phase)
     # Review outcomes remove eligible rows, but do not move this source version.
     # Real evidence/context revisions and changed input settings restart a pass.
@@ -321,7 +350,7 @@ def _scan_progress(runtime, project, phase, cfg):
     candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
     signature = digest([list(facts), list(knowledge) if knowledge else None, candidates[0] if candidates else 0,
                         cfg["version"], runtime.admin_effective_config(project)["max_input_chars"],
-                        runtime.admin_policy(project)["policy_version"]])
+                        runtime.admin_policy(project)["policy_version"], PACKET_FORMAT, RESERVATION_ESTIMATE_VERSION])
     row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
     changed = not row or row["signature"] != signature
     if changed:
@@ -468,7 +497,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [])
     executor_conversation = next((phase["conversation"] for phase in reversed(phases)
                                   if phase["id"] not in routine_ids), phases[-1]["conversation"])
-    items, seen, omitted, reused, used = [], set(), [], [], 0
+    items, seen, omitted, reused = [], set(), [], []
     duplicates, reused_ready, scanned_remainder, prior_deferred = [], set(), 0, 0
     scan_updates = {}
     try:
@@ -476,9 +505,11 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                                             runtime.resolve_admin_executor(project, executor_conversation))
     except ValueError:
         review_cfg = None
-    char_limit = runtime.admin_effective_config(project)["max_input_chars"] - 3000
+    maximum = runtime.admin_effective_config(project)["max_input_chars"]
+    empty_batch = batch_packet(parent, ids, [], executor_conversation, maximum)
+    char_limit = item_char_budget(maximum, empty_batch)
     for phase in phases:
-        if phase["id"] in routine_ids and (not items or len(items) >= 8 or used >= char_limit - 1000):
+        if phase["id"] in routine_ids and (not items or len(items) >= 8):
             continue
         before_phase = (len(items), len(duplicates), len(omitted), len(reused))
         source_sql, source_args = _case_source(runtime, project, phase)
@@ -496,7 +527,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
         deferred = 0
         last_key = previous_key
         for source_index, source in enumerate(rows):
-            if used >= char_limit - 1000 or len(items) >= 8:
+            if len(items) >= 8:
                 omitted.extend(r["id"] for r in rows[source_index:] if r["id"] not in seen)
                 more = True
                 break
@@ -561,26 +592,15 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 reused.append(source["id"])
                 duplicates.append(packet)
                 continue  # Comparison reuse only, never independent verification.
-            cost = len(encode(packet))
-            if used + cost > char_limit or len(items) >= 8:
-                if items:
-                    last_key = before_current
-                    more = True
-                    break
-                omitted.append(source["id"])
-                deferred += 1
-                continue
             # Test the actual wrapper, not just the sum of member characters.
             # An oversized member remains uncovered; it cannot pin a ready sibling.
-            candidate_body = {"problem": parent, "task": None, "events": [], "related_knowledge": [],
-                "related_candidates": [], "purpose": "phase_review", "executor_conversation": executor_conversation,
-                "item_max_chars": max(1000, char_limit), "phase_ids": ids, "items": items + [packet],
-                "incomplete": False, "evidence_truncated": False, "omitted_problem_ids": [],
-                "reused_problem_ids": [], "omitted_source_count": 0, "coverage_complete": False}
+            candidate_body = batch_packet(parent, ids, items + [packet], executor_conversation, char_limit,
+                omitted=omitted, reused=reused, prior_deferred=prior_deferred,
+                continuation=bool(scanned_remainder), omitted_sources=sum(p["omitted_sources"] for p in phases))
             from .admin_usage import estimate_reservation
-            # Leave room for bounded diagnostic identifiers appended after selection.
-            estimate = estimate_reservation(runtime, project, instruction(candidate_body) + " " * 3000, phase=True)
-            if not estimate["admitted"]:
+            visible_instruction = instruction(candidate_body)
+            estimate = estimate_reservation(runtime, project, visible_instruction, phase=True)
+            if len(visible_instruction) > maximum or not estimate["admitted"]:
                 if items:
                     last_key = before_current
                     more = True
@@ -589,7 +609,6 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 deferred += 1
                 continue
             items.append(packet)
-            used += cost
         if phase["id"] in routine_ids and (len(items), len(duplicates)) == before_phase[:2]:
             # Merely probing a routine packet is not evidence of inclusion.
             # Preserve its cursor and local state when the remaining character
@@ -607,38 +626,47 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     request, _ = runtime._event(project, conversation, "PhaseReviewRequested", {"phase_ids": ids},
                                 event_id="phase-review:" + batch_key, outcome="reported")
     parent = runtime._problem(project, conversation, "阶段集中审核 [" + batch_key + "]", "mixed", [request["id"]])
-    body = {"problem": parent, "task": None, "events": [], "related_knowledge": [], "related_candidates": [],
-            "purpose": "phase_review", "executor_conversation": executor_conversation, "item_max_chars": max(1000, char_limit),
-            "phase_ids": ids, "items": items, "incomplete": False,
-            "evidence_truncated": False, "omitted_problem_ids": omitted[:32], "reused_problem_ids": reused[:32],
-            "omitted_problem_count": len(omitted) + prior_deferred, "reused_problem_count": len(reused),
-            "case_scan_continuation": bool(scanned_remainder),
-            "omitted_source_count": sum(p["omitted_sources"] for p in phases),
-            "coverage_complete": not omitted and not prior_deferred and not scanned_remainder and not any(p["omitted_sources"] for p in phases)}
+    body = batch_packet(parent, ids, items, executor_conversation, char_limit, omitted=omitted, reused=reused,
+        prior_deferred=prior_deferred, continuation=bool(scanned_remainder),
+        omitted_sources=sum(p["omitted_sources"] for p in phases),
+        complete=not omitted and not prior_deferred and not scanned_remainder and not any(p["omitted_sources"] for p in phases))
     for identity, scan in scan_updates.items():
         runtime.db.execute("UPDATE phase_scan_progress SET cursor=?,deferred=?,exhausted=? WHERE phase_id=?",
             (encode(scan["cursor"]), scan["deferred"], int(not scan["more"]), identity))
     # The final diagnostics are bounded as well. No queued batch may be too big
     # for the very same admission function that will launch it.
     from .admin_usage import estimate_reservation
-    while body["items"] and (len(instruction(body)) > runtime.admin_effective_config(project)["max_input_chars"]
-                             or not estimate_reservation(runtime, project, instruction(body), phase=True)["admitted"]):
+    base_omitted_ids = body["omitted_problem_ids"]
+    base_omitted_count = body["omitted_problem_count"]
+    removed_ids = []
+    while True:
+        included_signatures = {(_fingerprint(item), dependency_signature(item, _fingerprint(item)))
+                               for item in body["items"]}
+        supported_duplicates, unsupported_ids = [], []
+        for item in duplicates:
+            identity = item["problem"]["id"]
+            signature = _fingerprint(item)
+            if identity in reused_ready or (signature, dependency_signature(item, signature)) in included_signatures:
+                supported_duplicates.append(item)
+            else:
+                unsupported_ids.append(identity)
+        # Removing a representative can also remove its duplicate-reuse proof.
+        # Account for those diagnostics before the final size check, not after.
+        body["omitted_problem_ids"] = (base_omitted_ids + removed_ids + unsupported_ids)[:32]
+        body["omitted_problem_count"] = base_omitted_count + len(removed_ids) + len(unsupported_ids)
+        if removed_ids or unsupported_ids:
+            body["coverage_complete"] = False
+        visible_instruction = instruction(body)
+        if (not body["items"] or (len(visible_instruction) <= maximum
+                and estimate_reservation(runtime, project, visible_instruction, phase=True)["admitted"])):
+            break
         removed = body["items"].pop()
-        body["omitted_problem_ids"] = (body["omitted_problem_ids"] + [removed["problem"]["id"]])[:32]
-        body["omitted_problem_count"] += 1
-        body["coverage_complete"] = False
+        removed_ids.append(removed["problem"]["id"])
         for identity in ids:
             runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
-    included_signatures = {_fingerprint(item) for item in body["items"]}
-    supported_duplicates = []
-    for item in duplicates:
-        identity = item["problem"]["id"]
-        if identity in reused_ready or _fingerprint(item) in included_signatures:
-            supported_duplicates.append(item)
-        else:
-            body["omitted_problem_ids"] = (body["omitted_problem_ids"] + [identity])[:32]
-            body["omitted_problem_count"] += 1
-            body["coverage_complete"] = False
+    # batch_packet owns its list. Only the final admitted members may receive
+    # pending rows; a removed case must remain available to a later scan.
+    items = body["items"]
     duplicates = supported_duplicates
     runtime.db.execute("INSERT INTO phase_review_batches VALUES(?,?,?,?,?,?,?,?,'pending',?,NULL)",
         (project, parent["id"], runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"],
