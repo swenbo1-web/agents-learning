@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from .knowledge_index import _CHINESE, _match_info, _query_terms, _rank
+from .knowledge_index import _CHINESE, _match_info, lexical_rows, normalized_query_plan
 
 
 REVIEW_PREFIX = (
@@ -441,26 +441,23 @@ class ReviewPacketMixin:
             if len(knowledge) == 3:
                 break
 
-        selected, meaningful = _query_terms(query)
+        plan = normalized_query_plan(query)
+        selected, meaningful = plan["terms"], plan["meaningful"]
         if not selected and not knowledge:
             return [], []
         if selected and len(knowledge) < 3:
             weights = {word: 2 if _CHINESE.fullmatch(word) and len(word) > 1 else 1 for word in selected}
             denominator = sum(weights.values())
-            self.db.create_function("alp_packet_score", 1, lambda body: _rank(body, weights, denominator))
-            match = " OR ".join('"' + word.replace('"', '""') + '"' for word in selected)
-            rows = self.db.execute(
-                "SELECT k.* FROM knowledge_fts JOIN active a ON knowledge_fts.project=a.project "
-                "AND knowledge_fts.id=a.id AND CAST(knowledge_fts.revision AS INTEGER)=a.revision "
-                "JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-                "WHERE knowledge_fts MATCH ? AND a.project=? ORDER BY alp_packet_score(k.body) DESC,k.id LIMIT 6",
-                (match, project)).fetchall()
-            for row in rows:
+            # 不在查询期间替换连接级 UDF：审核/本地重验可能仍遍历外层 SQLite 游标。
+            # 共用有界 FTS 召回，再按本次独立权重评分，不保存会串入下次查询的闭包。
+            ranked = []
+            for row in lexical_rows(self.db, project, plan):
                 if row["id"] in seen_kids:
                     continue
                 info = _match_info(row["body"], weights, denominator, meaningful)
-                if not info["auto_eligible"]:
-                    continue
+                if info["auto_eligible"]:
+                    ranked.append((info["score"], row["id"], row))
+            for _, _, row in sorted(ranked, key=lambda value: (-value[0], value[1])):
                 item = self._public(project, row)
                 knowledge.append({"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                                   "title": clip(item["title"], 100), "content": clip(item["content"], 240),

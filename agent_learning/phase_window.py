@@ -25,13 +25,51 @@ def _current(runtime, project, conversation, task):
         task["id"], task["revision"], runtime.session_epoch(), runtime.host_epoch()) else None
 
 
-def _open(runtime, project, conversation, task, start):
+def _open(runtime, project, conversation, task, start, *, ordered=True, inclusive_event=None):
     runtime.db.execute("INSERT INTO phase_review_windows VALUES(?,?,?,?,?,?,?,?) "
         "ON CONFLICT(project,host_scope,conversation) DO UPDATE SET task_id=excluded.task_id,"
         "task_revision=excluded.task_revision,session_epoch=excluded.session_epoch,"
         "governance_epoch=excluded.governance_epoch,start_time=excluded.start_time",
         (project, runtime._session_scope(), conversation, task["id"], task["revision"],
          runtime.session_epoch(), runtime.host_epoch(), start))
+    # Wall clocks may return equal values across pause/resume and opt-in. Keep
+    # an ordered local boundary without changing the source timestamps.
+    runtime._event(project, conversation, "PhaseWindowStarted", {
+        "host_scope": runtime._session_scope(), "host_epoch": runtime.session_epoch(),
+        "governance_epoch": runtime.host_epoch(), "start_time": start, "ordered_boundary": ordered,
+        "inclusive_event_id": inclusive_event},
+        task_id=task["id"], task_revision=task["revision"],
+        task_write_version=task["write_version"], outcome="reported")
+
+
+def event_bounds(runtime, project, phase):
+    """Original active suffix plus an optional ordered boundary for new windows.
+
+    Older windows have no marker; their immutable task history still excludes
+    observations from an earlier paused/completed suffix at the same timestamp.
+    """
+    last = runtime.db.execute("SELECT COALESCE(MAX(write_version),0) FROM task_states "
+        "WHERE project=? AND id=? AND revision=? AND status!='active' AND write_version<?",
+        (project, phase["task_id"], phase["task_revision"], phase["delivery_version"])).fetchone()[0]
+    first = runtime.db.execute("SELECT MIN(write_version) FROM task_states WHERE project=? AND id=? "
+        "AND revision=? AND status='active' AND write_version>? AND write_version<?",
+        (project, phase["task_id"], phase["task_revision"], last, phase["delivery_version"])).fetchone()[0]
+    marker = runtime.db.execute("SELECT rowid,payload FROM events WHERE project=? AND conversation=? "
+        "AND type='PhaseWindowStarted' AND task_id=? AND task_revision=? AND task_write_version<=? "
+        "AND json_extract(payload,'$.host_scope')=? AND json_extract(payload,'$.host_epoch')=? "
+        "AND json_extract(payload,'$.governance_epoch')=? AND json_extract(payload,'$.start_time')=? "
+        "AND json_extract(payload,'$.ordered_boundary')=1 "
+        "ORDER BY rowid DESC LIMIT 1", (project, phase["conversation"], phase["task_id"],
+        phase["task_revision"], phase["delivery_version"], phase["host_scope"],
+        phase["session_epoch"], phase["governance_epoch"], phase["start_time"])).fetchone()
+    sequence = marker[0] if marker else 0
+    if marker:
+        initiating = json.loads(marker[1]).get("inclusive_event_id")
+        event = runtime.db.execute("SELECT rowid FROM events WHERE project=? AND conversation=? AND id=?",
+            (project, phase["conversation"], initiating)).fetchone() if initiating else None
+        if event and event[0] <= sequence:
+            sequence = event[0] - 1
+    return first or 0, sequence
 
 
 def activate(runtime, project):
@@ -52,7 +90,8 @@ def observe(runtime, project, conversation, task, event):
         # A known window crossing an account/contract boundary starts at this
         # new event. A missing upgrade cache can reconstruct its active suffix.
         start = event["created"] if old else start_time(runtime, project, conversation, task)
-        _open(runtime, project, conversation, task, min(start, event["created"]))
+        _open(runtime, project, conversation, task, min(start, event["created"]), ordered=bool(old),
+              inclusive_event=event["id"])
 
 
 def task_changed(runtime, project, conversation, previous, task, *, changed_contract, resume):
@@ -113,5 +152,5 @@ def start_time(runtime, project, conversation, task):
         (project, conversation, runtime.session_epoch())).fetchone()[0]
     start = max(first[0] if first else task["updated"], policy[0] if policy else task["updated"],
                 boundary if boundary is not None else task["updated"])
-    _open(runtime, project, conversation, task, start)
+    _open(runtime, project, conversation, task, start, ordered=False)
     return start

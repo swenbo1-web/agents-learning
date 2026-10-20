@@ -265,23 +265,48 @@ def resolve_feedback(runtime, project, candidate_id, expected_version, reason):
 
 
 def held_equivalent(runtime, project, body, *, include_held=True):
-    """No fresh source identity may bypass an equivalent held candidate."""
-    from .runtime import knowledge_fingerprint
+    """Find an exact risky equivalent without limiting ordinary source history.
+
+    Equality follows ``knowledge_fingerprint``: evidence and source identity do
+    not distinguish a claim, while every business field and metadata value do.
+    The database filters the risk before returning at most one row.  Sampling
+    the latest same-title candidates both locked healthy duplicate merges after
+    32 sources and could hide an older hold or concern behind those sources.
+    """
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='candidate_reference_feedback'").fetchone():
         return None
-    rows = runtime.db.execute("SELECT id,status,body FROM candidates WHERE project=? "
-        "AND lower(trim(json_extract(body,'$.title')))=lower(trim(?)) ORDER BY created DESC,id LIMIT 33", (project, body["title"])).fetchall()
-    if len(rows) > 32:
+    from .runtime import METADATA_KEYS
+    _, _, _, encode = _helpers()
+    # Candidates are validated business objects: these scalar fields are strings
+    # and metadata is a bounded string-valued object. JSON extraction handles
+    # escaping; symmetric set comparison preserves metadata key-order freedom.
+    # No dynamic SQLite UDF registration is needed while approval cursors exist.
+    fields = ("title", "content", "category", "applicability", "limitations", "validation_level")
+    scalar = " AND ".join(f"json_extract(c.body,'$.{field}') IS json_extract(t.body,'$.{field}')" for field in fields)
+    equality = scalar + (" AND coalesce(json_extract(c.body,'$.knowledge_kind'),'solution')="
+        "coalesce(json_extract(t.body,'$.knowledge_kind'),'solution') "
+        "AND NOT EXISTS (SELECT key,type,atom FROM json_each(c.body,'$.metadata') "
+        "EXCEPT SELECT key,type,atom FROM json_each(t.body,'$.metadata')) "
+        "AND NOT EXISTS (SELECT key,type,atom FROM json_each(t.body,'$.metadata') "
+        "EXCEPT SELECT key,type,atom FROM json_each(c.body,'$.metadata'))")
+    source = ("WITH target(body) AS (VALUES (?)) SELECT 1 FROM candidates c,target t WHERE c.project=? "
+        "AND lower(trim(json_extract(c.body,'$.title')))=lower(trim(?))")
+    args = (encode(body), project, body["title"])
+    if include_held and runtime.db.execute(source + " AND c.status IN ('deferred','rejected') AND " + equality + " LIMIT 1", args).fetchone():
+        return "equivalent candidate is held"
+    if runtime.db.execute(source + " AND EXISTS (SELECT 1 FROM candidate_reference_feedback f "
+            "WHERE f.project=c.project AND f.candidate_id=c.id AND f.state='unresolved') AND " + equality + " LIMIT 1", args).fetchone():
+        return "equivalent candidate has unresolved concerns"
+    # Keep the existing comparison bound for genuinely different claims under
+    # the same title. Count business variants, never repeated source identities;
+    # sorted metadata fields preserve the fingerprint's key-order independence.
+    variants = [f"json_extract(c.body,'$.{field}')" for field in fields]
+    variants.append("coalesce(json_extract(c.body,'$.knowledge_kind'),'solution')")
+    variants.extend(f"json_extract(c.body,'$.metadata.{field}')" for field in sorted(METADATA_KEYS))
+    if runtime.db.execute("SELECT 1 FROM (SELECT DISTINCT " + ",".join(variants) + " FROM candidates c "
+            "WHERE c.project=? AND lower(trim(json_extract(c.body,'$.title')))=lower(trim(?)) "
+            "LIMIT 33) LIMIT 1 OFFSET 32", (project, body["title"])).fetchone():
         return "candidate comparison requires review"
-    fingerprint = knowledge_fingerprint(body)
-    for row in rows:
-        if knowledge_fingerprint(json.loads(row["body"])) != fingerprint:
-            continue
-        if include_held and row["status"] in {"deferred", "rejected"}:
-            return "equivalent candidate is held"
-        if runtime.db.execute("SELECT 1 FROM candidate_reference_feedback WHERE project=? AND candidate_id=? "
-                              "AND state='unresolved' LIMIT 1", (project, row["id"])).fetchone():
-            return "equivalent candidate has unresolved concerns"
     return None
 
 

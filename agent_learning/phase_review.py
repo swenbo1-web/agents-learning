@@ -195,6 +195,10 @@ def seal_phase(runtime, project, phase, event_id):
             or stop["created"] < row["start_time"]):
         return False
     from .work_summaries import _PUBLIC_PREVIEW_FILTER
+    from .phase_window import event_bounds
+    first_write, first_sequence = event_bounds(runtime, project, row)
+    stop_sequence = runtime.db.execute("SELECT rowid FROM events WHERE project=? AND id=?",
+                                       (project, stop["id"])).fetchone()[0]
     # Segments are captured AFTER their parent Stop. Use the original message
     # timestamp and prefer complete segments to the duplicated/truncated preview.
     sources = (" FROM events e LEFT JOIN work_memories m ON m.project=e.project AND m.event_id=e.id "
@@ -202,8 +206,11 @@ def seal_phase(runtime, project, phase, event_id):
         "AND origin.id=json_extract(e.payload,'$.public_message_id') "
         "WHERE e.project=? AND e.conversation=? AND e.task_id=? AND e.task_revision=? AND e.agent IS NULL "
         "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
+        "AND COALESCE(origin.rowid,e.rowid)>? AND COALESCE(origin.rowid,e.rowid)<=? "
+        "AND e.task_write_version>=? AND e.task_write_version<=? "
         "AND e.type IN ('UserPromptSubmit','PhaseRequestContext','PublicMessageSegment','Stop') " + _PUBLIC_PREVIEW_FILTER)
-    params = (project, row["conversation"], task["id"], task["revision"], row["start_time"], stop["created"])
+    params = (project, row["conversation"], task["id"], task["revision"], row["start_time"], stop["created"],
+              first_sequence, stop_sequence, first_write, row["delivery_version"])
     refs = runtime.db.execute("SELECT e.id,length(e.payload) AS chars" + sources +
         " ORDER BY COALESCE(origin.created,e.created),e.created,e.rowid LIMIT 2000", params).fetchall()
     chunks, chunk, chars = [], [], 0
@@ -287,15 +294,20 @@ def source_conversation(runtime, project, problem_id, fallback):
 
 
 def _case_source(runtime, project, phase):
-    stop = runtime.db.execute("SELECT created FROM events WHERE id=?", (phase["event_id"],)).fetchone()[0]
+    from .phase_window import event_bounds
+    first_write, first_sequence = event_bounds(runtime, project, phase)
+    stop = runtime.db.execute("SELECT created,rowid FROM events WHERE id=?", (phase["event_id"],)).fetchone()
     sql = (" FROM problems p WHERE p.project=? AND p.conversation=? AND p.task_id=? AND p.task_revision=? "
         "AND NOT EXISTS(SELECT 1 FROM work_summary_links w WHERE w.problem_id=p.id) "
         "AND NOT EXISTS(SELECT 1 FROM deliveries d WHERE d.problem_id=p.id) "
         "AND EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
         "LEFT JOIN events origin ON e.type='PublicMessageSegment' AND origin.project=e.project "
         "AND origin.id=json_extract(e.payload,'$.public_message_id') WHERE pe.problem=p.id "
-        "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=?) ")
-    return sql, (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop)
+        "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
+        "AND COALESCE(origin.rowid,e.rowid)>? AND COALESCE(origin.rowid,e.rowid)<=? "
+        "AND e.task_write_version>=? AND e.task_write_version<=?) ")
+    return sql, (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop[0],
+                 first_sequence, stop[1], first_write, phase["delivery_version"])
 
 
 def _scan_progress(runtime, project, phase, cfg):

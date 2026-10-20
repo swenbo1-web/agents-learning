@@ -225,6 +225,10 @@ class KnowledgeContextMixin:
             # 新提示优先查询当前问题；旧故障保留到后续工具前置，不抢占注意力。
             fault = None
         effective = initial["last_query"] if continuation else query
+        if compact and effective:
+            # 恢复当前讨论焦点；旧故障继续排队到工具前置，不能抢占当前
+            # 查询后再通过历史展示 ID 补回一批未经相关度核对的旧卡。
+            fault = None
         if not effective and task:
             effective = task["goal"]
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
@@ -283,21 +287,8 @@ class KnowledgeContextMixin:
                 if item["revision"] == ref["revision"]:
                     item["match"] = ref.get("match", {})
                     items.append(item)
-        # 新命中优先；恢复集合保留顺序，不由历史曾见列表决定。
-        if compact:
-            seen = {item["knowledge_id"] for item in items}
-            for identity in reversed(json.loads(initial["injected"])[-5:]):
-                ident = identity.rsplit("@", 1)[0]
-                if ident in seen:
-                    continue
-                try:
-                    item = self.read(project, ident)
-                except ContractError:
-                    continue
-                if any(item.get("metadata", {}).get(k) != v for k, v in filters.items()):
-                    continue
-                items.append(item)
-                seen.add(ident)
+        # 压缩后的恢复也依据当前有效查询重新召回。历史展示身份只用于
+        # 失效通知，不能绕过相关度门槛把无关旧卡重新塞回当前上下文。
         work_settings = self.config.get("work_memory", {})
         work_items = []
         candidate_items = []
@@ -396,7 +387,7 @@ class KnowledgeContextMixin:
             delivered, eligible = [], 0
             for item in items:
                 identity = f"{item['knowledge_id']}@{item['revision']}"
-                if (delivery == "persistent" and identity in prior) or not item.get("match", {}).get("auto_eligible", True):
+                if (delivery == "persistent" and identity in prior) or not item.get("match", {}).get("auto_eligible", False):
                     continue
                 # 提交时核active与来源版本，避免快照后的撤销或冲突继续进入自动摘要。
                 active = self.db.execute("SELECT COALESCE(v.version,0) FROM active a LEFT JOIN knowledge_source_versions v "
@@ -614,7 +605,7 @@ class KnowledgeContextMixin:
                 self.db.execute(f"UPDATE {table} SET last_query=? WHERE {where}", (effective[-8000:], *key))
             if fault:
                 refs = [{"knowledge_id": i["knowledge_id"], "revision": i["revision"], "match": i.get("match", {})}
-                        for i in items[:5] if i.get("match", {}).get("auto_eligible", True) and i["source_health"] == "valid"]
+                        for i in items[:5] if i.get("match", {}).get("auto_eligible", False) and i["source_health"] == "valid"]
                 for ref in refs:
                     ref["retrieval_signature"] = fault_result_signature
                 pending = [ref for ref in refs if f"{ref['knowledge_id']}@{ref['revision']}" not in prior]

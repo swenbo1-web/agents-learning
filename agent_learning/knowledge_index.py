@@ -5,8 +5,7 @@ import json
 import re
 import sqlite3
 from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matched_labels
-from .semantic_retrieval import (SemanticRetrievalMixin, semantic_automatic_allowed,
-                                 semantic_exact_anchors_allowed)
+from .semantic_retrieval import SemanticRetrievalMixin
 
 
 INDEX_VERSION = 4
@@ -24,7 +23,38 @@ _ZH_REQUEST = re.compile("|".join(sorted({"请先", "帮我", "请问", "一下"
                         "说明", "给出", "进行", "可以", "需要", "是否", "能够", "然后", "最后", "请"},
                        key=lambda value: (-len(value), value))))
 _MAX_QUERY_TERMS = 128
-_MAX_AUTOMATIC_CANDIDATES = 64
+_LEXICAL_CANDIDATES = 128
+_MATCH_POLICY_VERSION = 2
+_TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
+_ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
+                        "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
+                        "模型设置", "按钮样式", "主题颜色"}, key=lambda value: (-len(value), value))))
+
+
+def _exact_anchors(query):
+    """Keep full identifiers; fragments such as ``auth`` cannot stand for an error code."""
+    result = []
+    for word in _WORDS.findall(query.lower()):
+        if (_CHINESE.fullmatch(word) or word in _TOOL_FIELDS
+                or re.fullmatch(r"\d+(?:\.\d+)*", word)):
+            continue
+        if (any(char in word for char in "_./:") or re.search(r"\d", word)
+                or word.startswith("c++") or word == "c#"):
+            result.append(terms(word)[0])
+    result = list(dict.fromkeys(result))
+    # Counts and language/version background must not veto an exact issue or
+    # file identity. Explicit environment compatibility is checked separately.
+    specific = [anchor for anchor in result if _specific_anchor(anchor)]
+    return specific or result
+
+
+def _specific_anchor(anchor):
+    # A full path, file or error/setting identifier can locate one concrete issue.
+    # Language names, a bare number or a version alone still need normal coverage.
+    return ("_" in anchor or "/" in anchor or ":" in anchor
+            or "." in anchor and not re.fullmatch(r"v?\d+(?:\.\d+)+", anchor)
+            or re.fullmatch(r"(?:e|err|error)\d+[a-z0-9]*|0x[0-9a-f]+|[a-z][a-z0-9]*-\d[a-z0-9_-]*",
+                            anchor) is not None)
 
 
 def terms(text):
@@ -57,16 +87,21 @@ def _query_terms(query):
     if any(_CHINESE.fullmatch(word) and len(word) > 1 for word in selected):
         selected = [word for word in selected if not (_CHINESE.fullmatch(word) and len(word) == 1)]
     # 技术标识通常比自然语言连接片段明确，超预算时优先保留。
+    anchors = [word for word in _exact_anchors(meaningful) if word in selected]
     technical = [word for word in selected if not _CHINESE.fullmatch(word)]
     chinese = [word for word in selected if _CHINESE.fullmatch(word)]
-    return (technical + chinese)[:_MAX_QUERY_TERMS], meaningful
+    ordered = list(dict.fromkeys(technical + chinese))
+    keep = set(list(dict.fromkeys(anchors + ordered))[:_MAX_QUERY_TERMS])
+    return [word for word in ordered if word in keep], meaningful
 
 
 def normalized_query_plan(query):
     """缓存和检索共享同一有效输入；短语顺序也参与自动匹配判断。"""
     selected, meaningful = _query_terms(query)
     return {"terms": selected, "meaningful": meaningful,
-            "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION}
+            "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION,
+            "exact_anchors": [word for word in _exact_anchors(meaningful) if word in selected],
+            "match_policy_version": _MATCH_POLICY_VERSION}
 
 
 def match_terms(text):
@@ -106,22 +141,35 @@ def _rank(body_json, query_weights, denominator):
     return _match_values(body_json, query_weights, denominator)[0]
 
 
+def _positive_anchors_allowed(body_json, anchors):
+    if not anchors:
+        return True
+    body = json.loads(body_json)
+    fields = [body.get(field, "") for field in ("title", "content", "applicability")]
+    fields.extend(body.get("metadata", {}).values())
+    positive = set(match_terms(" ".join(value for value in fields if isinstance(value, str))))
+    # A restriction saying "not applicable to E_IMPORT" is not a positive
+    # identity match and must not grant the sparse-query or semantic shortcut.
+    return all(anchor in positive for anchor in anchors)
+
+
 def _match_info(body_json, query_weights, denominator, query, *, _values=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
     score, coverage, matches = (_match_values(body_json, query_weights, denominator)
                                 if _values is None else _values)
     strong = [token for token in matches if len(token) > 1]
-    eligible = bool(strong) and coverage >= 0.65
+    anchors = [word for word in _exact_anchors(query) if word in query_weights]
+    exact = _positive_anchors_allowed(body_json, anchors)
+    eligible = exact and bool(strong) and (coverage >= 0.65 or any(
+        _specific_anchor(anchor) for anchor in anchors))
     if not eligible and strong:
         # 长中文请求会降低全句覆盖；连续四字的问题短语仍可作为明确命中依据。
         body = json.loads(body_json)
-        raw_matches = set(terms(" ".join(value for key, value in body.items()
-                                         if key in _FIELD_WEIGHTS and isinstance(value, str))))
-        for segment in re.findall(r"[\u3400-\u9fff]+", query):
-            run = 0
-            for index in range(len(segment) - 1):
-                run = run + 1 if segment[index:index + 2] in raw_matches else 0
-                if run >= 3:
+        positive = " ".join(body.get(key, "") for key in ("title", "content", "applicability")
+                            if isinstance(body.get(key, ""), str))
+        for segment in re.findall(r"[\u3400-\u9fff]+", _ZH_CONTEXT.sub(" ", query)):
+            for index in range(len(segment) - 3):
+                if exact and segment[index:index + 4] in positive:
                     eligible = True
                     break
             if eligible:
@@ -129,6 +177,35 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None):
     return {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
+
+
+def lexical_rows(db, project, plan, filters=None):
+    """Bound FTS recall without installing per-query SQLite functions.
+
+    Explicit identifiers have a separate lane so common prose cannot crowd them
+    out before Python applies query coverage and the automatic eligibility gate.
+    """
+    filters = filters or {}
+    conditions = _filter_sql(filters)
+    base = ("SELECT k.* FROM knowledge_fts JOIN active a ON "
+            "knowledge_fts.project=a.project AND knowledge_fts.id=a.id AND "
+            "CAST(knowledge_fts.revision AS INTEGER)=a.revision JOIN knowledge k ON "
+            "k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+            "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions +
+            " ORDER BY bm25(knowledge_fts),k.id LIMIT ?")
+    quote = lambda word: '"' + word.replace('"', '""') + '"'
+    anchors = plan.get("exact_anchors", [])
+    lanes = []
+    if anchors:
+        lanes.append((" AND ".join(quote(word) for word in anchors), _LEXICAL_CANDIDATES // 2))
+    lanes.append((" OR ".join(quote(word) for word in plan["recall_terms"]),
+                  _LEXICAL_CANDIDATES // 2 if anchors else _LEXICAL_CANDIDATES))
+    rows = {}
+    for expression, maximum in lanes:
+        if expression:
+            for row in db.execute(base, (expression, project, *filters.values(), maximum)).fetchall():
+                rows[row["id"]] = row
+    return list(rows.values())
 
 
 def _filter_sql(filters):
@@ -266,16 +343,12 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         break
                     rows.append(row)
             if references is None:
-                self.db.create_function("alp_knowledge_score", 1, lambda body: _rank(body, weights, denominator))
-                match = " OR ".join('"' + word.replace('"', '""') + '"' for word in plan["recall_terms"])
-                rows = self.db.execute("SELECT k.* FROM knowledge_fts JOIN active a ON "
-                                       "knowledge_fts.project=a.project AND knowledge_fts.id=a.id AND "
-                                       "CAST(knowledge_fts.revision AS INTEGER)=a.revision JOIN knowledge k ON "
-                                       "k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-                                       "WHERE knowledge_fts MATCH ? AND a.project=?" + conditions +
-                                       " ORDER BY alp_knowledge_score(k.body) DESC,k.id ASC LIMIT ?",
-                                       (match, project, *filters.values(),
-                                        _MAX_AUTOMATIC_CANDIDATES if _automatic or hybrid else limit)).fetchall()
+                rows = lexical_rows(self.db, project, plan, filters)
+                def lexical_order(row):
+                    values = analyze(row)
+                    exact = all(anchor in values[2] for anchor in plan["exact_anchors"])
+                    return (-int(exact), -values[0], row["id"])
+                rows.sort(key=lexical_order)
                 if hybrid:
                     lexical_ranks = {row["id"]: rank for rank, row in enumerate(rows, 1)}
                     merged = {row["id"]: row for row in rows}
@@ -295,21 +368,20 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 if explanation["score"] <= 0 and semantic_match is None:
                     continue
                 if hybrid:
-                    full_matches = values[2]
                     # Cached references preserve ranking; scores remain query-specific.
                     explanation.update(method="hybrid", semantic_score=round(semantic_match["score"], 6)
                         if semantic_match else None, semantic_rank=semantic_match["rank"] if semantic_match else None,
                         fusion_method="reciprocal_rank_k60", semantic_input_truncated=bool(
                             semantic_match and semantic_match["input_truncated"]))
                     if semantic_match and not explanation["auto_eligible"]:
-                        explanation["auto_eligible"] = semantic_automatic_allowed(
-                            meaningful, full_matches, semantic_match, semantic["config"])
-                if semantic["config"]["enabled"]:
-                    # Optional-provider failure must not weaken the configured exact
-                    # identifier gate when results fall back to the lexical channel.
-                    full_matches = values[2]
-                    if not semantic_exact_anchors_allowed(meaningful, full_matches):
-                        explanation["auto_eligible"] = False
+                        explanation["auto_eligible"] = bool(
+                            semantic_match["score"] >= semantic["config"]["automatic_min_similarity"]
+                            and any(len(token) > 1 for token in selected))
+                # All channels, including a disabled or degraded semantic provider,
+                # use the same complete identifier gate. Public matched_terms is
+                # bounded for display and must never decide this check.
+                if explanation["auto_eligible"] and not _positive_anchors_allowed(row["body"], plan["exact_anchors"]):
+                    explanation["auto_eligible"] = False
                 item = self._public(project, row)
                 if _automatic and _environment:
                     from .knowledge_applicability import automatic_applicability

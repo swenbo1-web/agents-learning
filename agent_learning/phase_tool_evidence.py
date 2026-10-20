@@ -184,16 +184,19 @@ def _attach(runtime, project, phase, task, stop, cases):
     # Native events must have a real current operation and task binding. A
     # legitimate stage may span several execution fences/write versions.
     stop_sequence = runtime.db.execute("SELECT rowid FROM events WHERE project=? AND id=?", (project, stop["id"])).fetchone()[0]
+    from .phase_window import event_bounds
+    first_write, first_sequence = event_bounds(runtime, project, phase)
     rows = runtime.db.execute("SELECT e.*,o.host_epoch operation_epoch FROM events e JOIN operations o "
         "ON o.project=e.project AND o.id=e.operation WHERE e.project=? AND e.conversation=? "
         "AND e.task_id=? AND e.task_revision=? AND e.agent IS NULL AND e.assignment_id IS NULL "
         "AND e.type='PostToolUse' AND e.created>=? AND e.created<=? AND e.rowid<=? AND o.host_epoch=? "
         "AND o.task_id=e.task_id AND o.task_revision=e.task_revision AND o.agent IS NULL "
-        "AND o.assignment_id IS NULL AND e.task_write_version IS NOT NULL AND e.task_write_version<=? "
+        "AND o.assignment_id IS NULL AND e.rowid>? AND e.task_write_version>=? AND e.task_write_version<=? "
         "AND EXISTS(SELECT 1 FROM task_states s WHERE s.project=e.project AND s.id=e.task_id "
         "AND s.revision=e.task_revision AND s.write_version=e.task_write_version) "
         "ORDER BY e.created DESC,e.rowid DESC LIMIT ?", (project, phase["conversation"], task["id"], task["revision"],
-        phase["start_time"], stop["created"], stop_sequence, phase["session_epoch"], phase["delivery_version"], SCAN_LIMIT + 1)).fetchall()
+        phase["start_time"], stop["created"], stop_sequence, phase["session_epoch"], first_sequence, first_write,
+        phase["delivery_version"], SCAN_LIMIT + 1)).fetchall()
     if not rows:
         return
     excluded = {"existing_case": 0, "partial_source": 0, "budget": 0, "duplicate": 0}

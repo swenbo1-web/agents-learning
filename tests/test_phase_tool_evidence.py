@@ -190,8 +190,54 @@ class PhaseToolEvidenceTests(unittest.TestCase):
             expected_task_id=task["id"], expected_write_version=paused["write_version"])
         self.hook("UserPromptSubmit", turn_id="resumed-window", prompt="Inspect the resumed terminal phase")
         phase = self.finish()
-        self.assertLess(old["created"], phase["start_time"])
+        self.assertLessEqual(old["created"], phase["start_time"])
         self.assertEqual(self.selected_tools(self.packet(phase)), [])
+
+    def test_equal_clock_resume_keeps_original_stage_order(self):
+        with patch("time.time", return_value=2000000000.0):
+            self.begin("Inspect the terminal stage at one clock tick")
+            old = self.tool("same-tick-before", "TERM_DIAG_ALPHA belongs to the earlier active suffix")
+            task = self.r.task(self.p, self.c)
+            paused = self.r.task_update(self.p, self.c, task["goal"], status="paused",
+                expected_task_id=task["id"], expected_write_version=task["write_version"])
+            self.r.task_update(self.p, self.c, task["goal"], status="active", resume=True,
+                expected_task_id=task["id"], expected_write_version=paused["write_version"])
+            current = self.tool("same-tick-after", "TERM_DIAG_ALPHA belongs to the current suffix")
+            phase = self.finish()
+        self.assertEqual(old["created"], current["created"])
+        self.assertEqual(old["created"], phase["start_time"])
+        self.assertEqual([event["id"] for event in self.selected_tools(self.packet(phase))], [current["id"]])
+
+    def test_equal_clock_opt_in_excludes_earlier_same_contract_observation(self):
+        with patch("time.time", return_value=2000000000.0):
+            configure(self.r, self.p, {"mode": "legacy"}, policy(self.r, self.p)["version"])
+            old = self.tool("before-opt-in", "TERM_DIAG_ALPHA before explicit opt-in")
+            configure(self.r, self.p, {"mode": "phase"}, policy(self.r, self.p)["version"])
+            current = self.tool("after-opt-in", "TERM_DIAG_ALPHA after explicit opt-in")
+            phase = self.finish()
+        self.assertEqual(old["task_write_version"], current["task_write_version"])
+        self.assertEqual(old["created"], phase["start_time"])
+        self.assertEqual([event["id"] for event in self.selected_tools(self.packet(phase))], [current["id"]])
+
+    def test_same_clock_recovery_cannot_borrow_a_later_resumed_delivery(self):
+        import sqlite3
+        from agent_learning.phase_seal_recovery import recover
+        with patch("time.time", return_value=2000000000.0):
+            self.begin("Inspect TERM_DIAG_ALPHA in two ordered suffixes")
+            original = self.tool("original-suffix", "TERM_DIAG_ALPHA original observation")
+            with patch("agent_learning.phase_review.seal_phase", side_effect=sqlite3.OperationalError("delayed seal")):
+                phase = self.finish("TERM_DIAG_ALPHA ORIGINAL_STAGE_DELIVERY", turn="original-stop")
+                task = self.r.task(self.p, self.c)
+                self.r.task_update(self.p, self.c, task["goal"], resume=True, status="active",
+                    expected_task_id=task["id"], expected_write_version=task["write_version"])
+                future = self.tool("future-suffix", "TERM_DIAG_ALPHA FUTURE_STAGE_OBSERVATION")
+                self.finish("TERM_DIAG_ALPHA FUTURE_STAGE_DELIVERY", turn="future-stop")
+            with self.r.transaction():
+                recover(self.r, self.p, force=True)
+        packet = self.packet(phase)
+        self.assertEqual(original["created"], future["created"])
+        self.assertEqual([event["id"] for event in self.selected_tools(packet)], [original["id"]])
+        self.assertNotIn("FUTURE_STAGE", json.dumps(packet["events"]))
 
     def test_previous_account_observation_is_not_borrowed(self):
         old = self.tool("old-account", "TERM_DIAG_ALPHA in the previous account context")

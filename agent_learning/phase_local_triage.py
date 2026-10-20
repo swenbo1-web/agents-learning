@@ -75,17 +75,23 @@ def is_routine(runtime, project, phase):
             or not row["summary"].startswith("阶段公开记录：")
             or "[" + phase["id"] + "] part " not in row["summary"] for row in cases):
         return False
-    stop = runtime.db.execute("SELECT created FROM events WHERE project=? AND id=?", (project, phase["event_id"])).fetchone()
+    stop = runtime.db.execute("SELECT created,rowid FROM events WHERE project=? AND id=?", (project, phase["event_id"])).fetchone()
     if not stop:
         return False
+    from .phase_window import event_bounds
+    first_write, first_sequence = event_bounds(runtime, project, phase)
     events = runtime.db.execute(
         "SELECT e.type,e.outcome,e.agent,e.operation,length(e.payload) chars,substr(e.payload,1,6001) payload "
         "FROM events e LEFT JOIN events origin ON origin.project=e.project AND origin.id=json_extract(e.payload,'$.public_message_id') "
         "AND e.type='PublicMessageSegment' WHERE e.project=? AND e.conversation=? "
         "AND ((e.task_id=? AND e.task_revision=?) OR e.task_id IS NULL) "
         "AND COALESCE(origin.created,e.created)>=? AND COALESCE(origin.created,e.created)<=? "
+        "AND COALESCE(origin.rowid,e.rowid)>? AND COALESCE(origin.rowid,e.rowid)<=? "
+        "AND (e.task_id IS NULL OR e.task_write_version BETWEEN ? AND ?) "
+        "AND e.type NOT IN ('PhaseWindowStarted','PhaseToolEvidenceSelection') "
         "ORDER BY COALESCE(origin.created,e.created),e.created,e.rowid LIMIT 41",
-        (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop[0])).fetchall()
+        (project, phase["conversation"], phase["task_id"], phase["task_revision"], phase["start_time"], stop[0],
+         first_sequence, stop[1], first_write, phase["delivery_version"])).fetchall()
     if len(events) > 40 or sum(row["chars"] for row in events) > 16000:
         return False
     requested = replied = False
