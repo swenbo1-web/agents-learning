@@ -35,7 +35,9 @@ phaseSealPending:['{n} delivered stages await local sealing recovery. Their orig
 phaseExecutorWaiting:['{n} batches await their original executor. Other available model groups can continue; existing call locks remain in force.','{n} 个批次等待原执行器；其他可用模型分组可继续，原调用锁保持有效。'],
 phaseBatchCounts:['This batch: {cases} submitted cases · {evidence} evidence records · {calls} execution attempts · {candidates} candidates · {published} automatically published.','本批送审 {cases} 个案例 · {evidence} 条证据 · {calls} 次执行尝试 · 生成 {candidates} 条候选 · 自动发布 {published} 条。'],
 phaseBatchTime:['Batch elapsed {batch}s (includes waiting); recorded call processing {call}s (includes startup and local checks). These are not per-knowledge times.','批次经过 {batch} 秒（含等待）；调用处理 {call} 秒（含启动与本地检查）。均不是单条知识耗时。'],
-phaseBatchTokens:['Host-reported input {input} · output {output} · total {total} tokens. Missing usage stays unknown; execution attempts are not proof of paid requests.','宿主上报输入 {input} · 输出 {output} · 合计 {total} token。未上报用量保持未知；执行尝试数不等于确认计费次数。']
+phaseBatchTokens:['Host-reported input {input} · output {output} · total {total} tokens. Missing usage stays unknown; execution attempts are not proof of paid requests.','宿主上报输入 {input} · 输出 {output} · 合计 {total} token。未上报用量保持未知；执行尝试数不等于确认计费次数。'],
+phaseBatchTools:['Selected related tool observations: {n}. This is not a full tool audit or independent verification.','已关联 {n} 条相关工具观察；这是有界选材，不是全部工具审计或独立验证。'],
+phaseBatchToolsLimited:['Some matching observations were not included, or selection was limited or unavailable. Review covers only the visible cases and evidence; original work history remains available.','部分匹配观察未纳入，或选材受限／暂不可用；审核仅覆盖可见案例与证据，原工作历史仍可查阅。']
 });
 const PHASE_FIELDS=['phase-mode','phase-every','phase-daily','phase-input','phase-output'];
 ADMIN_FIELDS.push(...PHASE_FIELDS);
@@ -50,5 +52,7 @@ for(const id of PHASE_FIELDS)$(id).addEventListener('change',()=>{state.adminDir
 const basePhaseControls=controls;
 controls=function(){basePhaseControls();if(!state.adminData?.phase_review||$('phase-mode').value!=='phase')return;for(const id of ['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'])$(id).disabled=true;};
 const basePhaseRecoveryRender=renderAdminState;
+const basePhaseToolMetrics=phaseBatchMetrics;
+phaseBatchMetrics=function(detail,batch){basePhaseToolMetrics(detail,batch);const view=batch.metrics?.tool_context;if(!view)return;detail.append(node('p',t('phaseBatchTools',{n:view.selected_observations}),'note'));if(view.selection_limited)detail.append(node('p',t('phaseBatchToolsLimited'),'note'));};
 renderAdminState=function(){basePhaseRecoveryRender();const view=state.adminData?.phase_review;if(!view)return;const area=$('phase-results');if(view.local_seal_pending_count>0)area.append(node('p',t('phaseSealPending',{n:view.local_seal_pending_count}),'note'));if(view.executor_waiting_batch_count>0)area.append(node('p',t('phaseExecutorWaiting',{n:view.executor_waiting_batch_count}),'note'));};
 '''

@@ -11,6 +11,8 @@ PHASE_PREFIX = (
     "逐项返回一个结果，保持problem_id和problem_revision；每项可提出最多5条独立候选。"
     "公开项目事实保留reported；流水不强行提炼知识。重复返回skip，缺证返回needs_evidence。"
     "不得以新条目绕过已有知识反例、撤销或修订。只审核可见范围，未覆盖材料仍待后续。\n"
+    "phase_tool_context仅说明有界选择相关工具观察，不是完整工具审计或结论验证；只引用实际events，"
+    "unknown/call_completed不能写成tool_success，未纳入工具不等于没有其他证据。"
     "批次外层candidate和proposal均为null；逐项候选可使用candidate单条，或candidate=null加candidates数组，不能同时使用。"
     "多候选统一使用proposal=null（兼容空目标publish）；需要update或attach时只返回单候选和明确目标。\n"
 )
@@ -213,9 +215,13 @@ def seal_phase(runtime, project, phase, event_id):
         chars += ref["chars"]
     if chunk:
         chunks.append(chunk)
+    cases = []
     for index, chunk in enumerate(chunks):
-        runtime._problem(project, row["conversation"], "阶段公开记录：" + task["goal"][:240] + " [" + row["id"] + "] part " + str(index),
+        problem = runtime._problem(project, row["conversation"], "阶段公开记录：" + task["goal"][:240] + " [" + row["id"] + "] part " + str(index),
                          "mixed", chunk, task_binding=task)
+        cases.append((problem, chunk))
+    from .phase_tool_evidence import attach as attach_tool_context
+    attach_tool_context(runtime, project, row, task, stop, cases)
     total = runtime.db.execute("SELECT COUNT(*)" + sources, params).fetchone()[0]
     runtime.db.execute("UPDATE review_phases SET state='sealed',event_id=?,omitted_sources=? WHERE id=?",
                        (event_id, max(0, total-len(refs)), row["id"]))

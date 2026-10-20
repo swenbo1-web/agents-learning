@@ -74,6 +74,15 @@ def batch_metrics(runtime, project, batch_id):
         evidence = len({event["id"] for item in items if isinstance(item, dict)
             for event in (item.get("events") if isinstance(item.get("events"), list) else [])
             if isinstance(event, dict) and isinstance(event.get("id"), str)})
+    contexts = [item["phase_tool_context"] for item in (items if isinstance(items, list) else []) if isinstance(item, dict)
+                and isinstance(item.get("phase_tool_context"), dict)
+                and type(item["phase_tool_context"].get("selected_count")) is int
+                and 0 <= item["phase_tool_context"]["selected_count"] <= 3]
+    omitted_context = any(isinstance(item, dict) and item.get("phase_tool_context_omitted")
+                          for item in (items if isinstance(items, list) else []))
+    tool_context = {"selected_observations": sum(item.get("selected_count", 0) for item in contexts),
+                    "selection_limited": bool(omitted_context or any(item.get("omitted_matching") or item.get("selection_unavailable")
+                        or item.get("scan_limited") for item in contexts))} if contexts or omitted_context else None
     result_cases, candidates, published = _outcomes(result, row[0])
     calls = runtime.db.execute("SELECT id,state,created,started,launch_intent,finished,substr(usage,1,?) "
         "FROM admin_calls WHERE project=? AND problem=? AND state!='deduplicated' ORDER BY created,id LIMIT ?",
@@ -117,6 +126,7 @@ def batch_metrics(runtime, project, batch_id):
         if recovered and _number(local[1]):
             completed_at = max(completed_at or 0, local[1])
     return {"submitted_cases": submitted, "evidence_records": evidence, "result_cases": result_cases,
+        "tool_context": tool_context,
         "candidate_count": candidates, "published_count": published, "call_count": call_count,
         "call_records": count_row[0], "call_count_scope": "recorded_execution_attempts",
         "batch_elapsed_seconds": round(completed_at - row[1], 3)

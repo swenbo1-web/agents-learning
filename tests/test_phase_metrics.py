@@ -58,6 +58,19 @@ class PhaseMetricsTests(unittest.TestCase):
         self.assertIsNone(metric["total_tokens"])
         self.assertEqual(metric["usage_completeness"], "partial")
 
+    def test_selected_tool_metrics_are_read_only_and_not_full_audit_coverage(self):
+        batch, packet = self.review()
+        self.assertIsNone(batch_metrics(self.r, self.p, batch)["tool_context"])
+        packet["items"][0]["phase_tool_context"] = {"selected_count": 2, "omitted_matching": 1, "scan_limited": False}
+        self.r.db.execute("UPDATE phase_review_batches SET packet=? WHERE problem_id=?", (json.dumps(packet), batch))
+        before = self.r.db.total_changes
+        self.assertEqual(batch_metrics(self.r, self.p, batch)["tool_context"],
+                         {"selected_observations": 2, "selection_limited": True})
+        self.assertEqual(self.r.db.total_changes, before)
+        packet["items"][0]["phase_tool_context"]["selected_count"] = "invalid"
+        self.r.db.execute("UPDATE phase_review_batches SET packet=? WHERE problem_id=?", (json.dumps(packet), batch))
+        self.assertIsNone(batch_metrics(self.r, self.p, batch)["tool_context"])
+
     def test_candidates_are_not_publications(self):
         batch, _ = self.review("candidate")
         metric = batch_metrics(self.r, self.p, batch)

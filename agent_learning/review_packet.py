@@ -34,7 +34,7 @@ HISTORY_REVIEW_PREFIX = (
     "相关资料的展示不表示该资料已审核。历史陈述只能reported；若用户对本批授权，程序可发布带来源参考，不能宣称已验证。"
     "全部JSON输出UTF-8总量不超过40000字节；skip/needs_evidence时candidates=[]。\n"
 )
-PACKET_FORMAT = 6
+PACKET_FORMAT = 7
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
@@ -159,6 +159,8 @@ class ReviewPacketMixin:
                           target_omitted="budget" if target is not None else "missing")
         if problem["task_id"] and task is None:
             packet["task_snapshot_missing"] = True
+        from .phase_tool_evidence import packet_selection
+        tool_context = packet_selection(self, project, problem)
 
         # 任务规则不做静默裁剪。完整合同放不下时改为明确的投影，并保留 JSON 原文分页。
         if not _fits(packet, limit) and task:
@@ -244,6 +246,18 @@ class ReviewPacketMixin:
                 packet.update(target_required=True, target_knowledge=None,
                               target_omitted="budget" if target is not None else "missing")
                 packet["omission_reasons"].append("target_knowledge_" + packet["target_omitted"])
+        if tool_context:
+            # Optional selection diagnostics must not displace actual evidence
+            # or turn a previously reviewable public case into an incomplete one.
+            packet["phase_tool_context"] = tool_context
+            while not _fits(packet, limit) and (packet.get("related_candidates") or packet.get("related_knowledge")):
+                key = "related_candidates" if packet.get("related_candidates") else "related_knowledge"
+                packet[key].pop()
+            if not _fits(packet, limit):
+                packet.pop("phase_tool_context")
+                packet["phase_tool_context_omitted"] = True
+                if not _fits(packet, limit):
+                    packet.pop("phase_tool_context_omitted")
         return packet
 
     def _review_target(self, project, problem_id):

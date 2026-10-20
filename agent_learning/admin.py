@@ -158,6 +158,10 @@ def _fingerprint(packet):
                                 ("knowledge_id", "knowledge_revision", "resolution_status")}}
     if packet.get("purpose") == "history_review":
         identity["history_context"] = packet.get("related_history", [])
+    if packet.get("phase_tool_context"):
+        identity["phase_tool_context"] = packet["phase_tool_context"]
+    if packet.get("phase_tool_context_omitted"):
+        identity["phase_tool_context_omitted"] = True
     if packet.get("purpose") == "phase_review":
         identity["items"] = [_fingerprint(item) for item in packet.get("items", [])]
         identity["phase_ids"] = packet.get("phase_ids", [])
