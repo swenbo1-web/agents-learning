@@ -142,7 +142,8 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertEqual(snapshot(self.home), old_data)
         self.assertEqual((self.target / "personal.txt").read_bytes(), b"preserve user file")
         self.assertNotIn("personal.txt", read_json(self.target / INSTALL_MANIFEST)["files"])
-        self.assertTrue(Path(updated["backup_directory"]).is_dir())
+        self.assertEqual(updated["status"], "unchanged")
+        self.assertNotIn("backup_directory", updated)
         inspect_installation(self.target, _hook_commands, target_host="antigravity")
 
     def test_explicit_rebinding_and_hook_policy_update_switches_both_native_entries(self):

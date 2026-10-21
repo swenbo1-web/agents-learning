@@ -324,6 +324,16 @@ def parser():
     export.add_argument("--allow-volatile-python", action="store_true", help="明确接受缓存或临时解释器被清理后失效的风险")
     health = sub.add_parser("installation-check", help="只读检查安装与Python，不打开知识库或调用模型")
     health.add_argument("--installation", required=True)
+    backups = sub.add_parser("installation-backups", help="预览升级备份、外置目录和保留建议；不删除文件")
+    backups.add_argument("--installation", required=True)
+    backups.add_argument("--keep", type=int, default=2, help="建议保留最近多少个可恢复发布版本，默认2")
+    backups.add_argument("--limit", type=int, default=128, help="每批最多核验的备份数，1～256，默认128")
+    relocate = sub.add_parser("relocate-installation-backups", help="将已核验旧备份可逆迁出插件目录，不删除内容")
+    relocate.add_argument("--installation", required=True)
+    relocate.add_argument("--keep", type=int, default=2)
+    relocate.add_argument("--limit", type=int, default=128)
+    relocate.add_argument("--plan-id", required=True, help="installation-backups 返回的当前准确计划身份")
+    relocate.add_argument("--confirm", action="store_true")
     repair = sub.add_parser("repair-python", help="保留固定版本、项目、知识与配置，原子重绑已验证安装的Python")
     repair.add_argument("--installation", required=True)
     repair.add_argument("--python", help="替换解释器的绝对路径；省略使用当前解释器")
@@ -357,6 +367,19 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    if args.command in {"installation-backups", "relocate-installation-backups"}:
+        try:
+            from .installation_backups import backup_preview, migrate_backups
+            if args.command == "installation-backups":
+                result = backup_preview(args.installation, keep=args.keep, limit=args.limit)
+            else:
+                result = migrate_backups(args.installation, keep=args.keep, limit=args.limit,
+                    expected_plan_id=args.plan_id, confirm=args.confirm)
+            print(encode(result))
+            return 0
+        except (ContractError, OSError) as exc:
+            print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
+            return 1
     if args.command in {"installation-check", "repair-python"}:
         try:
             if args.command == "installation-check":

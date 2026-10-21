@@ -42,7 +42,8 @@ class SummarySupplementRecoveryTests(RecoveryFixture):
         super().setUp()
         self.r.config["admin"].update(enabled=True, command=[sys.executable], timeout_seconds=10,
                                       max_input_chars=16000, max_calls_per_day=100)
-        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=2)
+        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=2,
+                                            summary_strategy="all_windows")
         self.r.configure_work_summary(self.p, True)
 
     def queue(self):
@@ -132,6 +133,7 @@ class SummarySupplementRecoveryTests(RecoveryFixture):
 class SchedulerScopeRecoveryTests(RecoveryFixture):
     def setUp(self):
         super().setUp()
+        self.r.config["work_memory"]["summary_strategy"] = "all_windows"
         self.r.config["scheduler"]["enabled"] = True
         self.r.config["admin"].update(command=[sys.executable], max_input_chars=16000,
                                       max_calls_per_day=100, max_calls_per_batch=1, timeout_seconds=1)
@@ -143,6 +145,7 @@ class SchedulerScopeRecoveryTests(RecoveryFixture):
         self.dsh.admin_configure(self.p, True, provider="codex", model_mode="default", command=[sys.executable])
 
     def window(self, runtime, conversation):
+        runtime.config["work_memory"]["summary_strategy"] = "all_windows"
         runtime.configure_work_summary(self.p, True)
         self.capture("Requirements for " + conversation, runtime=runtime, conversation=conversation, kind="UserPromptSubmit")
         self.capture("Visible result for " + conversation, runtime=runtime, conversation=conversation)

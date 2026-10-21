@@ -9,6 +9,7 @@
     "max_context_chars": 600,
     "max_items": 3,
     "summary_enabled": false,
+    "summary_strategy": "balanced",
     "summary_min_events": 2,
     "summary_max_events": 12
   },

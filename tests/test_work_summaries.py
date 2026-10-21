@@ -25,7 +25,7 @@ class WorkSummaryTests(unittest.TestCase):
         self.task = self.r.task_update(self.p, "chat", "animation mapping")
         self.r.config["admin"].update(enabled=True, command=[sys.executable], max_calls_per_day=100,
                                       max_input_chars=16000, timeout_seconds=10, auto_publish=True)
-        self.r.config["work_memory"].update(summary_enabled=True)
+        self.r.config["work_memory"].update(summary_enabled=True, summary_strategy="all_windows")
 
     def event(self, kind="PostToolUse", *, outcome="succeeded", **payload):
         task = self.r.task(self.p, "chat")

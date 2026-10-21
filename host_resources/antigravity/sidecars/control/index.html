@@ -46,6 +46,8 @@
   Object.assign(strings["zh-CN"], {debug:"检查接入",debugTitle:"本地诊断（不调用模型）",uiBridge:"界面连接",mcp:"MCP连接",hook:"当前Hook绑定",responding:"已响应",verified:"已验证",install:"安装校验",home:"知识目录",version:"运行版本／协议",installedVersion:"安装版本／协议",schema:"数据库／索引版本",phase:"管理员阶段",reason:"当前原因",nextDue:"下次尝试",failure:"最近供应商故障",latestUnchecked:"未检查远端最新版本；界面连接不能证明当前Hook或MCP已连通。"});
   Object.assign(strings.en, {host:"Host scope",runtimeMatch:"Running process / installed runtime",matches:"Match",mismatch:"Mismatch (check the entry point)"});
   Object.assign(strings["zh-CN"], {host:"宿主范围",runtimeMatch:"当前进程与安装副本",matches:"匹配",mismatch:"不匹配（需核对运行入口）"});
+  Object.assign(strings.en, {backupPreview:"Upgrade backup preview",backupReadOnly:"Preview only; no migration or deletion",backupCount:"Backups on this page",backupLegacy:"Old plugin-directory backups (unverified)",backupRoot:"External backup location",backupValidation:"Validation",backupUnverified:"Metadata preview only; full verification is required before migration",backupMigration:"Verified for migration",backupRetained:"Retained backup",backupAvailable:"Available backup",backupLegacyLocation:"Old plugin directory",backupExternalLocation:"External directory",backupMore:"This list is incomplete. Use installation maintenance preview to inspect the remaining backups."});
+  Object.assign(strings["zh-CN"], {backupPreview:"升级备份预览",backupReadOnly:"仅预览，不迁移或删除",backupCount:"本页备份数量",backupLegacy:"旧插件目录备份（待核验）",backupRoot:"外置备份位置",backupValidation:"核验状态",backupUnverified:"仅元数据预览，迁移前需完整核验",backupMigration:"已核验可迁移",backupRetained:"保留的备份",backupAvailable:"可查看备份",backupLegacyLocation:"旧插件目录",backupExternalLocation:"外置目录",backupMore:"列表未列全，请使用安装维护预览查看其余备份。"});
   Object.assign(strings.en, {quota:"Enabling review uses platform model allowance. Review and publication follow the selected project policy; historical batches require separate confirmation.",confirmPreset:"Save this administrator setting? It may start model-backed daily review and publication under the selected project policy. Historical review requires separate confirmation."});
   Object.assign(strings["zh-CN"], {quota:"开启审核会使用平台模型额度。审核与发布按项目所选策略执行；历史批次需单独确认。",confirmPreset:"保存此管理员设置？可能启动日常模型审核，并按项目所选策略发布；历史审核仍需单独确认。"});
   Object.assign(strings.en, {stageFrequency:"Review every {n} delivered stages together", stageQueue:"Stages: awaiting close / awaiting review / queued / partial / completed", stageCoverage:"Latest batch coverage", coverageFull:"Complete", coveragePartial:"Partial; further work is retained", reportedTokens:"Project reported tokens today", reservedTokens:"Usage awaiting confirmation: reserved", remainingTokens:"Estimated available / daily budget", tokenEstimate:"Incomplete usage retains an estimate; reservations are not actual consumption. Open Approval & settings to change stage frequency and token budgets."});
@@ -114,6 +116,23 @@
     $("panel").hidden = false; $("notice").textContent = t("ready");
   }
 
+  function backupPreviewLines(b) {
+    if (!b || typeof b !== "object") return [];
+    if (b.status === "unavailable") return [[t("backupPreview"),t("unknown")]];
+    const entries = Array.isArray(b.entries) ? b.entries.slice(0,20) : [];
+    const n = value => Number.isInteger(value) && value >= 0 ? String(value) : t("unknown");
+    const lines = [[t("backupPreview"),t("backupReadOnly")], [t("backupCount"),n(entries.length)],
+      [t("backupLegacy"),n(b.legacy_count)], [t("backupRoot"),typeof b.backup_root === "string" ? b.backup_root : t("unknown")]];
+    if (b.verified !== true) lines.push([t("backupValidation"),t("backupUnverified")]);
+    for (const entry of entries) {
+      if (!entry || typeof entry.name !== "string") continue;
+      const state = entry.needs_review || b.verified !== true ? "backupUnverified" : entry.migration_allowed ? "backupMigration" : entry.retained ? "backupRetained" : "backupAvailable";
+      lines.push([entry.name,[entry.version || t("unknown"),t(entry.location === "legacy" ? "backupLegacyLocation" : "backupExternalLocation"),t(state)].join(" · ")]);
+    }
+    if (b.truncated || b.scan_limited || b.entries?.length > 20) lines.push([t("backupPreview"),t("backupMore")]);
+    return lines;
+  }
+
   function renderDebug() {
     const d = diagnostics;
     if (!d || d.version !== 1 || d.project?.id !== summary?.project_id) { $("debugPanel").hidden = true; return; }
@@ -131,6 +150,7 @@
       const f = a.last_provider_failure;
       lines.push([t("failure"),[f.reason_code,f.http_status,f.parameter_code].filter(v => v !== null && v !== undefined).join(" · ")]);
     }
+    lines.push(...backupPreviewLines(d.backups));
     $("debugOutput").textContent = lines.map(([key,value]) => key+": "+val(value)).join("\n")+"\n"+t("latestUnchecked");
     $("debugPanel").hidden = false;
   }

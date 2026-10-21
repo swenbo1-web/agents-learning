@@ -144,6 +144,15 @@ class HistorySourcesTests(unittest.TestCase):
         self.write("README.md", "own project", root=project)
         self.assertEqual(len(scan_sources(project)["sources"]), 1)
 
+    def test_installation_archives_are_excluded_even_when_explicitly_selected(self):
+        for directory in (".agents/agent-learning-installations", ".codex/agent-learning-installations"):
+            with self.subTest(directory=directory):
+                path = self.write(directory + "/identity/backups/old/notes.md", "generated backup")
+                for selected in (path.parent, path):
+                    scan = scan_sources(self.project, [{"path": str(selected), "kind": "artifacts"}])
+                    self.assertEqual(scan["sources"], [])
+                    self.assertIn("excluded_directory", self.reasons(scan))
+
     def test_binary_and_invalid_utf8_are_unparsed_not_claimed_understood(self):
         self.write("binary.md", b"a\x00b")
         self.write("legacy.txt", b"\xff\xfeinvalid")

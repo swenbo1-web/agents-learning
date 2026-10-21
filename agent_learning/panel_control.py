@@ -201,6 +201,7 @@ class PanelControl:
         from .install import _hook_commands
         from .install_update import inspect_installation
         from .admin_diagnostics import safe_diagnostic
+        from .installation_maintenance import panel_backup_preview
 
         installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
         receipt = installed["receipt"]
@@ -241,7 +242,8 @@ class PanelControl:
                     failure = failure or safe_diagnostic(observed.get("provider_diagnostic"))
             except (ValueError, TypeError):
                 pass
-        return {"version": 1, "connection": {"ui_bridge": "responding",
+        return {"version": 1, "backups": panel_backup_preview(self.installation),
+                "connection": {"ui_bridge": "responding",
                     "mcp": "responding" if self.require_context else "unknown",
                     "hook": "verified" if bound else "unknown", "context_bound": bound if self.require_context else None},
                 "installation": {"state": "verified", "version": receipt["version"],

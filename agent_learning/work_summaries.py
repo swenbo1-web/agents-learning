@@ -49,13 +49,17 @@ def _settings(runtime, project=None):
         raw_enabled = runtime.work_summary_policy(project)["enabled"]
     enabled = raw_enabled and master_enabled
     minimum, maximum = cfg.get("summary_min_events", 2), cfg.get("summary_max_events", 12)
+    strategy = cfg.get("summary_strategy", "balanced")
     if not isinstance(raw_enabled, bool) or not isinstance(master_enabled, bool):
         raise ContractError("work_memory.summary_enabled must be boolean")
     if (any(isinstance(value, bool) or not isinstance(value, int) for value in (minimum, maximum))
             or not 1 <= minimum <= maximum <= 40):
         raise ContractError("work summary event limits must satisfy 1 <= min <= max <= 40")
+    if not isinstance(strategy, str) or strategy not in {"balanced", "all_windows"}:
+        raise ContractError("work_memory.summary_strategy must be balanced or all_windows")
     return {"summary_enabled": enabled, "summary_min_events": minimum,
-            "summary_max_events": maximum, "instruction_version": SUMMARY_INSTRUCTION_VERSION,
+            "summary_max_events": maximum, "summary_strategy": strategy,
+            "instruction_version": SUMMARY_INSTRUCTION_VERSION,
             "policy_version": runtime.work_summary_policy(project)["version"] if project is not None else 0}
 
 
@@ -68,6 +72,15 @@ def _link(runtime, project, problem_id):
 def _source_scope(task_id, task_revision, bindings):
     return "task" if task_id is not None and bindings and all(
         pair == (task_id, task_revision) for pair in bindings) else "conversation"
+
+
+def _summary_delta(row):
+    """Public text already has a searchable record; this is only an AI cost gate.
+
+    A public delivery never proves that its tool observations are covered. Unknown
+    kinds are therefore retained as deltas, alongside corrections and tool work.
+    """
+    return json.loads(row["body"]).get("type") not in {"public_summary", "user_request"}
 
 
 # Apply before LIMIT: covered previews must not fill the bounded scan and hide
@@ -100,7 +113,8 @@ class WorkSummaryMixin:
                               (project, self._session_scope())).fetchone() if exists else None
         return {"enabled": bool(row["enabled"]) if row else bool(self.config["work_memory"]["summary_enabled"]),
                 "configured": bool(row), "version": row["version"] if row else 0,
-                "source": "project_host" if row else "configuration"}
+                "source": "project_host" if row else "configuration",
+                "strategy": self.config["work_memory"].get("summary_strategy", "balanced")}
 
     def work_summary_enabled(self, project):
         return bool(self.config["work_memory"]["enabled"] and self.work_summary_policy(project)["enabled"])
@@ -143,8 +157,20 @@ class WorkSummaryMixin:
                 (project, conversation, self._session_scope())).fetchall()
             for previous in pending:
                 self.work_summary_select(project, previous["problem_id"])
+            balanced = settings["summary_strategy"] == "balanced"
+            # Prioritize actual deltas before LIMIT. A long sequence of already
+            # searchable public segments must not hide a later failure or edit.
+            public_type = "json_extract(m.body,'$.type') IN ('public_summary','user_request')"
+            selection_order = (f"CASE WHEN {public_type} THEN 1 ELSE 0 END,"
+                               f"CASE WHEN {public_type} THEN -m.created ELSE m.created END,"
+                               f"CASE WHEN {public_type} THEN -e.rowid ELSE e.rowid END," if balanced else "")
+            # Retiring a stale policy window cannot unlock an unresolved paid
+            # call under newly captured IDs. Match its original source binding
+            # and business observation; a changed outcome or explicit retry is
+            # still distinct. Only old snapshots lacking task_id use its owner.
             rows = self.db.execute(
-                "SELECT m.*,e.task_write_version AS source_task_write_version,e.business_digest AS business_digest FROM work_memories m "
+                "SELECT m.*,e.rowid AS source_order,e.task_write_version AS source_task_write_version,"
+                "e.business_digest AS business_digest FROM work_memories m "
                 "JOIN events e ON e.id=m.event_id AND e.project=m.project "
                 "WHERE m.project=? AND m.conversation=? AND m.workspace_key=? "
                 "AND ((m.task_id IS ? AND m.task_revision IS ?) OR m.task_id IS NULL) AND m.agent IS NULL "
@@ -155,9 +181,17 @@ class WorkSummaryMixin:
                 "AND j.value=m.id) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_snapshots) j "
                 "WHERE s.project=m.project AND s.host_scope=? AND s.conversation=m.conversation AND s.workspace_key=m.workspace_key "
-                "AND ((json_extract(j.value,'$.task_id') IS m.task_id AND json_extract(j.value,'$.task_revision') IS m.task_revision) "
-                "OR (s.task_id IS m.task_id AND s.task_revision IS m.task_revision)) "
-                "AND s.state IN ('pending','accepted','skipped','superseded') "
+                "AND ((json_type(j.value,'$.task_id') IS NOT NULL AND json_extract(j.value,'$.task_id') IS m.task_id "
+                "AND json_extract(j.value,'$.task_revision') IS m.task_revision) "
+                "OR (json_type(j.value,'$.task_id') IS NULL AND s.task_id IS m.task_id AND s.task_revision IS m.task_revision)) "
+                "AND (s.state IN ('pending','accepted','skipped','superseded') OR ("
+                "json_extract(j.value,'$.agent') IS m.agent "
+                "AND json_extract(j.value,'$.projection.type') IS json_extract(m.body,'$.type') "
+                "AND json_extract(j.value,'$.projection.title') IS json_extract(m.body,'$.title') "
+                "AND json_extract(j.value,'$.projection.assignment_id') IS json_extract(m.body,'$.assignment_id') "
+                "AND EXISTS(SELECT 1 FROM admin_calls c WHERE c.project=s.project AND c.problem=s.problem_id "
+                "AND c.state NOT IN ('not_started','deduplicated') AND c.retry_allowed=0 "
+                "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)))) "
                 "AND e.business_digest IS NOT NULL AND json_extract(j.value,'$.business_digest')=e.business_digest "
                 "AND json_extract(j.value,'$.projection.classification_input_digest') IS json_extract(m.body,'$.classification_input_digest')) "
                 "AND NOT EXISTS(SELECT 1 FROM work_summary_links s,json_each(s.source_record_ids) j "
@@ -165,7 +199,7 @@ class WorkSummaryMixin:
                 "WHERE s.project=m.project AND s.host_scope=? AND j.value=m.id "
                 "AND c.state NOT IN ('not_started','deduplicated') AND c.retry_allowed=0 "
                 "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) "
-                + _PUBLIC_PREVIEW_FILTER + "ORDER BY m.created,m.id LIMIT ?",
+                + _PUBLIC_PREVIEW_FILTER + "ORDER BY " + selection_order + "m.created,e.rowid,m.id LIMIT ?",
                 (project, conversation, checkout, task.get("id"), task.get("revision"), self._session_scope(),
                  self._session_scope(), self._session_scope(), settings["summary_max_events"] * 4)).fetchall()
             # A full needs-evidence window must make room for a new observation.
@@ -184,6 +218,11 @@ class WorkSummaryMixin:
             if awaiting_rows and not new_rows:
                 return {"status": "awaiting_evidence", "problem_id": awaiting_rows[0]["problem_id"],
                         "reused": True, "invocations": 0}
+            if balanced and not awaiting_rows and rows and not any(_summary_delta(row) for row in rows):
+                # Do not create a consumed-window receipt. These raw records stay
+                # available as context for a later real delta or explicit policy.
+                return {"status": "raw_reference_only", "source_count": len(rows),
+                        "reason": "public_records_already_searchable", "invocations": 0}
             if awaiting_rows:
                 # First reserve one genuinely new source, then retain as much
                 # old context as the same count/character limits allow.
@@ -214,7 +253,13 @@ class WorkSummaryMixin:
                     break
             # Selection priority reserves space for supplementation; evidence
             # presentation retains the original chronological order.
-            rows = sorted(distinct, key=lambda row: (row["created"], row["id"]))
+            rows = sorted(distinct, key=lambda row: (row["created"], row["source_order"], row["id"]))
+            if balanced and not awaiting_rows and rows and not any(_summary_delta(row) for row in rows):
+                # A substantive observation that does not fit cannot justify
+                # paying to re-summarize only the public context left beside it.
+                return {"status": "input_budget_exceeded", "source_count": 0,
+                        "blocked_count": blocked_by_budget,
+                        "required_max_input_chars": (min_blocked_cost or 0) + overhead, "invocations": 0}
             if awaiting_rows and not any(row["id"] not in awaiting_ids for row in rows):
                 return {"status": "input_budget_exceeded", "source_count": 0,
                         "blocked_count": blocked_by_budget,

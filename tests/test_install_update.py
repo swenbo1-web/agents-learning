@@ -14,6 +14,7 @@ from agent_learning.install import install
 from agent_learning.install_update import (INSTALL_MANIFEST, inspect_installation, installation_lock,
                                            _expected_hook_document, safe_path, snapshot, validate_previous_release)
 from agent_learning.runtime import ContractError
+from agent_learning.installation_backups import backup_root
 
 
 def read_json(path):
@@ -132,19 +133,18 @@ class InstallUpdateTests(unittest.TestCase):
         old_before = snapshot(Path(first["runtime_directory"]))
         with patch.dict(os.environ, {"ALP_HOME": str(external), "ALP_RUNTIME_STORE": str(self.root / "ignored env store")}):
             result = install(self.target, upgrade=True, expected_release_id=first["release_id"])
-        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["status"], "unchanged")
         self.assertEqual(result["hook_mode"], "enforce")
         self.assertEqual(Path(result["runtime_directory"]).parent, self.store)
         self.assertEqual(personal.read_bytes(), b'{"personal": true}')
         self.assertTrue(empty.is_dir())
-        backup = Path(result["backup_directory"])
-        self.assertEqual((backup / "personal/config.json").read_bytes(), personal.read_bytes())
+        self.assertNotIn("backup_directory", result)
         self.assertEqual(result["preserved_extra_files"], ["personal/config.json"])
         self.assertNotIn("personal/config.json", read_json(self.target / INSTALL_MANIFEST)["files"])
         self.assertEqual(snapshot(external), external_before)
         self.assertEqual(snapshot(Path(first["runtime_directory"])), old_before)
         self.assertFalse((self.root / "ignored env store").exists())
-        self.assertTrue(result["host_reload_required"])
+        self.assertFalse(result["host_reload_required"])
         inspect_installation(self.target, installer._hook_commands)
         install(self.target, upgrade=True)
         self.assertNotIn("personal/config.json", read_json(self.target / INSTALL_MANIFEST)["files"])
@@ -403,7 +403,7 @@ class InstallUpdateTests(unittest.TestCase):
             return original(path, destination)
         with patch.object(Path, "rename", new=interrupted):
             with self.assertRaisesRegex(ContractError, "previous installation"):
-                install(self.target, upgrade=True)
+                install(self.target, upgrade=True, hook_mode="observe")
         self.assertEqual(snapshot(self.target), before)
         self.assertFalse(list(self.root.glob(".alp-backup-*")))
         self.assertFalse(list(self.root.glob(".alp-staging-*")))
@@ -434,7 +434,7 @@ class InstallUpdateTests(unittest.TestCase):
             return result
         with patch.object(Path, "rename", new=concurrent):
             with self.assertRaisesRegex(ContractError, "changed during switching"):
-                install(self.target, upgrade=True)
+                install(self.target, upgrade=True, hook_mode="observe")
         self.assertEqual((self.target / "concurrent-user-file").read_bytes(), b"external change")
         self.assertFalse(list(self.root.glob(".alp-backup-*")))
 
@@ -449,9 +449,9 @@ class InstallUpdateTests(unittest.TestCase):
             return result
         with patch.object(Path, "rename", new=concurrent):
             with self.assertRaisesRegex(ContractError, "backup were preserved"):
-                install(self.target, upgrade=True)
+                install(self.target, upgrade=True, hook_mode="observe")
         self.assertEqual((self.target / "other-owner").read_bytes(), b"keep external owner")
-        backups = list(self.root.glob(".alp-backup-*"))
+        backups = [item for item in backup_root(self.target).iterdir() if item.is_dir()]
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "runtime-release.json").is_file())
 

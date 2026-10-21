@@ -46,6 +46,7 @@ _EXCLUDED_DIRS = {
     "build", "dist", "target", "coverage", ".next", ".nuxt", "bin", "obj",
     "binaries", "intermediate", "deriveddatacache", "saved", "runtime-releases",
     "site-packages", ".tox", ".nox", ".idea",
+    "agent-learning-installations",
     ".ssh", ".aws", ".gnupg", ".gcloud", "secrets", "credentials",
 }
 _SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore", ".sqlite", ".sqlite3", ".db"}
@@ -691,8 +692,13 @@ def scan_sources(workspace, extra_sources=None, options=None, *, prioritize_path
                                     or _matches(relative + "/", configuration["exclude"])):
                 note(current, "excluded_by_user")
                 continue
+            parts = tuple(part.casefold() for part in current.parts)
+            if any(parts[index:index + 2] in {(".agents", "agent-learning-installations"),
+                                             (".codex", "agent-learning-installations")}
+                   for index in range(len(parts) - 1)):
+                note(current, "excluded_directory")
+                continue
             if stat.S_ISDIR(information.st_mode):
-                parts = tuple(part.casefold() for part in current.parts)
                 excluded = (current != selected and current.name.casefold() in _EXCLUDED_DIRS
                             or any(parts[index:index + 2] in {(".agents", "plugins"), (".codex", "plugins")}
                                    for index in range(len(parts) - 1))

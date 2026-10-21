@@ -33,6 +33,7 @@ class ConversationContinuityTests(unittest.TestCase):
     def enable(self):
         self.r.config["admin"].update(enabled=True, command=[sys.executable], timeout_seconds=10,
                                       max_input_chars=16000, auto_publish=True)
+        self.r.config["work_memory"]["summary_strategy"] = "all_windows"
         self.r.configure_work_summary(self.p, True)
 
     def test_requirement_and_public_analysis_are_searchable_without_tasks_or_approval(self):

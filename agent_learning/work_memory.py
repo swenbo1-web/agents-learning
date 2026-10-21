@@ -10,7 +10,7 @@ from .work_files import checkout_key, checkout_root, file_links_from_payload, no
 
 
 WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context_chars": 600,
-                        "max_items": 3, "summary_enabled": False, "summary_min_events": 2,
+                        "max_items": 3, "summary_enabled": False, "summary_strategy": "balanced", "summary_min_events": 2,
                         "summary_max_events": 12}
 WORK_INDEX_VERSION = 1
 
@@ -23,6 +23,8 @@ def validate_work_memory_config(value):
     for key in ("enabled", "automatic_context", "summary_enabled"):
         if not isinstance(result[key], bool):
             raise ContractError(f"work_memory.{key} must be boolean")
+    if not isinstance(result["summary_strategy"], str) or result["summary_strategy"] not in {"balanced", "all_windows"}:
+        raise ContractError("work_memory.summary_strategy must be balanced or all_windows")
     for key, minimum, maximum in (("max_context_chars", 128, 4000), ("max_items", 1, 10),
                                   ("summary_min_events", 1, 40), ("summary_max_events", 1, 40)):
         if isinstance(result[key], bool) or not isinstance(result[key], int) or not minimum <= result[key] <= maximum:
@@ -502,7 +504,7 @@ class WorkMemoryMixin:
             output["truncated"] = bool(output["omitted_count"])
             return output
 
-    def work_read(self, project, memory_id, *, expected_revision=None, offset=0, max_chars=6000, section="summary"):
+    def work_read(self, project, memory_id, *, expected_revision=None, offset=0, max_chars=6000, section="summary", workspace=None):
         from .runtime import ContractError
         _budget(max_chars, 1024, 50000)
         if section not in {"summary", "evidence"}:
@@ -520,7 +522,7 @@ class WorkMemoryMixin:
                 raise ContractError("unknown work memory")
             if expected_revision is not None and expected_revision != row["revision"]:
                 raise ContractError("work revision changed; search again")
-            result = self._work_item(project, row)
+            result = self._work_item(project, row, workspace=workspace)
             body = json.loads(row["body"])
             if section == "summary":
                 text = body["summary"]

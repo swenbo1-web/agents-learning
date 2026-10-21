@@ -93,11 +93,12 @@ WORKER_TOOLS = [
         "context_handle": NONEMPTY,
         "limit": {"type": "integer", "minimum": 1, "maximum": 10},
         "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}})),
-    ("work_memory_read", "绑定当前会话后，分页读取工作观察摘要或已保存的可见证据投影。续页必须保持section和expected_revision；不会恢复截断原文。", schema({
+    ("work_memory_read", "按需分页读取工作观察；续页保持section与expected_revision。同一上下文已完整返回的版本默认给简短回执，确需重呈时reread=true；不会恢复截断原文。", schema({
         "memory_id": NONEMPTY, "context_handle": NONEMPTY,
         "expected_revision": {"type": "integer", "minimum": 1},
         "offset": {"type": "integer", "minimum": 0},
         "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
+        "reread": {"type": "boolean"},
         "section": {"type": "string", "enum": ["summary", "evidence"]}}, ["memory_id"])),
     ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
     ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
@@ -234,6 +235,8 @@ class Server:
         self.epoch = runtime.session_epoch()
         self.governance_epoch = runtime.host_epoch()
         self.state, self.protocol_version = "new", None
+        from .work_read_delivery import WorkReadDelivery
+        self.work_read_delivery = WorkReadDelivery()
         self.tools = {name: (description, contract) for name, description, contract in
                       WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])}
         self.panel, self.direct_panel, self.panel_ui_supported = None, None, False
@@ -325,6 +328,7 @@ class Server:
         return _PanelResult(public, private)
 
     def close(self):
+        self.work_read_delivery.clear()
         if self.panel is not None:
             self.panel.close()
         if self.direct_panel is not None:
@@ -390,7 +394,7 @@ class Server:
                     raise ContractError("expected_revision is required to continue a section page")
                 result = r.work_read(p, args["memory_id"], expected_revision=args.get("expected_revision"),
                                      offset=args.get("offset", 0), max_chars=args.get("max_chars", 6000),
-                                     section=args.get("section", "summary"))
+                                     section=args.get("section", "summary"), workspace=self.workspace)
                 items = [result]
             if access is not None:
                 with r.transaction():
@@ -399,10 +403,22 @@ class Server:
                     task_state = r._work_task_state(p, access["conversation_id"], access["agent_id"], handle, task)
                     table, where, key = r._ensure_context(p, access["conversation_id"], access["agent_id"])
                     context_epoch = r.db.execute(f"SELECT epoch FROM {table} WHERE {where}", key).fetchone()[0]
+                    delivery_scope = (p, handle, r.host, r.host_instance, self.epoch,
+                                      r.host_epoch(), context_epoch, task_state)
+                    if r.host == "antigravity":
+                        # Native ephemeral context is replaced for each model
+                        # invocation. Missing trajectory identity disables reuse.
+                        trajectory = r.db.execute("SELECT generation,last_invocation,ambiguous FROM antigravity_trajectories "
+                            "WHERE project=? AND conversation=?", (p, access["conversation_id"])).fetchone()
+                        delivery_scope = ((*delivery_scope, tuple(trajectory)) if trajectory
+                            and trajectory["last_invocation"] >= 0 and not trajectory["ambiguous"] else None)
                     r.work_record_exposure(p, access["conversation_id"], items, agent_id=access["agent_id"],
                                            task_state=task_state, context_epoch=context_epoch, method="mcp",
                                            context_handle=handle, expected_epoch=self.epoch)
                 self._bind(handle)
+                if name == "work_memory_read":
+                    result = self.work_read_delivery.project(result, delivery_scope,
+                                                             reread=args.get("reread", False))
             else:
                 # 未绑定查询只返回项目公开索引，不能为猜测的会话登记展示。
                 r.assert_session_epoch(self.epoch)

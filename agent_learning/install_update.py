@@ -273,9 +273,13 @@ def mcp_document(runtime, python, host="codex", workspace=None, home=None, *, pa
     return {"mcpServers": {"agent_learning": {"command": python, "args": arguments}}}
 
 
-def inspect_installation(destination, command_builder, expected_release_id=None, *, target_host=None):
+def inspect_installation(destination, command_builder, expected_release_id=None, *, target_host=None,
+                         installation_target=None):
     """只读身份、受管理文件及用户额外文件；旧版本不要求已有安装清单。"""
     target = safe_path(destination)
+    # Backups retain the MCP panel's original, explicit installation path.
+    # This optional identity is only supplied by the backup inspector.
+    bound_target = safe_path(installation_target) if installation_target is not None else target
     observed = snapshot(target)
     if any(Path(name).name.lower() in {"runtime.sqlite3", "runtime.sqlite3-wal", "runtime.sqlite3-shm", "runtime.sqlite3-journal"}
            for name in observed["files"]):
@@ -352,7 +356,7 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
     dsh_multi = host == "dsh" and isinstance(receipt.get("workspaces"), list) and len(receipt["workspaces"]) > 1
     pinned_workspace = None if dsh_multi else receipt.get("workspace")
     mcp = mcp_document(runtime, receipt["python"], host, pinned_workspace, receipt.get("home"),
-                       panel_installation=target if "panel_workspace" in receipt else None)
+                       panel_installation=bound_target if "panel_workspace" in receipt else None)
     mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
     hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
     if host == "codex":
@@ -457,7 +461,7 @@ def installation_lock(target):
 
 
 def switch_installation(previous, staging):
-    """兄弟目录重命名切换。Windows 占用会停止；失败尽可能恢复旧目录。"""
+    """同卷切换，旧副本移出宿主发现目录；失败尽可能恢复。"""
     target = safe_path(previous["target"])
     staging = safe_path(staging)
     if staging.parent != target.parent or not staging.name.startswith(".alp-staging-"):
@@ -465,12 +469,13 @@ def switch_installation(previous, staging):
     if snapshot(target) != previous["snapshot"]:
         raise ContractError("installation destination changed during preparation; it was preserved")
     validate_previous_release(previous["runtime_directory"])
-    backup = target.parent / (".alp-backup-" + target.name[:40] + "-" + uuid.uuid4().hex)
-    safe_path(backup)
-    if backup.exists():
-        raise ContractError("installation backup destination already exists")
+    from .installation_backups import allocate_backup, remove_backup_record
+    backup = allocate_backup(previous)
     moved = False
     try:
+        safe_path(backup)
+        if backup.exists():
+            raise ContractError("installation backup destination already exists")
         target.rename(backup)
         moved = True
         if snapshot(backup) != previous["snapshot"]:
@@ -482,10 +487,13 @@ def switch_installation(previous, staging):
         if moved and not target.exists() and not _linked(target):
             try:
                 backup.rename(target)
+                remove_backup_record(backup)
             except OSError:
                 raise ContractError("installation switch failed; restore the retained backup at " + str(backup)) from None
         if moved and backup.exists():
             raise ContractError("installation switch failed; existing destination and backup were preserved at " + str(backup)) from None
+        if not moved:
+            remove_backup_record(backup)
         if isinstance(error, ContractError):
             raise
         raise ContractError("installation switch failed; previous installation was preserved or restored") from None

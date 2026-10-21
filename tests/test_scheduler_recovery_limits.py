@@ -199,7 +199,7 @@ class PrelaunchStateChangeTests(unittest.TestCase):
         self.assertLessEqual(observed[0], 2)
 
     def test_summary_disabled_between_reservation_and_launch_is_local_state_change(self):
-        self.r.config["work_memory"]["summary_enabled"] = True
+        self.r.config["work_memory"].update(summary_enabled=True, summary_strategy="all_windows")
         self.r.db.execute("UPDATE problems SET status='reviewed' WHERE project=?", (self.p,))
         for index in range(2):
             self.r.handle_hook({"hook_event_name": "UserPromptSubmit", "session_id": "chat", "cwd": str(self.workspace),

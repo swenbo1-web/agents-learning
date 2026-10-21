@@ -23,7 +23,8 @@ class WorkSummaryWindowTests(unittest.TestCase):
         self.p = self.r.project(self.workspace)
         self.r.config["admin"].update(enabled=True, command=[sys.executable], timeout_seconds=10,
                                       max_input_chars=16000, max_calls_per_day=100)
-        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=2)
+        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=2,
+                                            summary_strategy="all_windows")
         self.r.configure_work_summary(self.p, True)
 
     def capture(self, text, kind="Stop"):

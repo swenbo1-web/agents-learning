@@ -15,7 +15,7 @@ from .release import MANIFEST_NAME, ReleaseError, manifest_for, validate_release
 from .runtime import ContractError
 from .install_update import (installation_lock, inspect_installation, preserve_extra_files,
                              safe_path, switch_installation, write_installation_manifest,
-                             TARGET_HOSTS, antigravity_hooks, dsh_hooks, mcp_document, payload_mapping)
+                             TARGET_HOSTS, antigravity_hooks, dsh_hooks, mcp_document, payload_mapping, snapshot)
 
 
 RESOURCE_DIRS = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
@@ -480,20 +480,29 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 (staging / "runtime-release.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 _validate_resources(staging, host)
                 write_installation_manifest(staging, release["release_id"], host)
-                backup, adopted_extra_files = None, []
+                backup, adopted_extra_files, unchanged = None, [], False
                 if previous is not None:
                     adopted_extra_files = preserve_extra_files(previous, staging)
-                    backup = switch_installation(previous, staging)
+                    if snapshot(target) != previous["snapshot"]:
+                        raise ContractError("installation destination changed during preparation; it was preserved")
+                    prepared = snapshot(staging)
+                    unchanged = (prepared["files"] == previous["snapshot"]["files"]
+                                 and prepared["directories"] == previous["snapshot"]["directories"])
+                    if unchanged:
+                        validate_release_root(runtime_directory)
+                    else:
+                        backup = switch_installation(previous, staging)
                 else:
                     if target.exists():
                         raise ContractError("installation destination appeared during export; it was preserved")
                     staging.rename(target)
-                staging = None
+                if not unchanged:
+                    staging = None
             finally:
                 _cleanup_owned(staging, target.parent, staging_identity)
     except (OSError, ReleaseError):
         raise ContractError("plugin export could not complete; final destination was not published") from None
-    result = {"status": "updated" if upgrade else "exported", "plugin_directory": str(target), "python": selected_python,
+    result = {"status": "unchanged" if unchanged else ("updated" if upgrade else "exported"), "plugin_directory": str(target), "python": selected_python,
             "interpreter": interpreter,
             "runtime_directory": str(runtime_directory), "release_id": release["release_id"],
             "version": __version__, "hook_mode": hook_mode, "target_host": host,
@@ -516,9 +525,12 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                                 "workspace_required": True,
                                 "next_step": "首次接入项目可明确选择吸收或稍后；安装和升级均不会读取历史或调用模型。"}
     if previous is not None:
-        result.update({"previous_release_id": previous["release"]["release_id"], "backup_directory": str(backup),
+        result.update({"previous_release_id": previous["release"]["release_id"],
                        "preserved_extra_files": [name for name in previous["extra_files"] if name not in adopted_extra_files],
                        "adopted_extra_files": adopted_extra_files, "knowledge_and_config": "external_untouched",
-                       "host_reload_required": True, "hook_review_required": True,
-                       "next_step": "重新加载或重新安装宿主缓存中的插件，并审阅Hook路径变化；旧目录与固定副本保留，可用于恢复。"})
+                       "host_reload_required": not unchanged, "hook_review_required": not unchanged,
+                       "next_step": ("安装内容、解释器与宿主绑定均未变化，无需重新加载或审阅Hook。" if unchanged else
+                                     "重新加载或重新安装宿主缓存中的插件，并审阅Hook路径变化；旧目录与固定副本保留，可用于恢复。")})
+        if backup is not None:
+            result["backup_directory"] = str(backup)
     return result

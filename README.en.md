@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.6 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.7 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -123,6 +123,17 @@ The initial complete offline run covered 2,326 checks and exposed coupling issue
 Database schema and publication protocol remain 25; work and optional semantic indexes remain 1. Update shared-database runtimes together to avoid alternating full-text projection rebuilds. Upgrading does not rerun administrators, delete knowledge or alter project publication policies.
 
 Final isolated verification covered 791 Python 3.10 checks: 790 passed and one Windows symlink-privilege check was skipped. One old assertion still allowed automatic injection for 160 identifiers; after updating it to the explicit manual-only overflow contract, all eight checks in that module passed again without production-code changes. Another 168 combined checks passed on Python 3.14. Three-host installation integrity, simulated Hooks, MCP and visual resources passed in 13.877 seconds. The simulated database passed quick_check with zero foreign-key errors. Acceptance called no real models and did not update active installations; these results do not establish real-task benefits or constant latency at every provenance scale.
+
+### Installation maintenance and work-history reuse (1.4.7)
+
+- **Identical installations stay unchanged.** If export content, interpreter, bindings and preserved extras match, installation returns `unchanged` without another backup or reload request. Real upgrades still follow host Hook trust requirements.
+- **Backups stay outside discovery.** Same-volume switching retains complete old exports outside plugin discovery directories. Legacy backups require an explicit, snapshot-bound relocation plan; no files are deleted. Codex and Antigravity connection diagnostics show a lightweight inventory of at most 20 entries, not a recovery or deletion guarantee.
+- **Expand working history when needed.** A complete, unchanged section already returned in the same trusted context gets a short receipt; use `reread=true` to present it again. Missing pages, source/file changes, compaction, task changes and new connections require fresh output. Antigravity reuse is limited to a verified invocation. Returned content does not prove model reading or retention.
+- **Balanced summary policy.** `summary_strategy=balanced` keeps ordinary user requests and public notes searchable without another model summary. Edits, failures, verification observations and user corrections retain their organization path. Choose `all_windows` explicitly for the previous window policy. AI summaries remain off by default; installation does not enable administrators or change model/publication settings. Stage mode prioritizes stage review.
+
+Database schema, indexes and publication protocol remain unchanged. External installation archives are excluded from historical ingestion. Local selection and reduced duplicate output do not establish real-world token savings or task quality.
+
+Isolated joint regression: 404 Python 3.10 checks, 402 passed and two skipped for Windows symlink permissions; all 87 Python 3.14 checks passed. Installation checks passed with 98 of 100 and 18 of 19 in the latest follow-up; remaining cases were permission skips. All three hosts passed installation, MCP, simulated Hook and UI-resource acceptance in 15.547 seconds without real model calls. A synthetic 12,540-character public delivery produced six summary requests under the old window policy and zero under balanced policy; adding a file change produced one, preserving all raw records. This compares fake-model request counts, not measured token savings.
 
 ### Review input and adaptive budgets (1.4.6)
 
@@ -778,7 +789,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.6 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index advances to **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update optimizes review input and budgets while preserving knowledge, tasks and usage. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
+Current `main` v1.4.7 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index advances to **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update optimizes review input and budgets while preserving knowledge, tasks and usage. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -840,7 +851,17 @@ python -B scripts/learning.py install "$learningPlugin" --host codex --upgrade -
 
 The upgrader checks the old plugin identity, fixed runtime, MCP/Hook paths and managed file digests before preparing the new export. Omitted `--runtime-store` and `--hook-mode` inherit their old values. Modified managed files, conflicting extra files, source/fixed runtime targets, links or a knowledge database such as `runtime.sqlite3` inside the export cause rejection. External `ALP_HOME` and `ALP_CONFIG` are neither read nor modified. Keep the database outside the export. Extra personal files and empty directories are retained without becoming managed plugin files.
 
-The receipt includes `backup_directory` and both release identities. The complete old export is retained as a sibling backup, along with the old fixed runtime. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
+A real update returns `backup_directory` and both release identities. The complete old export is retained on the same volume outside plugin discovery under `agent-learning-installations/<installation-identity>/backups/`, along with the old fixed runtime. Identical content and bindings return `unchanged` without another backup. A target lock and snapshots detect concurrent changes; switch failures attempt restoration. Directory switching has a brief gap. A hard process exit can leave a lock or backup; inspect the receipt, target and `.alp-install-*.lock` before manual recovery. The installer does not steal locks or delete backups automatically. Downgrades are rejected.
+
+Preview legacy backups before explicitly relocating the exact current selection:
+
+```powershell
+python -B scripts/learning.py installation-backups --installation "$learningPlugin" --limit 128
+python -B scripts/learning.py relocate-installation-backups --installation "$learningPlugin" --limit 128 --plan-id "plan_id from the preview" --confirm
+```
+
+The full read-only preview checks release identity, workspace/home bindings, managed content and extras. Changed, unknown or actively referenced entries stay in place. Relocation preserves all contents and attempts rollback on failure; it changes neither knowledge nor the active installation or host configuration. `--keep` recommends recoverable releases within the visible page; **it never deletes files**. Large inventories require new previews for each batch. DSH uses the same CLI maintenance commands. The UI inventory does not hash releases or authorize relocation.
+
 
 Restart Codex after updating the local source directory and review changed Hook definitions. Existing MCP processes may still use the old runtime; an update receipt does not confirm that they switched. Reload the plugin through the host installation entry if its cache remains old. Refresh Antigravity's registered UI bridge with `install-ui --upgrade` and update the active DSH profile's export as applicable. All shared-database hosts must use a schema-25-compatible runtime before reconnecting. Upgrading does not enable administrators, historical review or publication. [Official local plugin update guidance](https://developers.openai.com/plugins/build/plugins)
 
@@ -1031,13 +1052,14 @@ Merge these defaults into your external configuration as needed. Administrators,
     "max_context_chars": 600,
     "max_items": 3,
     "summary_enabled": false,
+    "summary_strategy": "balanced",
     "summary_min_events": 2,
     "summary_max_events": 12
   }
 }
 ```
 
-`automatic_context=false` disables work-index injection while retaining manual queries. AI work summaries require an explicit project/host **Organize conversation summaries** setting (or `summary_enabled=true`) and an enabled [administrator executor](#optional-administrator-executor). Installation alone makes no model call. By default, two new work records start a frozen window of at most twelve records. An explicit task is optional; unbound tools retain their original identity. Accepted or skipped windows locally queue one next window, including a final single record. Calls still follow project limits, global safeguards and runtime limits; remaining work persists when limits are reached. Policy or account changes recheck unstarted windows without automatically retrying unknown calls. Original working records remain searchable before AI organization.
+`automatic_context=false` disables work-index injection while retaining manual queries. AI work summaries require an explicit project/host **Organize conversation summaries** setting (or `summary_enabled=true`) and an enabled [administrator executor](#optional-administrator-executor). Installation alone makes no model call. The default `summary_strategy=balanced` reuses raw public notes and ordinary requests without a new AI-summary window. Actual deltas take priority, with bounded related public context. Explicit `all_windows` retains the previous window policy. Eligible windows start with two new work records by default and contain at most twelve. An explicit task is optional; unbound tools retain their original identity. Accepted or skipped windows locally queue one next window, including a final single record. Calls still follow project limits, global safeguards and runtime limits; remaining work persists when limits are reached. Policy or account changes recheck unstarted windows without automatically retrying unknown calls. Original working records remain searchable before AI organization.
 
 AI summaries are marked `model_reported` and describe visible attempts, results, public notes and unresolved questions. They create no knowledge candidates or governance actions. Published solutions still use the separate review/publication workflow.
 
@@ -1089,7 +1111,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.6 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update optimizes review input and budgets without changing evidence, publication or scheduling permissions. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index advances to **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
+**Current source version 1.4.7 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update optimizes review input and budgets without changing evidence, publication or scheduling permissions. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index advances to **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
 
 The following entries describe changes and release status at the time of each historical version:
 

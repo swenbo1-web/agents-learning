@@ -518,7 +518,7 @@ class KnowledgeContextMixin:
                 work_line_start = len(lines)
                 self.db.execute("SAVEPOINT optional_work_context")
                 try:
-                    work_header = "工作历史索引（非正式解法/执行授权；详情用 work_memory_read）："
+                    work_header = "工作历史索引（非正式解法/执行授权；仅相关且索引不足时用 work_memory_read）："
                     # 正式知识、完整失效提醒及任务边界已优先分配预算。工作历史只能使用
                     # 剩余空间，并共享 injection_max_chars，不额外叠加一个注入预算。
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))

@@ -300,19 +300,19 @@ console.log(JSON.stringify({calls,outputs,missingData,legacy,inputClaim:debug.in
         with self.assertRaisesRegex(ContractError, "different target host"):
             install(ag_target, upgrade=True, host="dsh")
 
-    def test_dsh_upgrade_preserves_bindings_extra_files_and_creates_backup(self):
+    def test_dsh_identical_upgrade_preserves_bindings_extra_files_without_backup(self):
         self.initial("enforce", bind_workspace=True)
         (self.target / "notes/custom.txt").parent.mkdir(parents=True, exist_ok=True)
         (self.target / "notes/custom.txt").write_text("user custom file", encoding="utf-8")
         updated = install(self.target, upgrade=True, host="dsh")
-        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(updated["status"], "unchanged")
         self.assertEqual(updated["target_host"], "dsh")
         self.assertEqual(updated["hook_mode"], "enforce")
         self.assertEqual(updated["workspace"], str(self.workspace))
         self.assertEqual(updated["home"], str(self.home))
         self.assertEqual(updated["preserved_extra_files"], ["notes/custom.txt"])
         self.assertEqual((self.target / "notes/custom.txt").read_text(encoding="utf-8"), "user custom file")
-        self.assertTrue(Path(updated["backup_directory"]).is_dir())
+        self.assertNotIn("backup_directory", updated)
 
     def _old_release_with_unmanaged_modules(self):
         """Synthetic pinned old release whose optional scripts were extra files."""

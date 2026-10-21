@@ -127,7 +127,8 @@ class AutomaticWriteEfficiencyTests(unittest.TestCase):
 
     def long_message(self):
         self.r.config["admin"].update(enabled=True)
-        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=4)
+        self.r.config["work_memory"].update(summary_min_events=2, summary_max_events=4,
+                                            summary_strategy="all_windows")
         self.r.configure_work_summary(self.p, True)
         event, _ = self.capture("Stop", {"last_assistant_message":"Optical calibration results remain reported, pending hardware validation. " * 45})
         return event
