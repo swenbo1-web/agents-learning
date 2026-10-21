@@ -284,9 +284,15 @@ class AntigravityAdapter:
         return {"decision": "deny", "reason": "Agent Learning: " + reason}
 
     def _record_unassociated(self, project, conversation, observed, event_key, reason, phase_guard):
+        identity = ["antigravity", conversation, event_key]
+        legacy = ["antigravity", event_key]
+        prior = self.runtime.db.execute("SELECT conversation FROM events WHERE id=?",
+                                       (digest([project, legacy]),)).fetchone()
+        if prior and prior["conversation"] == conversation:
+            identity = legacy
         self.runtime.record_event(project, conversation, "Antigravity" + observed["kind"],
                                   {**observed, "association": "unassociated", "reason": reason},
-                                  event_id=["antigravity", event_key], _phase_guard=phase_guard)
+                                  event_id=identity, _phase_guard=phase_guard)
 
     def _orphan_fault(self, project, conversation, epoch, normalized):
         r = self.runtime
@@ -318,8 +324,15 @@ class AntigravityAdapter:
                 "SELECT id FROM events WHERE project=? AND conversation=? AND type='AntigravityStop' "
                 "AND json_extract(payload,'$.fullyIdle')=1 ORDER BY created DESC,id DESC LIMIT 1",
                 (project, conversation)).fetchone()
-            key = ["antigravity-public-prompt", epoch, generation,
-                   boundary[0] if boundary else None, digest(text)]
+            legacy_key = ["antigravity-public-prompt", epoch, generation,
+                          boundary[0] if boundary else None, digest(text)]
+            key = ["antigravity-public-prompt", conversation, *legacy_key[1:]]
+            # 同阶段后续 invocation 可以复用升级前已捕获的本会话消息；另一
+            # 会话占用的旧 ID 则使用新身份，不借用或更改旧来源。
+            prior = self.runtime.db.execute("SELECT conversation FROM events WHERE id=?",
+                                           (digest([project, legacy_key]),)).fetchone()
+            if prior and prior["conversation"] == conversation:
+                key = legacy_key
             payload = {"prompt": text, "source": "antigravity_public_hook",
                        "capture_coverage": observed["capture_coverage"],
                        "host_epoch": epoch}
@@ -336,45 +349,95 @@ class AntigravityAdapter:
 
     def _stop(self, project, conversation, observed, event_key, phase_guard):
         with self.runtime.transaction():
-            phase_guard()
-            task = self.runtime.task(project, conversation)
-            event, fresh = self.runtime._event(project, conversation, "AntigravityStop", observed,
-                                event_id=["antigravity", event_key],
-                                task_id=task["id"] if task else None,
-                                task_revision=task["revision"] if task else None)
-            if observed["fullyIdle"]:
-                self.runtime._execution_fence(project, conversation, "antigravity_execution_stopped")
-            if fresh:
-                text = observed.get("finalModelOutput")
-                complete = (observed["fullyIdle"] and observed["terminationReason"] == "model_stop"
-                            and not observed["error"]
-                            and observed["capture_coverage"].get("workspace_association") == "installed_workspace"
-                            and observed["capture_coverage"].get("trajectory_identity") == "current")
-                # 原生终止事实与公开说明分别留证。停止不等于任务交付，部分输出
-                # 仍可作为 reported 工作记录，但不能触发交付案例或AI阶段摘要。
-                if isinstance(text, str) and text.strip():
-                    payload = {"last_assistant_message": text, "source": "antigravity_public_hook",
-                               "completion": "complete" if complete else "partial",
-                               "termination_reason": observed["terminationReason"],
-                               "capture_coverage": observed["capture_coverage"],
-                               "host_epoch": self._epoch()}
-                    public, public_fresh = self.runtime._event(project, conversation, "Stop", payload,
-                        event_id=["antigravity-public-stop", event_key],
-                        task_id=task["id"] if task else None,
-                        task_revision=task["revision"] if task else None,
-                        task_write_version=task["write_version"] if task else None,
-                        execution_epoch=task["execution_epoch"] if task else None,
-                        outcome="reported" if observed_public("Stop", payload) else "unknown")
-                    if public_fresh:
-                        if complete:
-                            self.runtime._capture_delivery(project, conversation, task, public, payload)
-                        self.runtime._work_capture_safely(project, public["id"], str(self.workspace), raw=payload,
-                                                          summarize=complete, conversation=conversation)
-                else:
-                    self.runtime._work_capture_safely(project, event["id"], str(self.workspace), raw=observed,
+            return self._stop_locked(project, conversation, observed, event_key, phase_guard)
+
+    def _stop_locked(self, project, conversation, observed, event_key, phase_guard):
+        """调用者持写事务；旧碰撞恢复须与完成回执原子提交。"""
+        phase_guard()
+        task = self.runtime.task(project, conversation)
+        event, fresh = self.runtime._event(project, conversation, "AntigravityStop", observed,
+                            event_id=["antigravity", conversation, event_key],
+                            task_id=task["id"] if task else None,
+                            task_revision=task["revision"] if task else None)
+        if fresh and observed["fullyIdle"]:
+            self.runtime._execution_fence(project, conversation, "antigravity_execution_stopped")
+        if fresh:
+            text = observed.get("finalModelOutput")
+            complete = (observed["fullyIdle"] and observed["terminationReason"] == "model_stop"
+                        and not observed["error"]
+                        and observed["capture_coverage"].get("workspace_association") == "installed_workspace"
+                        and observed["capture_coverage"].get("trajectory_identity") == "current")
+            # 原生终止事实与公开说明分别留证。停止不等于任务交付，部分输出
+            # 仍可作为 reported 工作记录，但不能触发交付案例或AI阶段摘要。
+            if isinstance(text, str) and text.strip():
+                payload = {"last_assistant_message": text, "source": "antigravity_public_hook",
+                           "completion": "complete" if complete else "partial",
+                           "termination_reason": observed["terminationReason"],
+                           "capture_coverage": observed["capture_coverage"],
+                           "host_epoch": self._epoch()}
+                public, public_fresh = self.runtime._event(project, conversation, "Stop", payload,
+                    event_id=["antigravity-public-stop", conversation, event_key],
+                    task_id=task["id"] if task else None,
+                    task_revision=task["revision"] if task else None,
+                    task_write_version=task["write_version"] if task else None,
+                    execution_epoch=task["execution_epoch"] if task else None,
+                    outcome="reported" if observed_public("Stop", payload) else "unknown")
+                if public_fresh:
+                    if complete:
+                        self.runtime._capture_delivery(project, conversation, task, public, payload)
+                    self.runtime._work_capture_safely(project, public["id"], str(self.workspace), raw=payload,
                                                       summarize=complete, conversation=conversation)
-            # 后置签名也必须在相同快照内取得，不能接纳提交后出现的新任务。
-            return {"decision": "stop"}, self._task_signature(project, conversation)
+            else:
+                self.runtime._work_capture_safely(project, event["id"], str(self.workspace), raw=observed,
+                                                  summarize=complete, conversation=conversation)
+        # 后置签名也必须在相同快照内取得，不能接纳提交后出现的新任务。
+        return {"decision": "stop"}, self._task_signature(project, conversation)
+
+    def _pending_stop_recovery_reason(self, project, conversation, observed, event_key, old, epoch, generation):
+        """只恢复可证实在旧 native ID 碰撞处回滚的 Stop；其他 pending 保留。"""
+        r = self.runtime
+        if old["state"] != "pending" or old["kind"] != "Stop":
+            return "receipt_not_pending_stop"
+        if old["host_epoch"] != epoch or old["generation"] != generation:
+            return "receipt_boundary_changed"
+        if old["task_signature"] != self._task_signature(project, conversation):
+            return "receipt_task_changed"
+        native_digest = "v2:" + digest({key: value for key, value in observed.items()
+            if key not in {"modelName", "lastUserInput", "finalModelOutput", "capture_coverage"}})
+        if native_digest != old["raw_digest"]:
+            return "receipt_native_identity_changed"
+        legacy_id = digest([project, ["antigravity", event_key]])
+        collision = r.db.execute("SELECT conversation,type,payload FROM events WHERE id=?", (legacy_id,)).fetchone()
+        if not collision or collision["conversation"] == conversation or collision["type"] != "AntigravityStop":
+            return "legacy_cross_conversation_collision_unproven"
+        recorded = json.loads(collision["payload"])
+        if not isinstance(recorded, dict) or "v2:" + digest({key: value for key, value in recorded.items()
+                if key not in {"modelName", "lastUserInput", "finalModelOutput", "capture_coverage"}}) != old["raw_digest"]:
+            return "legacy_native_identity_mismatch"
+        # 新／旧原生与公开 Stop 任一已经落地都不能重放。即使出现不完整
+        # 数据或关联投影，也不能仅凭另一会话占用旧 ID 推断副作用未发生。
+        ids = [digest([project, value]) for value in (
+            ["antigravity", conversation, event_key],
+            ["antigravity-public-stop", conversation, event_key],
+            ["antigravity-public-stop", event_key])]
+        if r.db.execute("SELECT 1 FROM events WHERE conversation=? AND id IN (?,?,?) LIMIT 1",
+                        (conversation, *ids)).fetchone():
+            return "stop_effect_already_recorded"
+        if r.db.execute("SELECT 1 FROM events WHERE project=? AND conversation=? AND created>=? LIMIT 1",
+                        (project, conversation, old["created"])).fetchone():
+            return "later_conversation_effects_present"
+        if r.db.execute("SELECT 1 FROM work_memories WHERE project=? AND conversation=? AND created>=? LIMIT 1",
+                        (project, conversation, old["created"])).fetchone():
+            return "later_work_projection_present"
+        if r.db.execute("SELECT 1 FROM delivery_rounds d JOIN task_states t ON t.project=d.project "
+                        "AND t.id=d.task_id AND t.revision=d.revision AND t.write_version=d.write_version "
+                        "WHERE d.project=? AND t.conversation=? AND d.created>=? LIMIT 1",
+                        (project, conversation, old["created"])).fetchone():
+            return "later_delivery_present"
+        if r.db.execute("SELECT 1 FROM review_phases WHERE project=? AND conversation=? AND event_id IN (?,?,?) LIMIT 1",
+                        (project, conversation, *ids)).fetchone():
+            return "phase_effect_already_recorded"
+        return None
 
     def _schedule(self, project, governance_epoch, phase_guard):
         r, token = self.runtime, None
@@ -424,6 +487,7 @@ class AntigravityAdapter:
                                    if key not in {"modelName", "lastUserInput", "finalModelOutput", "capture_coverage"}})
         r = self.runtime
         replayed_stop = False
+        recover_stop = False
         with r.transaction():
             epoch = self._epoch()
             # 在缓存查找前处理计数回退，旧 PreInvocation 不能绕过轨迹失效。
@@ -486,7 +550,11 @@ class AntigravityAdapter:
                         return json.loads(old["output"])
                 # 不确定前次提交状态时不重投可能已消费通知，也不再次停止fence。
                 if not replayed_stop and event in {"PreInvocation", "Stop"}:
-                    return {"decision": "stop"} if event == "Stop" else {}
+                    recover_stop = (event == "Stop" and not trajectory["ambiguous"] and
+                        self._pending_stop_recovery_reason(project, conversation, observed, event_key,
+                                                           old, epoch, trajectory["generation"]) is None)
+                    if not recover_stop:
+                        return {"decision": "stop"} if event == "Stop" else {}
             task_signature = self._receipt_signature(project, conversation, event)
             phase_task_signature = self._task_signature(project, conversation)
             governance_epoch = r.host_epoch()
@@ -512,6 +580,27 @@ class AntigravityAdapter:
             # 幂等派发；队列仍排除活跃/结果未知的模型调用，不重复记录/fence。
             self._schedule(project, governance_epoch, phase_guard)
             return json.loads(old["output"])
+        if recover_stop:
+            # 重新持锁核对；并发重投只有一个能落地。Stop、副作用和完成回执
+            # 一起提交，崩溃会整体回滚；绝不恢复前置通知或工具执行。
+            with r.transaction():
+                self._assert_phase(project, conversation, epoch, generation)
+                current = r.db.execute("SELECT * FROM antigravity_receipts WHERE project=? AND conversation=? AND event_key=?",
+                                       (project, conversation, event_key)).fetchone()
+                if current["state"] == "complete":
+                    return json.loads(current["output"])
+                phase_guard()
+                if self._pending_stop_recovery_reason(project, conversation, observed, event_key,
+                                                     current, epoch, generation) is not None:
+                    return {"decision": "stop"}
+                output, phase_task_signature = self._stop_locked(project, conversation, observed, event_key, phase_guard)
+                r.db.execute("UPDATE antigravity_receipts SET state='complete',output=?,task_signature=? "
+                             "WHERE project=? AND conversation=? AND event_key=?",
+                             (encode(output), phase_task_signature, project, conversation, event_key))
+                r._metric(project, "antigravity_stop_collision_recovered")
+            if observed["fullyIdle"]:
+                self._schedule(project, governance_epoch, phase_guard)
+            return output
         if event == "PreInvocation":
             if not trajectory["ambiguous"]:
                 self._capture_prompt(project, conversation, observed, generation, epoch, phase_guard, mounted)
@@ -585,8 +674,15 @@ class AntigravityAdapter:
                     output = {}
         with r.transaction():
             phase_guard()
-            r.db.execute("UPDATE antigravity_receipts SET state='complete',output=? WHERE project=? AND conversation=? AND event_key=?",
-                         (encode(output), project, conversation, event_key))
+            if event == "Stop":
+                # 已完成 Stop 的可重派发边界是 fence 后的同一任务快照；
+                # 只为本次完成写入，不猜测或回填升级前 complete 回执。
+                r.db.execute("UPDATE antigravity_receipts SET state='complete',output=?,task_signature=? "
+                             "WHERE project=? AND conversation=? AND event_key=?",
+                             (encode(output), phase_task_signature, project, conversation, event_key))
+            else:
+                r.db.execute("UPDATE antigravity_receipts SET state='complete',output=? WHERE project=? AND conversation=? AND event_key=?",
+                             (encode(output), project, conversation, event_key))
         if event == "Stop" and observed["fullyIdle"]:
             self._schedule(project, governance_epoch, phase_guard)
         if event == "PreInvocation" and r.config["software_updates"]["enabled"]:

@@ -28,6 +28,7 @@ _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
 _MATCH_POLICY_VERSION = 3
+_RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
                         "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
@@ -129,7 +130,8 @@ def normalized_query_plan(query):
             "query_diagnostics": diagnostics,
             "input_fingerprint": hashlib.sha256(query.encode("utf-8", errors="surrogatepass")).hexdigest()
                                  if any(diagnostics[key] for key in ("input_truncated", "terms_truncated")) else None,
-            "match_policy_version": _MATCH_POLICY_VERSION}
+            "match_policy_version": _MATCH_POLICY_VERSION,
+            "recall_policy_version": _RECALL_POLICY_VERSION}
 
 
 def match_terms(text):
@@ -211,8 +213,9 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
 def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
     """Bound FTS recall without installing per-query SQLite functions.
 
-    Explicit identifiers have a separate lane so common prose cannot crowd them
-    out before Python applies query coverage and the automatic eligibility gate.
+    Manual queries retain the broad lane. Automatic queries that require every
+    identifier only scan the AND lane: broad-only rows cannot pass the existing
+    positive-identifier gate. Keep paging that lane to find healthy later rows.
     """
     filters = filters or {}
     conditions = _filter_sql(filters)
@@ -227,8 +230,9 @@ def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
     lanes = []
     if anchors:
         lanes.append((" AND ".join(quote(word) for word in anchors), _LEXICAL_CANDIDATES // 2))
-    lanes.append((" OR ".join(quote(word) for word in plan["recall_terms"]),
-                  _LEXICAL_CANDIDATES // 2 if anchors else _LEXICAL_CANDIDATES))
+    if not (anchors and plan.get("required_anchor_recall")):
+        lanes.append((" OR ".join(quote(word) for word in plan["recall_terms"]),
+                      _LEXICAL_CANDIDATES // 2 if anchors else _LEXICAL_CANDIDATES))
     rows = {}
     for expression, maximum in lanes:
         if expression:
@@ -307,6 +311,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
         limit = max(1, min(int(limit), 10))
         filters = knowledge_filters(filters)
         plan = normalized_query_plan(query)
+        recall_plan = dict(plan, required_anchor_recall=bool(_automatic and plan["exact_anchors"]))
         selected, meaningful = plan["terms"], plan["meaningful"]
         if not selected or (_automatic and not plan["automatic_safe"]):
             return {"status": "no_match", "items": [], "query_diagnostics": plan["query_diagnostics"]}
@@ -390,7 +395,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 exact = all(anchor in values[2] for anchor in plan["exact_anchors"])
                 return (-int(exact), -values[0], row["id"])
             if references is None:
-                rows = lexical_rows(self.db, project, plan, filters, diagnostics=page_state)
+                rows = lexical_rows(self.db, project, recall_plan, filters, diagnostics=page_state)
                 recall["pages"] = 1
                 rows.sort(key=lexical_order)
                 if hybrid:
@@ -472,7 +477,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         break
                     else:
                         page_state = {}
-                        next_page = lexical_rows(self.db, project, plan, filters, page=recall["pages"],
+                        next_page = lexical_rows(self.db, project, recall_plan, filters, page=recall["pages"],
                                                  diagnostics=page_state)
                         recall["pages"] += 1
                         rows = sorted((item for item in next_page if item["id"] not in seen), key=lexical_order)
