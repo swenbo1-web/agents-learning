@@ -13,6 +13,92 @@ WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context
                         "max_items": 3, "summary_enabled": False, "summary_strategy": "balanced", "summary_min_events": 2,
                         "summary_max_events": 12}
 WORK_INDEX_VERSION = 1
+WORK_READ_FILE_CHECK_LIMIT = 64
+
+
+def _read_file_version(relative_path, workspace):
+    """Bounded metadata observation; known absence differs from unreadable state."""
+    try:
+        root = checkout_root(workspace)
+        target = normalize_file_target(relative_path, root, observe_version=False)
+        if target is None:
+            return {"status": "unavailable"}
+        stat = (root / target["relative_path"]).stat()
+        return {"status": "stat_observed", "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    except FileNotFoundError:
+        return {"status": "missing"}
+    except (OSError, ValueError, RuntimeError):
+        return {"status": "unavailable"}
+
+
+def _read_file_check(runtime, project, memory_id, workspace):
+    """A receipt checks all recorded associations, independently of three-file UI."""
+    from .runtime import digest
+    rows = runtime.db.execute(
+        "SELECT f.event_id,f.checkout_key,f.path_key,f.relative_path,f.relation,f.version "
+        "FROM work_memory_sources s JOIN work_file_links f "
+        "ON f.project=s.project AND f.event_id=s.event_id "
+        "WHERE s.project=? AND s.memory_id=? "
+        "ORDER BY f.event_id,f.checkout_key,f.path_key,f.relation LIMIT ?",
+        (project, memory_id, WORK_READ_FILE_CHECK_LIMIT + 1)).fetchall()
+    if len(rows) > WORK_READ_FILE_CHECK_LIMIT:
+        return {"complete": False, "reason": "file_check_limit"}
+    if not rows:
+        return {"complete": True, "version": digest([])}
+    if workspace is None:
+        return {"complete": False, "reason": "workspace_unavailable"}
+    try:
+        current_checkout = checkout_key(workspace)
+    except (OSError, ValueError, RuntimeError):
+        return {"complete": False, "reason": "workspace_unavailable"}
+    versions, observations = {}, []
+    for row in rows:
+        if row["checkout_key"] != current_checkout:
+            return {"complete": False, "reason": "checkout_unavailable"}
+        path = row["relative_path"]
+        if path not in versions:
+            versions[path] = _read_file_version(path, workspace)
+        current = versions[path]
+        if current.get("status") not in {"stat_observed", "missing"}:
+            return {"complete": False, "reason": "file_state_unavailable"}
+        observations.append([*tuple(row), current])
+    return {"complete": True, "version": digest(observations)}
+
+
+def _read_metadata_preview(result, max_chars):
+    """Reserve page space by shortening previews, never identity or live checks."""
+    target = max_chars - 128
+    while len(_json(result)) > target and result["files"]:
+        result["files"].pop()
+        result["files_omitted"] = result["files_count"] - len(result["files"])
+    if len(_json(result)) > target and len(result["source_event_refs"]) > 1:
+        result["source_refs_omitted"] = len(result["source_event_refs"]) - 1
+        result["source_event_refs"] = result["source_event_refs"][:1]
+        result["source_refs_truncated"] = True
+    if len(_json(result)) > target and result.get("file_state"):
+        result["file_state_omitted"] = len(result["file_state"])
+        result["file_state"] = None
+    if len(_json(result)) > target and result.get("coverage"):
+        result["coverage"] = {}
+        result["coverage_omitted"] = True
+    if len(_json(result)) > target and result.get("candidate_reference_risk"):
+        result["candidate_reference_risk"] = [{"blocked": True, "details_omitted": True}]
+    # Index-only hints and presentation fields do not establish source validity.
+    # The immutable source_version includes the full source/risk snapshots.
+    for key in ("file_focus", "summary_only", "read_required", "permission_restored",
+                "created", "task_binding_known", "type", "coverage"):
+        if len(_json(result)) <= target:
+            break
+        if key in result:
+            result.pop(key)
+            result["metadata_omitted"] = True
+    if len(_json(result)) > target and len(result.get("title", "")) > 80:
+        result["title"] = result["title"][:80]
+        result["title_truncated"] = True
+    if len(_json(result)) > target and result["source_event_refs"]:
+        result["source_refs_omitted"] = result.get("source_refs_omitted", 0) + len(result["source_event_refs"])
+        result["source_event_refs"] = []
+        result["source_refs_truncated"] = True
 
 
 def validate_work_memory_config(value):
@@ -523,6 +609,9 @@ class WorkMemoryMixin:
             if expected_revision is not None and expected_revision != row["revision"]:
                 raise ContractError("work revision changed; search again")
             result = self._work_item(project, row, workspace=workspace)
+            result["file_check"] = _read_file_check(self, project, memory_id, workspace)
+            if result["files_count"] > len(result["files"]):
+                result["files_omitted"] = result["files_count"] - len(result["files"])
             body = json.loads(row["body"])
             if section == "summary":
                 text = body["summary"]
@@ -536,12 +625,8 @@ class WorkMemoryMixin:
                 raise ContractError("offset exceeds work section length")
             result.pop("summary", None)
             result.update(status="ok", section=section, section_length=len(text), offset=offset, content="", next_offset=None)
-            # metadata 非正文也必须可容纳，不裁断 JSON 身份或证据状态。
-            while len(_json(result)) > max_chars - 128 and result["files"]:
-                result["files"].pop()
-            if len(_json(result)) > max_chars - 128:
-                result["source_event_refs"] = result["source_event_refs"][:1]
-                result["source_refs_truncated"] = True
+            # Previews may shrink; full source and bounded file checks remain.
+            _read_metadata_preview(result, max_chars)
             low, high = 0, len(text) - offset
             while low < high:
                 middle = (low + high + 1) // 2

@@ -93,7 +93,7 @@ WORKER_TOOLS = [
         "context_handle": NONEMPTY,
         "limit": {"type": "integer", "minimum": 1, "maximum": 10},
         "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}})),
-    ("work_memory_read", "按需分页读取工作观察；续页保持section与expected_revision。同一上下文已完整返回的版本默认给简短回执，确需重呈时reread=true；不会恢复截断原文。", schema({
+    ("work_memory_read", "按需分页读取工作观察；续页保持section与expected_revision。同一上下文已完整返回的版本默认给简短回执；reread=true开启新轮，续页无需重复该标记。文件未完整核验时返回正文；不会恢复截断原文。", schema({
         "memory_id": NONEMPTY, "context_handle": NONEMPTY,
         "expected_revision": {"type": "integer", "minimum": 1},
         "offset": {"type": "integer", "minimum": 0},

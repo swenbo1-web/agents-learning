@@ -8,6 +8,8 @@ from unittest.mock import patch
 from agent_learning.mcp import Server
 from agent_learning.runtime import ContractError, Runtime, encode
 from agent_learning.work_read_delivery import WorkReadDelivery
+from agent_learning.work_memory import WORK_READ_FILE_CHECK_LIMIT, _read_file_version
+from agent_learning.work_files import normalize_file_target
 
 
 class WorkReadDeliveryTests(unittest.TestCase):
@@ -65,6 +67,173 @@ class WorkReadDeliveryTests(unittest.TestCase):
         self.assertTrue(self.read(section="evidence")["already_read"])
         with self.assertRaisesRegex(ContractError, "expected_revision"):
             self.read(section="evidence", offset=1)
+
+    def test_forced_replay_continues_without_repeating_flag(self):
+        original = self.read(section="evidence", max_chars=10000)
+        current = self.read(section="evidence", max_chars=1400, reread=True)
+        self.assertTrue(current["truncated"])
+        contents = current["content"]
+        while current["next_offset"] is not None:
+            current = self.read(section="evidence", max_chars=1400, offset=current["next_offset"],
+                                expected_revision=original["revision"])
+            self.assertNotIn("already_read", current)
+            contents += current["content"]
+        self.assertEqual(contents, original["content"])
+        self.assertTrue(self.read(section="evidence")["already_read"])
+
+    def test_legacy_replay_flag_on_each_page_keeps_round_coverage(self):
+        original = self.read(section="evidence", max_chars=10000)
+        current = self.read(section="evidence", max_chars=1400, reread=True)
+        contents = current["content"]
+        while current["next_offset"] is not None:
+            current = self.read(section="evidence", max_chars=1400, offset=current["next_offset"],
+                                expected_revision=original["revision"], reread=True)
+            contents += current["content"]
+        self.assertEqual(contents, original["content"])
+        self.assertTrue(self.read(section="evidence")["already_read"])
+
+    def add_files(self, count):
+        paths = []
+        for index in range(count):
+            path = self.workspace / f"extra-{index:03}.py"
+            path.write_text(f"file {index}", encoding="utf-8")
+            target = normalize_file_target(str(path), self.workspace)
+            with self.r.transaction():
+                # Each source owns no more than the producer's sixteen links.
+                if index % 16 == 0:
+                    event, _ = self.r._event(self.p, "past", "PostToolUse", {"index": index},
+                                             outcome="succeeded")
+                    snapshot = self.r.work_source_snapshot(self.p, event["id"])
+                    self.r.db.execute("INSERT INTO work_memory_sources VALUES(?,?,?,?,?)",
+                        (self.p, self.memory_id, event["id"], snapshot["capture_digest"], snapshot["source_version"]))
+                self.r.db.execute("INSERT INTO work_file_links VALUES(?,?,?,?,?,?,?)",
+                    (self.p, event["id"], target["checkout_key"], target["relative_path"],
+                     target["path_key"], "write_target", json.dumps(target["version"])))
+            paths.append(path)
+        return paths
+
+    def test_change_beyond_three_visible_files_invalidates_complete_receipt(self):
+        paths = self.add_files(4)
+        first = self.read(max_chars=10000)
+        self.assertEqual(len(first["files"]), 3)
+        hidden = next(path for path in paths if path.name not in
+                      {item["relative_path"] for item in first["files"]})
+        self.assertTrue(first["file_check"]["complete"])
+        self.assertTrue(self.read()["already_read"])
+        hidden.write_text("a larger changed file beyond display", encoding="utf-8")
+        changed = self.read()
+        self.assertIn("content", changed)
+        self.assertNotEqual(first["file_check"], changed["file_check"])
+        self.assertTrue(self.read()["already_read"])
+
+    def test_file_check_limit_disables_receipt_without_unbounded_stats(self):
+        self.add_files(WORK_READ_FILE_CHECK_LIMIT)
+        with patch("agent_learning.work_memory._read_file_version", wraps=_read_file_version) as observed:
+            first = self.read(max_chars=10000)
+            repeated = self.read(max_chars=10000)
+        self.assertEqual(observed.call_count, 0)
+        self.assertEqual(first["file_check"], {"complete": False, "reason": "file_check_limit"})
+        self.assertIn("content", repeated)
+        self.assertFalse(self.server.work_read_delivery.receipts)
+
+    def test_exact_file_check_limit_checks_all_files_and_reuses(self):
+        self.add_files(WORK_READ_FILE_CHECK_LIMIT - 1)
+        with patch("agent_learning.work_memory._read_file_version", wraps=_read_file_version) as observed:
+            first = self.read(max_chars=10000)
+        self.assertEqual(observed.call_count, WORK_READ_FILE_CHECK_LIMIT)
+        self.assertTrue(first["file_check"]["complete"])
+        self.assertEqual(first["files_omitted"], first["files_count"] - len(first["files"]))
+        self.assertTrue(self.read(max_chars=10000)["already_read"])
+        self.assertTrue(self.read(max_chars=1024)["already_read"])
+
+    def test_small_budget_multi_file_reads_and_receipts_keep_full_live_check(self):
+        self.add_files(2)
+        for section in ("summary", "evidence"):
+            with self.subTest(section=section):
+                complete = self.read(section=section, max_chars=10000)
+                receipt = self.read(section=section, max_chars=1024)
+                self.assertTrue(receipt["already_read"])
+                self.assertEqual(receipt["file_check"], complete["file_check"])
+                self.assertLessEqual(len(encode(receipt)), 1024)
+                replay = self.read(section=section, max_chars=1024, reread=True)
+                self.assertIn("content", replay)
+                self.assertTrue(replay["content"])
+                self.assertGreater(replay["files_omitted"], 0)
+                self.assertEqual(replay["files_omitted"], replay["files_count"] - len(replay["files"]))
+                self.assertGreater(replay["file_state_omitted"], 0)
+                self.assertEqual(replay["file_check"], complete["file_check"])
+                self.assertLessEqual(len(encode(replay)), 1024)
+                current, text = replay, replay["content"]
+                while current["next_offset"] is not None:
+                    current = self.read(section=section, max_chars=1024,
+                        offset=current["next_offset"], expected_revision=complete["revision"])
+                    self.assertNotIn("already_read", current)
+                    text += current["content"]
+                self.assertEqual(text, complete["content"])
+                self.assertTrue(self.read(section=section, max_chars=10000)["already_read"])
+
+    def test_small_budget_over_limit_does_not_reuse_but_can_read(self):
+        self.add_files(WORK_READ_FILE_CHECK_LIMIT)
+        for section in ("summary", "evidence"):
+            with self.subTest(section=section):
+                self.read(section=section, max_chars=10000)
+                page = self.read(section=section, max_chars=1024)
+                self.assertIn("content", page)
+                self.assertTrue(page["content"])
+                self.assertFalse(page["file_check"]["complete"])
+                self.assertNotIn("already_read", page)
+                self.assertLessEqual(len(encode(page)), 1024)
+                self.assertEqual(page["files_omitted"], page["files_count"] - len(page["files"]))
+
+    def test_small_budget_keeps_reference_risk_and_stable_full_source_version(self):
+        self.add_files(1)
+        risk = {"blocked": True, "reason": "unresolved " + "source details " * 300}
+        with patch("agent_learning.candidate_references.lineage_risk", return_value=risk):
+            for section in ("summary", "evidence"):
+                with self.subTest(section=section):
+                    complete = self.read(section=section, max_chars=50000)
+                    receipt = self.read(section=section, max_chars=1024)
+                    self.assertTrue(receipt["already_read"])
+                    self.assertFalse(receipt["automatic_eligible"])
+                    self.assertTrue(receipt["candidate_reference_risk"][0]["blocked"])
+                    self.assertLessEqual(len(encode(receipt)), 1024)
+                    replay = self.read(section=section, max_chars=1024, reread=True)
+                    self.assertTrue(replay["content"])
+                    self.assertFalse(replay["automatic_eligible"])
+                    self.assertTrue(replay["candidate_reference_risk"][0]["details_omitted"])
+                    self.assertEqual(replay["source_version"], complete["source_version"])
+                    self.assertLessEqual(len(encode(replay)), 1024)
+
+    def test_unreadable_file_does_not_reuse_or_keep_old_complete_receipt(self):
+        self.read()
+        with patch("agent_learning.work_memory._read_file_version", return_value={"status": "unavailable"}):
+            changed = self.read()
+            self.assertIn("content", changed)
+            self.assertFalse(changed["file_check"]["complete"])
+            self.assertIn("content", self.read())
+            self.assertFalse(self.server.work_read_delivery.receipts)
+        self.assertIn("content", self.read())
+        self.assertTrue(self.read()["already_read"])
+
+    def test_known_missing_file_invalidates_then_can_be_reused(self):
+        self.read()
+        self.file.unlink()
+        changed = self.read()
+        self.assertIn("content", changed)
+        self.assertTrue(changed["file_check"]["complete"])
+        self.assertTrue(self.read()["already_read"])
+        self.file.write_text("restored file", encoding="utf-8")
+        self.assertIn("content", self.read())
+
+    def test_other_checkout_or_missing_workspace_returns_body_without_receipt(self):
+        self.read()
+        with self.r.transaction():
+            self.r.db.execute("UPDATE work_file_links SET checkout_key='another-checkout' WHERE project=?",
+                              (self.p,))
+        self.assertEqual(self.read()["file_check"]["reason"], "checkout_unavailable")
+        self.assertIn("content", self.read())
+        no_workspace = self.r.work_read(self.p, self.memory_id)
+        self.assertEqual(no_workspace["file_check"]["reason"], "workspace_unavailable")
 
     def test_sections_have_independent_receipts(self):
         self.read(section="summary")
@@ -196,7 +365,8 @@ class WorkReadReceiptBoundsTests(unittest.TestCase):
     def page(self, memory_id="id", *, offset=0, content="secret observation"):
         return {"status": "ok", "memory_id": memory_id, "revision": 1, "source_version": "v1",
                 "state": "reported", "source_changed": False, "validation_level": "reported",
-                "section": "summary", "section_length": len(content), "offset": offset, "content": content}
+                "section": "summary", "section_length": len(content), "offset": offset, "content": content,
+                "file_check": {"complete": True, "version": "verified-no-files"}}
 
     def test_receipts_are_bounded_and_store_no_evidence_text(self):
         receipts = WorkReadDelivery()
@@ -215,6 +385,35 @@ class WorkReadReceiptBoundsTests(unittest.TestCase):
         self.assertIn("content", receipts.project(first, "scope"))
         receipts.project(dict(first, offset=5), "scope")
         self.assertTrue(receipts.project(first, "scope")["already_read"])
+
+    def test_missing_file_check_never_creates_receipt(self):
+        receipts = WorkReadDelivery()
+        page = self.page()
+        page.pop("file_check")
+        self.assertIn("content", receipts.project(page, "scope"))
+        self.assertIn("content", receipts.project(page, "scope"))
+        self.assertFalse(receipts.receipts)
+
+    def test_replay_from_middle_does_not_inherit_old_complete_ranges(self):
+        receipts = WorkReadDelivery()
+        full = self.page(content="abcdefghijklmnopqrst")
+        receipts.project(full, "scope")
+        middle = dict(full, offset=10, content="klmnopqrst")
+        receipts.project(middle, "scope", reread=True)
+        self.assertIn("content", receipts.project(middle, "scope"))
+        receipts.project(dict(full, content="abcdefghij"), "scope")
+        self.assertTrue(receipts.project(full, "scope")["already_read"])
+
+    def test_replay_restart_at_zero_discards_previous_partial_round(self):
+        receipts = WorkReadDelivery()
+        full = self.page(content="abcdefghijklmnopqrst")
+        receipts.project(full, "scope")
+        receipts.project(dict(full, offset=10, content="klmnopqrst"), "scope", reread=True)
+        first = dict(full, content="abcdefghij")
+        receipts.project(first, "scope", reread=True)
+        self.assertIn("content", receipts.project(first, "scope"))
+        receipts.project(dict(full, offset=10, content="klmnopqrst"), "scope")
+        self.assertTrue(receipts.project(full, "scope")["already_read"])
 
 
 if __name__ == "__main__":

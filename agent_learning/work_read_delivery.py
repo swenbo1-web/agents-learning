@@ -31,18 +31,32 @@ class WorkReadDelivery:
                 or not 0 <= offset <= offset + len(text) <= length):
             return result
         key = _hash([scope, result["memory_id"], result["section"]])
+        file_check = result.get("file_check")
+        if not isinstance(file_check, dict) or file_check.get("complete") is not True:
+            # Unknown or over-budget file observations cannot establish that a
+            # previous full section still describes the same available state.
+            self.receipts.pop(key, None)
+            return result
         fingerprint = _hash({key: result.get(key) for key in (
             "revision", "source_version", "state", "completion", "source_changed",
-            "candidate_reference_risk", "file_state", "section_length")})
+            "file_check", "section_length")})
         previous = self.receipts.pop(key, None)
         ranges = previous[1] if previous and previous[0] == fingerprint else []
         complete = ranges == [(0, length)]
+        if reread and (complete or offset == 0):
+            # A new replay must cover its own ranges. Explicit reread on each
+            # continuation page remains compatible, without resetting that round.
+            ranges = []
+            complete = False
         # An already-returned receipt is not proof the model read or remembered it.
         if complete and not reread:
             self.receipts[key] = (fingerprint, ranges)
             return {"status": "ok", "memory_id": result["memory_id"], "revision": result["revision"],
                 "source_version": result["source_version"], "state": result["state"],
                 "source_changed": result["source_changed"], "validation_level": result["validation_level"],
+                "file_check": file_check,
+                **({"candidate_reference_risk": [{"blocked": True, "details_omitted": True}],
+                    "automatic_eligible": False} if result.get("candidate_reference_risk") else {}),
                 "section": result["section"], "section_length": length, "offset": offset,
                 "next_offset": None, "truncated": False, "content_omitted": True,
                 "already_read": True, "section_previously_returned_complete": True,
