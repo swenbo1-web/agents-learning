@@ -3,6 +3,9 @@
     "PreInvocation": [
       {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PreInvocation", "timeout": 10}
     ],
+    "PostInvocation": [
+      {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PostInvocation", "timeout": 10}
+    ],
     "PostToolUse": [
       {"matcher": "*", "hooks": [
         {"type": "command", "command": "python -B hooks/antigravity_dispatch.py --event PostToolUse", "timeout": 10}

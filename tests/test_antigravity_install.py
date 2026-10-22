@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -63,7 +64,7 @@ class AntigravityInstallTests(unittest.TestCase):
         self.assertEqual(set(plugin), {"name", "description"})
         self.assertEqual(plugin["name"], "agent-learning")
         hooks = read_json(self.target / "hooks.json")["agent-learning"]
-        self.assertEqual(set(hooks), {"PreInvocation", "PostToolUse", "Stop"})
+        self.assertEqual(set(hooks), {"PreInvocation", "PostInvocation", "PostToolUse", "Stop"})
         self.assertNotIn("permissionOverrides", json.dumps(hooks))
         runtime = Path(result["runtime_directory"])
         mcp = read_json(self.target / "mcp_config.json")["mcpServers"]["agent_learning"]
@@ -370,6 +371,16 @@ class AntigravityInstallTests(unittest.TestCase):
         handle_match = re.search(r"context_handle=([^;\s]+)", text)
         self.assertIsNotNone(handle_match, "the exported hook must deliver a usable session identity")
         handle = handle_match.group(1)
+        post = subprocess.run(shlex.split(observe["PostInvocation"][0]["command"]),
+            input=json.dumps(event, ensure_ascii=False).encode("utf-8"), cwd=self.root,
+            env=environment, capture_output=True, timeout=15)
+        self.assertEqual(post.returncode, 0, post.stderr.decode("utf-8", "replace"))
+        self.assertEqual(json.loads(post.stdout.decode("utf-8")), {})
+        check = sqlite3.connect((self.home / "runtime.sqlite3").as_uri() + "?mode=ro", uri=True)
+        try:
+            self.assertEqual(check.execute("SELECT state FROM antigravity_receipts WHERE kind='PostInvocation'").fetchone()[0], "complete")
+        finally:
+            check.close()
         mcp = read_json(self.target / "mcp_config.json")["mcpServers"]["agent_learning"]
         goal = "检查中文编码与隔离会话"
         messages = [

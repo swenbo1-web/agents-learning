@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.11 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.12 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -123,6 +123,15 @@ The initial complete offline run covered 2,326 checks and exposed coupling issue
 Database schema and publication protocol remain 25; work and optional semantic indexes remain 1. Update shared-database runtimes together to avoid alternating full-text projection rebuilds. Upgrading does not rerun administrators, delete knowledge or alter project publication policies.
 
 Final isolated verification covered 791 Python 3.10 checks: 790 passed and one Windows symlink-privilege check was skipped. One old assertion still allowed automatic injection for 160 identifiers; after updating it to the explicit manual-only overflow contract, all eight checks in that module passed again without production-code changes. Another 168 combined checks passed on Python 3.14. Three-host installation integrity, simulated Hooks, MCP and visual resources passed in 13.877 seconds. The simulated database passed quick_check with zero foreign-key errors. Acceptance called no real models and did not update active installations; these results do not establish real-task benefits or constant latency at every provenance scale.
+
+### Antigravity public records and health diagnostics (1.4.12)
+
+- **Bounded public capture:** Read recognized public `prompt/content` fields only from the native Hook's `transcriptPath`, checking the matching `PreInvocation`/`PostInvocation`, project, conversation, trajectory and task boundaries. No account-wide history scan, thinking, tool payloads or unknown text is retained. Multiple roots, unknown formats or mismatched identity leave coverage unknown.
+- **Responses and deliveries remain separate:** Public responses become searchable `reported`/partial working history. `PostInvocation` does not manufacture a `Stop`, task delivery, stage or administrator dispatch, and never backfills or replays an old Stop. Stage completion still needs valid task delivery and supported native stopping evidence.
+- **Scoped health observations:** `project_recent_capture` describes recent project capture, not complete coverage of the current chat or one turn. Refreshing reads saved receipts without rereading transcripts or calling models. The complete Antigravity automatic stage-review chain still requires live acceptance.
+- **Independent administrator entry:** Only the independent `agy` CLI provides this review protocol. On Windows, the default command checks PATH, then the official `%LOCALAPPDATA%\agy\bin\agy.exe` location. Explicit commands stay authoritative; App, IDE and `agentapi` are not substitutes. Launcher availability, cached protocol checks and unverified authentication/model capability are distinct. No automatic installation, login or administrator enablement occurs.
+
+Database schema/publication protocol remain 25 and indexes remain 5/1/1; knowledge, permissions and usage are preserved. See the [official Hooks contract](https://antigravity.google/docs/hooks) and [Headless reference](https://antigravity.google/docs/cli/headless/).
 
 ### DSH tool contracts and observation consistency (1.4.11)
 
@@ -761,18 +770,21 @@ Every Antigravity stateful MCP request must explicitly supply the current Hook h
 
 ### Host differences and evidence
 
-| Workflow | Codex | Initial Antigravity adapter |
+| Workflow | Codex | Current Antigravity adapter |
 |---|---|---|
 | Automatic context | Supported user prompt, session and restoration events | PreInvocation using registered goals, recent queries and actual errors |
-| Current user prompt | Supported Hook prompt | Public callback does not promise prompt text; register it through task_update |
+| Current user prompt | Supported Hook prompt | Native public fields or verified public user fields from the Hook-supplied transcriptPath and matching invocation; use task_update when unavailable |
+| Public responses | Actual public output supplied by the host | Matched PostInvocation may save a bounded response as partial working history; it does not establish task delivery |
 | Context delivery | Track previous injections and avoid repeated text | Render bounded ephemeralMessage from cached references each invocation |
 | Tool observations | Classify actual responses | Nonempty PostToolUse.error is failure; empty means call_completed only |
 | Execution checks | Connected rules and trusted approvals | Observe omits PreToolUse; enforce returns ask on passing checks and deny on rejection |
 | Stop | Registered delivery and public output | Records loop stopping; fullyIdle does not prove user acceptance |
 | Compaction, children, login | Supported events and explicit entry points | No invented equivalent events; ambiguous numbering needs trusted reset |
-| Administrator | Optional Codex CLI review executor and separate admin tools | Optional Antigravity CLI review executor sharing governance queues and budgets; automatic calls are off by default on both hosts |
+| Administrator | Optional Codex CLI review executor and separate admin tools | Requires independent agy CLI, not App/IDE/agentapi; complete automatic stage review remains unverified in a live host; off by default |
 
-The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). It does not scan transcripts, artifacts or private model reasoning. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
+The adapter follows the [official Hooks contract](https://antigravity.google/docs/hooks). A Hook-supplied `transcriptPath` permits bounded recovery of recognized public fields only for the verified current invocation and conversation directory. It does not scan account history, artifacts, tool payloads, internal reasoning or old Stop records. Without final outputs, exit codes or asynchronous outcomes, it does not generate tool_success evidence or satisfy publication policies requiring that level. Feedback retains its reported status. In observe mode, a Post without a verified Pre remains unassociated with a task; errors can still trigger bounded followup searches. Repeated ephemeral summaries still use model context. Caching avoids repeated retrieval; it is not evidence of net token savings.
+
+Invocation completion, searchable public responses, stage delivery and administrator review are checked separately. Recent project capture observations may concern different invocations and cannot be combined to claim complete coverage of one turn.
 
 Multi-workspace callbacks must mount the bound project. Tool resources verify attribution; uncertain callbacks stay unassociated, and enforce rejects them. Native tool argument mappings are distinct from Codex. For example, run_command is command execution and cannot bypass read-only protection through a rule labeling it as a read.
 
@@ -822,7 +834,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.11 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update repairs DSH tool argument injection and completion observation consistency while preserving knowledge, tasks and usage. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
+Current `main` v1.4.12 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update adds bounded Antigravity public capture, recent-capture diagnostics and independent CLI discovery while preserving knowledge, tasks, permissions and usage. Public responses do not establish stage delivery or administrator review. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1144,7 +1156,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.11 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update repairs DSH tool argument injection and completion observation consistency without changing evidence, publication or scheduling permissions. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
+**Current source version 1.4.12 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update adds bounded Antigravity public capture, recent-capture diagnostics and independent CLI discovery without changing evidence, publication or scheduling permissions. Complete Antigravity automatic stage review still needs live acceptance; a public response alone is not a stage delivery. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1460,6 +1472,8 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host dsh ad
 ```
 
 `admin-status` makes no model call. It reports the effective policy, readiness, waiting reason and recent calls. Add `--conversation "NATIVE_CONVERSATION_ID"` to check a specific root conversation. Retain the installation's custom `--home PATH` and any corresponding `--host-instance`. To disable reviews, change `--enabled on` to `off` in the configuration command.
+
+**Antigravity review requires the independent `agy` CLI.** A working App or IDE conversation does not establish that this executable is installed; `agentapi` manages native conversations and does not provide the restricted initialization and structured review protocol. Follow the [official installation guide](https://antigravity.google/docs/getting-started?tab=cli). On Windows, the default command checks PATH before the official `%LOCALAPPDATA%\agy\bin\agy.exe`; explicit paths or arguments are not replaced. Status separates launcher availability, cached protocol checks and unverified authentication/model support. Refreshing never starts a probe or model. Unknown remains unknown, and platform authentication is CLI-managed; the plugin does not sign in or silently change models.
 
 | Model mode | Selection | When unavailable |
 |---|---|---|

@@ -76,8 +76,8 @@ def _validate_antigravity_resources(root):
             or not isinstance(hooks["agent-learning"], dict)):
         raise ContractError("Antigravity plugin Hook resource is invalid")
     events = hooks["agent-learning"]
-    if (not {"PreInvocation", "PostToolUse", "Stop"}.issubset(events)
-            or set(events) - {"PreInvocation", "PostToolUse", "PreToolUse", "Stop"}):
+    if (not {"PreInvocation", "PostInvocation", "PostToolUse", "Stop"}.issubset(events)
+            or set(events) - {"PreInvocation", "PostInvocation", "PostToolUse", "PreToolUse", "Stop"}):
         raise ContractError("Antigravity plugin Hook events are invalid")
     for event, handlers in events.items():
         if not isinstance(handlers, list) or not handlers:

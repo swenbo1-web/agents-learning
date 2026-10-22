@@ -150,6 +150,7 @@ class PanelControl:
 
     def _summary(self):
         from .admin_control import control_status
+        from .antigravity_health import capture_status
         state = control_status(self.runtime, self.project)
         routing = state["routing"]
         usage = state.get("project_usage") or {}
@@ -164,7 +165,17 @@ class PanelControl:
                     "expected_session_epoch": state["session_epoch"],
                     "expected_governance_epoch": state["governance_epoch"]}
         root = self.binding["workspace"]
+        capture = ({"host_capture": capture_status(self.runtime, self.project)}
+                   if self.runtime.host == "antigravity" else {})
+        availability = routing.get("availability") or {}
         return {"project_id": self.project, "project_name": Path(root).name, "workspace": root,
+                **capture,
+                "administrator_readiness": {
+                    "provider": executor.get("provider") if executor.get("provider") in {"codex", "antigravity", "dsh"} else None,
+                    "launcher_available": availability.get("cli_available"),
+                    "capability_checked": availability.get("capability_checked", False),
+                    "capability_ready": availability.get("capability_ready"),
+                    "authentication_checked": False},
                 "host_scope": state["host_scope"], "admin_admission_enabled": state["enabled"],
                 "model_mode": policy["model_mode"], "model": executor.get("model"),
                 "remaining_calls": usage.get("remaining_calls"), "max_calls_per_day": usage.get("max_calls_per_day"),
@@ -243,6 +254,7 @@ class PanelControl:
             except (ValueError, TypeError):
                 pass
         return {"version": 1, "backups": panel_backup_preview(self.installation),
+                **({"capture": state["host_capture"]} if "host_capture" in state else {}),
                 "connection": {"ui_bridge": "responding",
                     "mcp": "responding" if self.require_context else "unknown",
                     "hook": "verified" if bound else "unknown", "context_bound": bound if self.require_context else None},

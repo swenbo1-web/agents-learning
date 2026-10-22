@@ -768,6 +768,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (project, name, value))
 
     def status(self, project):
+        from .antigravity_health import capture_status
         from .candidate_references import policy as reference_policy
         from .phase_review import status as phase_status
         from .admin_control import admission_enabled
@@ -798,7 +799,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             admission = {"admission_status": "invalid_configuration", "blocking_scope": None,
                          "project_usage": project_usage, "global_usage": budget}
             dispatch = {"phase": "idle", "reason": "invalid_configuration", "next_due": None}
+        capture = {"host_capture": capture_status(self, project)} if self.host == "antigravity" else {}
         return {"project_id": project, "home": str(self.home), "host_epoch": self.session_epoch(),
+                **capture,
                 "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],

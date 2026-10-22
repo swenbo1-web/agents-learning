@@ -346,7 +346,7 @@ def parser():
     ui.add_argument("--upgrade", action="store_true", help="验证并更新已有纯UI桥，保留其他项目及旧目录备份")
     ui.add_argument("--remove", action="store_true", help="仅移除选中安装的UI登记；不卸载项目核心")
     native_hook = sub.add_parser("antigravity-hook", help="接收固定安装工作区的Antigravity原生事件")
-    native_hook.add_argument("--event", required=True, choices=["PreInvocation", "PreToolUse", "PostToolUse", "Stop"])
+    native_hook.add_argument("--event", required=True, choices=["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
     native_hook.add_argument("--hook-mode", choices=["observe", "enforce"])
     reset = sub.add_parser("antigravity-session-reset", help="受信入口重置无法辨别的原生轨迹；暂停任务并失效旧句柄与许可")
     reset.add_argument("--conversation", required=True, help="原生conversationId，不含宿主前缀")

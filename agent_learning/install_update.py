@@ -195,7 +195,8 @@ def antigravity_hooks(runtime, python, mode, command_builder, workspace, home):
         if set(hooks) != {"agent-learning"} or not isinstance(hooks["agent-learning"], dict):
             raise TypeError
         definition = hooks["agent-learning"]
-        if set(definition) != {"PreInvocation", "PostToolUse", "PreToolUse", "Stop"}:
+        if set(definition) not in ({"PreInvocation", "PostToolUse", "PreToolUse", "Stop"},
+                                   {"PreInvocation", "PostInvocation", "PostToolUse", "PreToolUse", "Stop"}):
             raise TypeError
         if mode != "enforce":
             definition.pop("PreToolUse")

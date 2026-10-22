@@ -321,7 +321,7 @@ class AdminRoutingMixin:
                 from .dsh_profile import resolve_profile, assert_conversation_profile
                 result["dsh_profile"] = resolve_profile(config["dsh_profile"])
                 assert_conversation_profile(self, project, conversation, result["dsh_profile"])
-        if provider == "codex":
+        if provider in {"codex", "antigravity"}:
             # Freeze the actual launcher as well as the configured command.
             # A host backend/PATH change must invalidate a prepared execution.
             from .admin_queue import executor_signature
@@ -427,9 +427,12 @@ class AdminRoutingMixin:
             executor = self.resolve_admin_executor(project, conversation, require_enabled=False)
             from .admin_providers import executor_availability
             availability = executor_availability(executor)
+            ready = availability["cli_available"] and availability.get("capability_ready") is not False
+            reason = availability["reason"] or (availability.get("capability_reason")
+                                               if availability.get("capability_ready") is False else None)
             return {"policy": policy, "executor": executor, "routing_ready": True,
-                    "ready": availability["cli_available"], "availability": availability,
-                    "reason": availability["reason"], "recent_calls": recent,
+                    "ready": ready, "availability": availability,
+                    "reason": reason, "recent_calls": recent,
                     "first_binding": binding, "observed_models": observed_models}
         except ValueError as exc:
             # 不回传潜在外部执行器错误文本或凭证，仅已定义的契约状态。

@@ -58,24 +58,67 @@ def validate_model(model):
 
 def executor_availability(plan):
     """使用与 Popen 相同的静态解析；不运行模型、shell 或读取登录凭证。"""
+    capability = {"capability_checked": False, "capability_ready": None,
+                  "capability_reason": "not_checked", "readiness_scope": "launcher_only"}
     try:
         resolved = (dsh_sdk_launcher(plan.get("command")) if plan.get("provider") == "dsh" else None)
         if resolved is not None:
             from .dsh_profile import assert_profile
             assert_profile(plan.get("dsh_profile"))
         resolved = resolved or resolve_command(plan.get("command"))
+        # A status refresh may reuse a bounded help/probe result, but must never
+        # launch that probe itself. Executable identity invalidates stale results.
+        if _CAPABILITIES:
+            from .admin_queue import executor_signature
+            observed = _CAPABILITIES.get(executor_signature(plan))
+            if observed is not None:
+                capability.update(capability_checked=True, capability_ready=observed["ready"],
+                                  capability_reason=observed["reason"], readiness_scope="protocol_checked")
         return {"cli_available": True, "authentication": "provider_cli_managed_not_checked",
                 "reason": None, "launch_kind": resolved["launch_kind"],
-                "executable_source": resolved.get("executable_source", "configured_or_path")}
+                "executable_source": resolved.get("executable_source", "configured_or_path"), **capability}
     except (OSError, ValueError) as exc:
         return {"cli_available": False, "authentication": "provider_cli_managed_not_checked",
-                "reason": getattr(exc, "launch_reason", "cli_unavailable")}
+                "reason": getattr(exc, "launch_reason", "cli_unavailable"),
+                **{**capability, "readiness_scope": "unavailable"}}
+
+
+def _windows_agy(command):
+    """Find only the standard CLI; skip implicit/relative current-directory PATH entries.
+
+    The official installer may not have refreshed a running desktop's PATH yet.
+    This is a bounded fallback to its documented directory, never an App/IDE or
+    a launcher inferred from project files. Explicit paths/arguments stay authoritative.
+    """
+    if len(command) != 1 or command[0].lower() not in {"agy", "agy.exe"}:
+        return None, None
+    cwd = Path.cwd().resolve()
+    names = [command[0]] if command[0].lower().endswith(".exe") else [command[0] + suffix for suffix in (".exe", ".com", ".bat", ".cmd")]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        directory = Path(entry)
+        if not directory.is_absolute() or directory.resolve() == cwd:
+            continue
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and candidate.resolve().parent != cwd:
+                return str(candidate), "path"
+    local = os.environ.get("LOCALAPPDATA")
+    if local and Path(local).is_absolute():
+        candidate = Path(local) / "agy" / "bin" / "agy.exe"
+        if candidate.is_file():
+            return str(candidate), "official_install"
+    return None, None
 
 
 def resolve_command(command, *, _windows=None):
     """npm Windows shim 仅投影为已存在 node + 包脚本，绝不交给 cmd.exe。"""
     command = validate_command(command)
     candidate = Path(command[0])
+    windows = os.name == "nt" if _windows is None else _windows
+    standard_agy = windows and len(command) == 1 and command[0].lower() in {"agy", "agy.exe"}
+    executable_source = "configured_or_path"
     # A desktop may ship a newer backend than the independently installed CLI.
     # The default name and our exact HTTP preset inherit this host-owned hint. Explicit paths
     # and custom launchers remain authoritative; project evidence is never read.
@@ -88,19 +131,21 @@ def resolve_command(command, *, _windows=None):
             exc.launch_reason = "host_cli_unavailable"
             raise exc
         executable = str(hinted)
+        executable_source = "host_cli"
+    elif standard_agy:
+        executable, executable_source = _windows_agy(command)
     else:
         executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
     if not executable:
         raise FileNotFoundError("administrator executable unavailable")
     executable = Path(executable).resolve()
-    windows = os.name == "nt" if _windows is None else _windows
     if windows and executable.suffix.lower() in {".ps1", ".py", ".js", ".mjs", ".cjs"}:
         exc = ValueError("administrator script requires an explicit interpreter")
         exc.launch_reason = "cli_shim_unsupported"
         raise exc
     if not windows or executable.suffix.lower() not in {".cmd", ".bat"}:
         return {"args": [str(executable), *command[1:]], "launch_kind": "executable",
-                "executable_source": "host_cli" if host_cli else "configured_or_path"}
+                "executable_source": executable_source}
     def refuse():
         exc = ValueError("administrator command shim is unsupported")
         exc.launch_reason = "cli_shim_unsupported"
@@ -128,7 +173,8 @@ def resolve_command(command, *, _windows=None):
     node = str(adjacent) if adjacent.is_file() else shutil.which("node.exe")
     if not node:
         raise FileNotFoundError("administrator node runtime unavailable")
-    return {"args": [str(Path(node).resolve()), str(script), *command[1:]], "launch_kind": "npm_node"}
+    return {"args": [str(Path(node).resolve()), str(script), *command[1:]], "launch_kind": "npm_node",
+            "executable_source": executable_source}
 
 
 def launch_error(exc):
