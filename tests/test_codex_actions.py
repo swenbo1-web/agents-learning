@@ -304,7 +304,10 @@ class CodexActionsTests(unittest.TestCase):
         command = build_action_command({"python": sys.executable, "runtime_directory": runtime}, target,
                                        home=home, config=config)
         args = command.split(" ") if sys.platform == "win32" else ["/bin/sh", "-c", command]
-        result = subprocess.run(args, cwd=self.workspace, capture_output=True, text=True, encoding="utf-8", timeout=15)
+        # Shared Windows runners can start PowerShell slowly; this probe allowance
+        # does not change any product Hook execution budget.
+        timeout = 45 if sys.platform == "win32" else 15
+        result = subprocess.run(args, cwd=self.workspace, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
         self.assertEqual(result.returncode, 0, result.stderr)
         observed = json.loads(result.stdout)
         self.assertEqual(observed["home"], str(home))

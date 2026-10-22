@@ -479,6 +479,10 @@ const WORKER_TOOL_SPECS = [
   },
 ];
 
+const CONTEXT_TOOL_NAMES = new Set(WORKER_TOOL_SPECS.filter(
+  (spec) => Object.hasOwn(spec.parameters.properties, "context_handle"),
+).map((spec) => spec.name));
+
 export const name = "agent-learning";
 export const inject = ["tools", "systemPrompt", "agents"];
 
@@ -583,6 +587,7 @@ export function apply(ctx, config = {}) {
           src.includes("captureTurn(") ||
           src.includes("ensureAgentScopedTools(") ||
           src.includes("WORKER_TOOL_NAMES") ||
+          src.includes("toolArguments(") ||
           src.includes("forgetSessionCapture(") ||
           src.includes("sessionMeta.set(")
         ) {
@@ -596,6 +601,23 @@ export function apply(ctx, config = {}) {
   const sessionHandles = new Map();
   const sessionMeta = new Map();
   const sessionStarts = new Map();
+  // Keep the authorization field stable between observation, execution and
+  // completion, even if a later context refresh changes the session handle.
+  const toolContextBindings = new Map();
+  function toolContextKey(exec) {
+    return exec?.agent?.id && exec?.callId ? JSON.stringify([exec.agent.id, exec.callId]) : null;
+  }
+  function toolArguments(toolName, rawArgs, exec, completion = false) {
+    const args = { ...(rawArgs || {}) };
+    if (CONTEXT_TOOL_NAMES.has(toolName) && !Object.hasOwn(args, "context_handle")) {
+      const key = toolContextKey(exec);
+      const bound = key && toolContextBindings.get(key);
+      const handle = bound?.name === toolName ? bound.handle
+        : completion ? undefined : sessionHandles.get(exec?.agent?.id);
+      if (handle) args.context_handle = handle;
+    }
+    return args;
+  }
   const browserProcesses = new Map();
   const scopedAgentIds = new Set();
   const capturedTurns = new Map();
@@ -646,7 +668,7 @@ export function apply(ctx, config = {}) {
       }
     }
   }
-  activeDisposers.push(() => { capturedTurns.clear(); sessionStarts.clear(); });
+  activeDisposers.push(() => { capturedTurns.clear(); sessionStarts.clear(); toolContextBindings.clear(); });
 
   if (typeof ctx.inject === "function") {
     ctx.inject(["sessionQuery"], (scope) => {
@@ -1112,11 +1134,15 @@ export function apply(ctx, config = {}) {
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
     const matched = matchInstalledWorkspace(meta.cwd, receipt);
     const workspace = matched || meta.cwd || receipt.workspace || process.cwd();
-    const args = { ...(rawArgs || {}) };
+    const args = toolArguments(toolName, rawArgs, exec);
     if (toolName === "learning_browser") {
       return manageBrowser(args.action || "start", args, workspace, exec?.signal);
     }
-    if (!args.context_handle && agentId) {
+    const observedBinding = toolContextBindings.get(toolContextKey(exec));
+    if (CONTEXT_TOOL_NAMES.has(toolName) && !Object.hasOwn(args, "context_handle") && agentId
+        && observedBinding?.name !== toolName) {
+      // A pre-checked read without a handle remains native-session scoped in
+      // dsh_tool.py. Do not retrofit a later session handle into that call.
       const boundHandle = await ensureSessionBound(agentId, workspace, exec?.signal);
       if (boundHandle) {
         args.context_handle = boundHandle;
@@ -1843,10 +1869,12 @@ export function apply(ctx, config = {}) {
     if (!agent?.id) return next();
     await sessionStarts.get(agent.id);
     const meta = await resolveSessionMeta(agent.id);
-    const toolArgs = { ...(exec.arguments || {}) };
-    if (WORKER_TOOL_NAMES.has(exec.name) && !toolArgs.context_handle && sessionHandles.has(agent.id)) {
-      toolArgs.context_handle = sessionHandles.get(agent.id);
+    const contextKey = toolContextKey(exec);
+    if (contextKey && CONTEXT_TOOL_NAMES.has(exec.name)
+        && toolContextBindings.size >= 4096 && !toolContextBindings.has(contextKey)) {
+      return { kind: "deny", reason: "Agent Learning: tool context capacity reached; retry after active tools finish." };
     }
+    const toolArgs = toolArguments(exec.name, exec.arguments, exec);
     const result = await dispatchEvent(
       "PreToolUse",
       {
@@ -1872,11 +1900,17 @@ export function apply(ctx, config = {}) {
       sessionContexts.set(agent.id, additional);
       captureHandleFromText(agent.id, additional);
     }
+    if (contextKey && CONTEXT_TOOL_NAMES.has(exec.name)) {
+      toolContextBindings.set(contextKey, { name: exec.name, handle: toolArgs.context_handle });
+    }
     return next();
   });
 
   onEvent("tools/post-execute", async (exec, toolResult, next) => {
     const agent = exec?.agent;
+    let recovered;
+    let didRecover = false;
+    let recoveryError;
     if (
       exec?.name &&
       WORKER_TOOL_NAMES.has(exec.name) &&
@@ -1884,27 +1918,37 @@ export function apply(ctx, config = {}) {
       typeof toolResult?.error?.message === "string" &&
       toolResult.error.message.includes("SyntaxError: invalid syntax")
     ) {
-      const recovered = await invokeMcpTool(exec.name, exec.arguments || {}, exec);
-      return {
-        kind: "accept",
-        content: [{ type: "text", text: JSON.stringify(recovered, null, 2) }],
-      };
+      try {
+        recovered = await invokeMcpTool(exec.name, exec.arguments || {}, exec);
+        didRecover = true;
+      } catch (error) {
+        recoveryError = error;
+      }
     }
-    if (agent?.id) {
-      const meta = sessionMeta.get(agent.id) || {};
-      await dispatchEvent(
-        "PostToolUse",
-        {
-          sessionId: meta.parentSession || agent.id,
-          agentId: meta.origin === "subagent" ? agent.id : undefined,
-          cwd: meta.cwd,
-          callId: exec.callId,
-          name: exec.name,
-          arguments: exec.arguments || {},
-          result: toolResult,
-        },
-        exec.signal,
-      );
+    try {
+      if (agent?.id) {
+        const meta = sessionMeta.get(agent.id) || {};
+        await dispatchEvent(
+          "PostToolUse",
+          {
+            sessionId: meta.parentSession || agent.id,
+            agentId: meta.origin === "subagent" ? agent.id : undefined,
+            cwd: meta.cwd,
+            callId: exec.callId,
+            name: exec.name,
+            arguments: toolArguments(exec.name, exec.arguments, exec, true),
+            result: recoveryError ? { isError: true, error: { message: String(recoveryError.message || recoveryError) } }
+              : didRecover ? { isError: false, output: JSON.stringify(recovered) } : toolResult,
+          },
+          exec.signal,
+        );
+      }
+    } finally {
+      toolContextBindings.delete(toolContextKey(exec));
+    }
+    if (recoveryError) throw recoveryError;
+    if (didRecover) {
+      return { kind: "accept", content: [{ type: "text", text: JSON.stringify(recovered, null, 2) }] };
     }
     return next();
   });
@@ -1959,6 +2003,9 @@ export function apply(ctx, config = {}) {
       sessionContexts.delete(session.id);
       sessionHandles.delete(session.id);
       sessionMeta.delete(session.id);
+      for (const key of toolContextBindings.keys()) {
+        if (JSON.parse(key)[0] === session.id) toolContextBindings.delete(key);
+      }
       for (const key of trajectoryBindings.keys()) {
         const [root, child] = JSON.parse(key);
         if (root === session.id || child === session.id) trajectoryBindings.delete(key);

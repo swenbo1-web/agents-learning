@@ -370,11 +370,14 @@ def main():
 
         native_session = payload.get("session_id")
         agent_id = payload.get("agent_id")
-        if "context_handle" not in tool_args and isinstance(native_session, str) and native_session.strip():
+        server = Server(runtime, project, "worker", workspace=workspace)
+        contract = server.tools.get(tool_name, (None, {}))[1]
+        accepts_context = "context_handle" in contract.get("properties", {})
+        if (accepts_context and "context_handle" not in tool_args
+                and isinstance(native_session, str) and native_session.strip()):
             conversation = runtime.host_conversation(native_session.strip())
             access = runtime.register_context(project, conversation, agent_id=agent_id)
             tool_args = {**tool_args, "context_handle": access["context_handle"]}
-        server = Server(runtime, project, "worker", workspace=workspace)
         result = server.call(tool_name, tool_args)
         _emit({"ok": True, "result": result})
     except Exception as exc:
