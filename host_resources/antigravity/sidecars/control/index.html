@@ -59,6 +59,8 @@
   Object.assign(strings["zh-CN"], {captureTitle:"最近会话公开交付",captureComplete:"完整公开文本已采集；不表示知识已审核或发布。",capturePartial:"仅采集到部分公开文本，完整阶段覆盖仍未验证。",captureMissing:"未取得公开交付文本；工具记录正常不等于对话已完整吸收。",captureUnknown:"尚无当前宿主代次的停止观察，公开交付采集待验证。",captureUnavailable:"采集状态暂不可用，请稍后刷新。",cliMissing:"未找到独立 agy CLI；仅安装桌面 App 尚不能执行受限管理员审核。",cliFound:"已找到管理员启动器，协议尚未验证。",cliUnsupported:"已找到管理员启动器，但所需协议尚未通过验证。",cliProtocol:"管理员协议已验证；平台登录和模型可用性仍未验证。"});
   Object.assign(strings.en, {captureTitle:"Recent public text capture",captureUnknown:"Current public text or execution completion is unverified.",captureResponse:"A public response was retained for work-history retrieval; stage completion remains unverified.",captureResponsePartial:"Part of a public response was retained; stage completion remains unverified."});
   Object.assign(strings["zh-CN"], {captureTitle:"近期公开文本采集",captureUnknown:"当前公开文本或执行终态尚未验证。",captureResponse:"公开回复已保留，可供工作历史检索；阶段终态尚未验证。",captureResponsePartial:"已保留部分公开回复；阶段终态尚未验证。"});
+  Object.assign(strings.en, {inputTitle:"Recent public input",inputAvailable:"Public input was recorded.",inputPartial:"Only part of the public input was retained.",inputMissing:"Public input was unavailable.",inputUnknown:"Public input capture is unverified.",inputWindowBound:"The invocation's response window was checked; stage completion remains unverified.",inputWindowUnknown:"The response window remains unverified.",captureWindowLimited:"Recent capture records exceeded this status window; current coverage remains unverified."});
+  Object.assign(strings["zh-CN"], {inputTitle:"近期公开输入",inputAvailable:"公开输入已记录。",inputPartial:"仅保留部分公开输入。",inputMissing:"未取得公开输入。",inputUnknown:"公开输入采集尚未核对。",inputWindowBound:"该次调用的回复归属窗口已核对；不表示阶段完成。",inputWindowUnknown:"回复归属窗口尚未核对。",captureWindowLimited:"近期采集记录超出本次检查范围，当前覆盖尚未核对。"});
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
   const t = (key) => strings[language][key];
@@ -94,8 +96,14 @@
     else if (readiness?.provider === "antigravity" && readiness.launcher_available === true) lines.push(t(readiness.capability_checked === true ? readiness.capability_ready === true ? "cliProtocol" : "cliUnsupported" : "cliFound"));
     const capture = summary.host_capture;
     if (capture?.version === 1 && capture.host_scope === summary.host_scope && capture.scope === "project_recent_capture") {
-      const key = capture.state === "unavailable" ? "captureUnavailable" : capture.state !== "observed" ? "captureUnknown" : capture.public_delivery === "complete" ? "captureComplete" : ({available:"captureResponse",partial:"captureResponsePartial"})[capture.public_response] || ({partial:"capturePartial",unavailable:"captureMissing"})[capture.public_delivery] || "captureUnknown";
+      const key = capture.scan_limited === true ? "captureWindowLimited" : capture.state === "unavailable" ? "captureUnavailable" : capture.state !== "observed" ? "captureUnknown" : capture.public_delivery === "complete" ? "captureComplete" : ({available:"captureResponse",partial:"captureResponsePartial"})[capture.public_response] || ({partial:"capturePartial",unavailable:"captureMissing"})[capture.public_delivery] || "captureUnknown";
       lines.push(`${t("captureTitle")}: ${t(key)}`);
+      const input = capture.input_window;
+      if (input && typeof input === "object") {
+        const inputKey = input.state === "observed" ? ({available:"inputAvailable",partial:"inputPartial",unavailable:"inputMissing"})[input.public_input] || "inputUnknown" : "inputUnknown";
+        const windowKey = input.state === "observed" && input.available === true && input.reason === "bound" ? "inputWindowBound" : "inputWindowUnknown";
+        lines.push(`${t("inputTitle")}: ${t(inputKey)} ${t(windowKey)}`);
+      }
     }
     const staged = stageReview(summary), tokenMode = !!staged || p?.budget_mode === "tokens";
     if (p) {

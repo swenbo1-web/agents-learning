@@ -63,6 +63,9 @@ class AntigravityTranscriptTests(unittest.TestCase):
     def coverage(self):
         return json.loads(self.events("AntigravityPublicResponse")[-1]["payload"])["capture_coverage"]["finalModelOutput"]
 
+    def input_metadata(self):
+        return json.loads(self.events("AntigravityPublicInput")[-1]["payload"])
+
     def normal(self):
         self.add("USER_INPUT", "Choose sqlite outbox design")
         self.invoke()
@@ -79,6 +82,94 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.assertTrue(self.r.work_search(self.p, "outbox")["items"])
         self.assertEqual(self.r.db.execute("PRAGMA user_version").fetchone()[0], 25)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_native_1_4_7_windows_allow_only_completed_system_ephemeral_steps(self):
+        self.add("USER_INPUT", "public task")
+        initials = []
+        for invocation in range(3):
+            initial = len(self.rows)
+            initials.append(initial)
+            self.add("EPHEMERAL_MESSAGE", "EXCLUDED-SYSTEM-TEXT", source="SYSTEM_SDK")
+            self.invoke(invocation, initialNumSteps=initial)
+            self.assertEqual(self.input_metadata()["public_window"],
+                             {"available": True, "reason": "bound", "trailing_system_steps": 1})
+            self.add("PLANNER_RESPONSE", "public result" if invocation == 2 else None, thinking="EXCLUDED-THOUGHT")
+            self.post()
+            if invocation != 2:
+                self.add("GENERIC", "EXCLUDED-TOOL-TEXT")
+        self.assertEqual(initials, [1, 4, 7])
+        self.assertEqual(len(self.events("AntigravityPublicInput")), 3)
+        self.assertEqual(len(self.events("AntigravityPublicWindow")), 3)
+        self.assertEqual(len(self.events("UserPromptSubmit")), 1)
+        self.assertEqual(len(self.events("PublicMessageSegment")), 1)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM review_phases").fetchone()[0], 0)
+        metadata = str([row["payload"] for row in self.events("AntigravityPublicInput")])
+        self.assertNotIn("public task", metadata)
+        self.assertNotIn("EXCLUDED", metadata)
+        self.assertNotIn(str(self.path), metadata)
+
+    def test_multiple_trailing_system_steps_remain_bounded_public_window(self):
+        self.add("USER_INPUT", "public task")
+        self.add("EPHEMERAL_MESSAGE", "EXCLUDED-ONE", source="SYSTEM_SDK")
+        self.add("EPHEMERAL_MESSAGE", "EXCLUDED-TWO", source="SYSTEM_SDK")
+        self.invoke(initialNumSteps=1)
+        self.assertEqual(self.input_metadata()["public_window"]["trailing_system_steps"], 2)
+        self.add("PLANNER_RESPONSE", "public response")
+        self.post()
+        self.assertTrue(self.coverage()["available"])
+
+    def test_ahead_user_model_tool_unknown_or_non_done_system_steps_are_rejected(self):
+        variants = [("USER_INPUT", "USER_EXPLICIT", "DONE"), ("PLANNER_RESPONSE", "MODEL", "DONE"),
+                    ("GENERIC", "MODEL", "DONE"), ("UNKNOWN", "SYSTEM_SDK", "DONE"),
+                    ("EPHEMERAL_MESSAGE", "MODEL", "DONE"),
+                    ("EPHEMERAL_MESSAGE", "SYSTEM_SDK", "RUNNING")]
+        self.add("USER_INPUT", "original public task")
+        for number, (kind, source, status) in enumerate(variants):
+            with self.subTest(kind=kind, source=source, status=status):
+                self.rows = self.rows[:1]
+                self.add(kind, "must not be borrowed", source=source, status=status)
+                self.invoke(number, initialNumSteps=1)
+                self.assertEqual(self.input_metadata()["public_window"],
+                    {"available": False, "reason": "transcript_ahead_of_invocation"})
+        self.assertEqual(len(self.events("AntigravityPublicWindow")), 0)
+        self.assertEqual(len(self.events("UserPromptSubmit")), 0)
+
+    def test_pre_failure_diagnostics_keep_native_prompt_priority_and_no_text(self):
+        self.add("USER_INPUT", "TRANSCRIPT-PUBLIC-INPUT")
+        self.invoke(lastUserInput="NATIVE-DIFFERENT-INPUT")
+        metadata = self.input_metadata()
+        self.assertTrue(metadata["capture_coverage"]["lastUserInput"]["available"])
+        self.assertEqual(metadata["public_window"]["reason"], "transcript_native_prompt_mismatch")
+        self.assertNotIn("INPUT", json.dumps(metadata))
+        self.invoke(1, lastUserInput="  ")
+        self.assertEqual(self.input_metadata()["public_window"]["reason"], "native_prompt_empty")
+        self.invoke(2, lastUserInput={"text": "UNSUPPORTED-INPUT"})
+        self.assertEqual(self.input_metadata()["public_window"]["reason"], "native_prompt_unsupported_type")
+        self.invoke(3, artifactDirectoryPath="")
+        self.assertEqual(self.input_metadata()["public_window"]["reason"], "transcript_path_missing")
+        with patch("agent_learning.antigravity_transcript.read_public",
+                   return_value={"available": False, "reason": "transcript_read_deadline"}):
+            self.invoke(4)
+        self.assertEqual(self.input_metadata()["public_window"]["reason"], "transcript_read_deadline")
+        self.assertEqual(len(self.events("UserPromptSubmit")), 1)
+
+    def test_old_complete_and_pending_pre_receipts_do_not_backfill_input_diagnostics(self):
+        self.add("USER_INPUT", "public task")
+        self.invoke()
+        self.r.db.execute("DELETE FROM events WHERE type='AntigravityPublicInput'")
+        with patch("agent_learning.antigravity_transcript.read_public", side_effect=AssertionError("no replay I/O")):
+            self.invoke()
+            self.r.db.execute("UPDATE antigravity_receipts SET state='pending' WHERE kind='PreInvocation'")
+            self.invoke()
+        self.assertEqual(len(self.events("AntigravityPublicInput")), 0)
+
+    def test_multimount_pre_reports_isolation_without_private_payload(self):
+        other = self.root / "other"
+        other.mkdir()
+        self.invoke(workspacePaths=[str(self.workspace), str(other)])
+        metadata = self.input_metadata()
+        self.assertEqual(metadata["public_window"]["reason"], "workspace_association_unknown")
+        self.assertNotIn(str(other), json.dumps(metadata))
 
     def test_reader_excludes_thoughts_tools_and_system_text(self):
         self.add("USER_INPUT", "public user", thinking="PRIVATE-USER")

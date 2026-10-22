@@ -47,7 +47,7 @@ def _native_digest(observed):
     # identity, including compatibility with receipts from before this reader.
     return "v2:" + digest({key: value for key, value in observed.items() if key not in {
         "modelName", "lastUserInput", "finalModelOutput", "capture_coverage",
-        "host_epoch", "generation"}})
+        "host_epoch", "generation", "public_window"}})
 
 
 def install_storage(runtime):
@@ -337,12 +337,20 @@ class AntigravityAdapter:
         before = observed["kind"] == "PreInvocation"
         field = "lastUserInput" if before else "finalModelOutput"
         native_prompt = before and field in raw
+        if before:
+            observed["public_window"] = {"available": False, "reason": "transcript_window_unbound"}
         if native_prompt and (not isinstance(raw[field], str) or not raw[field].strip()):
+            observed["public_window"]["reason"] = (
+                "native_prompt_empty" if isinstance(raw[field], str) else "native_prompt_unsupported_type")
             return
         coverage = {"available": False, "truncated": False, "full_original_available": False,
                     "source": "antigravity_transcript"}
         if not native_prompt:
             observed["capture_coverage"][field] = coverage
+        def unavailable(reason):
+            coverage["reason"] = reason
+            if before:
+                observed["public_window"]["reason"] = reason
         initial, invocation = observed["initialNumSteps"], observed["invocationNum"]
         pre_key = digest([epoch, generation, _native_digest({"kind": "PreInvocation",
                          "invocationNum": invocation, "initialNumSteps": initial})])
@@ -361,7 +369,7 @@ class AntigravityAdapter:
                 return
         snapshot = read_public(raw)
         if not snapshot["available"]:
-            coverage["reason"] = snapshot["reason"]
+            unavailable(snapshot["reason"])
             return
         with self.runtime.transaction():
             phase_guard()
@@ -371,21 +379,28 @@ class AntigravityAdapter:
                      and isinstance(item.get("content"), str) and item["content"].strip()]
             user = users[-1] if users else None
             if user is None:
-                coverage["reason"] = "transcript_user_boundary_missing"
+                unavailable("transcript_user_boundary_missing")
                 return
             user_digest = digest(clean(user["content"]))
             if before:
-                if snapshot["last_step"] >= initial or user["step_index"] >= initial:
-                    coverage["reason"] = "transcript_ahead_of_invocation"
+                trailing = [item for item in records if item["step_index"] >= initial]
+                # Other hooks may already have written transient system steps.
+                # Their bodies are excluded by the reader. New user, model,
+                # tool or unknown steps still make the native window uncertain.
+                if (user["step_index"] >= initial or any(
+                        (item["type"], item["source"], item["status"]) !=
+                        ("EPHEMERAL_MESSAGE", "SYSTEM_SDK", "DONE") for item in trailing)):
+                    unavailable("transcript_ahead_of_invocation")
                     return
                 if native_prompt and digest(clean(raw[field])) != user_digest:
                     # Keep the host's direct prompt. A different public file
                     # cannot establish this invocation's response window.
+                    unavailable("transcript_native_prompt_mismatch")
                     return
                 receipt = self.runtime.db.execute("SELECT task_signature FROM antigravity_receipts "
                     "WHERE project=? AND conversation=? AND event_key=?", (project, conversation, pre_key)).fetchone()
                 if receipt is None:
-                    coverage["reason"] = "transcript_pre_receipt_missing"
+                    unavailable("transcript_pre_receipt_missing")
                     return
                 window = {"version": 1, "host_epoch": epoch, "generation": generation,
                           "invocation_num": invocation, "initial_steps": initial,
@@ -395,6 +410,8 @@ class AntigravityAdapter:
                           "pre_receipt_key": pre_key, "pre_receipt_signature": receipt["task_signature"]}
                 self.runtime._event(project, conversation, "AntigravityPublicWindow", window,
                     event_id=["antigravity-public-window", conversation, pre_key])
+                observed["public_window"] = {"available": True, "reason": "bound",
+                                             "trailing_system_steps": len(trailing)}
                 if native_prompt:
                     return
                 text, public_coverage = _public_field({field: user["content"]}, field)
@@ -457,6 +474,26 @@ class AntigravityAdapter:
                 public_coverage.update(truncated=True, full_original_available=False,
                                        reason="transcript_content_truncated")
             observed[field], observed["capture_coverage"][field] = text, public_coverage
+
+    def _public_input(self, project, conversation, observed, event_key, phase_guard):
+        """Keep a body's absence/coverage observable without retaining its text."""
+        with self.runtime.transaction():
+            phase_guard()
+            task = self.runtime.task(project, conversation)
+            coverage = observed["capture_coverage"]
+            window = observed.get("public_window")
+            if window is None:
+                reason = ("trajectory_identity_ambiguous" if coverage.get("trajectory_identity") == "ambiguous"
+                          else "workspace_association_unknown")
+                window = {"available": False, "reason": reason}
+            metadata = {key: observed[key] for key in ("host_epoch", "generation", "capture_coverage")}
+            metadata.update(invocation_num=observed["invocationNum"], initial_steps=observed["initialNumSteps"],
+                            public_window=window)
+            self.runtime._event(project, conversation, "AntigravityPublicInput", metadata,
+                event_id=["antigravity-public-input", conversation, event_key],
+                task_id=task["id"] if task else None, task_revision=task["revision"] if task else None,
+                task_write_version=task["write_version"] if task else None,
+                execution_epoch=task["execution_epoch"] if task else None)
 
     def _public_response(self, project, conversation, observed, event_key, phase_guard):
         with self.runtime.transaction():
@@ -778,6 +815,7 @@ class AntigravityAdapter:
                 self._transcript_public(project, conversation, observed, raw,
                                         epoch, generation, phase_guard)
         if event == "PreInvocation":
+            self._public_input(project, conversation, observed, event_key, phase_guard)
             if not trajectory["ambiguous"]:
                 self._capture_prompt(project, conversation, observed, generation, epoch, phase_guard, mounted)
             access = r.register_context(project, conversation, expected_epoch=epoch, _phase_guard=phase_guard)

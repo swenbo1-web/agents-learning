@@ -127,7 +127,9 @@ class AntigravityEventIdentityTests(unittest.TestCase):
             self.invocation()
         before = self.counts()
         self.invocation(number=1)
-        self.assertEqual(self.counts(), before)
+        self.assertEqual(self.counts(), {**before, "events": before["events"] + 1})
+        self.assertEqual(len(self.events("AntigravityPublicInput", "one")), 2)
+        self.assertEqual(len(self.events("UserPromptSubmit", "one")), 1)
         self.invocation("two")
         self.assertEqual(len(self.events("UserPromptSubmit")), 2)
 

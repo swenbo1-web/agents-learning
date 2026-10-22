@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.12 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.13 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -123,6 +123,14 @@ The initial complete offline run covered 2,326 checks and exposed coupling issue
 Database schema and publication protocol remain 25; work and optional semantic indexes remain 1. Update shared-database runtimes together to avoid alternating full-text projection rebuilds. Upgrading does not rerun administrators, delete knowledge or alter project publication policies.
 
 Final isolated verification covered 791 Python 3.10 checks: 790 passed and one Windows symlink-privilege check was skipped. One old assertion still allowed automatic injection for 160 identifiers; after updating it to the explicit manual-only overflow contract, all eight checks in that module passed again without production-code changes. Another 168 combined checks passed on Python 3.14. Three-host installation integrity, simulated Hooks, MCP and visual resources passed in 13.877 seconds. The simulated database passed quick_check with zero foreign-key errors. Acceptance called no real models and did not update active installations; these results do not establish real-task benefits or constant latency at every provenance scale.
+
+### Antigravity invocation diagnostics and limited compatibility (1.4.13)
+
+- **Explicit Pre coverage gaps:** Failed public capture at `PreInvocation` retains bounded diagnostic reasons. A newer Pre without a valid window remains unknown instead of borrowing an older complete Stop to claim current coverage. Refreshing neither rereads transcripts nor calls models.
+- **Only recognized temporary system steps:** Around the current invocation boundary after user input, the exception accepts only steps with `source=SYSTEM_SDK`, `type=EPHEMERAL_MESSAGE` and `status=DONE`. New user, model or tool steps do not qualify. Project, task, trajectory and invocation pairing checks remain in force. Public responses do not establish task delivery or administrator dispatch.
+- **Live recovery remains unverified:** The preceding live check had working tool/MCP receipts but no established public Pre window. This update adds diagnostics and limited compatibility without claiming an unproven cause or restored capture. Check the next natural work turn rather than making another model call for this diagnosis.
+
+Database schema/publication protocol remain 25 and indexes remain 5/1/1. Old Stops are not backfilled and administrator/publication policies do not change.
 
 ### Antigravity public records and health diagnostics (1.4.12)
 
@@ -396,11 +404,11 @@ $learningPlugin = Join-Path $learningProject ".agents/plugins/agent-learning"
 python -B scripts/learning.py --workspace "$learningProject" install "$learningPlugin" --host antigravity --hook-mode observe
 ```
 
-**Reload the project in Antigravity IDE / 2.0 → enable the plugin components → start a new conversation.** The IDE loads this project's export without the `agy` CLI. [Official plugin guide](https://antigravity.google/docs/plugins/)
+**Reload the project in an Antigravity surface supporting native plugins → enable the core components → start a new conversation.** This installs Hooks, MCP and skills; **it does not automatically add an App button**. App users must complete the next section. IDE core installation does not require the independent `agy` CLI. [Official plugin guide](https://antigravity.google/docs/plugins/)
 
 ### Antigravity App: add the visual panel
 
-The App discovers Sidecars from **global directories**; installing the project core alone does not make its sidebar discoverable. For an existing core, add `--upgrade` to the installation command above first; old cores without bridge support cannot be registered. Then run:
+The following settings entry describes **Antigravity App 2.23**; other versions need Sidecar/UI Extension support. The App discovers Sidecars from **global directories**. Run `install-ui` separately **and explicitly enable the component**; the core installation alone does not add a button. For an existing core, add `--upgrade` to the installation command above first; old cores without bridge support cannot be registered. Then run:
 
 ```powershell
 $learningUI = Join-Path $env:USERPROFILE ".gemini/config/plugins/agent-learning-ui"
@@ -408,6 +416,8 @@ python -B scripts/learning.py install-ui "$learningUI" --installation "$learning
 ```
 
 **Enable `agent-learning-ui/control` in App customizations, reload, then open ⋮ → Extensions → Agent Learning.** Sidecars start disabled; this command changes no host settings and enables no administrator. If configuring manually, set `sidecars.agent-learning-ui/control.enabled` to `true`, preserving existing settings. [Official discovery and activation guide](https://antigravity.google/docs/sidecars/)
+
+The host must be able to run `node` and mount its `sidecar_sdk` for the Sidecar. The App may provide its own Node shim; a separate Node.js installation is not universally required. If the component cannot start, check the host's executable entry and SDK mounting instead of copying another runtime into the project.
 
 The UI bridge starts no model, scans no projects and opens no knowledge database on startup. It connects to a fixed project runtime only when the current workspace exactly matches a registered installation. Workspace, project identity and access checks enforce isolation; the installation directory alone does not. **Check connection** inspects installation, directories, versions and administrator budgets. A working UI pipe does not verify the current conversation's Hook/MCP connections; use `learning-debug` for those checks.
 
@@ -834,7 +844,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.12 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update adds bounded Antigravity public capture, recent-capture diagnostics and independent CLI discovery while preserving knowledge, tasks, permissions and usage. Public responses do not establish stage delivery or administrator review. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
+Current `main` v1.4.13 uses database schema **25** and internal publication protocol **25**; the derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. Version 1.3.0 uses 21, 1.3.1 uses 22 and 1.4.0 uses 23 and 1.4.1 uses 24. This update adds Antigravity Pre coverage diagnostics and compatibility for limited temporary system steps while preserving knowledge, tasks, permissions and usage. Restored public capture still needs verification in a natural turn; public responses do not establish stage delivery or administrator review. The original v1.0.0 distribution uses schema/protocol 15 and 1.1.14 uses 19. Stop shared-database runtimes and back up the external database, then update every Codex, Antigravity and DSH installation to a schema-25-compatible version before reloading. Older runtimes cannot open schema 25.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1156,7 +1166,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.12 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update adds bounded Antigravity public capture, recent-capture diagnostics and independent CLI discovery without changing evidence, publication or scheduling permissions. Complete Antigravity automatic stage review still needs live acceptance; a public response alone is not a stage delivery. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
+**Current source version 1.4.13 uses database schema/internal publication protocol 25.** It provides completed-stage batches, dynamic token reservations, incremental deduplication, per-case receipts and independent local acceptance of saved historical replies. This update adds Antigravity Pre coverage diagnostics and compatibility for limited temporary system steps without changing evidence, publication or scheduling permissions. Restored public capture and complete Antigravity automatic stage review still need live acceptance; a public response alone is not a stage delivery. First confirmed visual enablement for an unconfigured project defaults to stage review; existing configurations remain compatible. The derived knowledge full-text index remains **5**; work and optional semantic indexes remain **1**. The original 1.0.0 distribution uses schema/protocol 15 and lacks newer capabilities; source updates do not imply a new downloadable Release. Migration preserves knowledge, sources and usage, without inventing complete history for unknown events. Back up the external database and update every shared-database host to a schema-25-compatible version; old runtimes reject it and export backups do not replace database backups. Installation and upgrades never enable administrators automatically.
 
 The following entries describe changes and release status at the time of each historical version:
 

@@ -105,6 +105,113 @@ class AntigravityHealthTests(unittest.TestCase):
                     "full_original_available": not truncated, "source": "antigravity_transcript"}}},
             event_id=["antigravity-public-response", conversation, key])
 
+    def public_input(self, conversation=None, *, state="complete", linked=True,
+                     public_available=True, window_available=False,
+                     reason="transcript_path_missing", truncated=False, window_extra=None):
+        conversation = conversation or self.c
+        self.r.db.execute("INSERT OR IGNORE INTO antigravity_trajectories(project,conversation) VALUES(?,?)",
+                          (self.p, conversation))
+        generation = self.r.db.execute("SELECT generation FROM antigravity_trajectories "
+            "WHERE project=? AND conversation=?", (self.p, conversation)).fetchone()[0]
+        import time
+        stamp = time.time()
+        key = digest(["input", conversation, stamp])
+        self.r.db.execute("INSERT INTO antigravity_receipts(project,conversation,event_key,kind,host_epoch,"
+            "generation,task_signature,state,created) VALUES(?,?,?,'PreInvocation',?,?,?,?,?)",
+            (self.p, conversation, key, self.r.session_epoch(), generation, "fixture", state, stamp))
+        if linked:
+            self.r._event(self.p, conversation, "AntigravityPublicInput", {
+                "host_epoch": self.r.session_epoch(), "generation": generation,
+                "invocation_num": 1, "initial_steps": 4,
+                "public_window": {"available": window_available, "reason": reason, **(window_extra or {})},
+                "capture_coverage": {"workspace_association": "installed_workspace", "trajectory_identity": "current",
+                    "lastUserInput": {"available": public_available, "truncated": truncated,
+                        "full_original_available": not truncated, "source": "native_hook"}}},
+                event_id=["antigravity-public-input", conversation, key])
+
+    def test_new_pre_cannot_reuse_old_complete_stop_or_response(self):
+        self.public_response()
+        self.stop(finalModelOutput="previous round report")
+        self.public_input()
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["public_delivery"], "unknown")
+        self.assertEqual(view["public_response"], "unknown")
+        self.assertEqual(view["input_window"]["public_input"], "available")
+        self.assertFalse(view["input_window"]["available"])
+        self.assertEqual(view["input_window"]["reason"], "transcript_path_missing")
+
+    def test_pending_pre_cannot_borrow_previous_input_or_complete_stop(self):
+        self.public_input(window_available=True, reason="bound")
+        self.stop(finalModelOutput="previous complete report")
+        self.public_input(state="pending")
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["state"], "pending")
+        self.assertEqual(view["public_delivery"], "unknown")
+        self.assertEqual(view["input_window"]["public_input"], "unknown")
+        self.assertIsNone(view["input_window"]["available"])
+
+    def test_old_pre_without_linked_metadata_is_unverified(self):
+        self.stop(finalModelOutput="previous complete report")
+        self.public_input(linked=False)
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["state"], "unavailable")
+        self.assertEqual(view["input_window"]["reason"], "receipt_unlinked")
+        self.assertEqual(view["public_delivery"], "unknown")
+
+    def test_input_of_another_chat_does_not_supply_latest_chat_coverage(self):
+        self.public_input(self.r.host_conversation("other-chat"), window_available=True, reason="bound")
+        self.stop(finalModelOutput="current chat report")
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["public_delivery"], "complete")
+        self.assertEqual(view["input_window"]["state"], "unobserved")
+
+    def test_new_input_chat_does_not_borrow_other_chat_complete_stop(self):
+        self.stop(finalModelOutput="other chat complete report")
+        self.public_input(self.r.host_conversation("new-chat"), window_available=True, reason="bound")
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["public_delivery"], "unknown")
+        self.assertTrue(view["input_window"]["available"])
+
+    def test_native_prompt_capture_is_separate_from_reply_window_binding(self):
+        self.adapter.handle("PreInvocation", {"conversationId": "chat", "workspacePaths": [str(self.workspace)],
+            "invocationNum": 0, "initialNumSteps": 1, "lastUserInput": "private-public-fixture-request"})
+        changes = self.r.db.total_changes
+        with patch.object(Path, "open", side_effect=AssertionError("metadata only")), \
+                patch.object(subprocess, "run", side_effect=AssertionError("no CLI")):
+            view = capture_status(self.r, self.p)
+        self.assertEqual(self.r.db.total_changes, changes)
+        self.assertEqual(view["input_window"]["public_input"], "available")
+        self.assertFalse(view["input_window"]["available"])
+        self.assertNotIn("private-public-fixture", json.dumps(view))
+
+    def test_partial_input_and_bound_window_do_not_complete_delivery(self):
+        self.public_input(window_available=True, reason="bound", truncated=True,
+                          window_extra={"trailing_system_steps": 2})
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["input_window"]["public_input"], "partial")
+        self.assertTrue(view["input_window"]["available"])
+        self.assertEqual(view["input_window"]["trailing_system_steps"], 2)
+        self.assertEqual(view["public_delivery"], "unknown")
+
+    def test_input_reason_and_metadata_are_allowlisted(self):
+        self.public_input(window_available=False, reason="private-path-and-text",
+                          window_extra={"path": "private-fixture-path", "trailing_system_steps": -1})
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["input_window"]["reason"], "window_unverified")
+        self.assertIsNone(view["input_window"]["available"])
+        self.assertNotIn("private", json.dumps(view))
+        self.assertNotIn("trailing_system_steps", view["input_window"])
+
+    def test_input_metadata_boundary_mismatch_does_not_claim_capture(self):
+        self.public_input(window_available=True, reason="bound")
+        row = self.r.db.execute("SELECT id,payload FROM events WHERE type='AntigravityPublicInput'").fetchone()
+        payload = json.loads(row["payload"])
+        payload["generation"] += 1
+        self.r.db.execute("UPDATE events SET payload=? WHERE id=?", (json.dumps(payload), row["id"]))
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["input_window"]["reason"], "boundary_unverified")
+        self.assertIsNone(view["input_window"]["available"])
+
     def test_latest_pending_stop_is_not_hidden_by_old_complete(self):
         self.stop(finalModelOutput="old report")
         self.stop(1)
@@ -178,7 +285,35 @@ class AntigravityHealthTests(unittest.TestCase):
                 "host_epoch,generation,task_signature,state,created) VALUES(?,?,?,'Stop',?,1,'','complete',?)",
                 ((self.p, "antigravity:other:chat", f"other-{i}", self.r.session_epoch(), stamp + i)
                  for i in range(33)))
-        self.assertEqual(capture_status(self.r, self.p)["state"], "unobserved")
+        view = capture_status(self.r, self.p)
+        self.assertEqual(view["public_delivery"], "unknown")
+        self.assertEqual(view["reason"], "recent_window_exhausted")
+        self.assertTrue(view["scan_limited"])
+
+    def test_exhausted_pre_window_cannot_reuse_visible_old_stop_success(self):
+        self.public_input(window_available=True, reason="bound")
+        self.stop(finalModelOutput="previous complete report")
+        import time
+        stamp = time.time()
+        with self.r.transaction():
+            self.r.db.executemany("INSERT INTO antigravity_receipts(project,conversation,event_key,kind,"
+                "host_epoch,generation,task_signature,state,created) VALUES(?,?,?,'PreInvocation',?,1,'','complete',?)",
+                ((self.p, "antigravity:other:chat", f"other-pre-{i}", self.r.session_epoch(), stamp + i)
+                 for i in range(50000)))
+        ticks = []
+        changes = self.r.db.total_changes
+        self.r.db.set_progress_handler(lambda: ticks.append(1) or 0, 100)
+        try:
+            view = capture_status(self.r, self.p)
+        finally:
+            self.r.db.set_progress_handler(None, 0)
+        self.assertEqual(self.r.db.total_changes, changes)
+        self.assertLess(len(ticks) * 100, 10000)
+        self.assertEqual(view["reason"], "recent_window_exhausted")
+        self.assertTrue(view["scan_limited"])
+        self.assertEqual(view["public_delivery"], "unknown")
+        self.assertEqual(view["public_response"], "unknown")
+        self.assertIsNone(view["input_window"]["available"])
 
     def test_old_host_epoch_cannot_look_current(self):
         self.stop(finalModelOutput="old login report")
@@ -248,6 +383,13 @@ for(const language of ['en','zh-CN']){
  context.show({...base,host_capture:{version:1,host_scope:'antigravity:other',scope:'project_recent_capture',public_delivery:'complete'}});assert(!local().includes(language==='en'?'Complete public text captured':'完整公开文本已采集'));
  context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'observed',public_response:'available',public_delivery:'unknown'}});assert(local().includes(language==='en'?'A public response was retained':'公开回复已保留'));
  context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'pending',public_response:'available',public_delivery:'complete'}});assert(!local().includes(language==='en'?'Complete public text captured':'完整公开文本已采集'));
+ for(const [publicInput,label] of [['available',language==='en'?'Public input was recorded':'公开输入已记录'],['partial',language==='en'?'Only part of the public input':'仅保留部分公开输入'],['unavailable',language==='en'?'Public input was unavailable':'未取得公开输入']]){
+  context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'observed',public_delivery:'unknown',input_window:{state:'observed',public_input:publicInput,available:false,reason:'private-untrusted-reason',path:'private-path'}}});
+  const text=local();assert(text.includes(label));assert(text.includes(language==='en'?'response window remains unverified':'回复归属窗口尚未核对'));assert(!text.includes('private'));assert(!text.includes(language==='en'?'Complete public text captured':'完整公开文本已采集'));
+ }
+ context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'observed',input_window:{state:'observed',public_input:'available',available:true,reason:'bound'}}});assert(local().includes(language==='en'?"response window was checked; stage completion remains unverified":"回复归属窗口已核对；不表示阶段完成"));
+ context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'pending',input_window:{state:'pending',public_input:'available',available:true,reason:'bound'}}});assert(!local().includes(language==='en'?'Public input was recorded':'公开输入已记录'));assert(!local().includes(language==='en'?'response window was checked':'回复归属窗口已核对'));
+ context.show({...base,host_capture:{version:1,host_scope:base.host_scope,scope:'project_recent_capture',state:'unavailable',scan_limited:true,public_delivery:'complete'}});assert(local().includes(language==='en'?'exceeded this status window':'超出本次检查范围'));assert(!local().includes(language==='en'?'Complete public text captured':'完整公开文本已采集'));
  for(const [view,label] of [[{launcher_available:false},language==='en'?'standalone agy CLI was not found':'未找到独立 agy CLI'],[{launcher_available:true,capability_checked:false},language==='en'?'protocol not yet checked':'协议尚未验证'],[{launcher_available:true,capability_checked:true,capability_ready:false},language==='en'?'has not passed validation':'尚未通过验证'],[{launcher_available:true,capability_checked:true,capability_ready:true},language==='en'?'platform login and model availability remain unverified':'平台登录和模型可用性仍未验证']]){
   context.show({...base,administrator_readiness:{...view,provider:'antigravity'}});assert(local().includes(label));
  }
