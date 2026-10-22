@@ -129,6 +129,7 @@ Final isolated verification covered 791 Python 3.10 checks: 790 passed and one W
 - **Explicit Pre coverage gaps:** Failed public capture at `PreInvocation` retains bounded diagnostic reasons. A newer Pre without a valid window remains unknown instead of borrowing an older complete Stop to claim current coverage. Refreshing neither rereads transcripts nor calls models.
 - **Only recognized temporary system steps:** Around the current invocation boundary after user input, the exception accepts only steps with `source=SYSTEM_SDK`, `type=EPHEMERAL_MESSAGE` and `status=DONE`. New user, model or tool steps do not qualify. Project, task, trajectory and invocation pairing checks remain in force. Public responses do not establish task delivery or administrator dispatch.
 - **Live recovery remains unverified:** The preceding live check had working tool/MCP receipts but no established public Pre window. This update adds diagnostics and limited compatibility without claiming an unproven cause or restored capture. Check the next natural work turn rather than making another model call for this diagnosis.
+- **Fewer panel-related upgrade locks:** The panel subprocess uses the validated project directory as its working directory, avoiding a long-lived handle on the replaceable plugin directory on Windows. Installation changes still require a fresh panel connection and never replay earlier actions.
 
 Database schema/publication protocol remain 25 and indexes remain 5/1/1. Old Stops are not backfilled and administrator/publication policies do not change.
 

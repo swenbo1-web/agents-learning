@@ -104,7 +104,8 @@ export class PanelBridge {
     const receipt = this.installation.receipt;
     const child = this.spawnProcess(receipt.python, ["-B", join(receipt.runtime_directory, "scripts", "learning.py"),
       "panel-serve", "--installation", this.installation.directory], {
-      cwd: this.installation.directory, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+      // Keep Windows' working-directory handle outside the replaceable export.
+      cwd: receipt.workspace, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
       env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
     });
     this.child = child;

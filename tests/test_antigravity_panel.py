@@ -234,6 +234,7 @@ globalThis.setTimeout=(callback,delay)=>{timeouts.push(delay);return originalTim
 const result = bridge.request('bootstrap',{workspace:installation.receipt.workspace,conversation_id:'chat'});
 assert.equal(spawned.exe, installation.receipt.python);
 assert.deepEqual(spawned.args, ['-B', join(installation.receipt.runtime_directory,'scripts','learning.py'), 'panel-serve','--installation',installation.directory]);
+assert.equal(spawned.opts.cwd, installation.receipt.workspace);
 assert.equal(spawned.opts.windowsHide, true);
 assert.equal(spawned.opts.shell, undefined);
 child.stdout.emit('data', JSON.stringify({id:sent.id,result:{visible:true}}) + '\\n');
@@ -244,6 +245,28 @@ bridge.close();
 await assert.rejects(pending);
 assert.equal(ended, true); assert.equal(killed, true);
 assert.throws(() => bridge.start());
+""")
+
+    def test_running_panel_does_not_lock_replaceable_installation_directory(self):
+        (self.runtime / "scripts" / "learning.py").write_text(
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    body = json.loads(line)\n"
+            "    print(json.dumps({'id': body['id'], 'result': {'visible': True}}), flush=True)\n",
+            encoding="utf-8")
+        self.run_node("""
+const { renameSync } = await import('node:fs');
+const bridge = new api.PanelBridge(installation);
+try {
+  assert.equal((await bridge.request('bootstrap', {
+    workspace: installation.receipt.workspace, conversation_id: 'isolated-panel',
+  })).visible, true);
+  assert.equal(bridge.child.exitCode, null);
+  renameSync(installation.directory, installation.directory + '-replaced');
+  assert.throws(() => bridge.assertCurrent());
+} finally {
+  bridge.close();
+}
 """)
 
     def test_receipt_change_and_uninstall_fail_closed(self):
