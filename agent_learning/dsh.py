@@ -429,6 +429,12 @@ class DshAdapter:
             raise ContractError("dsh_unsupported_event")
         if not isinstance(raw, dict):
             raise ContractError("dsh_input_object_required")
+        handshake_only = raw.get("dsh_handshake_only", False)
+        if type(handshake_only) is not bool or handshake_only and (
+            event not in {"SessionStart", "SubagentStart"} or raw.get("source") != "resume"
+            or not isinstance(raw.get("dsh_bridge_instance"), str)
+        ):
+            raise ContractError("dsh_invalid_handshake_request")
         workspace = self._resolve_workspace(raw, event)
         if workspace is None:
             # 尚未绑定目录的空白会话不猜项目，安全返回空对象
@@ -450,6 +456,11 @@ class DshAdapter:
                 if event == "PreToolUse":
                     return self._deny(event, str(exc))
                 return {"systemMessage": "Agent Learning: " + str(exc), "dsh_reconnect_required": True}
+            if handshake_only:
+                # Recover a lost native receipt without retrieval, task delivery
+                # or administrator scheduling. Epoch/trajectory checks above
+                # still reject callbacks belonging to an earlier reset.
+                return {"dsh_trajectory": trajectory}
             if not agent_id:
                 from .dsh_profile import bind_conversation_profile
                 bind_conversation_profile(r, project, conversation)

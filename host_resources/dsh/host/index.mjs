@@ -640,7 +640,10 @@ export function apply(ctx, config = {}) {
 
   function forgetSessionCapture(sessionId) {
     for (const [key, state] of capturedTurns) {
-      if (state.sessionId === sessionId) capturedTurns.delete(key);
+      if (state.sessionId === sessionId) {
+        state.closed = true;
+        capturedTurns.delete(key);
+      }
     }
   }
   activeDisposers.push(() => { capturedTurns.clear(); sessionStarts.clear(); });
@@ -710,11 +713,19 @@ export function apply(ctx, config = {}) {
   // after a trusted reset: silently claiming a new one would relabel delayed
   // callbacks as new work. Reloading the host creates a new bridge instance.
   const trajectoryBindings = new Map();
+  const disposedSessions = new Set();
+  let bridgeDisposed = false;
+  activeDisposers.push(() => {
+    bridgeDisposed = true;
+    trajectoryBindings.clear();
+    for (const state of capturedTurns.values()) state.closed = true;
+  });
   function trajectoryKey(payload) {
     return JSON.stringify([payload.sessionId, payload.agentId || null, normalizeWinPath(payload.cwd)]);
   }
 
   async function dispatchEvent(eventName, payload, signal) {
+    if (process.env.ALP_DISABLED === "1") return {};
     const envMode = process.env.ALP_HOOK_MODE;
     const denyBridgeFailure = (code, detail) => ({
       decision: "deny",
@@ -725,6 +736,14 @@ export function apply(ctx, config = {}) {
         permissionDecisionReason: `Agent Learning [${code}]: ${detail} The configured execution guard could not verify this call.`,
       },
     });
+    const inactive = () => ({
+      systemMessage: "Agent Learning [session_changed]: the session ended or the request was canceled.",
+      dsh_event_unconfirmed: true, dsh_session_inactive: true,
+    });
+    if (bridgeDisposed || signal?.aborted || disposedSessions.has(payload.sessionId)
+        || disposedSessions.has(payload.agentId)) {
+      return inactive();
+    }
     let receipt;
     try {
       receipt = loadRuntimeReceipt();
@@ -737,7 +756,7 @@ export function apply(ctx, config = {}) {
     const effectiveMode = receipt.hook_mode || envMode;
     const failClosedOnPre = eventName === "PreToolUse" && effectiveMode !== "observe";
     const dispatcher = join(receipt.runtime_directory, "hooks", "dsh_dispatch.py");
-    const argv = ["-B", dispatcher, "--event", eventName];
+    const argv = ["-B", dispatcher];
     if (receipt.hook_mode) {
       argv.push("--hook-mode", receipt.hook_mode);
     }
@@ -758,50 +777,104 @@ export function apply(ctx, config = {}) {
     const key = trajectoryKey(identityPayload);
     let binding = trajectoryBindings.get(key);
     if (!binding) {
-      binding = { instance: randomUUID(), trajectory: null };
+      binding = { instance: randomUUID(), trajectory: null, starting: null, recovering: null };
       trajectoryBindings.set(key, binding);
     }
-    const capturedPayload = { ...identityPayload, dsh_bridge_instance: binding.instance,
-      ...(binding.trajectory ? { dsh_trajectory: { ...binding.trajectory } } : {}) };
-    try {
-      const { code, stdout } = await runPythonProcess(
-        receipt.python,
-        argv,
-        JSON.stringify(capturedPayload),
-        cwd,
-        signal,
-        10000,
-      );
-      if (code !== 0 || !stdout.trim()) {
-        return failClosedOnPre
-          ? denyBridgeFailure("runtime_unavailable", "runtime processing failed; event persistence and policy could not be confirmed.")
-          : {};
+    const unconfirmed = (code, detail) => ({
+      systemMessage: `Agent Learning [${code}]: ${detail}`,
+      dsh_event_unconfirmed: true,
+    });
+    async function runEvent(kind, handshakeOnly = false) {
+      if (bridgeDisposed || trajectoryBindings.get(key) !== binding || signal?.aborted) {
+        return inactive();
       }
-      const parsed = JSON.parse(stdout.trim());
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return failClosedOnPre
-          ? denyBridgeFailure("response_invalid", "runtime returned an invalid response; its result could not be confirmed.")
-          : {};
+      const capturedPayload = { ...identityPayload, dsh_bridge_instance: binding.instance,
+        ...(handshakeOnly ? { source: "resume", dsh_handshake_only: true } : {}),
+        ...(binding.trajectory ? { dsh_trajectory: { ...binding.trajectory } } : {}) };
+      try {
+        const { code, stdout } = await runPythonProcess(
+          receipt.python, [...argv, "--event", kind], JSON.stringify(capturedPayload), cwd, signal, 10000,
+        );
+        if (bridgeDisposed || signal?.aborted || trajectoryBindings.get(key) !== binding) {
+          return inactive();
+        }
+        if (code !== 0 || !stdout.trim()) {
+          return unconfirmed("runtime_unavailable", "runtime processing failed; event persistence could not be confirmed.");
+        }
+        const parsed = JSON.parse(stdout.trim());
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return unconfirmed("response_invalid", "runtime returned an invalid response.");
+        }
+        const trajectory = parsed.dsh_trajectory;
+        if (Number.isSafeInteger(trajectory?.generation) && trajectory.generation >= 1
+            && /^[a-f0-9]{32}$/.test(trajectory?.token || "")) {
+          if (binding.trajectory && (binding.trajectory.generation !== trajectory.generation
+              || binding.trajectory.token !== trajectory.token)) {
+            return { ...unconfirmed("trajectory_changed", "reload the session before continuing."),
+              dsh_reconnect_required: true };
+          }
+          binding.trajectory = { generation: trajectory.generation, token: trajectory.token };
+        }
+        if (typeof parsed.systemMessage === "string" && !trajectory && !parsed.hookSpecificOutput?.additionalContext) {
+          parsed.dsh_event_unconfirmed = true;
+        }
+        return parsed;
+      } catch {
+        if (bridgeDisposed || signal?.aborted || trajectoryBindings.get(key) !== binding) return inactive();
+        return unconfirmed("runtime_unavailable", "runtime processing failed; event persistence could not be confirmed.");
       }
-      const trajectory = parsed.dsh_trajectory;
-      if (trajectoryBindings.get(key) === binding && Number.isSafeInteger(trajectory?.generation)
-          && trajectory.generation >= 1 && /^[a-f0-9]{32}$/.test(trajectory?.token || "")) {
-        binding.trajectory = { generation: trajectory.generation, token: trajectory.token };
-      }
-      return parsed;
-    } catch {
-      return failClosedOnPre
-        ? denyBridgeFailure("runtime_unavailable", "runtime processing failed; event persistence and policy could not be confirmed.")
-        : {};
     }
+    const isStart = eventName === "SessionStart" || eventName === "SubagentStart";
+    if (!isStart && ["UserPromptSubmit", "PreToolUse"].includes(eventName) && !binding.trajectory) {
+      // A context handle is not a native trajectory receipt. Wait for startup,
+      // then recover only a missing receipt, once for concurrent callers.
+      await binding.starting;
+      if (!binding.trajectory && trajectoryBindings.get(key) === binding && !signal?.aborted) {
+        if (!binding.recovering) {
+          const recovering = runEvent(identityPayload.agentId ? "SubagentStart" : "SessionStart", true);
+          binding.recovering = recovering;
+          recovering.finally(() => { if (binding.recovering === recovering) binding.recovering = null; });
+        }
+        const result = await binding.recovering;
+        if (!binding.trajectory) {
+          const detail = result?.systemMessage || "Agent Learning: trajectory handshake failed; retry or reload the session.";
+          return eventName === "PreToolUse" ? denyBridgeFailure("handshake_unavailable", detail)
+            : { ...unconfirmed("handshake_unavailable", detail), dsh_reconnect_required: true };
+        }
+      }
+      if (bridgeDisposed || !binding.trajectory || trajectoryBindings.get(key) !== binding || signal?.aborted) {
+        return eventName === "PreToolUse"
+          ? denyBridgeFailure("session_changed", "the session ended or the request was canceled.")
+          : inactive();
+      }
+    }
+    if (isStart) {
+      if (binding.starting) return binding.starting;
+      // Publish the promise before the process starts so tool callbacks share it.
+      const recovering = binding.recovering;
+      const started = Promise.resolve().then(async () => {
+        await recovering;
+        return runEvent(eventName);
+      });
+      binding.starting = started;
+      try { return await started; }
+      finally { if (binding.starting === started) binding.starting = null; }
+    }
+    const result = await runEvent(eventName);
+    return failClosedOnPre && result.dsh_event_unconfirmed
+      ? denyBridgeFailure("runtime_unavailable", result.systemMessage) : result;
   }
 
   async function ensureSessionBound(agentId, cwd, signal) {
     await sessionStarts.get(agentId);
-    if (!agentId || sessionHandles.has(agentId)) {
+    if (!agentId) return undefined;
+    const meta = await resolveSessionMeta(agentId);
+    const identity = { sessionId: meta.parentSession || agentId,
+      agentId: meta.origin === "subagent" ? agentId : undefined,
+      cwd: cwd || meta.cwd || process.cwd() };
+    if (sessionHandles.has(agentId) && trajectoryBindings.get(trajectoryKey(identity))?.trajectory) {
       return sessionHandles.get(agentId);
     }
-    const meta = sessionMeta.get(agentId) || {};
     const eventKind = meta.origin === "subagent" ? "SubagentStart" : "SessionStart";
     const result = await dispatchEvent(
       eventKind,
@@ -1649,6 +1722,7 @@ export function apply(ctx, config = {}) {
 
   onEvent("session/created", (session) => {
     if (!session || !session.header) return;
+    disposedSessions.delete(session.id);
     sessionMeta.set(session.id, {
       cwd: session.header.cwd,
       parentSession: session.header.parentSession,
@@ -1741,6 +1815,15 @@ export function apply(ctx, config = {}) {
         },
         payload.signal,
       );
+      if (result?.dsh_reconnect_required || result?.dsh_event_unconfirmed) {
+        // A failed handshake is not a captured prompt. Permit the same human
+        // message to be retried on the next step instead of silently losing it.
+        for (const message of humanMessages) state.seen.delete(message.id);
+        if (typeof result.systemMessage === "string" && !payload.signal?.aborted && !state.closed) {
+          return { ...baseDecision, messages: [...baseDecision.messages, recallMessage(result.systemMessage)] };
+        }
+        return baseDecision;
+      }
       const additional = result?.hookSpecificOutput?.additionalContext;
       if (typeof additional === "string" && additional && !payload.signal?.aborted && !state.closed) {
         // The recall now lives in the logged message history. Avoid republishing
@@ -1758,7 +1841,8 @@ export function apply(ctx, config = {}) {
   onEvent("tools/pre-execute", async (exec, next) => {
     const agent = exec?.agent;
     if (!agent?.id) return next();
-    const meta = sessionMeta.get(agent.id) || {};
+    await sessionStarts.get(agent.id);
+    const meta = await resolveSessionMeta(agent.id);
     const toolArgs = { ...(exec.arguments || {}) };
     if (WORKER_TOOL_NAMES.has(exec.name) && !toolArgs.context_handle && sessionHandles.has(agent.id)) {
       toolArgs.context_handle = sessionHandles.get(agent.id);
@@ -1775,10 +1859,12 @@ export function apply(ctx, config = {}) {
       },
       exec.signal,
     );
-    if (result?.decision === "deny" || result?.hookSpecificOutput?.permissionDecision === "deny") {
+    if (result?.dsh_session_inactive || result?.dsh_reconnect_required || result?.decision === "deny"
+        || result?.hookSpecificOutput?.permissionDecision === "deny") {
       return {
         kind: "deny",
-        reason: result.reason || result?.hookSpecificOutput?.permissionDecisionReason || "Denied by Agent Learning policy",
+        reason: result.reason || result?.hookSpecificOutput?.permissionDecisionReason
+          || result.systemMessage || "Denied by Agent Learning policy",
       };
     }
     const additional = result?.hookSpecificOutput?.additionalContext;
@@ -1867,8 +1953,12 @@ export function apply(ctx, config = {}) {
 
   onEvent("session/disposed", (session) => {
     if (session?.id) {
+      disposedSessions.add(session.id);
       forgetSessionCapture(session.id);
       sessionStarts.delete(session.id);
+      sessionContexts.delete(session.id);
+      sessionHandles.delete(session.id);
+      sessionMeta.delete(session.id);
       for (const key of trajectoryBindings.keys()) {
         const [root, child] = JSON.parse(key);
         if (root === session.id || child === session.id) trajectoryBindings.delete(key);

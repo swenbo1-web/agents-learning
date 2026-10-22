@@ -29,7 +29,8 @@ childProcess.spawn = (_python, argv, options) => {
     const complete = () => {
       const event = argv[argv.indexOf('--event') + 1];
       const payload = JSON.parse(input);
-      calls.push({event, payload, workspace: options.cwd});
+      // Light recovery is transport bootstrap, not another captured user event.
+      if (!payload.dsh_handshake_only) calls.push({event, payload, workspace: options.cwd});
       let result = event === 'UserPromptSubmit'
         ? {hookSpecificOutput:{additionalContext:'context_handle=synthetic-handle; matched project knowledge'}}
         : event === 'SessionStart' ? {hookSpecificOutput:{additionalContext:'context_handle=old-startup; initial context'}} : {};
@@ -45,6 +46,8 @@ childProcess.spawn = (_python, argv, options) => {
         result = binding.generation !== nativeGeneration
           ? {dsh_reconnect_required:true}
           : {...result,dsh_trajectory:binding};
+      } else {
+        result.dsh_trajectory = {generation:1,token:'1'.repeat(32)};
       }
       child.stdout.emit('data', Buffer.from(JSON.stringify(result)));
       child.emit('close', 0);
