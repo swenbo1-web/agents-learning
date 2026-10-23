@@ -210,6 +210,60 @@ def _constraint_request(text):
                           r"(?:\b(?:must|never|always|keep|preserve|only|require|use)\b)", text, re.I))
 
 
+def _metadata_only_write(body):
+    """Recognize only known write acknowledgements, not arbitrary tool output."""
+    if body.get("type") != "file_change":
+        return False
+    try:
+        response = json.loads(body.get("summary", ""))
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(response, dict) or not response:
+        return False
+    if any(key in response and response[key] is not True for key in ("written", "success")):
+        return False
+    if "exit_code" in response and (type(response["exit_code"]) is not int or response["exit_code"] != 0):
+        return False
+    if any(key in response and (type(response[key]) is not int or response[key] < 0)
+           for key in ("chars", "bytes", "size")):
+        return False
+    if any(key in response and (not isinstance(response[key], str)
+                               or re.fullmatch(r"[0-9a-fA-F]{16,128}", response[key]) is None)
+           for key in ("sha256", "hash")):
+        return False
+    if any(key in response and type(response[key]) is not bool for key in ("created", "updated")):
+        return False
+    metadata = {"path", "file_path", "written", "success", "exit_code", "chars", "bytes",
+                "size", "sha256", "hash", "encoding", "created", "updated"}
+    return (set(response) <= metadata and all(not isinstance(value, (dict, list)) for value in response.values())
+            and (response.get("written") is True or response.get("success") is True))
+
+
+def _work_priority(body):
+    kind = body.get("type")
+    if kind == "user_correction" or kind == "user_request" and _constraint_request(body.get("summary", "")):
+        return 4
+    return {"public_summary": 3, "work_summary": 3, "verification": 2, "tool_failure": 2,
+            "file_change": 1}.get(kind, 0)
+
+
+def _work_preview(text, query, max_chars=80):
+    """Select a bounded original-text excerpt; never synthesize a conclusion."""
+    from .knowledge_index import normalized_query_plan
+    if len(text) <= max_chars:
+        return text
+    plan = normalized_query_plan(query)
+    terms = [word for word in plan["terms"] if len(word) > 1]
+    lowered = text.casefold()
+    positions = [(lowered.find(word.casefold()), len(word)) for word in terms if word.casefold() in lowered]
+    if not positions:
+        return text[:max_chars]
+    position, _ = max(positions, key=lambda item: item[1])
+    line_start = text.rfind("\n", 0, position) + 1
+    start = line_start if position - line_start < 24 else max(0, position - 16)
+    return ("…" if start else "") + text[start:start + max_chars - int(bool(start))]
+
+
 def _task_key(task_state):
     state = task_state or {}
     if not isinstance(state, dict):
@@ -289,6 +343,7 @@ class WorkMemoryMixin:
             return None
         kind = ""
         text = ""
+        projection_truncated = False
         classification_source = None
         if event["type"] == "PostToolUse":
             if event["outcome"] in {"failed", "conflict"}:
@@ -302,7 +357,9 @@ class WorkMemoryMixin:
             if not kind:
                 return None
             response = payload.get("tool_response", payload.get("toolResult", payload.get("error", {})))
-            text = clip(_json(response), 700)
+            response_text = _json(response)
+            projection_truncated = len(response_text) > 700
+            text = clip(response_text, 700)
             title = f"{stored_name or name or 'tool'}: {event['outcome']}"
         elif event["type"] == "PublicMessageSegment":
             text = payload.get("text", "")
@@ -334,7 +391,8 @@ class WorkMemoryMixin:
                 "task_write_version": event.get("task_write_version"),
                 "assignment_id": event.get("assignment_id"),
                 "coverage": {"projection_only": True, "truncated": bool(payload.get("truncated"))
-                             or len(text) > 1400, "full_original_available": not bool(payload.get("truncated"))}}
+                             or projection_truncated or len(text) > 1400,
+                             "full_original_available": not bool(payload.get("truncated"))}}
         if classification_source:
             body["classification_source_event"] = classification_source
             source = self.db.execute("SELECT business_digest,payload FROM events WHERE project=? AND id=?",
@@ -417,7 +475,7 @@ class WorkMemoryMixin:
         return {"event_id": event_id, "capture_digest": event.get("capture_digest") or digest(json.loads(event["payload"])),
                 "state": state, "source_version": digest([event["id"], event["payload"], signature])}
 
-    def _work_item(self, project, row, *, workspace=None, file_paths=None):
+    def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None):
         from .runtime import digest
         row = dict(row)
         body = json.loads(row["body"])
@@ -456,7 +514,8 @@ class WorkMemoryMixin:
         return {"memory_id": row["id"], "revision": row["revision"],
                 "source_version": digest([row["revision"], row["body"], snapshots, reference_risks]), "state": state,
                 **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
-                "type": body["type"], "title": body["title"], "summary": body["summary"][:240],
+                "type": body["type"], "title": body["title"],
+                "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
                 "completion": body.get("completion", "complete"), "execution_authority": False,
                 "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
                 "files": visible_files, "files_count": len(files), "coverage": body.get("coverage", {}),
@@ -467,7 +526,7 @@ class WorkMemoryMixin:
 
     def _work_search_rows(self, project, query, *, file_path=None, workspace=None, limit=5,
                           conversation=None, agent_id=None, task_state=None, exclude_event_id=None,
-                          automatic=False):
+                          automatic=False, handoff=False):
         from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
         from .runtime import ContractError
         query_limit = _MAX_QUERY_CHARS if automatic else 8000
@@ -476,10 +535,19 @@ class WorkMemoryMixin:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ContractError("work search limit must be 1..20")
         clauses, params = ["m.project=?"], [project]
+        if handoff:
+            if not conversation or not workspace or not isinstance(task_state, dict) or not task_state.get("id"):
+                return []
+            if agent_id and not task_state.get("assignment_id"):
+                return []
+            clauses.extend(["m.workspace_key=?", "json_extract(m.body,'$.type') IN ('public_summary','work_summary')",
+                            "COALESCE(json_extract(m.body,'$.completion'),'complete')='complete'",
+                            "json_extract(m.body,'$.assignment_id') IS ?"])
+            params.extend((checkout_key(workspace), task_state.get("assignment_id")))
         if exclude_event_id is not None:
             # Public-message segments retain the original event identity.
             # Exclude before LIMIT so the current prompt cannot crowd out history.
-            clauses.append("m.event_id!=? AND COALESCE(json_extract(m.body,'$.public_message_id'),'')!=?")
+            clauses.append("m.event_id IS NOT ? AND COALESCE(json_extract(m.body,'$.public_message_id'),'')!=?")
             params.extend((exclude_event_id, exclude_event_id))
         joins = ""
         if file_path is not None:
@@ -507,18 +575,28 @@ class WorkMemoryMixin:
                 clauses.append("json_extract(m.body,'$.assignment_id')=?")
                 params.append(task_state["assignment_id"])
         ordering = " ORDER BY bm25(work_memory_fts),m.created DESC,m.id DESC" if joins else " ORDER BY m.created DESC,m.id DESC"
-        rows = self.db.execute("SELECT m.* FROM work_memories m" + joins + " WHERE " + " AND ".join(clauses)
-                               + ordering + " LIMIT ?", (*params, min(200, limit * 10))).fetchall()
-        if query.strip():
+        select = "SELECT m.* FROM work_memories m" + joins + " WHERE " + " AND ".join(clauses)
+        pool_limit = min(100 if automatic else 200, limit * 10)
+        rows = self.db.execute(select + ordering + " LIMIT ?", (*params, pool_limit)).fetchall()
+        if automatic and len(rows) == pool_limit and any(_metadata_only_write(json.loads(row["body"])) for row in rows):
+            # A bounded second lane prevents a burst of write receipts from
+            # hiding older results. It retains the same scope and query gates.
+            other = self.db.execute(select + " AND json_extract(m.body,'$.type')!='file_change'" + ordering
+                                    + " LIMIT ?", (*params, pool_limit)).fetchall()
+            found = {row["id"] for row in rows}
+            rows.extend(row for row in other if row["id"] not in found)
+        if query.strip() or automatic:
             selected = normalized_query_plan(query)["terms"][:64]
             from .knowledge_index import match_terms
             def score(row):
                 body = json.loads(row["body"])
                 values = set(match_terms(body["title"] + " " + body["summary"]))
-                return (sum(term in values for term in selected), row["created"], row["id"])
+                return (sum(term in values for term in selected), _work_priority(body) if automatic else 0,
+                        row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
         selected_rows, counts, requests = [], {}, []
-        if automatic and query.strip():
+        query_gate = automatic and query.strip() and file_path is None
+        if query_gate:
             from .knowledge_index import _match_info
             plan = normalized_query_plan(query)
             if not plan["automatic_safe"]:
@@ -528,7 +606,9 @@ class WorkMemoryMixin:
             denominator = sum(weights.values())
         for row in rows:
             body = json.loads(row["body"])
-            if automatic and query.strip():
+            if automatic and _metadata_only_write(body):
+                continue
+            if query_gate:
                 comparable = _json({"title": body["title"], "content": body["summary"], "knowledge_kind": ""})
                 if not denominator or not _match_info(comparable, weights, denominator,
                                                        plan["meaningful"], _anchors=plan["exact_anchors"])["auto_eligible"]:
@@ -681,15 +761,23 @@ class WorkMemoryMixin:
             (project, conversation, agent_id or "", project, conversation, agent_id or ""))
         return {"recorded": count, "delivery": delivery, "model_read_confirmed": False}
 
-    def work_exposure_updates(self, project, conversation, agent_id=None, limit=3):
+    def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None):
         result = []
         with _snapshot(self):
-            rows = self.db.execute("SELECT m.*,x.source_version AS shown_version FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT 100",
+            rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT 100",
                                    (project, conversation, agent_id or "")).fetchall()
             for row in rows:
-                item = self._work_item(project, row)
-                if item["source_version"] != row["shown_version"]:
+                old_files = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
+                item = self._work_item(project, row, workspace=workspace if old_files else None,
+                                       file_paths=list(old_files))
+                file_changed = any(path in old_files and old_files[path] != version
+                                   for path, version in (item["file_state"] or {}).items())
+                source_changed = item["source_version"] != row["shown_version"]
+                if source_changed:
                     item["source_changed"] = True
+                if file_changed:
+                    item["file_state_changed"] = True
+                if source_changed or file_changed:
                     result.append(item)
                     if len(result) >= limit:
                         break
@@ -703,7 +791,7 @@ class WorkMemoryMixin:
         with _snapshot(self):
             name, args = _tool(raw or {})
             links = file_links_from_payload(name, args, workspace, observe_version=False) if workspace else []
-            result = self.work_exposure_updates(project, conversation, agent_id, limit=limit)
+            result = self.work_exposure_updates(project, conversation, agent_id, limit=limit, workspace=workspace)
             if not links and not query.strip() and workspace and not file_only:
                 # AG 下一次 invocation 无工具参数，仅使用本会话/agent近期明确目标。
                 filters, parameters = "", [project, conversation, agent_id, checkout_key(workspace)]
@@ -737,7 +825,7 @@ class WorkMemoryMixin:
             for link in links[:3]:
                 rows.extend(self._work_search_rows(project, query[:8000],
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
-                    exclude_event_id=exclude_event_id))
+                    exclude_event_id=exclude_event_id, automatic=True))
             if not links:
                 # 空查询先查当前会话；新会话可读取同checkout的公开交接索引。
                 rows = self._work_search_rows(project, query, limit=limit,
@@ -750,10 +838,23 @@ class WorkMemoryMixin:
                         "AND COALESCE(json_extract(body,'$.completion'),'complete')='complete' "
                         "ORDER BY created DESC,id DESC LIMIT ?",
                         (project, checkout_key(workspace), conversation, limit * 4)).fetchall()
+            # A real compaction can restore the current phase's complete public
+            # handoff after relevant matches. Never restore unrelated seen IDs or
+            # treat Antigravity's ordinary ephemeral invocations as compaction.
+            if compact and not file_only:
+                rows.extend(self._work_search_rows(project, "", workspace=workspace, limit=limit,
+                    conversation=conversation, agent_id=agent_id, task_state=task_state,
+                    exclude_event_id=exclude_event_id, automatic=True, handoff=True))
             seen = {item["memory_id"] for item in result}
+            public_messages = set()
             for row in rows:
+                body = json.loads(row["body"])
+                parent = body.get("public_message_id")
+                if _metadata_only_write(body) or compact and parent and parent in public_messages:
+                    continue
                 item = self._work_item(project, row, workspace=workspace,
-                                       file_paths=[link["relative_path"] for link in links[:3]])
+                                       file_paths=[link["relative_path"] for link in links[:3]], preview_query=query)
+                item["_preview_query"] = query
                 if any(link.get("task_affinity") == "context_only" for link in links):
                     item["task_affinity"] = "context_only"
                 if item["memory_id"] in seen:
@@ -773,6 +874,8 @@ class WorkMemoryMixin:
                     continue
                 result.append(item)
                 seen.add(item["memory_id"])
+                if parent:
+                    public_messages.add(parent)
                 if len(result) >= limit:
                     break
             return result[:limit]
@@ -916,7 +1019,8 @@ class WorkMemoryMixin:
         for item in items[:20]:
             row = self.db.execute("SELECT * FROM work_memories WHERE project=? AND id=?", (project, item.get("memory_id"))).fetchone()
             if row is not None and row["revision"] == item.get("revision"):
-                current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"))
+                current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"),
+                                          preview_query=item.get("_preview_query"))
                 if item.get("task_affinity") == "context_only":
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):

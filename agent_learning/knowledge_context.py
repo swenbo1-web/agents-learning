@@ -219,12 +219,17 @@ class KnowledgeContextMixin:
                 (project, conversation, agent_id or "", *self._task_key(task)[:2],
                  *((self._task_key(task)[2],) if agent_id else ()), epoch)).fetchone()
         query = clean(query).strip()
-        continuation = not query or query.lower().strip("。.!！ ") in {
-            "继续", "好的", "可以", "接着", "继续吧", "好", "continue", "go on", "ok", "yes"}
+        def continuation_query(value):
+            return not value or value.lower().strip("。.!！ ") in {
+                "继续", "好的", "可以", "接着", "继续吧", "好", "确认", "确定", "同意",
+                "continue", "go on", "ok", "yes", "confirm", "confirmed"}
+        continuation = continuation_query(query)
         if not (tool_only or continuation or compact):
             # 新提示优先查询当前问题；旧故障保留到后续工具前置，不抢占注意力。
             fault = None
-        effective = initial["last_query"] if continuation else query
+        # Older contexts may already contain an acknowledgement as last_query.
+        # Recover the current task focus instead of recalling that generic word.
+        effective = (initial["last_query"] if not continuation_query(initial["last_query"]) else "") if continuation else query
         if compact and effective:
             # 恢复当前讨论焦点；旧故障继续排队到工具前置，不能抢占当前
             # 查询后再通过历史展示 ID 补回一批未经相关度核对的旧卡。
@@ -312,7 +317,7 @@ class KnowledgeContextMixin:
                         exclude_event_id=_source_event_id)
                 else:
                     # Safety/expiry notices stay independent of optional recall.
-                    work_items = self.work_exposure_updates(project, conversation, agent_id)
+                    work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace)
             except ContractError:
                 # 身份与任务契约失败仍必须由主上下文拒绝，不能当作派生索引故障。
                 raise

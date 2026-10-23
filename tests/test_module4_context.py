@@ -85,6 +85,28 @@ class Module4ContextTests(unittest.TestCase):
         item = self.publish("newtopic")
         self.assertIn(item["knowledge_id"], self.text(self.hook("UserPromptSubmit", prompt="继续", turn_id="published")))
 
+    def test_acknowledgements_reuse_focus_without_keyword_retrieval(self):
+        self.hook("UserPromptSubmit", prompt="compiler", turn_id="focus")
+        with patch.object(self.r, "search", wraps=self.r.search) as search:
+            for index, word in enumerate(("确认", "确认。", "确定", "同意", "confirmed")):
+                self.hook("UserPromptSubmit", prompt=word, turn_id="ack-" + str(index))
+        self.assertTrue(all(call.args[1] == "compiler" for call in search.call_args_list))
+        query = self.r.db.execute("SELECT last_query FROM contexts WHERE conversation='chat'").fetchone()[0]
+        self.assertEqual(query, "compiler")
+
+    def test_old_acknowledgement_focus_recovers_task_goal(self):
+        self.hook("UserPromptSubmit", prompt="compiler", turn_id="initial")
+        self.r.db.execute("UPDATE contexts SET last_query='确认' WHERE conversation='chat'")
+        with patch.object(self.r, "search", wraps=self.r.search) as search:
+            self.hook("UserPromptSubmit", prompt="确认", turn_id="recover")
+        self.assertEqual(search.call_args.args[1], "diagnostic task")
+
+    def test_confirmation_with_domain_text_remains_a_new_query(self):
+        self.hook("UserPromptSubmit", prompt="compiler", turn_id="initial")
+        with patch.object(self.r, "search", wraps=self.r.search) as search:
+            self.hook("UserPromptSubmit", prompt="确认修复 signingcompat 签名", turn_id="new-focus")
+        self.assertEqual(search.call_args.args[1], "确认修复 signingcompat 签名")
+
     def test_old_exposure_source_changes_are_tracked_beyond_eight(self):
         first = self.publish("oldcompiler", success=True)
         self.hook("UserPromptSubmit", prompt="oldcompiler", turn_id="old")
