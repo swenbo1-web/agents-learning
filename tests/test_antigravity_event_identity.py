@@ -133,6 +133,68 @@ class AntigravityEventIdentityTests(unittest.TestCase):
         self.invocation("two")
         self.assertEqual(len(self.events("UserPromptSubmit")), 2)
 
+    def test_legacy_input_metadata_is_preserved_without_backfilling_public_hash(self):
+        original = self.r._event
+        def legacy(project, conversation, kind, payload, **kwargs):
+            if kind == "AntigravityPublicInput":
+                payload = dict(payload)
+                payload.pop("public_input_digest", None)
+            return original(project, conversation, kind, payload, **kwargs)
+        with patch.object(self.r, "_event", side_effect=legacy):
+            self.invocation()
+        before = dict(self.events("AntigravityPublicInput", "one")[0])
+        self.assertNotIn("public_input_digest", json.loads(before["payload"]))
+        receipt = self.receipt("one")
+        observed = self.adapter._observable("PreInvocation", self.raw(
+            invocationNum=0, initialNumSteps=0, lastUserInput="相同公开用户输入"))
+        observed.update(host_epoch=self.r.session_epoch(), generation=receipt["generation"])
+        observed["capture_coverage"].update(workspace_association="installed_workspace",
+                                             trajectory_identity="current")
+        observed["public_window"] = json.loads(before["payload"])["public_window"]
+        self.adapter._public_input(self.p, self.conversation("one"), observed,
+                                   receipt["event_key"], lambda: None)
+        self.assertEqual(dict(self.events("AntigravityPublicInput", "one")[0]), before,
+                         "optional metadata upgrades must not rewrite old event hashes")
+        for state in ("pending", "complete"):
+            with self.subTest(receipt_state=state):
+                self.r.db.execute("UPDATE antigravity_receipts SET state=? WHERE project=? AND event_key=?",
+                                  (state, self.p, receipt["event_key"]))
+                counts = self.counts()
+                self.invocation()
+                self.assertEqual(self.counts(), counts)
+                self.assertEqual(dict(self.events("AntigravityPublicInput", "one")[0]), before)
+                self.assertEqual(self.receipt("one")["state"], state,
+                                 "replay cannot complete an unknown earlier invocation")
+
+    def test_input_metadata_public_hash_or_boundary_changes_keep_identity_conflict(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                native = "input-conflict-" + str(legacy)
+                self.invocation(native)
+                event = dict(self.events("AntigravityPublicInput", native)[0])
+                previous = json.loads(event["payload"])
+                if legacy:
+                    previous.pop("public_input_digest")
+                    self.r.db.execute("UPDATE events SET payload=? WHERE id=?",
+                                      (json.dumps(previous), event["id"]))
+                receipt = self.receipt(native)
+                for change in ("public_hash", "boundary"):
+                    observed = self.adapter._observable("PreInvocation", self.raw(native,
+                        invocationNum=0, initialNumSteps=0, lastUserInput="相同公开用户输入"))
+                    observed.update(host_epoch=self.r.session_epoch(), generation=receipt["generation"])
+                    observed["capture_coverage"].update(workspace_association="installed_workspace",
+                                                         trajectory_identity="current")
+                    observed["public_window"] = previous["public_window"]
+                    if change == "public_hash":
+                        if legacy:
+                            continue  # Old metadata did not capture a comparable public hash.
+                        observed["lastUserInput"] = "different public input under the same native event"
+                    else:
+                        observed["generation"] += 1
+                    with self.assertRaisesRegex(ContractError, "event id reused"):
+                        self.adapter._public_input(self.p, self.conversation(native), observed,
+                                                   receipt["event_key"], lambda: None)
+
     def test_legacy_complete_stop_does_not_replay_fence_delivery_or_new_public_text(self):
         self.r.task_update(self.p, self.conversation("one"), "明确交付")
         self.r.task_update(self.p, self.conversation("one"), "明确交付", status="delivered")

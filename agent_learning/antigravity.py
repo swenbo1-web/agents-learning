@@ -479,6 +479,7 @@ class AntigravityAdapter:
         """Keep a body's absence/coverage observable without retaining its text."""
         with self.runtime.transaction():
             phase_guard()
+            identity = ["antigravity-public-input", conversation, event_key]
             task = self.runtime.task(project, conversation)
             coverage = observed["capture_coverage"]
             window = observed.get("public_window")
@@ -489,8 +490,27 @@ class AntigravityAdapter:
             metadata = {key: observed[key] for key in ("host_epoch", "generation", "capture_coverage")}
             metadata.update(invocation_num=observed["invocationNum"], initial_steps=observed["initialNumSteps"],
                             public_window=window)
+            text = observed.get("lastUserInput")
+            if isinstance(text, str) and text.strip():
+                # Coverage alone cannot prove that this exact public request
+                # subsequently reached the capture store. Keep only its hash.
+                metadata["public_input_digest"] = digest(text)
+            prior = self.runtime.db.execute("SELECT payload FROM events WHERE project=? AND id=? "
+                "AND type='AntigravityPublicInput' AND conversation=?",
+                (project, digest([project, identity]), conversation)).fetchone()
+            if prior:
+                try:
+                    previous = json.loads(prior["payload"])
+                except (TypeError, ValueError):
+                    previous = None
+                if (isinstance(previous, dict) and "public_input_digest" not in previous
+                        and previous == {key: value for key, value in metadata.items()
+                                         if key != "public_input_digest"}):
+                    # Only the absent optional field is compatible. Preserve
+                    # legacy hashes; other changes retain the normal ID guard.
+                    return
             self.runtime._event(project, conversation, "AntigravityPublicInput", metadata,
-                event_id=["antigravity-public-input", conversation, event_key],
+                event_id=identity,
                 task_id=task["id"] if task else None, task_revision=task["revision"] if task else None,
                 task_write_version=task["write_version"] if task else None,
                 execution_epoch=task["execution_epoch"] if task else None)

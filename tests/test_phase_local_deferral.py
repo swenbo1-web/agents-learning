@@ -98,6 +98,70 @@ class PhaseLocalDeferralTests(unittest.TestCase):
                 self.assertEqual(status(runtime, project)["locally_deferred_phase_count"], 0)
                 self.assertIsNotNone(self.pending_packet(runtime), "uncertain or substantive work keeps normal review")
 
+    def test_antigravity_native_input_diagnostic_matches_saved_public_request(self):
+        from agent_learning.runtime import digest
+        runtime, project, send, conversation = self.setup_host("antigravity", "-native-input")
+        self.begin(runtime, project, send, conversation)
+        metadata = json.loads(runtime.db.execute("SELECT payload FROM events WHERE conversation=? "
+            "AND type='AntigravityPublicInput' ORDER BY rowid DESC LIMIT 1", (conversation,)).fetchone()[0])
+        request = runtime.db.execute("SELECT payload FROM events WHERE conversation=? "
+            "AND type='UserPromptSubmit' ORDER BY rowid DESC LIMIT 1", (conversation,)).fetchone()[0]
+        self.assertEqual(metadata["public_input_digest"], digest(json.loads(request)["prompt"]))
+        self.assertNotIn("lastUserInput", metadata, "the diagnostic must not duplicate public text")
+        self.assertFalse(metadata["public_window"]["available"],
+                         "complete native input does not require a transcript response window")
+        self.assertEqual(self.finish(runtime, project, send, conversation)["state"], "routine_deferred")
+
+    def test_antigravity_unknown_or_incomplete_input_metadata_keeps_normal_review(self):
+        changes = (
+            (("public_input_digest",), None),
+            (("public_input_digest",), "0" * 64),
+            (("host_epoch",), -1),
+            (("generation",), True),
+            (("capture_coverage",), []),
+            (("capture_coverage", "workspace_association"), "unknown_multi_workspace"),
+            (("capture_coverage", "trajectory_identity"), "ambiguous"),
+            (("capture_coverage", "lastUserInput", "available"), False),
+            (("capture_coverage", "lastUserInput", "full_original_available"), False),
+            (("capture_coverage", "lastUserInput", "truncated"), True),
+            (("capture_coverage", "lastUserInput", "source"), "unrecognized_source"),
+        )
+        for number, (path, value) in enumerate(changes):
+            with self.subTest(path=path, value=value):
+                runtime, project, send, conversation = self.setup_host("antigravity", "-coverage-" + str(number))
+                self.begin(runtime, project, send, conversation)
+                event = runtime.db.execute("SELECT id,payload FROM events WHERE conversation=? "
+                    "AND type='AntigravityPublicInput' ORDER BY rowid DESC LIMIT 1", (conversation,)).fetchone()
+                body = json.loads(event["payload"])
+                target = body
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                runtime.db.execute("UPDATE events SET payload=? WHERE id=?", (json.dumps(body), event["id"]))
+                phase = self.finish(runtime, project, send, conversation)
+                self.assertNotEqual(phase["state"], "routine_deferred")
+                self.assertIsNotNone(self.pending_packet(runtime))
+
+    def test_antigravity_metadata_without_original_public_request_keeps_normal_review(self):
+        runtime, project, send, conversation = self.setup_host("antigravity", "-missing-public-input")
+        self.begin(runtime, project, send, conversation)
+        retained = runtime.db.execute("SELECT payload FROM events WHERE conversation=? "
+            "AND type='PhaseRequestContext' ORDER BY rowid DESC LIMIT 1", (conversation,)).fetchone()
+        self.assertIsNotNone(retained, "the derived routine label alone must not prove captured input")
+        original = json.loads(retained[0])["original_event_id"]
+        runtime.db.execute("DELETE FROM events WHERE project=? AND id=?", (project, original))
+        phase = self.finish(runtime, project, send, conversation)
+        self.assertNotEqual(phase["state"], "routine_deferred")
+        self.assertIsNotNone(self.pending_packet(runtime))
+
+    def test_antigravity_mixed_native_request_keeps_normal_review(self):
+        runtime, project, send, conversation = self.setup_host("antigravity", "-mixed-native-input")
+        self.begin(runtime, project, send, conversation,
+                   prompt="检查 Agent Learning 连接，另外记录本项目的部署限制")
+        phase = self.finish(runtime, project, send, conversation)
+        self.assertNotEqual(phase["state"], "routine_deferred")
+        self.assertIsNotNone(self.pending_packet(runtime))
+
     def test_continuation_alone_does_not_establish_explicit_routine_intent(self):
         runtime, project, send, conversation = self.setup_host(suffix="-continuation")
         self.begin(runtime, project, send, conversation, prompt="继续核对")

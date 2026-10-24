@@ -54,6 +54,44 @@ def _partial(value):
     return isinstance(value, list) and any(_partial(item) for item in value)
 
 
+def _public_request_digest(runtime, project, phase, kind, body):
+    """A metadata receipt needs the complete request actually saved as evidence."""
+    from .public_observations import observed_public
+    from .runtime import digest
+    prompt = body.get("prompt")
+    if kind == "PhaseRequestContext":
+        original = runtime.db.execute("SELECT payload,outcome FROM events WHERE project=? AND conversation=? "
+            "AND id=? AND type='UserPromptSubmit' AND agent IS NULL",
+            (project, phase["conversation"], body.get("original_event_id"))).fetchone()
+        if original is None or original["outcome"] not in {"reported", "unknown"}:
+            return None
+        body = json.loads(original["payload"])
+        if not isinstance(body, dict) or body.get("prompt") != prompt:
+            return None
+    if (body.get("host_epoch") != phase["session_epoch"]
+            or not observed_public("UserPromptSubmit", body, require_complete=True)):
+        return None
+    return digest(prompt)
+
+
+def _native_input_digest(runtime, phase, body):
+    """Allow only a known complete native-input diagnostic, never unknown capture."""
+    coverage = body.get("capture_coverage", {})
+    public = coverage.get("lastUserInput", {}) if isinstance(coverage, dict) else {}
+    if (runtime.host != "antigravity" or not isinstance(coverage, dict)
+            or body.get("host_epoch") != phase["session_epoch"]
+            or coverage.get("workspace_association") != "installed_workspace"
+            or coverage.get("trajectory_identity") != "current"
+            or not isinstance(public, dict) or public.get("source") != "native_hook"
+            or public.get("available") is not True or public.get("full_original_available") is not True
+            or public.get("truncated") is not False
+            or any(type(body.get(key)) is not int or body[key] < minimum
+                   for key, minimum in (("generation", 1), ("invocation_num", 0), ("initial_steps", 0)))):
+        return None
+    value = body.get("public_input_digest")
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
 def is_routine(runtime, project, phase):
     """Recheck the whole original window, including late revisions, on each scan.
 
@@ -95,6 +133,7 @@ def is_routine(runtime, project, phase):
     if len(events) > 40 or sum(row["chars"] for row in events) > 16000:
         return False
     requested = replied = False
+    request_digests, native_inputs = set(), []
     for event in events:
         if event["chars"] > 6000 or event["agent"] or event["outcome"] in {"failed", "conflict", "denied"}:
             return False
@@ -106,8 +145,16 @@ def is_routine(runtime, project, phase):
             prompt = body.get("prompt")
             if _request(prompt):
                 requested = True
+                identity = _public_request_digest(runtime, project, phase, kind, body)
+                if identity:
+                    request_digests.add(identity)
             elif _text(prompt) not in {"继续", "继续核对", "继续检查", "continue"}:
                 return False
+        elif kind == "AntigravityPublicInput":
+            identity = _native_input_digest(runtime, phase, body)
+            if identity is None:
+                return False
+            native_inputs.append(identity)
         elif kind == "Stop":
             if not _reply(body.get("last_assistant_message")):
                 return False
@@ -146,4 +193,4 @@ def is_routine(runtime, project, phase):
                 return False
         else:
             return False
-    return requested and replied
+    return requested and replied and all(identity in request_digests for identity in native_inputs)
