@@ -26,6 +26,9 @@ VARIANTS = ("no_memory", "with_memory")
 TOKEN_COMPONENTS = ("worker", "admin", "retrieval", "model_other")
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_RECORDS = 20000
+ARTIFACT_UNITS = {"performance": {"ms", "s", "operations/s", "requests/s", "frames/s"},
+                  "memory": {"bytes", "KiB", "MiB"},
+                  "quality": {"ratio", "percent", "count", "score"}}
 
 
 class EvaluationError(ValueError):
@@ -91,12 +94,84 @@ def _model(value):
     return model
 
 
+def _artifact_descriptor(metric):
+    _object(metric, "artifact metric")
+    identity = _text(metric.get("id"), "artifact metric.id", 100)
+    if not identity.isascii() or any(not (char.isalnum() or char in "_.-") for char in identity):
+        raise EvaluationError("artifact metric.id must contain ASCII letters, digits, '_', '.' or '-'")
+    kind, unit = metric.get("kind"), metric.get("unit")
+    if not isinstance(kind, str) or kind not in ARTIFACT_UNITS or not isinstance(unit, str) or unit not in ARTIFACT_UNITS[kind]:
+        raise EvaluationError("artifact metric requires a supported kind and explicit unit")
+    _text(metric.get("method"), "artifact metric.method", 2000)
+    return {key: metric[key] for key in ("id", "kind", "unit", "method")}
+
+
+def _artifact_value(value, metric):
+    try:
+        finite = not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise EvaluationError("artifact metric value must be a finite number or null")
+    if metric["unit"] == "score":
+        return value
+    _number(value, "artifact metric value")
+    if metric["unit"] in {"bytes", "count"}:
+        _integer(value, "artifact metric value", high=2**63 - 1)
+    if metric["unit"] == "ratio" and value > 1 or metric["unit"] == "percent" and value > 100:
+        raise EvaluationError("artifact ratio/percent value exceeds its unit range")
+    return value
+
+
+def _artifact_definitions(items):
+    if not isinstance(items, list) or not 1 <= len(items) <= 16:
+        raise EvaluationError("task.artifact_metrics must contain 1..16 declarations")
+    result, identities = [], set()
+    for item in items:
+        descriptor = _artifact_descriptor(item)
+        if set(item) - {*descriptor, "criteria", "criteria_sha256"} or descriptor["id"] in identities:
+            raise EvaluationError("artifact metric declaration has duplicate identity or unsupported fields")
+        identities.add(descriptor["id"])
+        criteria = item.get("criteria")
+        if criteria is not None:
+            _object(criteria, "artifact metric.criteria")
+            operator = criteria.get("operator")
+            if set(criteria) != {"operator", "value"} or not isinstance(operator, str) or operator not in {"lt", "lte", "gt", "gte", "eq"}:
+                raise EvaluationError("artifact criteria requires operator lt/lte/gt/gte/eq and value")
+            _artifact_value(criteria["value"], descriptor)
+        criteria_sha = fingerprint(criteria) if criteria is not None else None
+        if "criteria_sha256" in item and item["criteria_sha256"] != criteria_sha:
+            raise EvaluationError("artifact criteria fingerprint does not match its frozen criteria")
+        result.append({**descriptor, "criteria": criteria, "criteria_sha256": criteria_sha})
+    return result
+
+
+def _artifact_observations(items):
+    if not isinstance(items, list) or len(items) > 16:
+        raise EvaluationError("record.artifact_metrics must be an array of at most 16 observations")
+    identities = set()
+    for item in items:
+        descriptor = _artifact_descriptor(item)
+        if set(item) != {*descriptor, "criteria_sha256", "value", "artifact_sha256", "evidence_sha256"} or item["id"] in identities:
+            raise EvaluationError("artifact observation requires unique id, descriptor, criteria fingerprint, value and evidence fingerprints")
+        identities.add(item["id"])
+        for key in ("criteria_sha256", "artifact_sha256", "evidence_sha256"):
+            if item[key] is not None:
+                _sha(item[key], "artifact metric." + key)
+        if item["value"] is not None:
+            _artifact_value(item["value"], descriptor)
+            if item["artifact_sha256"] is None or item["evidence_sha256"] is None:
+                raise EvaluationError("known artifact measurements require artifact and measurement evidence SHA-256")
+
+
 def create_protocol(spec):
     """Freeze task inputs and a balanced execution order before collecting results.
 
     Required spec: id, data_class (real_protocol or synthetic_template), model,
     environment_sha256, knowledge_sha256, repeats (2..100), seed, tasks.
-    Each task requires id, prompt, dataset_sha256, acceptance_criteria.
+    Each task requires id, prompt, dataset_sha256, acceptance_criteria. Optional
+    artifact_metrics declares id/kind/unit/method and criteria={operator,value};
+    criteria may be null. Its fingerprint and metric conditions are frozen.
     """
     spec = _object(spec, "spec")
     _text(spec.get("id"), "id", 200)
@@ -120,9 +195,12 @@ def create_protocol(spec):
         ids.add(identity)
         prompt = _text(task.get("prompt"), "task.prompt", 100000)
         criteria = _text(task.get("acceptance_criteria"), "task.acceptance_criteria", 100000)
-        normalized.append({"id": identity, "prompt": prompt, "prompt_sha256": fingerprint(prompt),
-                           "dataset_sha256": _sha(task.get("dataset_sha256"), "task.dataset_sha256"),
-                           "acceptance_criteria": criteria, "acceptance_sha256": fingerprint(criteria)})
+        frozen = {"id": identity, "prompt": prompt, "prompt_sha256": fingerprint(prompt),
+                  "dataset_sha256": _sha(task.get("dataset_sha256"), "task.dataset_sha256"),
+                  "acceptance_criteria": criteria, "acceptance_sha256": fingerprint(criteria)}
+        if "artifact_metrics" in task:
+            frozen["artifact_metrics"] = _artifact_definitions(task["artifact_metrics"])
+        normalized.append(frozen)
     pairs = [(task["id"], repeat) for task in normalized for repeat in range(1, repeats + 1)]
     generator = random.Random(seed)
     firsts = {task["id"]: generator.randrange(2) for task in normalized}
@@ -153,10 +231,13 @@ def _protocol(value):
 
 
 def _conditions(protocol, task, variant):
-    return {"model": protocol["model"], "environment_sha256": protocol["environment_sha256"],
+    result = {"model": protocol["model"], "environment_sha256": protocol["environment_sha256"],
             "prompt_sha256": task["prompt_sha256"], "dataset_sha256": task["dataset_sha256"],
             "acceptance_sha256": task["acceptance_sha256"], "memory_mode": variant,
             "knowledge_sha256": protocol["knowledge_sha256"] if variant == "with_memory" else None}
+    if "artifact_metrics" in task:
+        result["artifact_metrics_sha256"] = fingerprint(task["artifact_metrics"])
+    return result
 
 
 def record_template(protocol, task_id, repeat, variant):
@@ -177,7 +258,7 @@ def _new_record(protocol, task_id, repeat, variant):
         raise EvaluationError("unknown task or variant")
     _integer(repeat, "repeat", 1, protocol["repeats"])
     conditions = _conditions(protocol, task, variant)
-    return {"run_id": str(uuid.uuid4()), "task_id": task_id, "repeat": repeat, "variant": variant,
+    record = {"run_id": str(uuid.uuid4()), "task_id": task_id, "repeat": repeat, "variant": variant,
             "protocol_sha256": protocol["protocol_sha256"], "conditions": conditions,
             "condition_sha256": fingerprint(conditions), "source": "synthetic_template",
             "acceptance": {"method": "automated", "status": "unknown", "evidence_sha256": None},
@@ -186,6 +267,11 @@ def _new_record(protocol, task_id, repeat, variant):
             "isolation": {"workspace_id": "replace-with-unique-reset-workspace", "reset_verified": False,
                           "initial_state_sha256": task["dataset_sha256"]},
             "artifacts": []}
+    if "artifact_metrics" in task:
+        record["artifact_metrics"] = [{**{key: item[key] for key in ("id", "kind", "unit", "method", "criteria_sha256")},
+                                       "value": None, "artifact_sha256": None, "evidence_sha256": None}
+                                      for item in task["artifact_metrics"]]
+    return record
 
 
 def _record(record):
@@ -205,6 +291,8 @@ def _record(record):
         raise EvaluationError("invalid conditions.memory_mode")
     if conditions.get("knowledge_sha256") is not None:
         _sha(conditions["knowledge_sha256"], "conditions.knowledge_sha256")
+    if "artifact_metrics_sha256" in conditions:
+        _sha(conditions["artifact_metrics_sha256"], "conditions.artifact_metrics_sha256")
     acceptance = _object(record.get("acceptance"), "acceptance")
     if acceptance.get("method") not in {"user", "automated"} or acceptance.get("status") not in {"passed", "failed", "unknown"}:
         raise EvaluationError("acceptance requires user/automated method and passed/failed/unknown status")
@@ -264,6 +352,8 @@ def _record(record):
         _object(artifact, "artifact")
         _text(artifact.get("ref"), "artifact.ref", 2000)
         _sha(artifact.get("sha256"), "artifact.sha256")
+    if "artifact_metrics" in record:
+        _artifact_observations(record["artifact_metrics"])
     fingerprint(record)
     return record
 
@@ -304,6 +394,73 @@ def _arm_summary(rows):
                             "total_tokens": sum(item["reported_total_tokens"] for item in token_components.values()) if complete_tokens else None},
             "cost": {"known_runs": sum(currencies.values()), "unknown_runs": len(rows) - sum(currencies.values()),
                      "reported_by_currency": cost_totals}}
+
+
+def _artifact_report(protocol, paired_rows, all_rows, complete):
+    """Artifact measurements stay separate from worker wall time and token costs.
+
+    Declarations freeze kind/unit/method and optional numeric threshold criteria.
+    Known values require both measured-artifact and measurement-evidence SHA-256.
+    These are runner declarations, not attestation or professional acceptance.
+    """
+    declarations = {(task["id"], item["id"]): item for task in protocol["tasks"]
+                    for item in task.get("artifact_metrics", [])}
+    fields = ("id", "kind", "unit", "method", "criteria_sha256")
+
+    def matches(item, declared):
+        return all(item[key] == declared[key] for key in fields)
+
+    unmatched = []
+    for row in all_rows:
+        for item in row.get("artifact_metrics", []):
+            declared = declarations.get((row["task_id"], item["id"]))
+            if declared is None or not matches(item, declared):
+                unmatched.append({"run_id": row["run_id"], "task_id": row["task_id"], "metric_id": item["id"],
+                                  "reason": "metric_not_predeclared" if declared is None else "unit_method_or_criteria_mismatch"})
+    groups = {variant: [] for variant in VARIANTS}
+    for (task_id, identity), declared in sorted(declarations.items()):
+        for variant in VARIANTS:
+            rows = [row for row in paired_rows if row["task_id"] == task_id and row["variant"] == variant]
+            observed, mismatched = [], 0
+            for row in rows:
+                item = next((item for item in row.get("artifact_metrics", []) if item["id"] == identity), None)
+                if item is not None and not matches(item, declared):
+                    mismatched += 1
+                elif item is not None and item["value"] is not None:
+                    observed.append((row["run_id"], item))
+            values = [item["value"] for _, item in observed]
+            criteria = declared["criteria"]
+            passed = 0
+            if criteria is not None:
+                target = criteria["value"]
+                for value in values:
+                    passed += {"lt": value < target, "lte": value <= target, "gt": value > target,
+                               "gte": value >= target, "eq": value == target}[criteria["operator"]]
+            checked = len(values) if criteria is not None else 0
+            expected = protocol["repeats"]
+            status = ("passed" if passed == expected else "failed") if complete and checked == expected else "unknown"
+            ordered = sorted(values)
+            middle = len(ordered) // 2
+            # mean uses exact intermediate sums; two finite large scores must
+            # not overflow while calculating their median.
+            median = (ordered[middle] if len(ordered) % 2 else statistics.mean(ordered[middle - 1:middle + 1])) if ordered else None
+            groups[variant].append({"task_id": task_id, "metric_id": identity, "kind": declared["kind"],
+                "unit": declared["unit"], "method": declared["method"], "criteria": criteria,
+                "criteria_sha256": declared["criteria_sha256"], "expected_runs": expected,
+                "observed_runs": len(rows), "known_runs": len(values), "unknown_runs": expected - len(values),
+                "mismatched_runs": mismatched, "values": {"count": len(ordered), "p50": median,
+                    "p95": ordered[max(0, math.ceil(.95 * len(ordered)) - 1)] if ordered else None},
+                "criteria_results": {"passed": passed, "failed": checked - passed, "unknown": expected - checked,
+                                     "status": status},
+                "evidence": [{"run_id": run_id, "artifact_sha256": item["artifact_sha256"],
+                              "evidence_sha256": item["evidence_sha256"]} for run_id, item in sorted(observed)]})
+    return {"sample_scope": "compatible_paired_subset", "groups": groups,
+            "unmatched_observations": sorted(unmatched, key=lambda item: (item["run_id"], item["metric_id"])),
+            "comparisons_inferred": False,
+            "limitations": ["Artifact measurements are independent of worker wall time, retrieval latency and token usage.",
+                            "Threshold status checks only frozen criteria; missing criteria or measurements never imply passed.",
+                            "Units and methods are matched exactly; no conversions or cross-task pooling are inferred.",
+                            "Artifact and evidence fingerprints are runner declarations, not verified artifact quality or authenticity."]}
 
 
 def summarize(protocol, records):
@@ -398,7 +555,7 @@ def summarize(protocol, records):
     if eligibility["monetary_cost"]["eligible"]:
         currency = next(iter(currencies))
         deltas["monetary_cost"] = {"currency": currency, "amount": memory["cost"]["reported_by_currency"][currency] - baseline["cost"]["reported_by_currency"][currency]}
-    return {"kind": "agent_learning.task_evaluation_report", "version": PROTOCOL_VERSION,
+    report = {"kind": "agent_learning.task_evaluation_report", "version": PROTOCOL_VERSION,
             "protocol_id": protocol["id"], "protocol_sha256": protocol["protocol_sha256"],
             "expected_pairs": len(expected), "compatible_pairs": sum(pair["compatible"] for pair in pairs),
             "complete_design": complete, "input_records": len(records), "invalid_records": invalid,
@@ -416,6 +573,10 @@ def summarize(protocol, records):
                             "Unknown usage remains null; reported cost must include all calls and use one currency for comparison.",
                             "No causal benefit, statistical significance, professional correctness, or net savings is inferred.",
                             "Knowledge-building overhead must be allocated to admin tokens/cost by the runner; no lifecycle cost is inferred."]}
+    observed_rows = [row for identity, row in sorted(by_id.items()) if identity not in conflicted_ids]
+    if any("artifact_metrics" in task for task in protocol["tasks"]) or any("artifact_metrics" in row for row in observed_rows):
+        report["artifact_metrics"] = _artifact_report(protocol, subset, observed_rows, complete)
+    return report
 
 
 def _unique_object(pairs):
@@ -527,7 +688,7 @@ def _adapter_result(argv, request, workspace, environment, timeout_seconds):
             result = json.loads(output.read().decode("utf-8-sig"), object_pairs_hook=_unique_object,
                                 parse_constant=lambda token: (_ for _ in ()).throw(EvaluationError("nonfinite JSON value")))
             _object(result, "adapter result")
-            if set(result) - {"acceptance", "retrieval", "token_usage", "cost", "artifacts", "initial_state_sha256"}:
+            if set(result) - {"acceptance", "retrieval", "token_usage", "cost", "artifacts", "artifact_metrics", "initial_state_sha256"}:
                 raise EvaluationError("adapter result contains reserved fields")
         except (ValueError, UnicodeError, EvaluationError):
             runner["status"] = "invalid_output"

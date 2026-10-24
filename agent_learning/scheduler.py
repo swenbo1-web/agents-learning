@@ -130,8 +130,11 @@ class SchedulerMixin:
         last = self.db.execute("SELECT json_extract(summary,'$.host_scope') FROM scheduler_jobs "
                                "WHERE project=? AND kind='admin'", (project,)).fetchone()
         if last and last[0] in scopes and len(scopes) > 1:
-            scopes.remove(last[0])
-            scopes.append(last[0])
+            # A different host may wake the next runner. Keep one cycle even
+            # when the caller changes, instead of rebuilding caller priority.
+            scopes.sort()
+            start = scopes.index(last[0]) + 1
+            scopes = scopes[start:] + scopes[:start]
         return scopes
 
     @contextmanager
@@ -147,7 +150,7 @@ class SchedulerMixin:
             self.host, self.host_instance, self.host_scope = old_host, old_instance, old_scope
 
     def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
-        from .admin_queue import eligible_query, scan_signatures, ready_executor, dispatch_diagnostic
+        from .admin_queue import eligible_query, scan_signatures, ready_executor, dispatch_diagnostic, routing_scan_pending
         from .admin_usage import admin_admission_status
         from .runtime import digest
         with self._scheduler_host_scope(target_scope):
@@ -193,7 +196,9 @@ class SchedulerMixin:
                     "WHERE s.project=? AND p.status='pending' AND s.revision=p.revision AND s.state='awaiting_evidence' LIMIT 1", (project,)).fetchone()
                 reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
                 return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
-            if not ready_executor(self, project, query, args):
+            if not ready_executor(self, project, query, args, advance=self.db.in_transaction):
+                if routing_scan_pending(self, project, query, args):
+                    return signature, "waiting", now + cfg["poll_seconds"], "executor_scan_pending"
                 diagnostic = dispatch_diagnostic(self, project)
                 return signature, "waiting", diagnostic.get("next_due"), diagnostic["reason"]
             budget = admin_admission_status(self, project)

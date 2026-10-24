@@ -35,7 +35,7 @@ _LABEL = re.compile(
     r"pending(?:\s+(?:items|work))?|remaining(?:\s+(?:items|work))?|"
     r"unverified|constraints?|invariants?|next\s+steps?|limitations?|correction)", re.I)
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)、]\s+|[☐□]\s*)")
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_FENCE = re.compile(r"[ \t]*(`{3,}|~{3,})")
 _LOG = re.compile(
     r"^\s*(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|"
     r"\[(?:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|CRITICAL)\]|"
@@ -57,7 +57,7 @@ def _groups(text):
     scan = text[:_MAX_SCAN_CHARS]
     groups, headings = [], []
     label, prelude, current = None, None, None
-    fence, opaque_section = None, False
+    fence, opaque_section, opaque_bullet_indent = None, False, None
     exhausted = len(scan) == len(text)
 
     def flush():
@@ -80,15 +80,41 @@ def _groups(text):
         stripped = raw.strip()
         start = match.start() + len(raw) - len(raw.lstrip())
         end = match.start() + len(raw.rstrip())
+        indent = len(raw[:len(raw) - len(raw.lstrip())].expandtabs(4))
+        bullet_marker = _BULLET.match(raw)
         marker = _FENCE.match(raw)
+        inline_fence = fence is None and marker is None and bullet_marker is not None
+        if inline_fence:
+            marker = _FENCE.match(raw, bullet_marker.end())
+            inline_fence = marker is not None
         if fence is not None:
             if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1]:
                 # A closing fence cannot carry an extra language or payload.
                 if not raw[marker.end():].strip():
                     fence = None
             continue
+        if opaque_bullet_indent is not None:
+            if not stripped or indent > opaque_bullet_indent:
+                continue
+            opaque_bullet_indent = None
         if marker:
-            flush()
+            if (indent and current is not None and current[3]
+                    and (not inline_fence or indent > current[4])):
+                # A list item containing code is opaque as a whole. Keeping its
+                # prefix alone could drop a condition after the closing fence.
+                opaque_bullet_indent = current[4]
+                current = None
+            elif (indent and not inline_fence and groups
+                    and _BULLET.match(text[groups[-1][1][-1][0]:groups[-1][1][-1][1]])
+                    and not text[groups[-1][1][-1][1]:match.start()].strip()):
+                # A blank line may already have flushed this same list item.
+                previous = groups.pop()[1][-1]
+                previous_line_start = text.rfind("\n", 0, previous[0]) + 1
+                opaque_bullet_indent = len(text[previous_line_start:previous[0]].expandtabs(4))
+            else:
+                flush()
+                if inline_fence or indent:
+                    opaque_bullet_indent = indent if inline_fence else 0
             prelude = None
             fence = (marker[1][0], len(marker[1]))
             continue
@@ -128,8 +154,7 @@ def _groups(text):
             prelude = None
             continue
 
-        bullet = bool(_BULLET.match(raw))
-        indent = len(raw[:len(raw) - len(raw.lstrip())].expandtabs(4))
+        bullet = bool(bullet_marker)
         nested = bool(bullet and current is not None and current[3] and indent > current[4])
         if bullet and current is not None and not nested:
             if not current[3] and _CONDITIONAL.search(text[current[0]:current[1]]):

@@ -2,6 +2,8 @@
 
 ERROR_JAVASCRIPT = r'''
 Object.assign(strings,{
+readTimedOut:['This read timed out. Retry this view; no action was repeated.','读取超时，请重试当前视图；没有重复执行操作。'],
+readCancelled:['The previous view was closed.','上一视图已关闭。'],
 query_budget_exceeded:['Local query budget exceeded. Narrow this view or retry; model-call allowances are separate.','当前视图查询超限，请缩小筛选范围或稍后重试。这与模型调用额度无关。'],
 database_read_unavailable:['The database is temporarily unavailable for reading. Retry this view later.','数据库暂时无法读取，请稍后刷新当前视图。'],
 browser_read_unavailable:['This view could not be read or reached its local query limit. Narrow the view or retry.','当前视图暂时无法读取或查询超限，请缩小范围或稍后重试。'],

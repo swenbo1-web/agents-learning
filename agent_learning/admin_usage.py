@@ -410,12 +410,40 @@ def admin_project_budget_status(runtime, project, *, now=None):
         return _usage_status(runtime, policy, settings, now=now, project=project)
 
 
-def admin_admission_status(runtime, project, *, now=None):
+def pending_phase_reservation(runtime, project):
+    """Use the same frozen request estimate as claim_call, without preparing work."""
+    from .phase_review import policy as phase_policy, instruction
+    cfg = phase_policy(runtime, project)
+    if cfg["mode"] != "phase":
+        return None
+    amounts = []
+    for row in runtime.db.execute("SELECT b.packet FROM phase_review_batches b JOIN problems p "
+        "ON p.project=b.project AND p.id=b.problem_id WHERE b.project=? AND b.host_scope=? "
+        "AND b.session_epoch=? AND b.governance_epoch=? AND b.policy_version=? "
+        "AND b.state='pending' AND p.status='pending' ORDER BY b.created,b.problem_id LIMIT 40",
+        (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"])):
+        estimate = estimate_reservation(runtime, project, instruction(json.loads(row[0])), phase=True)
+        if estimate["admitted"]:
+            amounts.append(estimate["reserved_tokens"])
+    return min(amounts) if amounts else None
+
+
+def admin_admission_status(runtime, project, *, now=None, required_tokens=None):
     """Both scopes must admit the same call; legacy terminal status names stay stable."""
     current = time.time() if now is None else now
     with _read_snapshot(runtime):
         project_usage = admin_project_budget_status(runtime, project, now=current)
         global_usage = admin_budget_status(runtime, now=current)
+        if required_tokens is None:
+            required_tokens = pending_phase_reservation(runtime, project)
+        if required_tokens is not None:
+            if type(required_tokens) is not int or not 1 <= required_tokens <= 1000000000:
+                raise ContractError("invalid administrator token reservation")
+            for usage in (project_usage, global_usage):
+                usage["required_token_reservation"] = required_tokens
+                if (usage["admission_status"] == "available" and usage["remaining_reported_tokens"] is not None
+                        and usage["remaining_reported_tokens"] < required_tokens):
+                    usage["admission_status"] = "token_budget_exhausted"
         if project_usage["admission_status"] != "available":
             status, scope = project_usage["admission_status"], "project"
         elif global_usage["admission_status"] != "available":

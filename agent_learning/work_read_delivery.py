@@ -21,6 +21,47 @@ class WorkReadDelivery:
     def clear(self):
         self.receipts.clear()
 
+    def completed(self, result, scope, *, section, offset, max_chars):
+        """Reuse only after the caller has rechecked current access, source and files."""
+        from .runtime import ContractError
+        if scope is None:
+            return None
+        key = _hash([scope, result["memory_id"], section])
+        previous = self.receipts.get(key)
+        if previous is None or previous[1] != [(0, previous[2])]:
+            return None
+        candidate = dict(result, status="ok", section=section, section_length=previous[2], offset=offset)
+        check = candidate.get("file_check")
+        if not isinstance(check, dict) or check.get("complete") is not True or self._fingerprint(candidate) != previous[0]:
+            return None
+        if offset > previous[2]:
+            raise ContractError("offset exceeds work section length")
+        receipt = self._receipt(candidate)
+        if len(json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) > max_chars:
+            return None
+        self.receipts.move_to_end(key)
+        return receipt
+
+    @staticmethod
+    def _fingerprint(result):
+        return _hash({key: result.get(key) for key in (
+            "revision", "source_version", "state", "completion", "source_changed",
+            "file_check", "section_length")})
+
+    @staticmethod
+    def _receipt(result):
+        return {"status": "ok", "memory_id": result["memory_id"], "revision": result["revision"],
+            "source_version": result["source_version"], "state": result["state"],
+            "source_changed": result["source_changed"], "validation_level": result["validation_level"],
+            "file_check": result["file_check"],
+            **({"candidate_reference_risk": [{"blocked": True, "details_omitted": True}],
+                "automatic_eligible": False} if result.get("candidate_reference_risk") else {}),
+            "section": result["section"], "section_length": result["section_length"], "offset": result["offset"],
+            "next_offset": None, "truncated": False, "content_omitted": True,
+            "already_read": True, "section_previously_returned_complete": True,
+            "model_read_confirmed": False, "execution_authority": False,
+            "reread_hint": "Reuse the previously returned section, or set reread=true to return it again."}
+
     def project(self, result, scope, *, reread=False):
         """Called after live access/source checks and successful exposure bookkeeping."""
         if (scope is None or result.get("status") != "ok"
@@ -37,9 +78,7 @@ class WorkReadDelivery:
             # previous full section still describes the same available state.
             self.receipts.pop(key, None)
             return result
-        fingerprint = _hash({key: result.get(key) for key in (
-            "revision", "source_version", "state", "completion", "source_changed",
-            "file_check", "section_length")})
+        fingerprint = self._fingerprint(result)
         previous = self.receipts.pop(key, None)
         ranges = previous[1] if previous and previous[0] == fingerprint else []
         complete = ranges == [(0, length)]
@@ -50,18 +89,8 @@ class WorkReadDelivery:
             complete = False
         # An already-returned receipt is not proof the model read or remembered it.
         if complete and not reread:
-            self.receipts[key] = (fingerprint, ranges)
-            return {"status": "ok", "memory_id": result["memory_id"], "revision": result["revision"],
-                "source_version": result["source_version"], "state": result["state"],
-                "source_changed": result["source_changed"], "validation_level": result["validation_level"],
-                "file_check": file_check,
-                **({"candidate_reference_risk": [{"blocked": True, "details_omitted": True}],
-                    "automatic_eligible": False} if result.get("candidate_reference_risk") else {}),
-                "section": result["section"], "section_length": length, "offset": offset,
-                "next_offset": None, "truncated": False, "content_omitted": True,
-                "already_read": True, "section_previously_returned_complete": True,
-                "model_read_confirmed": False, "execution_authority": False,
-                "reread_hint": "Reuse the previously returned section, or set reread=true to return it again."}
+            self.receipts[key] = (fingerprint, ranges, length)
+            return self._receipt(result)
         merged = []
         for start, end in sorted(ranges + [(offset, offset + len(text))]):
             if merged and start <= merged[-1][1]:
@@ -70,7 +99,7 @@ class WorkReadDelivery:
                 merged.append((start, end))
         # Dropping excess disjoint ranges can only cause another full read, never
         # turn partial output into a complete receipt.
-        self.receipts[key] = (fingerprint, merged[:self.MAX_RANGES])
+        self.receipts[key] = (fingerprint, merged[:self.MAX_RANGES], length)
         while len(self.receipts) > self.MAX_RECEIPTS:
             self.receipts.popitem(last=False)
         return result

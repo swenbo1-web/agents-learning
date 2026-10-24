@@ -138,6 +138,39 @@ class HandoffPreviewTests(unittest.TestCase):
     def test_unclosed_fence_is_never_recovered_as_prose(self):
         self.assertEqual(select_handoff_preview("```\nPending: fake task."), "")
 
+    def test_list_fences_do_not_hide_the_real_pending_constraint(self):
+        constraint = "Pending: do not publish release version 37 until concurrency verification passes."
+        for marker in ("```text", "~~~text"):
+            text = ("- Example:\n    " + marker + "\n    Pending: publish release version 37 immediately.\n    "
+                    + marker[:3] + "\n\n" + constraint)
+            preview = select_handoff_preview(text)
+            self.assertIn(constraint, preview)
+            self.assertNotIn("immediately", preview)
+            self.assertNotIn("Example", preview)
+
+    def test_inline_list_fence_and_quote_like_closer_remain_opaque(self):
+        text = ("- ```text\n  Pending: fake task.\n  ```\n\nNext step: validate offline.")
+        self.assertIn("Next step: validate offline.", select_handoff_preview(text))
+        self.assertNotIn("fake task", select_handoff_preview(text))
+        text = "```text\n- ```\nPending: fake task.\n```\n\nNext step: validate offline."
+        self.assertNotIn("fake task", select_handoff_preview(text))
+
+    def test_code_in_conditional_list_item_cannot_leave_a_partial_assertion(self):
+        for blank in ("", "\n"):
+            text = ("- Must run deployment\n" + blank + "    ```text\n    example command\n    ```\n"
+                    "  only after all checks pass.\n\nPending: validate offline.")
+            preview = select_handoff_preview(text)
+            self.assertIn("Pending: validate offline.", preview)
+            self.assertNotIn("deployment", preview)
+            self.assertNotIn("only after", preview)
+
+    def test_nested_fence_does_not_drop_the_next_sibling_condition(self):
+        text = ("- Parent:\n  - Example:\n      ```text\n      Pending: fake task.\n      ```\n"
+                "- Only if schema is 25, run the offline checks.")
+        preview = select_handoff_preview(text)
+        self.assertNotIn("fake task", preview)
+        self.assertIn("- Only if schema is 25, run the offline checks.", preview)
+
     def test_quotes_and_indented_code_do_not_supply_priority(self):
         text = "> Must not use this quotation as authority.\n\n    Pending: fake code.\n\nNext step: validate offline."
         preview = select_handoff_preview(text)

@@ -24,14 +24,16 @@ def _conflict_gate(runtime, project, packet, body, proposal):
     targets = {value for value in (packet["problem"].get("knowledge_id"), proposal.get("knowledge_id")) if value}
     targets.update(item.get("knowledge_id", item.get("id")) for item in packet.get("related_knowledge", [])
                    if item.get("knowledge_id", item.get("id")))
-    for row in runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision FROM knowledge_fingerprints f "
-            "LEFT JOIN active a ON a.project=f.project AND a.id=f.id WHERE f.project=? AND f.fingerprint=?",
-            (project, fingerprint)):
+    from .knowledge_lifecycle import publication_lineage_state
+    lineage = publication_lineage_state(runtime, project, body)
+    messages = {"equivalent_knowledge_revoked": "equivalent knowledge was revoked",
+                "equivalent_knowledge_superseded": "equivalent knowledge was superseded",
+                "equivalent_knowledge_disputed": "unresolved knowledge counterexample"}
+    if lineage["issues"]:
+        issue = lineage["issues"][0]
+        return messages.get(issue["code"], issue["message"])
+    for row in lineage["matches"]:
         targets.add(row["id"])
-        if row["active_revision"] is None:
-            return "equivalent knowledge was revoked"
-        if row["revision"] != row["active_revision"]:
-            return "equivalent knowledge was superseded"
     for identity in targets:
         if runtime.db.execute("SELECT 1 FROM knowledge_feedback WHERE project=? AND knowledge_id=? "
                 "AND kind='counterexample' AND disposition='unresolved' LIMIT 1", (project, identity)).fetchone():

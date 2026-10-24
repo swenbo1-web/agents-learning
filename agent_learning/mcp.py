@@ -264,6 +264,22 @@ class Server:
     def _direct_panel_eligible(self):
         return self.direct_panel is not None and self.direct_panel.eligible()
 
+    def _work_delivery_scope(self, access, handle):
+        r, p = self.runtime, self.project
+        r.access_context(p, handle, expected_epoch=self.epoch)
+        task = r._retrieval_task(p, access["conversation_id"], access["agent_id"], handle)
+        state = r._work_task_state(p, access["conversation_id"], access["agent_id"], handle, task)
+        table, where, key = r._ensure_context(p, access["conversation_id"], access["agent_id"])
+        epoch = r.db.execute(f"SELECT epoch FROM {table} WHERE {where}", key).fetchone()[0]
+        from .work_memory import _exposure_task_key
+        scope = (p, handle, r.host, r.host_instance, self.epoch, r.host_epoch(), epoch, _exposure_task_key(state))
+        if r.host == "antigravity":
+            trajectory = r.db.execute("SELECT generation,last_invocation,ambiguous FROM antigravity_trajectories "
+                "WHERE project=? AND conversation=?", (p, access["conversation_id"])).fetchone()
+            scope = ((*scope, tuple(trajectory)) if trajectory and trajectory["last_invocation"] >= 0
+                     and not trajectory["ambiguous"] else None)
+        return scope, state, epoch
+
     def _direct_panel_call(self, name, args, request_meta):
         if not self._direct_panel_eligible():
             if self.panel_discovery and name == "learning_panel_open":
@@ -392,34 +408,32 @@ class Server:
                     raise ContractError("work_memory_read requires a verified context_handle")
                 if args.get("offset", 0) and "expected_revision" not in args:
                     raise ContractError("expected_revision is required to continue a section page")
+                # The receipt decision shares a snapshot with live identity, source
+                # and file checks. Complete evidence need not be assembled again.
+                with r.transaction():
+                    delivery_scope, task_state, context_epoch = self._work_delivery_scope(access, handle)
                 result = r.work_read(p, args["memory_id"], expected_revision=args.get("expected_revision"),
-                                     offset=args.get("offset", 0), max_chars=args.get("max_chars", 6000),
-                                     section=args.get("section", "summary"), workspace=self.workspace)
-                items = [result]
+                    offset=args.get("offset", 0), max_chars=args.get("max_chars", 6000),
+                    section=args.get("section", "summary"), workspace=self.workspace,
+                    _delivery=self.work_read_delivery, _delivery_scope=delivery_scope,
+                    _reread=args.get("reread", False))
+                with r.transaction():
+                    current_scope, task_state, context_epoch = self._work_delivery_scope(access, handle)
+                    if current_scope != delivery_scope:
+                        raise ContractError("work context changed; retry reading in the current context")
+                    r.work_record_exposure(p, access["conversation_id"], [result], agent_id=access["agent_id"],
+                        task_state=task_state, context_epoch=context_epoch, method="mcp",
+                        context_handle=handle, expected_epoch=self.epoch)
+                self._bind(handle)
+                return (result if result.get("already_read") else self.work_read_delivery.project(
+                    result, delivery_scope, reread=args.get("reread", False)))
             if access is not None:
                 with r.transaction():
-                    r.access_context(p, handle, expected_epoch=self.epoch)
-                    task = r._retrieval_task(p, access["conversation_id"], access["agent_id"], handle)
-                    task_state = r._work_task_state(p, access["conversation_id"], access["agent_id"], handle, task)
-                    table, where, key = r._ensure_context(p, access["conversation_id"], access["agent_id"])
-                    context_epoch = r.db.execute(f"SELECT epoch FROM {table} WHERE {where}", key).fetchone()[0]
-                    from .work_memory import _exposure_task_key
-                    delivery_scope = (p, handle, r.host, r.host_instance, self.epoch,
-                                      r.host_epoch(), context_epoch, _exposure_task_key(task_state))
-                    if r.host == "antigravity":
-                        # Native ephemeral context is replaced for each model
-                        # invocation. Missing trajectory identity disables reuse.
-                        trajectory = r.db.execute("SELECT generation,last_invocation,ambiguous FROM antigravity_trajectories "
-                            "WHERE project=? AND conversation=?", (p, access["conversation_id"])).fetchone()
-                        delivery_scope = ((*delivery_scope, tuple(trajectory)) if trajectory
-                            and trajectory["last_invocation"] >= 0 and not trajectory["ambiguous"] else None)
+                    _, task_state, context_epoch = self._work_delivery_scope(access, handle)
                     r.work_record_exposure(p, access["conversation_id"], items, agent_id=access["agent_id"],
                                            task_state=task_state, context_epoch=context_epoch, method="mcp",
                                            context_handle=handle, expected_epoch=self.epoch)
                 self._bind(handle)
-                if name == "work_memory_read":
-                    result = self.work_read_delivery.project(result, delivery_scope,
-                                                             reread=args.get("reread", False))
             else:
                 # 未绑定查询只返回项目公开索引，不能为猜测的会话登记展示。
                 r.assert_session_epoch(self.epoch)
@@ -492,6 +506,14 @@ class Server:
         raise ContractError("unknown tool")
 
     def request(self, message):
+        if isinstance(message, dict) and isinstance(message.get("method"), str) and message["method"] in {
+                "initialize", "tools/list", "resources/list", "resources/read"}:
+            from .panel_control import installation_inspection_scope
+            with installation_inspection_scope():
+                return self._request(message)
+        return self._request(message)
+
+    def _request(self, message):
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             return error_response(None, -32600, "invalid request")
         method, params = message.get("method"), message.get("params", {})

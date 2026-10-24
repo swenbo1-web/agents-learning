@@ -213,6 +213,69 @@ console.log('ok');
                                 capture_output=True, text=True, encoding="utf-8", timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js required")
+    def test_host_route_opens_exact_browser_mode_and_disposes_shared_starts(self):
+        plugin = self.root / "browser-bundle"
+        host_source = Path(__file__).resolve().parents[1] / "host_resources/dsh/host"
+        shutil.copytree(host_source, plugin / "host")
+        (plugin / "runtime-release.json").write_text(json.dumps({"workspace": str(self.workspace),
+            "runtime_directory": str(self.root / "runtime"), "home": str(self.root / "home"),
+            "python": sys.executable, "release_id": "isolated-v1"}), encoding="utf-8")
+        code = r'''
+import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+import childProcess from 'node:child_process';
+import {pathToFileURL} from 'node:url';
+const [modulePath,workspace]=process.argv.slice(1),browsers=[],opened=[];
+const view={project_id:'project-a',host_scope:'dsh:default',expected:{}};
+childProcess.spawn=(_exe,args)=>{
+ const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+ child.stdout.setEncoding=()=>{};child.exitCode=null;child.killed=false;let input='';
+ child.kill=()=>{child.killed=true;queueMicrotask(()=>child.emit('close',0));};
+ child.stdin={write:value=>{input+=value;},end:()=>queueMicrotask(()=>{
+  const payload=input?JSON.parse(input):{};
+  if(args.includes('-c'))opened.push(args.at(-1));
+  const data=payload.panel_status?{ok:true,result:{data:{project_id:'project-a',panel_snapshot:view}}}:{};
+  child.stdout.emit('data',Buffer.from(JSON.stringify(data)));child.exitCode=0;child.emit('close',0);
+ })};
+ if(args.includes('browser')){
+  child.pid=400+browsers.length;browsers.push(child);queueMicrotask(()=>{
+   const url='http://127.0.0.1:'+(12340+browsers.length)+'/',review=args.includes('--review'),admin=args.includes('--admin-control');
+   child.stdout.emit('data',JSON.stringify({project:'project-a',url,access_token:'read',read_only:!review&&!admin,
+    ...(review?{review_url:url+'#token=read&review_token=review'}:{}),
+    ...(admin?{admin_control_url:url+'#token=read&review_token=review&admin_token=admin'}:{})})+'\n');
+  });
+ }
+ return child;
+};syncBuiltinESMExports();
+let route;
+const scope={skills:{register(){}},commands:{register(){}},effect:fn=>fn(),
+ webServer:{register:value=>{if(value.path==='/agent-learning/panel-v2')route=value;}}};
+const {apply}=await import(pathToFileURL(modulePath).href);
+apply({tools:{register(){}},on(){},effect(){},inject(_names,callback){callback(scope);}});
+const request=async(method,body)=>{
+ let status,value;
+ const req={method,url:'/agent-learning/panel-v2?cwd='+encodeURIComponent(workspace),headers:{},
+  async *[Symbol.asyncIterator](){if(body)yield Buffer.from(JSON.stringify(body));}};
+ const res={writeHead:code=>{status=code;return res;},end:raw=>{value=JSON.parse(raw);}};
+ await route.handler(req,res);assert.equal(status,200,JSON.stringify(value));return value;
+};
+try{
+ const initial=await request('GET'),binding={cwd:workspace,project_id:'project-a',installation_id:initial.panel_snapshot.installation_id};
+ assert.equal((await request('POST',{...binding,action:'open_review'})).mode,'review');
+ assert(opened.at(-1).includes('admin_token'));
+ const reads=await Promise.all([request('POST',{...binding,action:'open_browser'}),request('POST',{...binding,action:'open_browser'})]);
+ assert(reads.every(item=>item.mode==='readonly'));assert.equal(browsers.length,2);
+ assert(!opened.at(-1).includes('admin_token'));assert(!opened.at(-1).includes('review_token'));
+}finally{globalThis.__ALP_DSH_DISPOSE__();}
+assert(browsers.every(child=>child.killed));console.log('ok');
+'''
+        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", code,
+                                 str(plugin / "host/index.mjs"), str(self.workspace)], capture_output=True,
+                                text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,23 @@ class WorkReadDeliveryTests(unittest.TestCase):
     def read(self, **kwargs):
         return self.server.call("work_memory_read", {"memory_id": self.memory_id, **kwargs})
 
+    def test_complete_receipt_skips_evidence_assembly_but_keeps_live_guards(self):
+        with patch.object(self.r, "_work_evidence_text", wraps=self.r._work_evidence_text) as assemble:
+            first = self.read(max_chars=10000, section="evidence")
+            self.assertEqual(assemble.call_count, 1)
+            self.assertTrue(self.read(section="evidence")["already_read"])
+            self.assertEqual(assemble.call_count, 1)
+            with self.assertRaisesRegex(ContractError, "offset exceeds"):
+                self.read(section="evidence", offset=first["section_length"] + 1, expected_revision=first["revision"])
+            with self.assertRaisesRegex(ContractError, "revision changed"):
+                self.read(section="evidence", expected_revision=first["revision"] + 1)
+            self.assertEqual(assemble.call_count, 1)
+            self.read(max_chars=10000, section="evidence", reread=True)
+            self.assertEqual(assemble.call_count, 2)
+            self.file.write_text("changed file state", encoding="utf-8")
+            self.assertNotIn("already_read", self.read(max_chars=10000, section="evidence"))
+            self.assertEqual(assemble.call_count, 3)
+
     def test_complete_then_larger_budget_returns_small_receipt_and_force_reread(self):
         first = self.read(max_chars=10000, section="evidence")
         self.assertFalse(first["truncated"])

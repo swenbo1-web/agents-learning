@@ -84,9 +84,10 @@ def claim_call(runtime, project, problem, revision, fingerprint, host_epoch, tim
             "AND state='validating' AND lease_until>? LIMIT 1", (project, time.time())).fetchone()
         if local:
             return {"status": "waiting_for_review", "call_id": local[0], "active_state": "local_recheck"}
-    from .admin_usage import admin_admission_status, reserve_usage
+    from .admin_usage import admin_admission_status, reserve_usage, budget_settings
     current = time.time()
-    budget = admin_admission_status(runtime, project, now=current)
+    budget = admin_admission_status(runtime, project, now=current, required_tokens=(
+        reserved_tokens if reserved_tokens is not None else budget_settings(runtime)["token_reservation_per_call"]))
     if budget["admission_status"] != "available":
         return {"status": budget["admission_status"], "blocking_scope": budget["blocking_scope"], "budget": budget}
     if reserved_tokens is not None and budget["remaining_reported_tokens"] is not None and budget["remaining_reported_tokens"] < reserved_tokens:

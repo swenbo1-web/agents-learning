@@ -239,14 +239,15 @@ class KnowledgeContextMixin:
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         effective_plan = normalized_query_plan(effective)
+        retrieval_plan = effective_plan if retrieval == effective else normalized_query_plan(retrieval)
         filters = self._retrieval_filters(task)
         from .knowledge_applicability import project_environment, automatic_applicability
         environment = project_environment(workspace)
         semantic_signature = self.semantic_signature(project)
         # 预算变化只影响待发卡容纳，不必重新召回；知识、来源、模型与任务变化需重查。
-        fault_result_signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task),
+        fault_result_signature = digest([retrieval_plan, filters, self._task_key(task),
                                          manifest, epoch, semantic_signature, environment])
-        signature = digest([normalized_query_plan(retrieval), filters, self._task_key(task), manifest,
+        signature = digest([retrieval_plan, filters, self._task_key(task), manifest,
                             epoch, self.config["injection_max_chars"], semantic_signature, environment])
         # 跨短时Hook进程保留重试冷却，不将临时嵌入失败永久缓存成无结果。
         previous_signature = initial["retrieval_signature"]

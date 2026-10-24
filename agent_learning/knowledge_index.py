@@ -9,8 +9,16 @@ from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matc
 from .semantic_retrieval import SemanticRetrievalMixin
 
 
-INDEX_VERSION = 5
-_WORDS = re.compile(r"c\+\+(?:[0-9]+)?|c#|[a-z0-9_]+(?:(?:[./:-]|:/)[a-z0-9_]+)*|[\u3400-\u9fff]+")
+INDEX_VERSION = 6
+_WORD_PART = r"[\w\u0300-\u036f]+"
+_WORD_TAIL = r"(?:(?:[./:-]|:/)\.?" + _WORD_PART + r")"
+# Keep the complete technical identity before emitting searchable components.
+# Plain Chinese prose still uses the existing bigram/character lane. A dotfile
+# or a Unicode path must never silently become just its ASCII basename.
+_WORDS = re.compile("|".join((r"c\+\+(?:[0-9]+)?", r"c#",
+    r"(?:\.{1,2}/)+\.?" + _WORD_PART + _WORD_TAIL + "*",
+    r"\." + _WORD_PART + _WORD_TAIL + "*",
+    _WORD_PART + _WORD_TAIL + "+", r"[a-z0-9_]+", r"[\u3400-\u9fff]+")))
 _CHINESE = re.compile(r"[\u3400-\u9fff]+\Z")
 _FIELD_WEIGHTS = {"title": 4, "content": 2, "applicability": 2, "limitations": 1,
                   "category": 1, "knowledge_kind": 1}
@@ -27,7 +35,7 @@ _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
-_MATCH_POLICY_VERSION = 3
+_MATCH_POLICY_VERSION = 4
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
@@ -77,7 +85,12 @@ def terms(text):
         else:
             result.append(word)
             if re.search(r"[./:_-]", word):
-                result.extend(component for component in re.split(r"[./:_-]+", word) if component)
+                for component in re.split(r"[./:_-]+", word):
+                    if _CHINESE.fullmatch(component):
+                        result.extend(component[i:i + 2] for i in range(len(component) - 1))
+                        result.extend(component)
+                    elif component:
+                        result.append(component)
     return list(dict.fromkeys(result))
 
 

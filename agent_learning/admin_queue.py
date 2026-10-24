@@ -160,6 +160,42 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
                         selected["source_task_updated"], time.time(), blocked_call))
 
 
+def routing_signature(runtime, project):
+    """Only executor changes restart failed-route scans, never new candidates."""
+    from .runtime import digest
+    cfg = runtime.admin_effective_config(project)
+    plan = cfg.get("executor") or {"provider": cfg["provider"], "command": cfg["command"], "model": cfg["model"],
+                                  "session_epoch": runtime.session_epoch()}
+    observations = [list(row) for row in runtime.db.execute(
+        "SELECT conversation,model,active,version FROM admin_model_observations "
+        "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
+        (project, runtime._session_scope(), runtime.session_epoch()))]
+    failures = [list(row) for row in runtime.db.execute(
+        "SELECT signature,reason,next_try,updated FROM admin_executor_failures WHERE project=? AND host_scope=? "
+        "AND (next_try>? OR reason='configuration_change_required') ORDER BY signature",
+        (project, runtime._session_scope(), time.time()))]
+    return digest([runtime._session_scope(), runtime.host_epoch(), runtime.admin_policy(project),
+                   executor_signature(plan), cfg.get("dsh_profile"), observations, failures])
+
+
+def executor_review_order(signature):
+    # Existing checks are a disposable projection. A routing check neither
+    # accepts evidence nor hides a case from eligible_query's review signature.
+    return ("ORDER BY COALESCE((SELECT route.updated FROM admin_review_checks route "
+            "WHERE route.project=p.project AND route.problem=p.id AND route.revision=p.revision "
+            "AND route.blocked_call='executor_scan' AND route.signature=?),0),"
+            + REVIEW_ORDER.removeprefix("ORDER BY "), (signature,))
+
+
+def routing_scan_pending(runtime, project, query, args):
+    query, args = executor_query(runtime, project, query, args)
+    signature = routing_signature(runtime, project)
+    return bool(runtime.db.execute(query + "AND NOT EXISTS(SELECT 1 FROM admin_review_checks route "
+        "WHERE route.project=p.project AND route.problem=p.id AND route.revision=p.revision "
+        "AND route.blocked_call='executor_scan' AND route.signature=?) LIMIT 1",
+        (project, *args, signature)).fetchone())
+
+
 def executor_query(runtime, project, query, args):
     """current 仅排入有本宿主根模型观察的日常案例，避免异宿主旧案例堵塞。"""
     policy = runtime.admin_policy(project)
@@ -195,17 +231,29 @@ def executor_query(runtime, project, query, args):
     return query, args
 
 
-def ready_executor(runtime, project, query, args):
+def ready_executor(runtime, project, query, args, *, advance=False):
     from .admin_providers import executor_availability
     query, args = executor_query(runtime, project, query, args)
-    for item in runtime.db.execute(query + REVIEW_ORDER + "LIMIT 40", (project, *args)).fetchall():
-        try:
-            plan = runtime.resolve_admin_executor(project, phase_conversation(runtime, project, item["id"], item["conversation"]))
-            available = executor_availability(plan)["cli_available"]
-        except ValueError:
-            continue
-        if available and not executor_backoff(runtime, project, plan):
-            return True
+    signature = routing_signature(runtime, project)
+    order, order_args = executor_review_order(signature)
+    seen = []
+    for _ in range(3 if advance else 1):
+        suffix = "AND p.id NOT IN (" + ",".join("?" for _ in seen) + ") " if seen else ""
+        rows = runtime.db.execute(query + suffix + order + "LIMIT 40",
+                                  (project, *args, *seen, *order_args)).fetchall()
+        for item in rows:
+            seen.append(item["id"])
+            try:
+                plan = runtime.resolve_admin_executor(project, phase_conversation(runtime, project, item["id"], item["conversation"]))
+                available = executor_availability(plan)["cli_available"]
+            except ValueError:
+                available, plan = False, None
+            if available and not executor_backoff(runtime, project, plan):
+                return True
+            if advance:
+                remember_check(runtime, project, item, signature, blocked_call="executor_scan")
+        if len(rows) < 40:
+            break
     return False
 
 
@@ -225,7 +273,7 @@ def unrouted_reason(runtime, project, query, args, fallback):
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
-    from .admin_usage import admin_admission_status
+    from .admin_usage import admin_admission_status, budget_settings
     cfg = runtime.admin_effective_config(project)
     if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0 and phase_scope(runtime, project) is None:
         return None
@@ -249,7 +297,8 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
                               (project, *ACTIVE_STATES)).fetchone():
             return None
-        budget = admin_admission_status(runtime, project, now=now)
+        budget = admin_admission_status(runtime, project, now=now,
+            required_tokens=budget_settings(runtime)["token_reservation_per_call"])
         if budget["admission_status"] != "available":
             return None
         # 已在审核的派发与调用占同一槽，不能重复计算并发占用。
@@ -262,11 +311,13 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         # evidence without a model job already existing. Exhausted passes sleep.
         from .phase_review import prepare as prepare_phases
         prepare_phases(runtime, project)
+        if admin_admission_status(runtime, project)["admission_status"] != "available":
+            return None
         signature, preflight_signature = scan_signatures(runtime, project)
         query, args = eligible_query(signature, preflight_signature=preflight_signature,
                                      summary_enabled=runtime.work_summary_enabled(project),
                                      summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
-        if not ready_executor(runtime, project, query, args):
+        if not ready_executor(runtime, project, query, args, advance=True):
             return None
         token = str(uuid.uuid4())
         runtime.db.execute("INSERT INTO admin_dispatch(project,token,host_epoch,lease_until,created,host_scope) VALUES(?,?,?,?,?,?)",
@@ -343,7 +394,7 @@ def executor_signature(plan):
         from pathlib import Path
         files = [(item, Path(item).stat().st_mtime_ns, Path(item).stat().st_size)
                  for item in command if not item.startswith("-") and Path(item).is_file()]
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         command, files = plan.get("command"), []
     identity = {"command": command, "files": files, "provider": plan.get("provider"),
                 "model": plan.get("model"), "session_epoch": plan.get("session_epoch")}
@@ -356,14 +407,21 @@ def executor_signature(plan):
         # Updating the trusted adapter must invalidate its old configuration
         # failure, even when the CLI and reviewer paths stay the same.
         from pathlib import Path
-        package = Path(sdk["anchor"]).parent.parent
-        names = ("@deepseek-ai/dsh-llm-pi-ai", "@earendil-works/pi-ai", "@deepseek-ai/dsh-settings-file")
-        packages = [package / "package.json", *(package / "node_modules" / name / "package.json" for name in names)]
-        try:
-            identity["sdk_versions"] = [(str(path), path.stat().st_mtime_ns, path.stat().st_size)
-                                        for path in packages if path.is_file()]
-        except OSError:
+        anchor = sdk.get("anchor") if isinstance(sdk, dict) else None
+        if not isinstance(anchor, (str, Path)) or not str(anchor).strip():
+            # A diagnostic signature is not an availability decision. Partial
+            # SDK metadata must stay signable while the normal launcher/profile
+            # guards decide whether the executor can actually run.
             identity["sdk_versions"] = "unavailable"
+        else:
+            package = Path(anchor).parent.parent
+            names = ("@deepseek-ai/dsh-llm-pi-ai", "@earendil-works/pi-ai", "@deepseek-ai/dsh-settings-file")
+            packages = [package / "package.json", *(package / "node_modules" / name / "package.json" for name in names)]
+            try:
+                identity["sdk_versions"] = [(str(path), path.stat().st_mtime_ns, path.stat().st_size)
+                                            for path in packages if path.is_file()]
+            except OSError:
+                identity["sdk_versions"] = "unavailable"
     return digest(identity)
 
 
@@ -452,7 +510,8 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
         summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     routed, routed_args = executor_query(runtime, project, query, args)
-    rows = runtime.db.execute(routed + REVIEW_ORDER + "LIMIT 40", (project, *routed_args)).fetchall()
+    order, order_args = executor_review_order(routing_signature(runtime, project))
+    rows = runtime.db.execute(routed + order + "LIMIT 40", (project, *routed_args, *order_args)).fetchall()
     if not rows:
         if runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():
             return dict(detail, reason=unrouted_reason(runtime, project, query, args, "model_missing"))

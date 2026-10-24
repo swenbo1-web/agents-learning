@@ -42,7 +42,36 @@ def measured_rows(protocol):
     return rows
 
 
+def artifact_spec():
+    definition = spec()
+    definition["tasks"][0]["artifact_metrics"] = [
+        {"id": "latency", "kind": "performance", "unit": "ms", "method": "Median of 10 frozen workload requests.",
+         "criteria": {"operator": "lte", "value": 10}},
+        {"id": "peak", "kind": "memory", "unit": "bytes", "method": "Peak resident bytes during the frozen workload.",
+         "criteria": {"operator": "lte", "value": 1024}},
+        {"id": "accuracy", "kind": "quality", "unit": "ratio", "method": "Correct outputs divided by frozen test cases.",
+         "criteria": {"operator": "gte", "value": .9}}]
+    return definition
+
+
+def artifact_rows(protocol):
+    rows = measured_rows(protocol)
+    for row in rows:
+        for item in row.get("artifact_metrics", []):
+            item.update(value={"latency": 5, "peak": 1024, "accuracy": .95}[item["id"]],
+                        artifact_sha256=fingerprint("generated artifact " + row["run_id"]),
+                        evidence_sha256=fingerprint("measurement " + row["run_id"]))
+    return rows
+
+
 class ProtocolTests(unittest.TestCase):
+    def test_legacy_protocol_and_report_fingerprints_remain_identical(self):
+        protocol = create_protocol(spec())
+        self.assertEqual(protocol["protocol_sha256"], "3500dce88f73bc243c8b314885bafb4cf9b86e8f053ac851a5f23cdff4e9d63b")
+        report = summarize(protocol, measured_rows(protocol))
+        self.assertEqual(fingerprint(report), "f537e46361dad5a017e0f6b1bc399bdf54969972e610ca3dbc84a163f5ce8dc5")
+        self.assertNotIn("artifact_metrics", protocol["tasks"][0])
+        self.assertNotIn("artifact_metrics", report)
     def test_protocol_is_stable_and_order_balanced(self):
         first = create_protocol(spec())
         self.assertEqual(first, create_protocol(spec()))
@@ -193,6 +222,157 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(distribution["p95"], 100)
 
 
+class ArtifactMetricTests(unittest.TestCase):
+    def setUp(self):
+        self.protocol = create_protocol(artifact_spec())
+        self.rows = artifact_rows(self.protocol)
+
+    def group(self, report, variant="with_memory", identity="latency"):
+        return next(item for item in report["artifact_metrics"]["groups"][variant] if item["metric_id"] == identity)
+
+    def test_conditions_freeze_method_units_criteria_and_fingerprints(self):
+        declaration = self.protocol["tasks"][0]["artifact_metrics"][0]
+        self.assertEqual(declaration["criteria_sha256"], fingerprint(declaration["criteria"]))
+        self.assertEqual(self.rows[0]["conditions"]["artifact_metrics_sha256"],
+                         fingerprint(self.protocol["tasks"][0]["artifact_metrics"]))
+        changed = copy.deepcopy(self.protocol)
+        changed["tasks"][0]["artifact_metrics"][0]["criteria"]["value"] = 20
+        with self.assertRaises(EvaluationError):
+            summarize(changed, [])
+        definition = artifact_spec()
+        definition["tasks"][0]["artifact_metrics"][0]["method"] = "A different workload method."
+        self.assertNotEqual(create_protocol(definition)["protocol_sha256"], self.protocol["protocol_sha256"])
+
+    def test_product_metrics_are_separate_from_task_time_tokens_and_acceptance(self):
+        for row in self.rows:
+            if row["variant"] == "with_memory":
+                for item in row["artifact_metrics"]:
+                    item["value"] = {"latency": 20, "peak": 2048, "accuracy": .8}[item["id"]]
+        report = summarize(self.protocol, self.rows)
+        self.assertTrue(report["comparison_eligibility"]["total_tokens"]["eligible"])
+        self.assertLess(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"], 0)
+        self.assertEqual(self.group(report)["values"]["p50"], 20)
+        self.assertEqual(self.group(report, "no_memory")["values"]["p50"], 5)
+        for identity in ("latency", "peak", "accuracy"):
+            self.assertEqual(self.group(report, identity=identity)["criteria_results"]["status"], "failed")
+        self.assertEqual(report["paired_subset"]["with_memory"]["acceptance"]["success_rate"], 1)
+        self.assertFalse(report["artifact_metrics"]["comparisons_inferred"])
+        self.assertTrue(self.group(report)["evidence"][0]["artifact_sha256"])
+
+    def test_missing_observations_are_unknown_and_zero_is_measured(self):
+        for row in self.rows:
+            if row["variant"] == "with_memory":
+                row.pop("artifact_metrics")
+            else:
+                row["artifact_metrics"][0]["value"] = 0
+        report = summarize(self.protocol, self.rows)
+        unknown = self.group(report)
+        self.assertEqual(unknown["unknown_runs"], 2)
+        self.assertIsNone(unknown["values"]["p50"])
+        self.assertEqual(unknown["criteria_results"]["status"], "unknown")
+        self.assertEqual(self.group(report, "no_memory")["values"]["p50"], 0)
+        self.assertTrue(report["complete_design"])
+
+    def test_unknown_template_and_missing_criteria_never_pass(self):
+        unknown = record_template(self.protocol, "fix-test", 1, "no_memory")["artifact_metrics"][0]
+        self.assertIsNone(unknown["value"])
+        self.assertIsNone(unknown["evidence_sha256"])
+        definition = artifact_spec()
+        definition["tasks"][0]["artifact_metrics"][0].pop("criteria")
+        protocol = create_protocol(definition)
+        report = summarize(protocol, artifact_rows(protocol))
+        group = self.group(report)
+        self.assertEqual(group["known_runs"], 2)
+        self.assertIsNone(group["criteria_sha256"])
+        self.assertEqual(group["criteria_results"], {"passed": 0, "failed": 0, "unknown": 2, "status": "unknown"})
+
+    def test_unit_method_and_criteria_mismatches_are_not_pooled(self):
+        for field, value in (("unit", "s"), ("method", "Different benchmark."), ("criteria_sha256", "a" * 64)):
+            with self.subTest(field=field):
+                rows = copy.deepcopy(self.rows)
+                selected = next(row for row in rows if row["variant"] == "with_memory")
+                selected["artifact_metrics"][0][field] = value
+                report = summarize(self.protocol, rows)
+                self.assertTrue(report["complete_design"])
+                self.assertEqual(self.group(report)["known_runs"], 1)
+                self.assertEqual(self.group(report)["mismatched_runs"], 1)
+                self.assertEqual(self.group(report)["criteria_results"]["status"], "unknown")
+                self.assertEqual(report["artifact_metrics"]["unmatched_observations"][0]["reason"], "unit_method_or_criteria_mismatch")
+
+    def test_invalid_measurements_require_units_method_and_evidence_sha(self):
+        bad = [("unit", "MB"), ("method", ""), ("value", True), ("value", -1),
+               ("value", float("nan")), ("value", float("inf")), ("value", 10 ** 1000),
+               ("evidence_sha256", None), ("artifact_sha256", None), ("evidence_sha256", "BAD")]
+        for field, value in bad:
+            with self.subTest(field=field, value=str(value)[:30]):
+                rows = copy.deepcopy(self.rows)
+                rows[0]["artifact_metrics"][0][field] = value
+                self.assertTrue(summarize(self.protocol, rows)["invalid_records"])
+        for index, value in ((1, 1.5), (2, 1.01)):
+            rows = copy.deepcopy(self.rows)
+            rows[0]["artifact_metrics"][index]["value"] = value
+            self.assertTrue(summarize(self.protocol, rows)["invalid_records"])
+        rows = copy.deepcopy(self.rows)
+        rows[0]["artifact_metrics"].append(copy.deepcopy(rows[0]["artifact_metrics"][0]))
+        self.assertTrue(summarize(self.protocol, rows)["invalid_records"])
+
+    def test_frozen_declarations_reject_ambiguous_criteria_and_duplicate_ids(self):
+        for criteria in ({"operator": "approximately", "value": 10}, {"operator": [], "value": 10},
+                         {"operator": "lte", "value": True}, {"operator": "lte"}, "somehow faster"):
+            definition = artifact_spec()
+            definition["tasks"][0]["artifact_metrics"][0]["criteria"] = criteria
+            with self.subTest(criteria=criteria), self.assertRaises(EvaluationError):
+                create_protocol(definition)
+        definition = artifact_spec()
+        definition["tasks"][0]["artifact_metrics"].append(copy.deepcopy(definition["tasks"][0]["artifact_metrics"][0]))
+        with self.assertRaises(EvaluationError):
+            create_protocol(definition)
+
+    def test_incomplete_design_and_undeclared_metrics_do_not_claim_pass(self):
+        report = summarize(self.protocol, self.rows[:-1])
+        self.assertEqual(self.group(report)["criteria_results"]["status"], "unknown")
+        protocol = create_protocol(spec())
+        rows = measured_rows(protocol)
+        for row, source in zip(rows, self.rows):
+            row["artifact_metrics"] = source["artifact_metrics"]
+        report = summarize(protocol, rows)
+        self.assertTrue(report["complete_design"])
+        self.assertEqual(report["artifact_metrics"]["groups"], {"no_memory": [], "with_memory": []})
+        self.assertTrue(all(item["reason"] == "metric_not_predeclared"
+                            for item in report["artifact_metrics"]["unmatched_observations"]))
+
+    def test_tasks_are_separate_and_failed_task_observations_remain_visible(self):
+        definition = artifact_spec()
+        second = copy.deepcopy(definition["tasks"][0])
+        second["id"] = "second-artifact"
+        second["artifact_metrics"][0]["method"] = "A separately frozen workload."
+        definition["tasks"].append(second)
+        protocol = create_protocol(definition)
+        rows = artifact_rows(protocol)
+        for row in rows:
+            if row["task_id"] == "second-artifact":
+                row["artifact_metrics"][0]["value"] = 30
+            row["acceptance"]["status"] = "failed"
+        report = summarize(protocol, rows)
+        groups = [item for item in report["artifact_metrics"]["groups"]["with_memory"] if item["metric_id"] == "latency"]
+        self.assertEqual({item["values"]["p50"] for item in groups}, {5, 30})
+        self.assertTrue(all(item["known_runs"] == 2 for item in groups))
+        self.assertEqual(report, summarize(protocol, list(reversed(rows))))
+
+    def test_signed_scores_and_large_finite_medians_remain_finite(self):
+        definition = artifact_spec()
+        quality = definition["tasks"][0]["artifact_metrics"][2]
+        quality.update(unit="score", criteria={"operator": "gte", "value": -5})
+        protocol = create_protocol(definition)
+        rows = artifact_rows(protocol)
+        for row in rows:
+            row["artifact_metrics"][2]["value"] = 1e308 if row["variant"] == "with_memory" else -2
+        report = summarize(protocol, rows)
+        self.assertEqual(self.group(report, identity="accuracy")["values"]["p50"], 1e308)
+        self.assertEqual(self.group(report, "no_memory", "accuracy")["values"]["p50"], -2)
+        json.dumps(report, allow_nan=False)
+
+
 class FileAndRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -264,6 +444,28 @@ print(json.dumps({"acceptance":{"method":"automated","status":"passed","evidence
         self.assertTrue(all(row["source"] == "synthetic_template" for row in rows))
         with self.assertRaises(FileExistsError):
             run_protocol(frozen, adapter, output)
+
+    def test_explicit_fake_adapter_reports_separate_artifact_observations(self):
+        frozen, adapter, output = self.runner_fixture('''import json,sys
+request=json.load(sys.stdin)
+item=request["task"]["artifact_metrics"][0]
+measurement={key:item[key] for key in ("id","kind","unit","method","criteria_sha256")}
+measurement.update(value=24,artifact_sha256="b"*64,evidence_sha256="c"*64)
+print(json.dumps({"initial_state_sha256":request["task"]["dataset_sha256"],"artifact_metrics":[measurement]}))
+''')
+        definition = artifact_spec()
+        previous = json.loads(frozen.read_text())
+        definition.update(data_class="synthetic_template", knowledge_sha256=previous["knowledge_sha256"])
+        frozen.write_text(json.dumps(create_protocol(definition)), encoding="utf-8")
+        report = run_protocol(frozen, adapter, output, timeout_seconds=10)
+        self.assertEqual(report["runner"]["outcomes"], {"completed": 4})
+        records = [json.loads(line) for line in output.read_text().splitlines()]
+        self.assertTrue(all(row["artifact_metrics"][0]["value"] == 24 for row in records))
+        self.assertTrue(all(row["wall_ms"] > 0 for row in records))
+        self.assertTrue(all(row["acceptance"]["status"] == "unknown" for row in records))
+        self.assertFalse(report["complete_design"])
+        for groups in report["artifact_metrics"]["groups"].values():
+            self.assertTrue(all(group["criteria_results"]["status"] == "unknown" for group in groups))
 
     def test_explicit_relative_script_argument_resolves_against_adapter_json(self):
         frozen, adapter, output = self.runner_fixture('''import json,sys

@@ -1,5 +1,6 @@
 """Panel protocol boundaries with deterministic adapters; no installed host or database."""
 import copy
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
@@ -74,6 +75,7 @@ class PanelMCPTests(unittest.TestCase):
     def setUp(self):
         module = types.ModuleType("agent_learning.panel_control")
         module.PanelControl = FakePanel
+        module.installation_inspection_scope = nullcontext
         self.patch = patch.dict(sys.modules, {"agent_learning.panel_control": module})
         self.patch.start()
         self.addCleanup(self.patch.stop)

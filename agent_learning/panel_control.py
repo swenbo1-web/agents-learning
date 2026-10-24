@@ -7,6 +7,8 @@ uninstall or replacement of the installation.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -20,6 +22,19 @@ from urllib.parse import unquote, urlsplit
 
 from .runtime import ContractError, digest, encode
 from .admin_presets import PRESETS
+
+
+_inspection_scope = ContextVar("agent_learning_panel_inspection", default=None)
+
+
+@contextmanager
+def installation_inspection_scope():
+    """One read-only RPC may share immutable inspection, never an action or next RPC."""
+    token = _inspection_scope.set({})
+    try:
+        yield
+    finally:
+        _inspection_scope.reset(token)
 
 
 PANEL_SECONDS = 300
@@ -112,7 +127,14 @@ class PanelControl:
             raise ContractError("project_panel_not_installed")
         from .install import _hook_commands
         from .install_update import inspect_installation
-        installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
+        cache = _inspection_scope.get()
+        key = (os.path.normcase(str(Path(self.installation).resolve())), self.runtime.host)
+        if cache is not None and key in cache:
+            installed = cache[key]
+        else:
+            installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
+            if cache is not None:
+                cache[key] = installed
         receipt = installed["receipt"]
         if self.runtime.host == "codex":
             candidates = [receipt["panel_workspace"]] if receipt.get("panel_workspace") else []

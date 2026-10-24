@@ -12,7 +12,7 @@ from .work_files import checkout_key, checkout_root, file_links_from_payload, no
 WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context_chars": 600,
                         "max_items": 3, "summary_enabled": False, "summary_strategy": "balanced", "summary_min_events": 2,
                         "summary_max_events": 12}
-WORK_INDEX_VERSION = 1
+WORK_INDEX_VERSION = 2
 WORK_READ_FILE_CHECK_LIMIT = 64
 
 
@@ -149,6 +149,16 @@ def install_work_memory(runtime):
         runtime.db.execute(sql)
     if "file_state" not in {row[1] for row in runtime.db.execute("PRAGMA table_info(work_exposures)")}:
         runtime.db.execute("ALTER TABLE work_exposures ADD COLUMN file_state TEXT")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS work_index_state(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS work_index_pending(project TEXT NOT NULL,memory_id TEXT NOT NULL,PRIMARY KEY(project,memory_id))")
+    state = runtime.db.execute("SELECT version FROM work_index_state WHERE id=1").fetchone()
+    if state is None or state[0] != WORK_INDEX_VERSION:
+        # Enqueue identities only; large evidence bodies are rebuilt in small writer batches.
+        runtime.db.execute("INSERT OR IGNORE INTO work_index_pending SELECT project,id FROM work_memories")
+        runtime.db.execute("INSERT INTO work_index_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
+                           (WORK_INDEX_VERSION,))
+    from .work_recovery import install
+    install(runtime)
 
 
 def _config(runtime):
@@ -333,8 +343,13 @@ class WorkMemoryMixin:
         if not event or event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PublicMessageSegment"}:
             return None
         event = dict(event)
-        self.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)",
-                        (project, event_id, checkout_key(workspace)))
+        current_checkout = checkout_key(workspace)
+        recorded_checkout = self.db.execute("SELECT checkout_key FROM work_event_checkouts WHERE project=? AND event_id=?",
+                                            (project, event_id)).fetchone()
+        if recorded_checkout and recorded_checkout[0] != current_checkout:
+            from .runtime import ContractError
+            raise ContractError("work capture checkout changed")
+        self.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)", (project, event_id, current_checkout))
         payload = json.loads(event["payload"])
         raw = clean(raw) if isinstance(raw, dict) else payload
         name, args = _tool(raw)
@@ -464,6 +479,7 @@ class WorkMemoryMixin:
         maximum, size = 65536, 1200
         visible = text[:maximum]
         total = (len(visible) + size - 1) // size
+        visible_digest = digest(visible)
         for index, start in enumerate(range(0, len(visible), size)):
             payload = {"text": visible[start:start + size], "memory_type": kind,
                        "title": title[:100] + f" [{index + 1}/{total}]", "public_message_id": event["id"],
@@ -472,11 +488,16 @@ class WorkMemoryMixin:
                        "message_truncated": (len(text) > maximum or raw.get("last_assistant_message_truncated") is True
                                              or raw.get("prompt_truncated") is True),
                        "execution_authority": False}
-            segment, _ = self._event(project, event["conversation"], "PublicMessageSegment", payload,
-                event_id=["public-message", event["id"], digest(visible), index], outcome="reported",
+            segment, fresh = self._event(project, event["conversation"], "PublicMessageSegment", payload,
+                event_id=["public-message", event["id"], visible_digest, index], outcome="reported",
                 task_id=event.get("task_id"), task_revision=event.get("task_revision"),
                 task_write_version=event.get("task_write_version"), execution_epoch=event.get("execution_epoch"),
                 agent_id=event.get("agent"), assignment_id=event.get("assignment_id"))
+            if fresh:
+                # A delayed rebuild is not a new user statement or delivery.
+                # Keep the original observation time for ranking and stage windows.
+                self.db.execute("UPDATE events SET created=? WHERE project=? AND id=?",
+                                (event["created"], project, segment["id"]))
             self._work_capture_event(project, segment["id"], workspace)
 
     def _work_index(self, project, memory_id, body, links):
@@ -485,6 +506,24 @@ class WorkMemoryMixin:
                                         *(item.get("relative_path", "") for item in links)])))
         self.db.execute("DELETE FROM work_memory_fts WHERE project=? AND id=?", (project, memory_id))
         self.db.execute("INSERT INTO work_memory_fts VALUES(?,?,?)", (project, memory_id, text))
+        self.db.execute("DELETE FROM work_index_pending WHERE project=? AND memory_id=?", (project, memory_id))
+
+    def _work_repair_index(self, project, *, limit=16):
+        """Refresh derived lexical terms, without recapturing or changing source facts."""
+        if not _config(self)["enabled"]:
+            return 0
+        rows = self.db.execute("SELECT p.memory_id,m.body,m.event_id FROM work_index_pending p "
+            "LEFT JOIN work_memories m ON m.project=p.project AND m.id=p.memory_id "
+            "WHERE p.project=? ORDER BY p.memory_id LIMIT ?", (project, limit)).fetchall()
+        for row in rows:
+            if row["body"] is None:
+                self.db.execute("DELETE FROM work_index_pending WHERE project=? AND memory_id=?", (project, row["memory_id"]))
+                continue
+            links = self.db.execute("SELECT f.relative_path FROM work_memory_sources s JOIN work_file_links f "
+                "ON f.project=s.project AND f.event_id=s.event_id WHERE s.project=? AND s.memory_id=?",
+                (project, row["memory_id"])).fetchall()
+            self._work_index(project, row["memory_id"], json.loads(row["body"]), [dict(link) for link in links])
+        return len(rows)
 
     def work_source_snapshot(self, project, event_id):
         from .runtime import digest
@@ -703,7 +742,8 @@ class WorkMemoryMixin:
             output["truncated"] = bool(output["omitted_count"])
             return output
 
-    def work_read(self, project, memory_id, *, expected_revision=None, offset=0, max_chars=6000, section="summary", workspace=None):
+    def work_read(self, project, memory_id, *, expected_revision=None, offset=0, max_chars=6000, section="summary", workspace=None,
+                  _delivery=None, _delivery_scope=None, _reread=False):
         from .runtime import ContractError
         _budget(max_chars, 1024, 50000)
         if section not in {"summary", "evidence"}:
@@ -725,15 +765,15 @@ class WorkMemoryMixin:
             result["file_check"] = _read_file_check(self, project, memory_id, workspace)
             if result["files_count"] > len(result["files"]):
                 result["files_omitted"] = result["files_count"] - len(result["files"])
+            if _delivery is not None and not _reread:
+                receipt = _delivery.completed(result, _delivery_scope, section=section, offset=offset, max_chars=max_chars)
+                if receipt is not None:
+                    return receipt
             body = json.loads(row["body"])
             if section == "summary":
                 text = body["summary"]
             else:
-                evidence = []
-                for ref in result["source_event_refs"]:
-                    event = self.db.execute("SELECT id,type,outcome,payload,capture_digest FROM events WHERE project=? AND id=?", (project, ref)).fetchone()
-                    evidence.append(dict(event) if event else {"id": ref, "state": "missing"})
-                text = _json({"projection_only": True, "events": evidence})
+                text = self._work_evidence_text(project, result["source_event_refs"])
             if offset > len(text):
                 raise ContractError("offset exceeds work section length")
             result.pop("summary", None)
@@ -772,6 +812,14 @@ class WorkMemoryMixin:
             if len(_json(result)) > max_chars or (not low and offset < len(text)):
                 raise ContractError("budget cannot fit work identity and page")
             return result
+
+    def _work_evidence_text(self, project, refs):
+        evidence = []
+        for ref in refs:
+            event = self.db.execute("SELECT id,type,outcome,payload,capture_digest FROM events WHERE project=? AND id=?",
+                                    (project, ref)).fetchone()
+            evidence.append(dict(event) if event else {"id": ref, "state": "missing"})
+        return _json({"projection_only": True, "events": evidence})
 
     def work_record_exposure(self, project, conversation, items, agent_id=None, *, delivery="persistent",
                              task_state=None, compact=False, context_epoch=None, method="hook", **kwargs):
@@ -1099,6 +1147,8 @@ class WorkMemoryMixin:
     def work_memory_status(self, project):
         with _snapshot(self):
             return {"settings": _config(self), "index_version": WORK_INDEX_VERSION,
+                    "index_rebuild_pending": self.db.execute("SELECT COUNT(*) FROM work_index_pending WHERE project=?", (project,)).fetchone()[0],
+                    "capture_repair_pending": self.db.execute("SELECT COUNT(*) FROM work_capture_pending WHERE project=?", (project,)).fetchone()[0],
                     "memories": self.db.execute("SELECT COUNT(*) FROM work_memories WHERE project=?", (project,)).fetchone()[0],
                     "file_relations": self.db.execute("SELECT COUNT(*) FROM work_file_links WHERE project=?", (project,)).fetchone()[0],
                     "model_summaries": self.db.execute("SELECT COUNT(*) FROM work_memories WHERE project=? AND event_id IS NULL", (project,)).fetchone()[0],

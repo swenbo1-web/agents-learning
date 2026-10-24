@@ -5,6 +5,7 @@ import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyExtensions, extensionConfig } from "./extensions.mjs";
+import { createBrowserManager } from "./browser.mjs";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -618,7 +619,7 @@ export function apply(ctx, config = {}) {
     }
     return args;
   }
-  const browserProcesses = new Map();
+  const browsers = createBrowserManager({ loadReceipt: loadRuntimeReceipt, runPython: runPythonProcess, environment: hostEnvironment });
   const scopedAgentIds = new Set();
   const capturedTurns = new Map();
   const activeDisposers = [];
@@ -676,17 +677,7 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  function stopAllBrowsers() {
-    for (const [key, entry] of browserProcesses.entries()) {
-      try {
-        if (entry?.child && !entry.child.killed) {
-          entry.child.kill();
-        }
-      } catch {}
-      browserProcesses.delete(key);
-    }
-  }
-  activeDisposers.push(stopAllBrowsers);
+  activeDisposers.push(() => browsers.close());
 
   async function resolveSessionMeta(agentId) {
     if (!agentId) return {};
@@ -917,216 +908,7 @@ export function apply(ctx, config = {}) {
     return sessionHandles.get(agentId);
   }
 
-  async function manageBrowser(action, options, workspace, signal) {
-    const receipt = loadRuntimeReceipt();
-    const targetWorkspace = workspace || receipt.workspace || process.cwd();
-    const key = targetWorkspace.toLowerCase();
-    const existing = browserProcesses.get(key);
-    const isAlive = existing && existing.child && exitCodeOf(existing.child) === null && !existing.child.killed;
-
-    if (!isAlive && existing) {
-      browserProcesses.delete(key);
-    }
-
-    if (action === "status") {
-      if (isAlive) {
-        return {
-          status: "serving",
-          running: true,
-          ...existing.info,
-        };
-      }
-      return {
-        status: "stopped",
-        running: false,
-        workspace: targetWorkspace,
-        read_only: true,
-      };
-    }
-
-    if (action === "stop") {
-      if (isAlive) {
-        try {
-          existing.child.kill();
-        } catch {}
-        browserProcesses.delete(key);
-        return {
-          status: "stopped",
-          running: false,
-          stopped: true,
-          workspace: targetWorkspace,
-        };
-      }
-      return {
-        status: "stopped",
-        running: false,
-        stopped: false,
-        workspace: targetWorkspace,
-      };
-    }
-
-    if (action !== "start") {
-      throw new Error("learning_browser action must be start, status or stop");
-    }
-
-    const shouldOpen = options?.open !== false;
-    const wantReview = Boolean(options?.review);
-    const wantAdminControl = Boolean(options?.adminControl);
-    const requestedPort =
-      typeof options?.port === "number" && Number.isInteger(options.port) && options.port >= 0 && options.port <= 65535
-        ? options.port
-        : 0;
-
-    if (
-      isAlive &&
-      (requestedPort === 0 || existing.info.port === requestedPort) &&
-      (!wantReview || existing.info.review) &&
-      (!wantAdminControl || existing.info.admin_control)
-    ) {
-      if (shouldOpen && existing.info.browser_url) {
-        await runPythonProcess(
-          receipt.python,
-          ["-B", "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])", existing.info.browser_url],
-          "",
-          targetWorkspace,
-          signal,
-          5000,
-        ).catch(() => {});
-      }
-      return {
-        status: "serving",
-        running: true,
-        reused: true,
-        opened: shouldOpen,
-        ...existing.info,
-      };
-    }
-
-    if (isAlive) {
-      try {
-        existing.child.kill();
-      } catch {}
-      browserProcesses.delete(key);
-    }
-
-    const cliScript = join(receipt.runtime_directory, "scripts", "learning.py");
-    const baseArgs = ["-B", cliScript];
-    if (receipt.home) {
-      baseArgs.push("--home", receipt.home);
-    }
-    baseArgs.push("--workspace", targetWorkspace, "--host", "dsh");
-
-    // 先确保当前项目已在数据库中注册
-    await runPythonProcess(receipt.python, [...baseArgs, "status"], "", targetWorkspace, signal, 10000);
-
-    const browserArgs = [...baseArgs, "browser", "--port", String(requestedPort)];
-    if (wantReview) {
-      browserArgs.push("--review");
-    }
-    if (wantAdminControl) {
-      browserArgs.push("--admin-control");
-    }
-    if (shouldOpen) {
-      browserArgs.push("--open");
-    }
-
-    return new Promise((resolve, reject) => {
-      const child = spawn(receipt.python, browserArgs, {
-        cwd: targetWorkspace,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-        env: { ...process.env, ...hostEnvironment(), PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
-      });
-      let buffer = "";
-      let stderrText = "";
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          try {
-            child.kill();
-          } catch {}
-          reject(new Error("Timed out starting Agent Learning knowledge browser"));
-        }
-      }, 10000);
-
-      child.stdout.on("data", (chunk) => {
-        if (settled) return;
-        buffer += chunk.toString("utf8");
-        const newlineIdx = buffer.indexOf("\n");
-        if (newlineIdx !== -1) {
-          const firstLine = buffer.slice(0, newlineIdx).trim();
-          settled = true;
-          clearTimeout(timer);
-          try {
-            const parsed = JSON.parse(firstLine);
-            const url = parsed.url;
-            const token = parsed.access_token;
-            const browserUrl =
-              parsed.admin_control_url ||
-              parsed.review_url ||
-              url + "#token=" + encodeURIComponent(token);
-            const portMatch = String(url).match(/:(\d+)\//);
-            const info = {
-              project: parsed.project,
-              workspace: targetWorkspace,
-              url,
-              browser_url: browserUrl,
-              access_token: token,
-              port: portMatch ? Number(portMatch[1]) : requestedPort,
-              pid: child.pid,
-              read_only: Boolean(parsed.read_only),
-              review: wantReview,
-              admin_control: wantAdminControl,
-            };
-            browserProcesses.set(key, { child, info });
-            child.on("close", () => {
-              const cur = browserProcesses.get(key);
-              if (cur && cur.child === child) {
-                browserProcesses.delete(key);
-              }
-            });
-            resolve({
-              status: "serving",
-              running: true,
-              reused: false,
-              opened: shouldOpen,
-              ...info,
-            });
-          } catch (err) {
-            try {
-              child.kill();
-            } catch {}
-            reject(new Error(`Failed to parse browser startup output: ${firstLine}`));
-          }
-        }
-      });
-
-      child.stderr.on("data", (chunk) => {
-        stderrText += chunk.toString("utf8");
-      });
-
-      child.on("error", (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        }
-      });
-
-      child.on("close", (code) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(new Error(`Browser process exited with code ${code}: ${(stderrText || buffer).trim()}`));
-        }
-      });
-    });
-  }
-
-  function exitCodeOf(child) {
-    return child && typeof child.exitCode === "number" ? child.exitCode : null;
-  }
+  const manageBrowser = (...args) => browsers.manage(...args);
 
   async function invokeMcpTool(toolName, rawArgs, exec) {
     const receipt = loadRuntimeReceipt();
@@ -1607,7 +1389,7 @@ export function apply(ctx, config = {}) {
                 { open: true, review: false, adminControl: false },
                 workspace,
               );
-              send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: "readonly" });
+              send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: info.read_only ? "readonly" : "review" });
               return;
             }
             if (action === "open_review") {

@@ -42,8 +42,10 @@ def storage_ready(runtime):
         if receipt[1] != runtime.db.execute("PRAGMA schema_version").fetchone()[0]:
             return False
         from .knowledge_index import INDEX_VERSION
+        from .work_memory import WORK_INDEX_VERSION
         index = runtime.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()
-        return bool(index and index[0] == INDEX_VERSION)
+        work = runtime.db.execute("SELECT version FROM work_index_state WHERE id=1").fetchone()
+        return bool(index and index[0] == INDEX_VERSION and work and work[0] == WORK_INDEX_VERSION)
     except sqlite3.OperationalError as exc:
         # A missing or old disposable table is a cache miss, never proof that
         # initialization succeeded. Other database failures still reach callers.

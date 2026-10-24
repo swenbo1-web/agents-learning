@@ -29,6 +29,7 @@ def current_history_request(runtime, project, job_id, *, active_only=False):
 def request_history_review(runtime, project, body, *, details=True):
     from .admin_control import control_status, request_receipt
     from .admin_recovery import _history, _version, _history_review_available
+    from .admin_usage import admin_admission_status, budget_settings
     fields = {"request_id", "job_id", "version", "confirmed", "max_calls", "max_seconds",
               "expected_policy_version", "expected_settings_version", "expected_project_budget_version",
               "expected_session_epoch", "expected_governance_epoch"}
@@ -81,7 +82,10 @@ def request_history_review(runtime, project, body, *, details=True):
         workspace = runtime.db.execute("SELECT workspace FROM history_jobs WHERE id=? AND project=?", (row["id"], project)).fetchone()[0]
         if not Path(workspace).is_dir():
             raise ContractError("history workspace unavailable")
-        admission = status["admission"]["admission_status"]
+        # This separately authorized history call retains legacy reservation;
+        # an unrelated pending stage packet must not choose its token amount.
+        admission = admin_admission_status(runtime, project,
+            required_tokens=budget_settings(runtime)["token_reservation_per_call"])["admission_status"]
         if admission != "available":
             raise ContractError("history review admission unavailable: " + admission)
         payload = dict(body, executor_signature=plan["executor_signature"], workspace=workspace)

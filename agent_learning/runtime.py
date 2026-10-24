@@ -1080,6 +1080,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                           conversation=conversation,
                                           native_context_hint=_adapter_event_key is not None
                                           or (self.host == "dsh" and kind == "PostToolUse" and not binding))
+            else:
+                self._work_repair_safely(project)
         schedule_warning = None
         update_notice_event = (fresh and not agent_id and self.config["software_updates"]["enabled"]
                               and (kind == "UserPromptSubmit" or kind == "SessionStart"
@@ -1251,6 +1253,17 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         """派生功能故障不回滚已记录的任务、事件或执行决定；可选摘要排队与普通工作记录采集彼此隔离。"""
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
+        self._work_repair_safely(project, exclude_event=event_id)
+        from .work_recovery import register, complete, failed
+        self.db.execute("SAVEPOINT work_capture_identity")
+        registered = False
+        try:
+            registered = register(self, project, event_id, workspace, raw, pending=False)
+        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+            self.db.execute("ROLLBACK TO work_capture_identity")
+            self._metric(project, "work_capture_identity_failed")
+        finally:
+            self.db.execute("RELEASE work_capture_identity")
         captured = False
         if summarize and conversation:
             self.db.execute("SAVEPOINT phase_seal_registration")
@@ -1267,11 +1280,22 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         try:
             self._work_capture_event(project, event_id, workspace, raw=raw,
                                      native_context_hint=native_context_hint)
-        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError) as exc:
             self.db.execute("ROLLBACK TO work_capture_extension")
             self.db.execute("RELEASE work_capture_extension")
             self._metric(project, "work_memory_capture_failed")
+            if registered:
+                self.db.execute("SAVEPOINT work_capture_retry_registration")
+                try:
+                    register(self, project, event_id, workspace, raw)
+                    failed(self, project, event_id, exc)
+                except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+                    self.db.execute("ROLLBACK TO work_capture_retry_registration")
+                    self._metric(project, "work_capture_retry_registration_failed")
+                finally:
+                    self.db.execute("RELEASE work_capture_retry_registration")
         else:
+            complete(self, project, event_id)
             self.db.execute("RELEASE work_capture_extension")
             captured = True
         if captured and summarize and conversation:
@@ -1288,6 +1312,18 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self._metric(project, "work_summary_queue_failed")
             else:
                 self.db.execute("RELEASE work_summary_extension")
+
+    def _work_repair_safely(self, project, *, exclude_event=None):
+        self.db.execute("SAVEPOINT work_derived_repair")
+        try:
+            from .work_recovery import recover
+            recover(self, project, exclude_event=exclude_event)
+            self._work_repair_index(project)
+        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+            self.db.execute("ROLLBACK TO work_derived_repair")
+            self._metric(project, "work_derived_repair_failed")
+        finally:
+            self.db.execute("RELEASE work_derived_repair")
 
     def _launch_background(self, workspace, command, arguments):
         import subprocess

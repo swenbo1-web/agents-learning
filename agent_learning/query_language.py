@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from functools import lru_cache
 
 
-LANGUAGE_VERSION = 2
+LANGUAGE_VERSION = 3
 ALIASES = {
     "administrator": ("administrator", "administrators", "admin", "管理员"),
     "project": ("project", "projects", "项目"),
@@ -47,7 +48,7 @@ for _alias in sorted(_LOOKUP, key=lambda item: (-len(item), item)):
                   r"(?<![a-z0-9_./:\\-])" + _escaped + r"(?![a-z0-9_./:\\-])")
 _PATTERN = re.compile("|".join(_PARTS), re.IGNORECASE)
 _TOKEN = re.compile(r'''[^\s"'`()<>，。！？；：,!?;]+''')
-_TECHNICAL = re.compile(r"[/\\_]|(?<=\w)[.:=\-](?=\w)")
+_TECHNICAL = re.compile(r"[/\\_]|(?<=\w)[.:=\-](?=\w)|^\.(?=\w)")
 
 
 def _protected_spans(text):
@@ -56,7 +57,10 @@ def _protected_spans(text):
 
 
 def _protected(match, spans):
-    return any(start <= match.start() < end for start, end in spans)
+    # Token spans are sorted and disjoint. Do not scan every earlier path for
+    # every alias in a long body or question.
+    position = bisect_right(spans, (match.start(), float("inf"))) - 1
+    return position >= 0 and match.start() < spans[position][1]
 
 
 def _rewrite(text):
