@@ -308,13 +308,14 @@ class KnowledgeContextMixin:
             work_query = ("" if tool_only or (self.host == "antigravity" and delivery == "ephemeral"
                                               and not query.strip()) else effective)
             try:
-                if effective_plan["automatic_safe"] or not work_query:
+                if effective_plan["automatic_safe"] or not work_query or (compact and not tool_only):
                     work_items = self.work_context_items(
                         project, conversation, query=work_query, workspace=workspace, raw=raw,
                         agent_id=agent_id, limit=work_settings.get("max_items", 3),
                         task_state=task_state, delivery=delivery, compact=compact,
                         context_epoch=work_context_epoch, file_only=tool_only,
-                        exclude_event_id=_source_event_id)
+                        exclude_event_id=_source_event_id,
+                        handoff_only=bool(work_query and not effective_plan["automatic_safe"]))
                 else:
                     # Safety/expiry notices stay independent of optional recall.
                     work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace)
@@ -538,6 +539,8 @@ class KnowledgeContextMixin:
                                 "state": work_item.get("state", "reported"),
                                 "validation_level": work_item.get("validation_level", "reported"),
                                 "read_required": True}
+                        if work_item.get("reference_role") == "task_handoff":
+                            card["reference_role"] = "task_handoff"
                         if work_item.get("completion", "complete") != "complete":
                             card["completion"] = work_item["completion"]
                         if work_item.get("task_binding_known") is False:

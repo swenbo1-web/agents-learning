@@ -585,7 +585,7 @@ class WorkMemoryMixin:
                                     + " LIMIT ?", (*params, pool_limit)).fetchall()
             found = {row["id"] for row in rows}
             rows.extend(row for row in other if row["id"] not in found)
-        if query.strip() or automatic:
+        if (query.strip() or automatic) and not handoff:
             selected = normalized_query_plan(query)["terms"][:64]
             from .knowledge_index import match_terms
             def score(row):
@@ -785,14 +785,15 @@ class WorkMemoryMixin:
 
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
-                           context_epoch=None, file_only=False, exclude_event_id=None):
+                           context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
             name, args = _tool(raw or {})
-            links = file_links_from_payload(name, args, workspace, observe_version=False) if workspace else []
+            links = (file_links_from_payload(name, args, workspace, observe_version=False)
+                     if workspace and not handoff_only else [])
             result = self.work_exposure_updates(project, conversation, agent_id, limit=limit, workspace=workspace)
-            if not links and not query.strip() and workspace and not file_only:
+            if not handoff_only and not links and not query.strip() and workspace and not file_only:
                 # AG 下一次 invocation 无工具参数，仅使用本会话/agent近期明确目标。
                 filters, parameters = "", [project, conversation, agent_id, checkout_key(workspace)]
                 if isinstance(task_state, dict) and task_state.get("id"):
@@ -826,7 +827,7 @@ class WorkMemoryMixin:
                 rows.extend(self._work_search_rows(project, query[:8000],
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
                     exclude_event_id=exclude_event_id, automatic=True))
-            if not links:
+            if not links and not handoff_only:
                 # 空查询先查当前会话；新会话可读取同checkout的公开交接索引。
                 rows = self._work_search_rows(project, query, limit=limit,
                     conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state,
@@ -838,13 +839,34 @@ class WorkMemoryMixin:
                         "AND COALESCE(json_extract(body,'$.completion'),'complete')='complete' "
                         "ORDER BY created DESC,id DESC LIMIT ?",
                         (project, checkout_key(workspace), conversation, limit * 4)).fetchall()
-            # A real compaction can restore the current phase's complete public
-            # handoff after relevant matches. Never restore unrelated seen IDs or
-            # treat Antigravity's ordinary ephemeral invocations as compaction.
-            if compact and not file_only:
-                rows.extend(self._work_search_rows(project, "", workspace=workspace, limit=limit,
+            # A query that cannot represent every identity is not a blank query.
+            # Its compact-only lane never infers files or falls back to other
+            # conversations. Reserve one healthy current-task handoff so ordinary
+            # matches cannot fill every slot before phase recovery is considered.
+            # A usable query keeps its best match first; a one-item budget has
+            # no extra slot to reserve for background.
+            handoff_scopes = {}
+            query_match_first = bool(query.strip() and rows and not handoff_only)
+            if compact and not file_only and not (limit == 1 and query_match_first):
+                handoffs = self._work_search_rows(project, "", workspace=workspace, limit=20,
                     conversation=conversation, agent_id=agent_id, task_state=task_state,
-                    exclude_event_id=exclude_event_id, automatic=True, handoff=True))
+                    exclude_event_id=exclude_event_id, automatic=True, handoff=True)
+                for row in sorted(handoffs, key=lambda row: (row["created"], row["id"]), reverse=True):
+                    item = self._work_item(project, row, workspace=workspace)
+                    if not self._work_handoff_usable(item):
+                        continue
+                    handoff_scopes[row["id"]] = {
+                        "workspace_key": checkout_key(workspace), "conversation": conversation,
+                        "agent": agent_id, "task_id": task_state["id"],
+                        "task_revision": task_state.get("revision"),
+                        "assignment_id": task_state.get("assignment_id"),
+                    }
+                    others = [other for other in rows if other["id"] != row["id"]]
+                    if query_match_first and rows[0]["id"] != row["id"]:
+                        rows = others[:1] + [row] + others[1:]
+                    else:
+                        rows = [row] + others
+                    break
             seen = {item["memory_id"] for item in result}
             public_messages = set()
             for row in rows:
@@ -852,9 +874,16 @@ class WorkMemoryMixin:
                 parent = body.get("public_message_id")
                 if _metadata_only_write(body) or compact and parent and parent in public_messages:
                     continue
+                handoff_scope = handoff_scopes.get(row["id"])
+                preview_query = None if handoff_scope else query
                 item = self._work_item(project, row, workspace=workspace,
-                                       file_paths=[link["relative_path"] for link in links[:3]], preview_query=query)
-                item["_preview_query"] = query
+                                       file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
+                item["_preview_query"] = preview_query
+                if handoff_scope:
+                    if not self._work_handoff_usable(item):
+                        continue
+                    item["_handoff_scope"] = handoff_scope
+                    item["reference_role"] = "task_handoff"
                 if any(link.get("task_affinity") == "context_only" for link in links):
                     item["task_affinity"] = "context_only"
                 if item["memory_id"] in seen:
@@ -879,6 +908,18 @@ class WorkMemoryMixin:
                 if len(result) >= limit:
                     break
             return result[:limit]
+
+    @staticmethod
+    def _work_handoff_usable(item):
+        """Only healthy complete observations may restore a phase as background."""
+        return (item.get("type") in {"public_summary", "work_summary"}
+                and item.get("completion") == "complete"
+                and not item.get("coverage", {}).get("truncated")
+                and item.get("state") in {"reported", "model_reported"}
+                and not item.get("source_changed")
+                and not item.get("candidate_reference_risk")
+                and item.get("automatic_eligible", True)
+                and not any(file.get("version_changed") is True for file in item.get("files", [])))
 
     def work_rebuild(self, project, workspace, *, cursor=None, limit=100):
         from .runtime import ContractError
@@ -1021,6 +1062,17 @@ class WorkMemoryMixin:
             if row is not None and row["revision"] == item.get("revision"):
                 current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"),
                                           preview_query=item.get("_preview_query"))
+                if item.get("reference_role") == "task_handoff":
+                    scope = item.get("_handoff_scope")
+                    body = json.loads(row["body"])
+                    if (not isinstance(scope, dict) or not self._work_handoff_usable(current)
+                            or any(row[field] != scope.get(field) for field in (
+                                "workspace_key", "conversation", "agent", "task_id", "task_revision"))
+                            or body.get("assignment_id") != scope.get("assignment_id")
+                            or not workspace or checkout_key(workspace) != scope["workspace_key"]):
+                        continue
+                    current["reference_role"] = "task_handoff"
+                    current["_handoff_scope"] = scope
                 if item.get("task_affinity") == "context_only":
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):
