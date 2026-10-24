@@ -560,13 +560,14 @@ class KnowledgeContextMixin:
                         if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
                                 and (not changed_work or work_item.get("candidate_reference_risk"))):
                             continue
+                        handoff = work_item.get("reference_role") == "task_handoff"
                         card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
                                 "title": clip(work_item.get("title", ""), 50),
-                                "summary": clip(work_item.get("summary", ""), 80),
+                                "summary": clip(work_item.get("summary", ""), 160 if handoff else 80),
                                 "state": work_item.get("state", "reported"),
                                 "validation_level": work_item.get("validation_level", "reported"),
                                 "read_required": True}
-                        if work_item.get("reference_role") == "task_handoff":
+                        if handoff:
                             card["reference_role"] = "task_handoff"
                         if work_item.get("completion", "complete") != "complete":
                             card["completion"] = work_item["completion"]

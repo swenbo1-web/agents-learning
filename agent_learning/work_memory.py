@@ -65,16 +65,21 @@ def _read_file_check(runtime, project, memory_id, workspace):
     return {"complete": True, "version": digest(observations)}
 
 
-def _read_metadata_preview(result, max_chars):
+def _read_metadata_preview(result, max_chars, *, paginated=False):
     """Reserve page space by shortening previews, never identity or live checks."""
+    # A fixed 128-character reserve left small pages almost entirely metadata.
+    # Repeated pages need only the live identity/checks, not another index card.
     target = max_chars - 128
+    if paginated:
+        target = 512 if result.get("offset") else max(512, max_chars // 4)
     while len(_json(result)) > target and result["files"]:
         result["files"].pop()
         result["files_omitted"] = result["files_count"] - len(result["files"])
     if len(_json(result)) > target and len(result["source_event_refs"]) > 1:
-        result["source_refs_omitted"] = len(result["source_event_refs"]) - 1
-        result["source_event_refs"] = result["source_event_refs"][:1]
-        result["source_refs_truncated"] = True
+        preview = dict(result, source_refs_omitted=len(result["source_event_refs"]) - 1,
+                       source_event_refs=result["source_event_refs"][:1], source_refs_truncated=True)
+        if len(_json(preview)) < len(_json(result)):
+            result.update(preview)
     if len(_json(result)) > target and result.get("file_state"):
         result["file_state_omitted"] = len(result["file_state"])
         result["file_state"] = None
@@ -96,9 +101,14 @@ def _read_metadata_preview(result, max_chars):
         result["title"] = result["title"][:80]
         result["title_truncated"] = True
     if len(_json(result)) > target and result["source_event_refs"]:
-        result["source_refs_omitted"] = result.get("source_refs_omitted", 0) + len(result["source_event_refs"])
-        result["source_event_refs"] = []
-        result["source_refs_truncated"] = True
+        preview = dict(result, source_refs_omitted=result.get("source_refs_omitted", 0) + len(result["source_event_refs"]),
+                       source_event_refs=[], source_refs_truncated=True)
+        if len(_json(preview)) < len(_json(result)):
+            result.update(preview)
+    if paginated and len(_json(result)) > target and "title" in result:
+        result.pop("title")
+        result.pop("title_truncated", None)
+        result["metadata_omitted"] = True
 
 
 def validate_work_memory_config(value):
@@ -727,19 +737,35 @@ class WorkMemoryMixin:
             if offset > len(text):
                 raise ContractError("offset exceeds work section length")
             result.pop("summary", None)
-            result.update(status="ok", section=section, section_length=len(text), offset=offset, content="", next_offset=None)
+            result.update(status="ok", section=section, section_length=len(text), offset=offset,
+                          content="", next_offset=None, truncated=False)
+            # Preserve a complete first-page response when its full details fit.
+            # Bound the trial by the response budget, even for very long evidence.
+            if offset == 0 and len(text) <= max_chars:
+                result["content"] = text
+                if len(_json(result)) <= max_chars:
+                    return result
+                result["content"] = ""
             # Previews may shrink; full source and bounded file checks remain.
-            _read_metadata_preview(result, max_chars)
-            low, high = 0, len(text) - offset
+            _read_metadata_preview(result, max_chars, paginated=True)
+            if len(text) - offset <= max_chars:
+                result.update(content=text[offset:], next_offset=None, truncated=False)
+                # At large offsets, replacing next_offset's integer with null
+                # can make the final page shorter than a preceding prefix.
+                if len(_json(result)) <= max_chars:
+                    return result
+            low, high = 0, min(len(text) - offset, max_chars)
             while low < high:
                 middle = (low + high + 1) // 2
-                result.update(content=text[offset:offset + middle], next_offset=offset + middle if offset + middle < len(text) else None)
+                end = offset + middle
+                result.update(content=text[offset:end], next_offset=end if end < len(text) else None,
+                              truncated=end < len(text))
                 if len(_json(result)) <= max_chars:
                     low = middle
                 else:
                     high = middle - 1
-            result.update(content=text[offset:offset + low], next_offset=offset + low if offset + low < len(text) else None)
-            result["truncated"] = result["next_offset"] is not None
+            result.update(content=text[offset:offset + low], next_offset=offset + low if offset + low < len(text) else None,
+                          truncated=offset + low < len(text))
             while len(_json(result)) > max_chars and result["content"]:
                 low -= 1
                 result.update(content=text[offset:offset + low], next_offset=offset + low, truncated=True)
@@ -905,6 +931,8 @@ class WorkMemoryMixin:
                 if handoff_scope:
                     if not self._work_handoff_usable(item):
                         continue
+                    from .work_handoff import select_handoff_preview
+                    item["summary"] = select_handoff_preview(body.get("summary", ""))
                     item["_handoff_scope"] = handoff_scope
                     item["reference_role"] = "task_handoff"
                 if any(link.get("task_affinity") == "context_only" for link in links):
@@ -1096,6 +1124,8 @@ class WorkMemoryMixin:
                         continue
                     current["reference_role"] = "task_handoff"
                     current["_handoff_scope"] = scope
+                    from .work_handoff import select_handoff_preview
+                    current["summary"] = select_handoff_preview(body.get("summary", ""))
                 if item.get("task_affinity") == "context_only":
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):
