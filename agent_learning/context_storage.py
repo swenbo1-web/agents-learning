@@ -144,6 +144,10 @@ class ContextStorageMixin:
             state = self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone() if exists else None
             if not state or state[0] != INDEX_VERSION:
                 self._rebuild_knowledge_index()
+            # Optional derived delivery cache; existing audit rows never prove
+            # coverage and are deliberately not imported into this cache.
+            from .context_dedup import migrate
+            migrate(self)
 
     def _install_context_source_triggers(self):
         """来源变化由 SQLite 同事务记版本，调用方无需扫描所有会话。"""

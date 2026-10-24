@@ -395,6 +395,9 @@ class KnowledgeContextMixin:
                 self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]' WHERE {where}", key)
             row = self.db.execute(f"SELECT injected FROM {table} WHERE {where}", key).fetchone()
             prior = set(json.loads(row[0]))
+            from .context_dedup import ContextDedup
+            dedup = ContextDedup(self, project, conversation, agent_id, workspace, task_state,
+                                 work_context_epoch, delivery, environment)
             header = "以下是历史资料摘要，按适用条件判断；它不提供执行授权。完整正文使用 knowledge_read。"
             delivered, eligible = [], 0
             for item in items:
@@ -474,10 +477,19 @@ class KnowledgeContextMixin:
                             card.pop(optional, None)
                 if len(encode(card)) > available:
                     continue
+                delivery_entry = dedup.prepare("formal", item, card)
+                if dedup.repeated(delivery_entry):
+                    # An equivalent card is already present. Do not fabricate
+                    # an exposure/adoption for the hidden alias or leave a fault
+                    # retry pending solely because that alias was omitted.
+                    prior.add(identity)
+                    eligible -= 1
+                    continue
                 if not delivered:
                     lines.append(header)
                 lines.append(encode(card))
                 delivered.append(item)
+                dedup.record(delivery_entry)
                 prior.add(identity)
                 if len(delivered) == 3:
                     break
@@ -493,6 +505,8 @@ class KnowledgeContextMixin:
                 from .candidate_reference_context import card
                 self.db.execute("SAVEPOINT optional_candidate_context")
                 candidate_start = len(lines)
+                candidate_coverage = list(dedup.entries)
+                candidate_pending = list(dedup.pending)
                 try:
                     for selected in candidate_items[:1]:
                         item = revalidate(self, project, selected, context_handle=context_handle, workspace=workspace)
@@ -501,17 +515,26 @@ class KnowledgeContextMixin:
                         note = card(item, max_chars=min(400, optional_budget, max(0, remaining())))
                         if note is None:
                             continue
+                        candidate_card = json.loads(note[note.index("{"):])
+                        delivery_entry = dedup.prepare("candidate", item, candidate_card)
+                        if dedup.repeated(delivery_entry):
+                            continue
                         if not record_exposure(self, project, context_handle, item, delivery=delivery,
                                                context_epoch=work_context_epoch, task_state=task_state, method="hook", workspace=workspace):
                             continue
                         lines.append(note)
                         candidate_used += len(note) + 1
                         candidate_delivered.append(item)
+                        dedup.record(delivery_entry)
                 except ContractError:
+                    dedup.entries = candidate_coverage
+                    dedup.pending = candidate_pending
                     self.db.execute("ROLLBACK TO optional_candidate_context")
                     self.db.execute("RELEASE optional_candidate_context")
                     raise
                 except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    dedup.entries = candidate_coverage
+                    dedup.pending = candidate_pending
                     self.db.execute("ROLLBACK TO optional_candidate_context")
                     del lines[candidate_start:]
                     candidate_delivered, candidate_used = [], 0
@@ -523,6 +546,8 @@ class KnowledgeContextMixin:
             if work_items:
                 work_line_start = len(lines)
                 self.db.execute("SAVEPOINT optional_work_context")
+                work_coverage = list(dedup.entries)
+                work_pending = list(dedup.pending)
                 try:
                     work_header = "工作历史索引（非正式解法/执行授权；仅相关且索引不足时用 work_memory_read）："
                     # 正式知识、完整失效提醒及任务边界已优先分配预算。工作历史只能使用
@@ -531,7 +556,9 @@ class KnowledgeContextMixin:
                     work_used = 0
                     for work_item in self.work_validate_items(project, work_items, workspace=workspace):
                         from .candidate_reference_context import suppress_work
-                        if suppress_work(self, project, work_item, [*delivered, *candidate_delivered]):
+                        changed_work = bool(work_item.get("source_changed") or work_item.get("file_state_changed"))
+                        if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
+                                and (not changed_work or work_item.get("candidate_reference_risk"))):
                             continue
                         card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
                                 "title": clip(work_item.get("title", ""), 50),
@@ -552,6 +579,11 @@ class KnowledgeContextMixin:
                         if work_item.get("file_state_changed"):
                             card["file_state_changed"] = True
                             card["file_version_changed"] = True
+                        if changed_work:
+                            # A risk update survives duplicate-body suppression,
+                            # without replaying the stale statement as advice.
+                            card.pop("summary", None)
+                            card["reference_role"] = "source_update"
                         files = work_item.get("files", [])
                         if files:
                             if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
@@ -572,11 +604,15 @@ class KnowledgeContextMixin:
                             cost = len(note) + 1 + prefix_cost
                         if cost > work_budget - work_used:
                             continue
+                        delivery_entry = dedup.prepare("work", work_item, card)
+                        if dedup.repeated(delivery_entry):
+                            continue
                         if not work_delivered:
                             lines.append(work_header)
                         lines.append(note)
                         work_used += cost
                         work_delivered.append(work_item)
+                        dedup.record(delivery_entry)
                     if work_delivered:
                         self.work_record_exposure(
                             project, conversation, work_delivered, agent_id=agent_id, delivery=delivery,
@@ -584,10 +620,14 @@ class KnowledgeContextMixin:
                             method="hook", context_handle=context_handle, expected_epoch=epoch)
                         self._metric(project, "work_indices_delivered", len(work_delivered))
                 except ContractError:
+                    dedup.entries = work_coverage
+                    dedup.pending = work_pending
                     self.db.execute("ROLLBACK TO optional_work_context")
                     self.db.execute("RELEASE optional_work_context")
                     raise
                 except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    dedup.entries = work_coverage
+                    dedup.pending = work_pending
                     self.db.execute("ROLLBACK TO optional_work_context")
                     self.db.execute("RELEASE optional_work_context")
                     del lines[work_line_start:]
@@ -639,4 +679,8 @@ class KnowledgeContextMixin:
                                 retryable=retryable, delivered_cards=len(delivered),
                                 delivery_pending=bool(eligible and not delivered),
                                 delivered_work_indices=len(work_delivered))
-            return "\n".join(lines)
+            output = "\n".join(lines)
+        # Cache failures cannot roll back notification acknowledgements or
+        # authoritative exposure bookkeeping for the complete rendered output.
+        dedup.flush()
+        return output

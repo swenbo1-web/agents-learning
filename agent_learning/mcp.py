@@ -403,8 +403,9 @@ class Server:
                     task_state = r._work_task_state(p, access["conversation_id"], access["agent_id"], handle, task)
                     table, where, key = r._ensure_context(p, access["conversation_id"], access["agent_id"])
                     context_epoch = r.db.execute(f"SELECT epoch FROM {table} WHERE {where}", key).fetchone()[0]
+                    from .work_memory import _exposure_task_key
                     delivery_scope = (p, handle, r.host, r.host_instance, self.epoch,
-                                      r.host_epoch(), context_epoch, task_state)
+                                      r.host_epoch(), context_epoch, _exposure_task_key(task_state))
                     if r.host == "antigravity":
                         # Native ephemeral context is replaced for each model
                         # invocation. Missing trajectory identity disables reuse.

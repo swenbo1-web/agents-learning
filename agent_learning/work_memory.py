@@ -271,6 +271,24 @@ def _task_key(task_state):
     return _json({key: state.get(key) for key in ("id", "revision", "write_version", "assignment_id")})
 
 
+def _exposure_task_key(task_state):
+    """Display identity follows the task contract, not a progress write fence."""
+    state = task_state or {}
+    if not isinstance(state, dict):
+        return _json(state)
+    return _json({key: state.get(key) for key in ("id", "revision", "assignment_id")})
+
+
+def _same_exposure_task(previous_key, task_state):
+    # Older receipts include write_version. Ignore only that display field;
+    # permission checks and file hints keep the complete _task_key contract.
+    try:
+        previous = json.loads(previous_key)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(previous, dict) and _exposure_task_key(previous) == _exposure_task_key(task_state)
+
+
 class WorkMemoryMixin:
     def _work_verification_source(self, project, event, payload, raw, name):
         """Classify a missing-input callback using only matching recorded attempts."""
@@ -511,8 +529,13 @@ class WorkMemoryMixin:
         from .candidate_references import lineage_risk
         reference_risks = [risk for source in sources
                            if (risk := lineage_risk(self, project, source["event_id"])) and risk.get("blocked", True)]
+        source_identity = [row["revision"], row["body"], snapshots, reference_risks]
+        # Capture mismatch can change health without changing the live snapshot.
+        # Keep healthy legacy fingerprints stable; only append the missing risk.
+        if mismatch:
+            source_identity.append({"capture_state": state})
         return {"memory_id": row["id"], "revision": row["revision"],
-                "source_version": digest([row["revision"], row["body"], snapshots, reference_risks]), "state": state,
+                "source_version": digest(source_identity), "state": state,
                 **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
                 "type": body["type"], "title": body["title"],
                 "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
@@ -754,7 +777,7 @@ class WorkMemoryMixin:
                 file_state = _json(dict(list(known.items())[-32:]))
             self.db.execute("INSERT INTO work_exposures(project,conversation,agent,memory_id,revision,source_version,context_epoch,task_key,delivery,method,created,file_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET revision=excluded.revision,source_version=excluded.source_version,context_epoch=excluded.context_epoch,task_key=excluded.task_key,delivery=excluded.delivery,method=excluded.method,created=excluded.created,file_state=COALESCE(excluded.file_state,work_exposures.file_state)",
                 (project, conversation, agent_id or "", item["memory_id"], item["revision"], item["source_version"],
-                 context_epoch, _task_key(task_state), delivery, method, now, file_state))
+                 context_epoch, _exposure_task_key(task_state), delivery, method, now, file_state))
             count += 1
         # 只保留展示台账；不改变工作记录或现有知识采用状态。
         self.db.execute("DELETE FROM work_exposures WHERE project=? AND conversation=? AND agent=? AND memory_id NOT IN (SELECT memory_id FROM work_exposures WHERE project=? AND conversation=? AND agent=? ORDER BY created DESC,memory_id DESC LIMIT 100)",
@@ -899,7 +922,7 @@ class WorkMemoryMixin:
                     item["file_state_changed"] = True
                 if (previous and delivery == "persistent" and not compact and previous["source_version"] == item["source_version"]
                         and not file_changed and not file_unseen and previous["context_epoch"] == int(context_epoch or 0)
-                        and previous["task_key"] == _task_key(task_state)):
+                        and _same_exposure_task(previous["task_key"], task_state)):
                     continue
                 result.append(item)
                 seen.add(item["memory_id"])
