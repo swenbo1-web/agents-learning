@@ -24,6 +24,46 @@ def _capture_digest(event):
     return event["capture_digest"] or digest(json.loads(event["payload"]))
 
 
+def original_workspace(runtime, project, event_id):
+    """Resolve a missing queue's original checkout without borrowing another project path."""
+    event = runtime.db.execute("SELECT * FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
+    if event is None:
+        return None
+    recorded = runtime.db.execute("SELECT checkout_key FROM work_event_checkouts WHERE project=? AND event_id=?",
+                                   (project, event_id)).fetchone()
+    key = recorded[0] if recorded else None
+    job = runtime.db.execute("SELECT * FROM work_capture_pending WHERE project=? AND event_id=?",
+                             (project, event_id)).fetchone()
+    try:
+        if job:
+            workspace = job["workspace"]
+            if (not isinstance(workspace, str) or not Path(workspace).is_absolute()
+                    or job["capture_digest"] != _capture_digest(event)
+                    or checkout_key(workspace) != job["checkout_key"]
+                    or key is not None and key != job["checkout_key"]):
+                return None
+            return workspace
+        payload = json.loads(event["payload"])
+        workspace = payload.get("cwd", payload.get("workspace"))
+        if workspace is not None:
+            if not isinstance(workspace, str) or not workspace or not Path(workspace).is_absolute():
+                return None
+            observed = checkout_key(workspace)
+            if key is not None:
+                return workspace if key == observed else None
+        elif key is None:
+            return None
+        for row in runtime.db.execute("SELECT path FROM project_paths WHERE project=? ORDER BY path", (project,)):
+            try:
+                if checkout_key(row[0]) == (observed if workspace is not None else key):
+                    return workspace if workspace is not None else row[0]
+            except (OSError, ValueError, RuntimeError):
+                continue
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+    return None
+
+
 def projection_links(event, key, projection):
     """Accept only internal bounded observations bound to the original evidence."""
     from .runtime import ContractError

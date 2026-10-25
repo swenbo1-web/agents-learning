@@ -17,6 +17,23 @@ def install(runtime):
         "attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,next_try REAL NOT NULL DEFAULT 0)")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS phase_seal_due ON phase_seal_requests("
                        "project,host_scope,session_epoch,governance_epoch,next_try,created)")
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS phase_seal_identity_scan("
+                       "phase_id TEXT PRIMARY KEY,position INTEGER NOT NULL)")
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS phase_seal_identity_position ON phase_seal_identity_scan(position)")
+
+
+def _checked_identity(runtime, phase_id):
+    """Rotate a disposable scan position without changing source or authority."""
+    import sqlite3
+    runtime.db.execute("SAVEPOINT phase_seal_identity_position")
+    try:
+        runtime.db.execute("INSERT INTO phase_seal_identity_scan VALUES(?,"
+            "(SELECT COALESCE(MAX(position),0)+1 FROM phase_seal_identity_scan)) "
+            "ON CONFLICT(phase_id) DO UPDATE SET position=excluded.position", (phase_id,))
+    except sqlite3.Error:
+        runtime.db.execute("ROLLBACK TO phase_seal_identity_position")
+    finally:
+        runtime.db.execute("RELEASE phase_seal_identity_position")
 
 
 def request(runtime, project, event_id, workspace, conversation, raw=None):
@@ -84,19 +101,32 @@ def recover(runtime, project, *, limit=8, force=False):
         return
     # A pre-savepoint write can itself fail. Reconstruct only an exact original
     # Stop bound to the delivered write version, never the latest conversation.
-    missing = runtime.db.execute("SELECT p.*,e.id original_stop FROM review_phases p JOIN events e "
+    missing = runtime.db.execute("SELECT p.*,e.id original_stop FROM review_phases p "
+        "LEFT JOIN phase_seal_identity_scan scan ON scan.phase_id=p.id JOIN events e "
         "ON e.project=p.project AND e.conversation=p.conversation AND e.task_id=p.task_id "
         "AND e.task_revision=p.task_revision AND e.task_write_version=p.delivery_version "
         "AND e.task_status='delivered' AND e.type='Stop' AND e.agent IS NULL AND e.created>=p.start_time "
         "WHERE p.project=? AND p.host_scope=? AND p.session_epoch=? AND p.governance_epoch=? "
         "AND p.state='awaiting_stop' AND NOT EXISTS(SELECT 1 FROM phase_seal_requests q WHERE q.phase_id=p.id) "
-        "ORDER BY p.created,e.created,e.rowid LIMIT ?", (project, runtime._session_scope(),
+        "AND e.rowid=(SELECT first.rowid FROM events first WHERE first.project=p.project "
+        "AND first.conversation=p.conversation AND first.task_id=p.task_id AND first.task_revision=p.task_revision "
+        "AND first.task_write_version=p.delivery_version AND first.task_status='delivered' "
+        "AND first.type='Stop' AND first.agent IS NULL AND first.created>=p.start_time "
+        "ORDER BY first.created,first.rowid LIMIT 1) "
+        "ORDER BY COALESCE(scan.position,0),p.created,e.created,e.rowid LIMIT ?", (project, runtime._session_scope(),
         runtime.session_epoch(), runtime.host_epoch(), limit)).fetchall()
+    from .work_recovery import original_workspace
     for phase in missing:
-        path = runtime.db.execute("SELECT path FROM project_paths WHERE project=? ORDER BY length(path),path LIMIT 1",
-                                  (project,)).fetchone()
-        if path:
-            request(runtime, project, phase["original_stop"], path[0], phase["conversation"])
+        _checked_identity(runtime, phase["id"])
+        runtime.db.execute("SAVEPOINT phase_seal_missing_request")
+        try:
+            workspace = original_workspace(runtime, project, phase["original_stop"])
+            if workspace is not None:
+                request(runtime, project, phase["original_stop"], workspace, phase["conversation"])
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            runtime.db.execute("ROLLBACK TO phase_seal_missing_request")
+        finally:
+            runtime.db.execute("RELEASE phase_seal_missing_request")
     now = time.time()
     rows = runtime.db.execute("SELECT q.* FROM phase_seal_requests q JOIN review_phases p ON p.id=q.phase_id "
         "AND p.project=q.project WHERE q.project=? AND q.host_scope=? AND q.session_epoch=? AND q.governance_epoch=? "

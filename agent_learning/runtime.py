@@ -95,15 +95,21 @@ def clean(value):
     return value
 
 
-def clip(text, limit):
-    """保留首尾，错误原因常在日志末尾；字符预算不等于 token 预算。"""
+def _clip_projection(text, limit):
+    """Original-text intervals and separator used by the public clip helper."""
     if len(text) <= limit:
-        return text
+        return [(0, len(text))], ""
     marker = "\n...[truncated]...\n"
     if limit <= len(marker):
-        return text[:max(0, limit)]
+        return [(0, max(0, limit))], ""
     head = (limit - len(marker)) // 2
-    return text[:head] + marker + text[-(limit - len(marker) - head):]
+    return [(0, head), (len(text) - (limit - len(marker) - head), len(text))], marker
+
+
+def clip(text, limit):
+    """保留首尾，错误原因常在日志末尾；字符预算不等于 token 预算。"""
+    ranges, separator = _clip_projection(text, limit)
+    return separator.join(text[start:end] for start, end in ranges)
 
 
 def metadata(value):

@@ -46,6 +46,23 @@ class PhaseSealRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(request, "the Stop binding must outlive the optional savepoint rollback")
         return phase, request
 
+    def missing_stop(self, r, p, conversation, raw, *, capture_failure=False):
+        task = r.task_update(p, conversation, "Preserve original source " + conversation)
+        r.task_update(p, conversation, task["goal"], status="delivered")
+        with r.transaction():
+            event, _ = r._event(p, conversation, "Stop", raw, outcome="reported",
+                                task_id=task["id"], task_revision=task["revision"])
+            with patch("agent_learning.phase_seal_recovery.request", side_effect=sqlite3.OperationalError("Registration interrupted")), \
+                    patch("agent_learning.phase_review.seal_phase", side_effect=sqlite3.OperationalError("Seal interrupted")):
+                if capture_failure:
+                    with patch.object(r, "_work_index", side_effect=sqlite3.OperationalError("Capture interrupted")):
+                        r._work_capture_safely(p, event["id"], self.workspace, raw=raw,
+                                              summarize=True, conversation=conversation)
+                else:
+                    r._work_capture_safely(p, event["id"], self.workspace, raw=raw,
+                                          summarize=True, conversation=conversation)
+        return event
+
     def test_each_host_recovers_original_stop_after_task_switch_exactly_once(self):
         for host in ("codex", "antigravity", "dsh"):
             with self.subTest(host=host):
@@ -211,6 +228,7 @@ class PhaseSealRecoveryTests(unittest.TestCase):
                 if host == "antigravity":
                     # No public Stop exists, so keep the original native/public evidence boundary.
                     self.assertEqual(state, "awaiting_stop")
+                    self.assertEqual(r.db.execute("SELECT COUNT(*) FROM events WHERE type='Stop'").fetchone()[0], 0)
                 else:
                     self.assertNotEqual(state, "awaiting_stop")
                 self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
@@ -334,6 +352,240 @@ class PhaseSealRecoveryTests(unittest.TestCase):
                                 "AND e.payload LIKE ?", (phase["task_id"], f"%ORIGINAL_MIDDLE_{index}%")).fetchone()
                             self.assertIsNotNone(linked)
                         self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_missing_request_uses_only_original_checkout_evidence_across_project_aliases(self):
+        from agent_learning.phase_seal_recovery import recover
+        from agent_learning.work_files import checkout_key
+        original, other = self.workspace / "long-original-checkout", self.root / "a"
+        for workspace in (original, other):
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / ".git").mkdir(exist_ok=True)
+        for identity in ("unknown", "pending", "checkout", "cwd"):
+            with self.subTest(identity=identity):
+                r = Runtime(self.root / ("missing-" + identity), config={})
+                self.addCleanup(r.close)
+                p = r.project(original)
+                r.config["project_aliases"][str(other)] = p
+                self.assertEqual(r.project(other), p)
+                configure(r, p, {"mode": "phase", "every_phases": 20}, 0)
+                r.config["work_memory"]["enabled"] = identity in {"pending", "checkout"}
+                task = r.task_update(p, "chat", "Keep the original checkout condition")
+                r.task_update(p, "chat", task["goal"], status="delivered")
+                marker = "ORIGINAL_PUBLIC_CONDITION_" + identity
+                text = ("Original public detail. " * 180 + marker + " Further public detail. " * 180
+                        if identity in {"pending", "checkout"} else marker)
+                raw = {"last_assistant_message": text}
+                if identity == "cwd":
+                    sub = original / "src"
+                    sub.mkdir(exist_ok=True)
+                    raw["cwd"] = str(sub)
+                with r.transaction():
+                    event, _ = r._event(p, "chat", "Stop", raw, outcome="reported",
+                                        task_id=task["id"], task_revision=task["revision"])
+                    with patch("agent_learning.phase_seal_recovery.request", side_effect=sqlite3.OperationalError("Queue registration interrupted")), \
+                            patch("agent_learning.phase_review.seal_phase", side_effect=sqlite3.OperationalError("Original seal interrupted")):
+                        if identity == "pending":
+                            with patch.object(r, "_work_index", side_effect=sqlite3.OperationalError("Original work capture interrupted")):
+                                r._work_capture_safely(p, event["id"], original, raw=raw, summarize=True, conversation="chat")
+                        else:
+                            r._work_capture_safely(p, event["id"], original, raw=raw, summarize=True, conversation="chat")
+                self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+                r.config["work_memory"]["enabled"] = True
+                with patch("subprocess.Popen", side_effect=AssertionError("Local restoration cannot run a model")):
+                    with r.transaction():
+                        recover(r, p, force=True)
+                    with r.transaction():
+                        recover(r, p, force=True)
+                phase = r.db.execute("SELECT * FROM review_phases").fetchone()
+                memories = r.db.execute("SELECT * FROM work_memories WHERE event_id=?", (event["id"],)).fetchall()
+                if identity == "unknown":
+                    self.assertEqual(phase["state"], "awaiting_stop")
+                    self.assertEqual(memories, [])
+                    self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_event_checkouts").fetchone()[0], 0)
+                else:
+                    self.assertEqual(phase["state"], "sealed")
+                    self.assertEqual(phase["event_id"], event["id"])
+                    self.assertEqual(len(memories), 1)
+                    self.assertEqual(memories[0]["workspace_key"], checkout_key(original))
+                    self.assertEqual(memories[0]["source_hash"], event["capture_digest"])
+                    self.assertIsNotNone(r.db.execute("SELECT 1 FROM problems pr JOIN problem_events pe ON pe.problem=pr.id "
+                        "JOIN events e ON e.id=pe.event WHERE pr.task_id=? AND e.payload LIKE ?",
+                        (task["id"], "%" + marker + "%")).fetchone())
+                self.assertEqual(r._work_search_rows(p, "", workspace=other, conversation="chat",
+                    task_state=r.task(p, "chat"), automatic=True, handoff=True), [])
+                self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+                self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 0)
+                self.assertEqual(dict(r.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()), event)
+                self.assertEqual(r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_unknown_checkout_stages_do_not_hide_a_later_recoverable_original_stop(self):
+        from agent_learning.phase_seal_recovery import recover
+        r = Runtime(self.root / "missing-window", config={"work_memory": {"enabled": False}})
+        self.addCleanup(r.close)
+        p = r.project(self.workspace)
+        configure(r, p, {"mode": "phase", "every_phases": 20}, 0)
+        known = None
+        for index in range(9):
+            conversation = "source-" + str(index)
+            task = r.task_update(p, conversation, "Keep original source " + str(index))
+            r.task_update(p, conversation, task["goal"], status="delivered")
+            raw = {"last_assistant_message": "Original public condition " + str(index)}
+            if index == 8:
+                raw["cwd"] = str(self.workspace)
+            with r.transaction():
+                event, _ = r._event(p, conversation, "Stop", raw, outcome="reported",
+                                    task_id=task["id"], task_revision=task["revision"])
+                with patch("agent_learning.phase_seal_recovery.request", side_effect=sqlite3.OperationalError("Queue registration interrupted")), \
+                        patch("agent_learning.phase_review.seal_phase", side_effect=sqlite3.OperationalError("Original seal interrupted")):
+                    r._work_capture_safely(p, event["id"], self.workspace, raw=raw,
+                                          summarize=True, conversation=conversation)
+            if index == 8:
+                known = event
+        r.config["work_memory"]["enabled"] = True
+        for _ in range(2):
+            with r.transaction():
+                recover(r, p, limit=8, force=True)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM review_phases WHERE state='awaiting_stop'").fetchone()[0], 8)
+        self.assertEqual(r.db.execute("SELECT event_id FROM review_phases WHERE state='sealed'").fetchone()[0], known["id"])
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 1)
+
+    def test_invalid_identity_candidates_rotate_persistently_before_a_later_valid_stop(self):
+        from agent_learning.phase_seal_recovery import recover
+        from agent_learning.work_files import checkout_key
+        from agent_learning.work_recovery import original_workspace
+        for invalid in ("empty_cwd", "relative_cwd", "changed_pending", "unmapped_checkout"):
+            with self.subTest(invalid=invalid):
+                r = Runtime(self.root / ("invalid-window-" + invalid), config={"work_memory": {"enabled": False}})
+                self.addCleanup(r.close)
+                p = r.project(self.workspace)
+                configure(r, p, {"mode": "phase", "every_phases": 20}, 0)
+                originals = []
+                for index in range(8):
+                    raw = {"last_assistant_message": "Original source condition " + str(index)}
+                    if invalid in {"empty_cwd", "relative_cwd"}:
+                        raw["cwd"] = "" if invalid == "empty_cwd" else "src"
+                    r.config["work_memory"]["enabled"] = invalid == "changed_pending"
+                    event = self.missing_stop(r, p, "invalid-" + str(index), raw,
+                                              capture_failure=invalid == "changed_pending")
+                    originals.append(event)
+                    with r.transaction():
+                        if invalid == "changed_pending":
+                            r.db.execute("UPDATE work_capture_pending SET capture_digest='changed' WHERE event_id=?", (event["id"],))
+                        elif invalid == "unmapped_checkout":
+                            unavailable = self.root / "unregistered-old-checkout"
+                            r.db.execute("INSERT INTO work_event_checkouts VALUES(?,?,?)",
+                                         (p, event["id"], checkout_key(unavailable)))
+                    self.assertIsNone(original_workspace(r, p, event["id"]))
+                r.config["work_memory"]["enabled"] = False
+                known = self.missing_stop(r, p, "known", {"last_assistant_message": "Original valid condition",
+                                                          "cwd": str(self.workspace)})
+                r.config["work_memory"]["enabled"] = True
+                with patch("agent_learning.work_recovery.original_workspace", wraps=original_workspace) as inspect:
+                    with r.transaction():
+                        recover(r, p, limit=8, force=True)
+                self.assertEqual(inspect.call_count, 8)
+                self.assertEqual(r.db.execute("SELECT COUNT(*) FROM review_phases WHERE state='awaiting_stop'").fetchone()[0], 9)
+                positions = [tuple(row) for row in r.db.execute("SELECT * FROM phase_seal_identity_scan ORDER BY position")]
+                self.assertEqual(len(positions), 8)
+                home, config = r.home, copy.deepcopy(r.config)
+                r.close()
+                reopened = Runtime(home, config=config)
+                self.addCleanup(reopened.close)
+                self.assertEqual(positions, [tuple(row) for row in reopened.db.execute("SELECT * FROM phase_seal_identity_scan ORDER BY position")])
+                with patch("agent_learning.work_recovery.original_workspace", wraps=original_workspace) as inspect, \
+                        patch("subprocess.Popen", side_effect=AssertionError("Identity recovery cannot launch a model")):
+                    with reopened.transaction():
+                        recover(reopened, p, limit=8, force=True)
+                self.assertLessEqual(inspect.call_count, 8)
+                self.assertEqual(inspect.call_args_list[0].args[2], known["id"])
+                self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM review_phases WHERE state='awaiting_stop'").fetchone()[0], 8)
+                self.assertEqual(reopened.db.execute("SELECT event_id FROM review_phases WHERE state='sealed'").fetchone()[0], known["id"])
+                self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 1)
+                self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+                for event in originals:
+                    self.assertEqual(event, dict(reopened.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()))
+                self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_identity_scan_storage_and_resolution_faults_do_not_change_original_stop(self):
+        from agent_learning.phase_seal_recovery import recover
+        r = Runtime(self.root / "identity-storage-fault", config={"work_memory": {"enabled": False}})
+        self.addCleanup(r.close)
+        p = r.project(self.workspace)
+        configure(r, p, {"mode": "phase", "every_phases": 20}, 0)
+        event = self.missing_stop(r, p, "known", {"last_assistant_message": "Original valid condition",
+                                                 "cwd": str(self.workspace)})
+        original_phase = tuple(r.db.execute("SELECT * FROM review_phases").fetchone())
+        r.config["work_memory"]["enabled"] = True
+        with r.transaction():
+            r.db.execute("CREATE TRIGGER reject_identity_scan BEFORE INSERT ON phase_seal_identity_scan "
+                         "BEGIN SELECT RAISE(ABORT,'synthetic identity cache write failure'); END")
+        with patch("agent_learning.work_recovery.original_workspace", side_effect=OSError("Synthetic source lookup failure")):
+            with r.transaction():
+                recover(r, p, force=True)
+        self.assertEqual(original_phase, tuple(r.db.execute("SELECT * FROM review_phases").fetchone()))
+        self.assertEqual(event, dict(r.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()))
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+        with r.transaction():
+            recover(r, p, force=True)
+        self.assertEqual(r.db.execute("SELECT state FROM review_phases").fetchone()[0], "sealed")
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_identity_scan").fetchone()[0], 0)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 1)
+        self.assertEqual(event, dict(r.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()))
+
+    def test_missing_identity_does_not_borrow_a_later_stop_at_the_same_delivery_version(self):
+        from agent_learning.phase_seal_recovery import recover
+        r = Runtime(self.root / "first-original-stop", config={"work_memory": {"enabled": False}})
+        self.addCleanup(r.close)
+        p = r.project(self.workspace)
+        configure(r, p, {"mode": "phase", "every_phases": 20}, 0)
+        with patch("time.time", return_value=1700000000.0):
+            original = self.missing_stop(r, p, "chat", {"last_assistant_message": "The original public condition"})
+            later = self.missing_stop(r, p, "chat", {"last_assistant_message": "A later explanation with a known cwd",
+                                                     "cwd": str(self.workspace)})
+        self.assertEqual(original["created"], later["created"])
+        self.assertEqual(original["task_write_version"], later["task_write_version"])
+        r.config["work_memory"]["enabled"] = True
+        from agent_learning.work_recovery import original_workspace
+        for _ in range(3):
+            with patch("agent_learning.work_recovery.original_workspace", wraps=original_workspace) as inspect:
+                with r.transaction():
+                    recover(r, p, force=True)
+            self.assertEqual(inspect.call_count, 1)
+            self.assertEqual(inspect.call_args.args[2], original["id"])
+        self.assertEqual(r.db.execute("SELECT state FROM review_phases").fetchone()[0], "awaiting_stop")
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+        for event in (original, later):
+            self.assertEqual(event, dict(r.db.execute("SELECT * FROM events WHERE id=?", (event["id"],)).fetchone()))
+
+    def test_startup10_receipt_without_identity_scan_reopens_with_preserved_authority(self):
+        from agent_learning.admin_lifecycle import claim_call
+        from agent_learning.runtime_storage import _signature
+        r = Runtime(self.root / "old-startup-receipt", config={})
+        self.addCleanup(r.close)
+        p = r.project(self.workspace)
+        r.task_update(p, "chat", "Keep original records across a cache initialization update")
+        problem = r.feedback(p, "chat", "A synthetic existing source", category="project")
+        with r.transaction():
+            call = claim_call(r, p, problem["id"], problem["revision"], "synthetic-existing-call", r.host_epoch(), 5)
+        self.assertEqual(call["status"], "reserved")
+        events = [tuple(row) for row in r.db.execute("SELECT * FROM events ORDER BY id")]
+        calls = [tuple(row) for row in r.db.execute("SELECT * FROM admin_calls ORDER BY id")]
+        with r.transaction():
+            r.db.execute("DROP TABLE phase_seal_identity_scan")
+            schema_cookie = r.db.execute("PRAGMA schema_version").fetchone()[0]
+            legacy = _signature().rsplit(":startup", 1)[0] + ":startup10"
+            r.db.execute("UPDATE runtime_storage_receipt SET signature=?,schema_cookie=? WHERE id=1",
+                         (legacy, schema_cookie))
+        home, config = r.home, copy.deepcopy(r.config)
+        r.close()
+        reopened = Runtime(home, config=config)
+        self.addCleanup(reopened.close)
+        self.assertIsNotNone(reopened.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='phase_seal_identity_scan'").fetchone())
+        self.assertEqual(reopened.db.execute("SELECT signature FROM runtime_storage_receipt WHERE id=1").fetchone()[0], _signature())
+        self.assertEqual(reopened.db.execute("PRAGMA user_version").fetchone()[0], 25)
+        self.assertEqual(events, [tuple(row) for row in reopened.db.execute("SELECT * FROM events ORDER BY id")])
+        self.assertEqual(calls, [tuple(row) for row in reopened.db.execute("SELECT * FROM admin_calls ORDER BY id")])
 
 
 if __name__ == "__main__":

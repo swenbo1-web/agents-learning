@@ -45,6 +45,51 @@ def _refs(item):
     return sorted(refs)
 
 
+def _formal_ranges(item, card):
+    from .knowledge_output import _summary_projection
+    from .runtime import clip, _clip_projection
+    summary, start, end, truncated = _summary_projection(item, 500)
+    rendered = card.get("content_summary")
+    positions = ([None] if start > 0 else []) + list(range(start, end)) + ([None] if truncated else [])
+    while summary != rendered and len(summary) > 24:
+        limit = max(24, len(summary) // 2)
+        pieces, separator = _clip_projection(summary, limit)
+        selected = []
+        for index, (left, right) in enumerate(pieces):
+            if index:
+                selected.extend([None] * len(separator))
+            selected.extend(positions[left:right])
+        positions = selected
+        summary = clip(summary, limit)
+    if summary != rendered:
+        return None  # Unknown formatting can only reuse the exact fingerprint.
+    return _merge_ranges([(position, position + 1) for position in positions if position is not None])
+
+
+def _merge_ranges(ranges):
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _formal_key(value):
+    try:
+        prefix, base, encoded = value.split(":", 2)
+        ranges = json.loads(encoded)
+        if (prefix != "formal" or not isinstance(ranges, list) or len(ranges) > 64
+                or any(not isinstance(pair, list) or len(pair) != 2
+                       or any(type(position) is not int for position in pair)
+                       or not 0 <= pair[0] < pair[1] for pair in ranges)):
+            return None
+        return base, ranges
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 class ContextDedup:
     """Only complete automatic cards in this exact input scope can suppress cards."""
 
@@ -153,6 +198,15 @@ class ContextDedup:
         entry = {"channel": channel, "item_id": identity, "revision": str(revision),
             "source_version": str(source_version),
             "material_key": digest([channel, str(comparison_revision), material, full, sources, visible]), "text_key": ""}
+        if channel == "formal":
+            # Keep original-text ranges, not just lengths: equally sized
+            # summaries can describe different query-selected passages.
+            base = {"source_files_changed": bool(card.get("source_files_changed"))}
+            ranges = [] if card.get("read_required") else _formal_ranges(item, card)
+            if ranges is not None:
+                entry["material_key"] = "formal:" + digest([
+                    channel, str(comparison_revision), material, body.get("content", ""), sources, base
+                ]) + ":" + json.dumps(ranges, separators=(",", ":"))
         if channel == "formal" and (item.get("knowledge_kind") == "fact"
                 and item.get("knowledge_tier", "source_reference") == "source_reference"
                 and item.get("validation_level") == "reported"
@@ -168,11 +222,11 @@ class ContextDedup:
             entry["text_key"] = digest([full, sources, "reported"])
         return entry
 
-    def _valid(self, entry):
-        if entry.get("_current"):
+    def _valid(self, entry, *, recheck=False):
+        if entry.get("_current") and not recheck:
             return True
         key = (entry["channel"], entry["item_id"], entry["revision"], entry["source_version"])
-        if key in self.validity:
+        if key in self.validity and not recheck:
             return self.validity[key]
         from .runtime import ContractError
         valid = False
@@ -204,15 +258,30 @@ class ContextDedup:
             return False
         for old in self.entries:
             same = old["material_key"] == entry["material_key"]
+            if entry["channel"] == old["channel"] == "formal":
+                previous, current = _formal_key(old["material_key"]), _formal_key(entry["material_key"])
+                if previous and current and previous[0] == current[0]:
+                    same = all(any(left <= start <= end <= right for left, right in previous[1])
+                               for start, end in current[1])
             covered = (entry["channel"] == "work" and old["channel"] == "formal"
                        and bool(entry["text_key"]) and old["text_key"] == entry["text_key"])
-            if (same or covered) and self._valid(old):
+            if (same or covered) and self._valid(old, recheck=covered):
                 return True
         return False
 
     def record(self, entry):
         if entry is None:
             return
+        if entry["channel"] == "formal":
+            current = _formal_key(entry["material_key"])
+            for old in self.entries:
+                previous = _formal_key(old["material_key"]) if old["channel"] == "formal" else None
+                if (current and previous and current[0] == previous[0]
+                        and old["item_id"] == entry["item_id"] and self._valid(old, recheck=True)):
+                    ranges = _merge_ranges(previous[1] + current[1])
+                    if len(ranges) <= 64:
+                        entry["material_key"] = "formal:" + current[0] + ":" + json.dumps(ranges, separators=(",", ":"))
+                        current = (current[0], ranges)
         self.entries.insert(0, dict(entry, _current=True))
         self.entries = self.entries[:MAX_ENTRIES]
         if self.delivery != "persistent":

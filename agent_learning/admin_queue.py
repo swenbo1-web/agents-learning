@@ -287,12 +287,31 @@ def ready_executor(runtime, project, query, args, *, advance=False):
             except ValueError:
                 available, plan = False, None
             if available and not executor_backoff(runtime, project, plan):
-                return True
+                from .admin_usage import admin_admission_status
+                required = phase_reservation(runtime, project, item["id"])
+                # Shared concurrency/call limits are reported by the caller's
+                # admission gate; only request-size token waits rotate cases.
+                if required is None or admin_admission_status(runtime, project,
+                        required_tokens=required)["admission_status"] != "token_budget_exhausted":
+                    return True
             if advance:
                 remember_executor_check(runtime, project, item, signature)
         if len(rows) < 40:
             break
     return False
+
+
+def phase_reservation(runtime, project, problem_id):
+    """Read the same frozen phase request used by the final atomic claim."""
+    from .admin_usage import estimate_reservation
+    from .phase_review import instruction
+    import json
+    row = runtime.db.execute("SELECT packet FROM phase_review_batches WHERE project=? AND problem_id=? "
+                             "AND state='pending'", (project, problem_id)).fetchone()
+    if not row:
+        return None
+    estimate = estimate_reservation(runtime, project, instruction(json.loads(row[0])), phase=True)
+    return estimate["reserved_tokens"]
 
 
 def unrouted_reason(runtime, project, query, args, fallback):
@@ -311,7 +330,7 @@ def unrouted_reason(runtime, project, query, args, fallback):
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
-    from .admin_usage import admin_admission_status
+    from .admin_usage import admin_admission_status, estimate_reservation
     cfg = runtime.admin_effective_config(project)
     if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0 and phase_scope(runtime, project) is None:
         return None
@@ -335,7 +354,9 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
                               (project, *ACTIVE_STATES)).fetchone():
             return None
-        budget = admin_admission_status(runtime, project, now=now)
+        minimum = (estimate_reservation(runtime, project, "", phase=True)["reserved_tokens"]
+                   if phase_scope(runtime, project) is not None else None)
+        budget = admin_admission_status(runtime, project, now=now, required_tokens=minimum)
         if budget["admission_status"] != "available":
             return None
         # 已在审核的派发与调用占同一槽，不能重复计算并发占用。
@@ -348,13 +369,13 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         # evidence without a model job already existing. Exhausted passes sleep.
         from .phase_review import prepare as prepare_phases
         prepare_phases(runtime, project)
-        if admin_admission_status(runtime, project)["admission_status"] != "available":
-            return None
         signature, preflight_signature = scan_signatures(runtime, project)
         query, args = eligible_query(signature, preflight_signature=preflight_signature,
                                      summary_enabled=runtime.work_summary_enabled(project),
                                      summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
         if not ready_executor(runtime, project, query, args, advance=True):
+            return None
+        if admin_admission_status(runtime, project)["admission_status"] != "available":
             return None
         token = str(uuid.uuid4())
         runtime.db.execute("INSERT INTO admin_dispatch(project,token,host_epoch,lease_until,created,host_scope) VALUES(?,?,?,?,?,?)",
@@ -565,6 +586,11 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
         return detail
     budget = admin_admission_status(runtime, project)
     if budget["admission_status"] != "available":
+        if budget["admission_status"] == "token_budget_exhausted" and phase_scope(runtime, project) is not None:
+            from .admin_usage import estimate_reservation
+            minimum = estimate_reservation(runtime, project, "", phase=True)["reserved_tokens"]
+            if (budget["remaining_reported_tokens"] is None or budget["remaining_reported_tokens"] >= minimum) and routing_scan_pending(runtime, project, query, args):
+                return dict(detail, reason="executor_scan_pending")
         return dict(detail, reason=budget["admission_status"], next_due=budget.get("next_reset_at"),
                     blocking_scope=budget.get("blocking_scope"))
     worker_backoff = executor_backoff(runtime, project, background_plan(runtime))
@@ -586,5 +612,12 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
             last = dict(detail, reason=executor_wait_reason(backoff),
                         next_due=backoff["next_try"], failure_reason=backoff["reason"])
             continue
+        required = phase_reservation(runtime, project, row["id"])
+        if required is not None:
+            admission = admin_admission_status(runtime, project, required_tokens=required)
+            if admission["admission_status"] != "available":
+                last = dict(detail, reason=admission["admission_status"], next_due=admission.get("next_reset_at"),
+                            blocking_scope=admission.get("blocking_scope"))
+                continue
         return dict(detail, reason="ready")
     return last

@@ -338,7 +338,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     from .admin_lifecycle import claim_call, recover_calls
     from .admin_queue import (eligible_query, executor_query, remember_check, scan_signatures,
                               executor_backoff, executor_wait_reason, routing_signature, executor_review_order,
-                              remember_executor_check)
+                              remember_executor_check, routing_scan_pending)
     from .admin_providers import executor_availability
     cfg = runtime.admin_effective_config(project)
     if history_job_id is None and not cfg["enabled"]:
@@ -365,7 +365,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     order, order_args = executor_review_order(runtime, project, route_signature)
     rows = runtime.db.execute(query + order + "LIMIT ?",
                               (project, *args, *order_args, 1 if problem_id is not None else scan_limit)).fetchall()
-    skipped, routing_skipped, scanned = [], [], 0
+    skipped, routing_skipped, budget_skipped, scanned = [], [], [], 0
     if not rows:
         if history_job_id is None and runtime.db.execute(raw_query + "LIMIT 1", (project, *raw_args)).fetchone():
             from .admin_queue import unrouted_reason
@@ -509,6 +509,13 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
         claim = claim_call(runtime, project, selected["id"], selected["revision"], review, epoch, timeout,
                            reserved_tokens=token_plan["reserved_tokens"] if phase_context else None)
         if claim["status"] != "reserved":
+            if phase_context and problem_id is None and claim["status"] == "token_budget_exhausted":
+                # A large frozen phase cannot pin smaller admissible siblings.
+                # This check only rotates a disposable bounded scan position;
+                # every later attempt still claims both budget scopes atomically.
+                remember_executor_check(runtime, project, selected, route_signature)
+                budget_skipped.append(claim)
+                continue
             return dict(claim, scanned_count=scanned)
         runtime.record_admin_execution(project, claim["call_id"], provider_plan, require_enabled=history_job_id is None)
         if summary_context:
@@ -536,6 +543,8 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 # Optional recovery cannot block the authorized normal review.
                 reservation["history_snapshot_unavailable"] = "history_comparison_budget_exceeded"
         return reservation
+    if budget_skipped and not routing_scan_pending(runtime, project, raw_query, raw_args):
+        return dict(budget_skipped[0], scanned_count=scanned)
     return {"status": "executor_not_ready" if routing_skipped else "needs_evidence" if skipped else "scan_complete", "scanned_count": scanned,
             **({"reason": routing_skipped[0]["reason"], "routing_skipped": routing_skipped[:10]} if routing_skipped else {}),
             **({"problem_id": skipped[0], "skipped_problem_ids": skipped,

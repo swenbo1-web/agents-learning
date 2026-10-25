@@ -350,6 +350,20 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertEqual(link["relative_path"], "src/a.py")
         self.assertEqual(json.loads(link["version"])["status"], "unknown")
 
+    def test_original_workspace_rejects_changed_pending_identity_without_falling_back(self):
+        from agent_learning.work_recovery import original_workspace
+        job = self.fail()
+        self.assertEqual(original_workspace(self.r, self.p, job["event_id"]), str(self.workspace))
+        with self.r.transaction():
+            self.r.db.execute("UPDATE work_capture_pending SET capture_digest='changed-source'")
+        self.assertIsNone(original_workspace(self.r, self.p, job["event_id"]))
+        other = self.root / "another-checkout"
+        other.mkdir()
+        with self.r.transaction():
+            self.r.db.execute("UPDATE work_capture_pending SET capture_digest=?,workspace=?,checkout_key=?",
+                              (job["capture_digest"], str(other), checkout_key(other)))
+        self.assertIsNone(original_workspace(self.r, self.p, job["event_id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

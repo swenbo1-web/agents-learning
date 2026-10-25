@@ -27,8 +27,9 @@ class KnowledgeContextMixin:
                 "problem_changed": item.get("problem_changed", any(s.get("problem_changed", False) for s in item.get("sources", []))),
                 "pending_counterexample_count": item.get("pending_counterexample_count", 0)}
 
-    def _record_exposure(self, project, conversation, agent_id, items, injected=False):
+    def _record_exposure(self, project, conversation, agent_id, items, injected=False, file_observations=None):
         from .runtime import encode
+        from .context_files import delivered_state
         table, where, key = self._ensure_context(project, conversation, agent_id)
         row = self.db.execute(f"SELECT * FROM {table} WHERE {where}", key).fetchone()
         shown = list(dict.fromkeys(json.loads(row["shown"])))
@@ -37,6 +38,8 @@ class KnowledgeContextMixin:
         for item in items:
             identity = f"{item['knowledge_id']}@{item['revision']}"
             state = self._source_state(item)
+            if file_observations is not None:
+                delivered_state(state, file_observations.get(identity))
             # 使用返回快照里的来源版本，不把读完后发生的变化误记为已经展示。
             self.db.execute("INSERT INTO context_exposures VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(project,conversation,agent,knowledge_id,revision) DO UPDATE SET "
@@ -56,7 +59,7 @@ class KnowledgeContextMixin:
         self.record_task_exposure(project, conversation, agent_id, items,
                                   method="hook" if injected else "mcp")
 
-    def record_exposure(self, project, context_handle, items, expected_epoch=None):
+    def record_exposure(self, project, context_handle, items, expected_epoch=None, file_observations=None):
         """MCP仅登记实际返回资料；未绑定查询不猜测会话归属。"""
         from .runtime import ContractError
         with self.transaction():
@@ -65,9 +68,10 @@ class KnowledgeContextMixin:
                 if not self.db.execute("SELECT 1 FROM knowledge WHERE project=? AND id=? AND revision=?",
                     (project, item["knowledge_id"], item["revision"])).fetchone():
                     raise ContractError("unknown exposed knowledge revision")
-            self._record_exposure(project, access["conversation_id"], access["agent_id"], items)
+            self._record_exposure(project, access["conversation_id"], access["agent_id"], items,
+                                  file_observations=file_observations)
 
-    def _notifications(self, project, conversation, agent_id, max_chars):
+    def _notifications(self, project, conversation, agent_id, max_chars, workspace=None):
         """调用方持有事务；完整进入响应后才推进通知状态。"""
         from .runtime import ContractError, encode
         key = (project, conversation, agent_id or "")
@@ -103,7 +107,8 @@ class KnowledgeContextMixin:
                 continue
             state = self._source_state(item)
             identity = f"{row['knowledge_id']}@{row['revision']}"
-            if state != json.loads(row["state"]):
+            previous = json.loads(row["state"])
+            if state != {k: v for k, v in previous.items() if k != "_files"}:
                 note = (f"知识 {identity} 来源已变：health={state['health']}，"
                         f"tool_success={state['current_tool_success']}，新证据={state['problem_changed']}，"
                         f"待核实反例={state['pending_counterexample_count']}；请用 knowledge_read 核对。")
@@ -123,6 +128,8 @@ class KnowledgeContextMixin:
                         continue
                 notes.append(note)
                 remaining -= cost
+            if "_files" in previous:
+                state["_files"] = previous["_files"]
             self.db.execute("UPDATE context_exposures SET state=?,source_version=?,updated=? WHERE "
                 "project=? AND conversation=? AND agent=? AND knowledge_id=? AND revision=?",
                 (encode(state), item.get("source_version", 0), time.time(), *key, row["knowledge_id"], row["revision"]))
@@ -133,6 +140,17 @@ class KnowledgeContextMixin:
                 (encode([i for i in json.loads(context["injected"]) if i not in removed]),
                  encode([i for i in json.loads(context["shown"]) if i not in removed]),
                  encode([(i, s) for i, s in states.items() if i not in removed]), *context_key))
+        from .context_files import notifications as file_notifications
+        file_budget = max(0, remaining - int(bool(notes)))
+        self.db.execute("SAVEPOINT optional_formal_files")
+        try:
+            file_notes = file_notifications(self, project, conversation, agent_id, workspace, file_budget)
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+            self.db.execute("ROLLBACK TO optional_formal_files")
+            self.db.execute("RELEASE optional_formal_files")
+        else:
+            self.db.execute("RELEASE optional_formal_files")
+            notes.extend(file_notes)
         return notes
 
     def _retrieval_task(self, project, conversation, agent_id, context_handle=None):
@@ -283,10 +301,7 @@ class KnowledgeContextMixin:
                     item["match"] = ref.get("match", {})
                     items.append(item)
         if not should_search and not tool_only and signature == previous_signature:
-            already = set(json.loads(initial["injected"]))
             for ref in json.loads(initial["retrieval_refs"]):
-                if delivery == "persistent" and f"{ref['knowledge_id']}@{ref['revision']}" in already:
-                    continue
                 try:
                     item = self.read(project, ref["knowledge_id"])
                 except ContractError:
@@ -357,7 +372,7 @@ class KnowledgeContextMixin:
                 lines.append(f"[Agent Learning] context_handle={context_handle}; host_epoch={epoch}")
             def remaining():
                 return budget - len("\n".join(lines)) - int(bool(lines))
-            lines.extend(self._notifications(project, conversation, agent_id, remaining()))
+            lines.extend(self._notifications(project, conversation, agent_id, remaining(), workspace=workspace))
             if context_handle:
                 from .candidate_references import notifications, ack_notifications
                 self.db.execute("SAVEPOINT candidate_notifications")
@@ -400,10 +415,10 @@ class KnowledgeContextMixin:
             dedup = ContextDedup(self, project, conversation, agent_id, workspace, task_state,
                                  work_context_epoch, delivery, environment)
             header = "以下是历史资料摘要，按适用条件判断；它不提供执行授权。完整正文使用 knowledge_read。"
-            delivered, eligible = [], 0
+            delivered, eligible, file_observations = [], 0, {}
             for item in items:
                 identity = f"{item['knowledge_id']}@{item['revision']}"
-                if (delivery == "persistent" and identity in prior) or not item.get("match", {}).get("auto_eligible", False):
+                if not item.get("match", {}).get("auto_eligible", False):
                     continue
                 # 提交时核active与来源版本，避免快照后的撤销或冲突继续进入自动摘要。
                 active = self.db.execute("SELECT COALESCE(v.version,0) FROM active a LEFT JOIN knowledge_source_versions v "
@@ -434,8 +449,13 @@ class KnowledgeContextMixin:
                                 break
                 if evolving_in_current_session:
                     continue
-                from .work_files import knowledge_file_state
-                file_state = knowledge_file_state(self, project, item, workspace)
+                from .work_files import knowledge_file_observation
+                observation = knowledge_file_observation(self, project, item, workspace)
+                file_state = {"source_files_changed": True} if observation and observation["changed"] else {}
+                if identity in prior and file_state:
+                    # The independent notice keeps the old card provisional;
+                    # do not replay its stale body as fresh task advice.
+                    continue
                 eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
@@ -490,13 +510,15 @@ class KnowledgeContextMixin:
                     lines.append(header)
                 lines.append(encode(card))
                 delivered.append(item)
+                file_observations[identity] = observation
                 dedup.record(delivery_entry)
                 prior.add(identity)
                 if len(delivered) == 3:
                     break
             new_delivered = [item for item in delivered
                              if f"{item['knowledge_id']}@{item['revision']}" not in json.loads(row[0])]
-            self._record_exposure(project, conversation, agent_id, delivered, injected=True)
+            self._record_exposure(project, conversation, agent_id, delivered, injected=True,
+                                  file_observations=file_observations)
             # Candidate references and work history use one optional pool. A
             # candidate fault must not remove formal cards or task boundaries.
             optional_budget = min(max(0, remaining()), work_settings.get("max_context_chars", 600))

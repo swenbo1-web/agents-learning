@@ -302,7 +302,10 @@ def record_usage(runtime, call_id, usage):
             totals[key] = max(value, totals.get(key, 0))
         reported = max(reported, prior["reported_tokens"],
                        totals.get("input_tokens", 0) + totals.get("output_tokens", 0), totals.get("total_tokens", 0))
-    completeness = "partial" if conflict else result["completeness"]
+    merged = normalize_usage(dict(result, token_totals=totals))
+    if {"input_tokens", "output_tokens", "total_tokens"} <= totals.keys():
+        conflict |= totals["total_tokens"] != totals["input_tokens"] + totals["output_tokens"]
+    completeness = "partial" if conflict else merged["completeness"]
     result.update(token_totals=totals, completeness=completeness, conflict=conflict)
     runtime.db.execute("UPDATE admin_call_budgets SET reported_tokens=?,completeness=?,conflict=?,updated=? WHERE call_id=?",
                        (max(reported, prior["reported_tokens"]), completeness, int(conflict), time.time(), call_id))
@@ -418,12 +421,14 @@ def pending_phase_reservation(runtime, project):
     cfg = phase_policy(runtime, project)
     if cfg["mode"] != "phase":
         return None
+    from .admin_queue import executor_review_order, routing_signature
+    order, order_args = executor_review_order(runtime, project, routing_signature(runtime, project))
     amounts = []
     for row in runtime.db.execute("SELECT b.packet FROM phase_review_batches b JOIN problems p "
         "ON p.project=b.project AND p.id=b.problem_id WHERE b.project=? AND b.host_scope=? "
         "AND b.session_epoch=? AND b.governance_epoch=? AND b.policy_version=? "
-        "AND b.state='pending' AND p.status='pending' ORDER BY b.created,b.problem_id LIMIT 40",
-        (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"])):
+        "AND b.state='pending' AND p.status='pending' " + order + "LIMIT 40",
+        (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"], *order_args)):
         estimate = estimate_reservation(runtime, project, instruction(json.loads(row[0])), phase=True)
         if estimate["admitted"]:
             amounts.append(estimate["reserved_tokens"])

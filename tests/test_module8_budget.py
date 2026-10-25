@@ -189,6 +189,35 @@ class Module8BudgetTests(unittest.TestCase):
         self.assertEqual(self.status()["accounted_tokens"], 0)
         self.assertEqual(self.status()["usage_states"]["complete"], 1)
 
+    def test_merged_missing_total_conflict_keeps_reservation_through_later_valid_observation(self):
+        self.r.config["admin"]["max_reported_tokens_per_day"] = 5000
+        call = self.claim()
+        self.start(call)
+        finish_call(self.r, call["call_id"], "failed", {"token_totals": {"total_tokens": 1000}, "completeness": "partial"})
+        row = finish_call(self.r, call["call_id"], "failed", {"token_totals": {"input_tokens": 100, "output_tokens": 50},
+            "completeness": "complete"})
+        merged = json.loads(row["usage"])
+        self.assertEqual(merged["completeness"], "partial")
+        self.assertTrue(merged["conflict"])
+        self.assertEqual(self.status()["accounted_tokens"], 4000)
+        self.assertEqual(self.claim(problem="blocked")["status"], "token_budget_exhausted")
+        valid = {"token_totals": {"input_tokens": 950, "output_tokens": 50, "total_tokens": 1000}, "completeness": "complete"}
+        for _ in range(2):
+            row = finish_call(self.r, call["call_id"], "failed", valid)
+        self.assertTrue(json.loads(row["usage"])["conflict"])
+        self.assertEqual(self.status()["accounted_tokens"], 4000)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_usage_observations").fetchone()[0], 3)
+
+    def test_consistent_completion_of_partial_total_can_settle_original_reservation(self):
+        call = self.claim()
+        self.start(call)
+        finish_call(self.r, call["call_id"], "failed", {"token_totals": {"total_tokens": 1000}, "completeness": "partial"})
+        row = finish_call(self.r, call["call_id"], "failed", {"token_totals": {
+            "input_tokens": 900, "output_tokens": 100, "total_tokens": 1000}, "completeness": "complete"})
+        self.assertFalse(json.loads(row["usage"])["conflict"])
+        self.assertEqual(self.status()["accounted_tokens"], 1000)
+        self.assertEqual(self.status()["token_reservations"], 0)
+
     def test_conflicting_disjoint_overage_preserves_both_visible_fields(self):
         call = self.claim()
         self.start(call)

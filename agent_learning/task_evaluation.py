@@ -38,10 +38,10 @@ class EvaluationError(ValueError):
 def fingerprint(value):
     """Stable JSON SHA-256; reject NaN and ambiguous non-JSON inputs."""
     try:
-        content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise EvaluationError("evaluation values must be finite JSON data") from exc
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return hashlib.sha256(content).hexdigest()
 
 
 def file_fingerprint(path):

@@ -96,8 +96,10 @@ apply({tools:{register(spec){definitions.set(spec.name,spec);}},effect(){},injec
 const agent={id:'worker-contract'};
 handlers.get('session/created')({id:agent.id,header:{cwd:process.argv[2]}});
 await handlers.get('agent/created')({agent});
-const args={query:'verify immutable effective arguments'};
-const exec={agent,name:'knowledge_search',arguments:args,callId:'same-call'};
+const rereading=scenario==='reread';
+if(rereading){assert.equal(definitions.get('work_memory_read').parameters.properties.reread.type,'boolean');}
+const args=rereading?{memory_id:'synthetic-memory',reread:true}:{query:'verify immutable effective arguments'};
+const exec={agent,name:rereading?'work_memory_read':'knowledge_search',arguments:args,callId:'same-call'};
 await handlers.get('tools/pre-execute')(exec,async()=>({kind:'allow'}));
 if (scenario === 'recovery-failure') {
   await assert.rejects(handlers.get('tools/post-execute')(exec,
@@ -129,6 +131,12 @@ assert.deepEqual(executed.payload.args,pre.payload.arguments,
   'execution must use the arguments checked before the handle changed');
 assert.deepEqual(post.payload.arguments,pre.payload.arguments,
   'completion must retain the actual checked arguments');
+if(rereading){
+ assert.equal(executed.payload.args.reread,true);
+ await definitions.get('work_memory_read').execute({memory_id:'synthetic-memory',reread:false},
+   {agent,name:'work_memory_read',callId:'reread-false'});
+ assert.equal(calls.at(-1).payload.args.reread,false);
+}
 await definitions.get('learning_status').execute({}, {agent,name:'learning_status',callId:'status'});
 assert.deepEqual(calls.at(-1).payload.args,{},'status has no context_handle property');
 for (const handle of ['', 'invalid-explicit-handle']) {
@@ -140,6 +148,83 @@ for (const handle of ['', 'invalid-explicit-handle']) {
 }
 globalThis.__ALP_DSH_DISPOSE__?.();
 console.log(JSON.stringify({ok:true}));
+"""
+
+
+SCOPE_BRIDGE = r"""
+import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+import childProcess from 'node:child_process';
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {dirname,join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+const [modulePath,workspace]=process.argv.slice(1),calls=[],browsers=[],handlers=new Map(),definitions=new Map();
+const receiptPath=join(dirname(dirname(modulePath)),'runtime-release.json');
+const fixed=JSON.parse(readFileSync(receiptPath,'utf8'));
+const sub=join(workspace,'src'),outside=join(dirname(workspace),'outside'),nested=join(workspace,'nested');
+for(const path of [sub,outside,join(nested,'.git')])mkdirSync(path,{recursive:true});
+childProcess.spawn=(_python,argv)=>{
+ const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdout.setEncoding=()=>{};
+ child.exitCode=null;child.killed=false;child.pid=200+calls.length;let input='';
+ child.kill=()=>{child.killed=true;queueMicrotask(()=>child.emit('close',0));};
+ child.stdin={write:value=>input+=value,end:()=>queueMicrotask(()=>{
+  const payload=input?JSON.parse(input):{},index=argv.indexOf('--event');calls.push({argv,payload});
+  const result=index>=0?{dsh_trajectory:{generation:1,token:'1'.repeat(32)},
+   hookSpecificOutput:{additionalContext:'context_handle='+'a'.repeat(32)+'; scope'}}:
+   payload.tool?{ok:true,result:{workspace:payload.workspace,args:payload.args}}:{};
+  child.stdout.emit('data',Buffer.from(JSON.stringify(result)));child.exitCode=0;child.emit('close',0);
+ })};
+ if(argv.includes('browser')){
+  browsers.push({child,argv});queueMicrotask(()=>{
+   const url='http://127.0.0.1:'+(13000+browsers.length)+'/';
+   child.stdout.emit('data',JSON.stringify({project:'synthetic',url,access_token:'read',read_only:true})+'\n');
+  });
+ }
+ return child;
+};syncBuiltinESMExports();
+const {apply}=await import(pathToFileURL(modulePath).href);
+apply({tools:{register:spec=>definitions.set(spec.name,spec)},effect(){},inject(){},
+ on:(name,handler)=>handlers.set(name,handler)});
+async function session(id,cwd){const agent={id};handlers.get('session/created')({id,header:{cwd}});await handlers.get('agent/created')({agent});return agent;}
+let sequence=0;
+async function execute(agent,name,args){
+ const exec={agent,name,arguments:args,callId:'scope-'+(++sequence)};
+ const gate=await handlers.get('tools/pre-execute')(exec,async()=>({kind:'allow'}));assert.equal(gate.kind,'allow',JSON.stringify(gate));
+ return definitions.get(name).execute(args,exec);
+}
+async function denied(agent){
+ for(const [name,args] of [['learning_status',{}],['knowledge_search',{query:'scope'}],['learning_browser',{action:'start',open:false}]]){
+  const before=calls.length;
+  const exec={agent,name,arguments:args,callId:'denied-'+(++sequence)};
+  const gate=await handlers.get('tools/pre-execute')(exec,async()=>({kind:'allow'}));
+  assert.equal(gate.kind,'deny');assert.match(gate.reason,/trusted session.*installed workspace/);
+  await assert.rejects(definitions.get(name).execute(args,exec),/trusted session.*installed workspace/);
+  assert.equal(calls.length,before,'Rejected native calls must not start Python or a browser');
+ }
+}
+try{
+ const rootAgent=await session('root',workspace),subAgent=await session('sub',sub),outsideAgent=await session('outside',outside),nestedAgent=await session('nested',nested);
+ assert.equal((await execute(rootAgent,'knowledge_search',{query:'root'})).workspace,workspace);
+ assert.equal((await execute(subAgent,'knowledge_search',{query:'sub'})).workspace,workspace);
+ await execute(rootAgent,'learning_browser',{action:'start',open:false});await execute(subAgent,'learning_browser',{action:'start',open:false});
+ assert.equal(browsers.length,1);assert.equal(browsers[0].argv[browsers[0].argv.indexOf('--workspace')+1],workspace);
+ for(const mode of ['observe','enforce']){
+  writeFileSync(receiptPath,JSON.stringify({...fixed,hook_mode:mode}));
+  for(const agent of [outsideAgent,nestedAgent,{id:'unknown'},undefined])await denied(agent);
+  const before=calls.length;
+  const ordinary=await handlers.get('tools/pre-execute')({agent:outsideAgent,name:'shell',arguments:{command:'synthetic'},callId:'ordinary-'+mode},async()=>({kind:'allow'}));
+  assert.equal(ordinary.kind,'allow');assert.equal(calls.length,before);
+ }
+ handlers.get('session/created')({id:rootAgent.id,header:{cwd:outside}});await denied(rootAgent);
+ writeFileSync(receiptPath,JSON.stringify({...fixed,workspaces:[workspace,nested]}));
+ assert.equal((await execute(nestedAgent,'learning_status',{})).workspace,nested,'An explicitly bound nested project remains usable');
+ writeFileSync(receiptPath,JSON.stringify({...fixed,workspace:nested,workspaces:[nested]}));await denied(subAgent);
+ const dynamic={...fixed};delete dynamic.workspace;delete dynamic.workspaces;writeFileSync(receiptPath,JSON.stringify(dynamic));
+ assert.equal((await execute(outsideAgent,'learning_status',{})).workspace,outside,'Unbound exports retain their dynamic workspace contract');
+ assert.equal((await execute(nestedAgent,'learning_status',{})).workspace,nested);
+ console.log(JSON.stringify({ok:true}));
+}finally{globalThis.__ALP_DSH_DISPOSE__?.();}
 """
 
 
@@ -188,6 +273,26 @@ class DshToolContractTests(unittest.TestCase):
                 self.assertFalse(result["ok"], result)
                 self.assertTrue(result.get("error"))
 
+    def test_python_work_read_accepts_boolean_reread_and_rejects_other_types(self):
+        from agent_learning.runtime import Runtime
+        runtime = Runtime(self.home, config={}, host="dsh")
+        try:
+            project = runtime.project(self.workspace)
+            payload = {"last_assistant_message": "Synthetic public observation for reread."}
+            with runtime.transaction():
+                event, _ = runtime._event(project, "source", "Stop", payload, outcome="reported")
+                memory = runtime._work_capture_event(project, event["id"], self.workspace, raw=payload)
+        finally:
+            runtime.close()
+        for value in (True, False):
+            result = self.tool("work_memory_read", {"memory_id": memory["memory_id"], "reread": value})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["result"]["content"], payload["last_assistant_message"])
+        for value in ("true", 1, [], None):
+            result = self.tool("work_memory_read", {"memory_id": memory["memory_id"], "reread": value})
+            self.assertFalse(result["ok"], result)
+            self.assertIn("boolean", result["error"])
+
     def bridge(self, probe, scenario="rotation"):
         plugin = self.root / "plugin"
         shutil.copytree(ROOT / "host_resources/dsh/host", plugin / "host")
@@ -224,6 +329,14 @@ class DshToolContractTests(unittest.TestCase):
     @unittest.skipUnless(NODE, "Node.js is required for DSH compatibility recovery")
     def test_failed_syntax_recovery_records_completion_and_releases_binding(self):
         self.assertTrue(self.bridge(ROTATION_BRIDGE, "recovery-failure")["ok"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for DSH reread argument pinning")
+    def test_bridge_declares_and_preserves_reread_through_pre_execute_and_post(self):
+        self.assertTrue(self.bridge(ROTATION_BRIDGE, "reread")["ok"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for DSH native scope checks")
+    def test_registered_native_tools_enforce_live_session_binding_without_blocking_other_tools(self):
+        self.assertTrue(self.bridge(SCOPE_BRIDGE)["ok"])
 
 
 if __name__ == "__main__":

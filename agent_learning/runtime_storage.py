@@ -26,7 +26,7 @@ def _signature():
     from . import __version__
     from .knowledge_index import INDEX_VERSION
     from .work_memory import WORK_INDEX_VERSION
-    return f"{__version__}:schema25:knowledge{INDEX_VERSION}:work{WORK_INDEX_VERSION}:startup10"
+    return f"{__version__}:schema25:knowledge{INDEX_VERSION}:work{WORK_INDEX_VERSION}:startup11"
 
 
 def storage_ready(runtime):

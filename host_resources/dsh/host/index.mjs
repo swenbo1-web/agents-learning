@@ -71,6 +71,15 @@ function matchInstalledWorkspace(candidateCwd, receipt) {
   return null;
 }
 
+function nativeToolWorkspace(candidateCwd, receipt) {
+  const matched = matchInstalledWorkspace(candidateCwd, receipt);
+  if (loadAllowedWorkspaces(receipt).length && !matched) {
+    throw new Error("Agent Learning native tool requires a trusted session in an installed workspace");
+  }
+  // An unbound export deliberately follows its dynamic host workspace.
+  return matched || candidateCwd || receipt.workspace || process.cwd();
+}
+
 function extractTextFromBlocks(blocks) {
   if (typeof blocks === "string") return blocks;
   if (!Array.isArray(blocks)) return "";
@@ -276,7 +285,7 @@ const WORKER_TOOL_SPECS = [
   {
     name: "work_memory_read",
     description:
-      "绑定当前会话后，分页读取工作观察摘要 (summary) 或可见证据投影 (evidence)。续页必须保持 section 和 expected_revision。",
+      "绑定当前会话后，分页读取工作观察摘要 (summary) 或可见证据投影 (evidence)。续页保持 section 和 expected_revision；reread=true 开启新轮，正常续页无需重复该标记。",
     parameters: {
       type: "object",
       properties: {
@@ -286,6 +295,7 @@ const WORKER_TOOL_SPECS = [
         offset: { type: "integer" },
         max_chars: { type: "integer" },
         section: { type: "string", enum: ["summary", "evidence"] },
+        reread: { type: "boolean" },
       },
       required: ["memory_id"],
       additionalProperties: false,
@@ -915,8 +925,7 @@ export function apply(ctx, config = {}) {
     const receipt = loadRuntimeReceipt();
     const agentId = exec?.agent?.id;
     const meta = (agentId && (await resolveSessionMeta(agentId))) || {};
-    const matched = matchInstalledWorkspace(meta.cwd, receipt);
-    const workspace = matched || meta.cwd || receipt.workspace || process.cwd();
+    const workspace = nativeToolWorkspace(meta.cwd, receipt);
     const args = toolArguments(toolName, rawArgs, exec);
     if (toolName === "learning_browser") {
       return manageBrowser(args.action || "start", args, workspace, exec?.signal);
@@ -1649,9 +1658,13 @@ export function apply(ctx, config = {}) {
 
   onEvent("tools/pre-execute", async (exec, next) => {
     const agent = exec?.agent;
+    if (agent?.id) await sessionStarts.get(agent.id);
+    const meta = agent?.id ? await resolveSessionMeta(agent.id) : {};
+    if (WORKER_TOOL_NAMES.has(exec?.name)) {
+      try { nativeToolWorkspace(meta.cwd, loadRuntimeReceipt()); }
+      catch (error) { return { kind: "deny", reason: error.message }; }
+    }
     if (!agent?.id) return next();
-    await sessionStarts.get(agent.id);
-    const meta = await resolveSessionMeta(agent.id);
     const contextKey = toolContextKey(exec);
     if (contextKey && CONTEXT_TOOL_NAMES.has(exec.name)
         && toolContextBindings.size >= 4096 && !toolContextBindings.has(contextKey)) {

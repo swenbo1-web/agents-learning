@@ -93,6 +93,15 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(version=version), self.assertRaises(EvaluationError):
                 summarize(protocol, [])
 
+    def test_valid_unicode_fingerprint_stays_stable_and_unpaired_surrogates_are_controlled(self):
+        self.assertEqual(fingerprint({"label": "项目😀"}),
+                         "c051ae810b11271c5ad16f15b5a2a2516b8613871d2596a19e6c238daeb90ae7")
+        self.assertEqual(fingerprint(json.loads('{"label":"\\u9879\\u76ee\\ud83d\\ude00"}')),
+                         fingerprint({"label": "项目😀"}))
+        for value in ("\ud800", "\udfff"):
+            with self.subTest(value=repr(value)), self.assertRaises(EvaluationError):
+                fingerprint({"ref": value})
+
     def test_changed_frozen_prompt_is_rejected(self):
         protocol = create_protocol(spec())
         protocol["tasks"][0]["prompt"] = "different prompt"
@@ -572,6 +581,24 @@ class FileAndRunnerTests(unittest.TestCase):
                 self.assertFalse(report["complete_design"])
                 self.assertTrue(all(not item["eligible"] for item in report["comparison_eligibility"].values()))
 
+    def test_jsonl_unpaired_unicode_is_isolated_and_valid_unicode_remains_comparable(self):
+        definition = spec()
+        definition["tasks"][0]["prompt"] += " 核对报告😀。"
+        frozen = self.root / "unicode-protocol.json"
+        protocol = write_protocol(self.write("unicode-spec.json", definition), frozen)
+        for index, value in enumerate(("报告😀", "\ud800", "\udfff")):
+            with self.subTest(value=repr(value)):
+                rows = measured_rows(protocol)
+                rows[0]["artifacts"] = [{"ref": value, "sha256": "a" * 64}]
+                records = self.root / f"unicode-{index}.jsonl"
+                records.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+                destination = self.root / f"unicode-{index}-report.json"
+                report = report_files(frozen, records, destination)
+                self.assertEqual(report, json.loads(destination.read_text(encoding="utf-8")))
+                self.assertEqual(len(report["invalid_records"]), int(index != 0))
+                self.assertEqual(report["complete_design"], index == 0)
+                self.assertEqual(sum(arm["runs"] for arm in report["all_reported_observations"].values()), 4 - int(index != 0))
+
     def test_duplicate_json_keys_rejected(self):
         frozen = self.write("protocol.json", create_protocol(spec()))
         records = self.root / "records.jsonl"
@@ -717,6 +744,37 @@ print(json.dumps({"initial_state_sha256":request["task"]["dataset_sha256"],"acce
             with self.subTest(value=value), self.assertRaises(EvaluationError):
                 run_protocol(frozen, adapter, output)
             self.assertFalse(output.exists())
+
+    def test_adapter_unpaired_unicode_preserves_all_attempts_and_unknown_usage(self):
+        frozen, adapter, output = self.runner_fixture('''import json,sys
+request=json.load(sys.stdin)
+reference="\\ud800" if request["variant"]=="no_memory" else "报告😀"
+print(json.dumps({"initial_state_sha256":request["task"]["dataset_sha256"],"artifacts":[{"ref":reference,"sha256":"a"*64}]}))
+''')
+        report = run_protocol(frozen, adapter, output, timeout_seconds=10)
+        self.assertEqual(report["runner"]["outcomes"], {"invalid_observations": 2, "completed": 2})
+        rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([row["runner"]["schedule_position"] for row in rows], [1, 2, 3, 4])
+        for row in rows:
+            self.assertEqual(row["runner"]["exit_code"], 0)
+            self.assertGreater(row["wall_ms"], 0)
+            self.assertEqual(row["acceptance"]["status"], "unknown")
+            self.assertTrue(all(value is None for value in row["token_usage"].values()))
+            self.assertIsNone(row["cost"])
+            if row["variant"] == "no_memory":
+                self.assertEqual(row["runner"]["status"], "invalid_observations")
+                self.assertFalse(row["isolation"]["reset_verified"])
+                self.assertEqual(row["artifacts"], [])
+            else:
+                self.assertEqual(row["artifacts"][0]["ref"], "报告😀")
+        imported = report_files(frozen, output, self.root / "unicode-attempts-report.json")
+        self.assertFalse(imported["invalid_records"])
+        for arm in imported["all_reported_observations"].values():
+            self.assertEqual(arm["runs"], 2)
+            self.assertIsNone(arm["token_usage"]["total_tokens"])
+            self.assertFalse(arm["token_usage"]["complete"])
+            self.assertEqual(arm["cost"]["unknown_runs"], 2)
 
     def test_snapshot_mismatch_and_synthetic_real_mix_rejected_before_launch(self):
         frozen, adapter, output = self.runner_fixture('raise AssertionError("must not launch")\n', real=True)

@@ -492,6 +492,8 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
          (any(r["state"] == "continuing" for r in group) or
           sum(r["state"] in {"sealed", "routine_deferred"} for r in group) >= cfg["every_phases"]))), [])
     fresh = [row for row in phases if row["state"] in {"sealed", "routine_deferred"}]
+    fresh_requires_continuation = not force and len(fresh) < cfg["every_phases"]
+    fresh_ids = {row["id"] for row in fresh}
     if not phases or len(fresh) < cfg["every_phases"] and not force and not any(r["state"] == "continuing" for r in phases):
         return
     if runtime.db.execute("SELECT 1 FROM phase_review_batches WHERE project=? AND host_scope=? AND state='pending' "
@@ -526,6 +528,10 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     empty_batch = batch_packet(parent, ids, [], executor_conversation, maximum)
     char_limit = item_char_budget(maximum, empty_batch)
     for phase in phases:
+        if fresh_requires_continuation and phase["id"] in fresh_ids and not items:
+            # Local reuse of an old evidence-wait receipt is not a model batch
+            # that can carry new stages before their configured frequency.
+            continue
         if phase["id"] in routine_ids and (not items or len(items) >= 8):
             continue
         before_phase = (len(items), len(duplicates), len(omitted), len(reused))
@@ -626,8 +632,9 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 deferred += 1
                 continue
             items.append(packet)
-        if phase["id"] in routine_ids and (len(items), len(duplicates)) == before_phase[:2]:
-            # Merely probing a routine packet is not evidence of inclusion.
+        if (phase["id"] in routine_ids or (fresh_requires_continuation and phase["id"] in fresh_ids)) and (
+                len(items), len(duplicates)) == before_phase[:2]:
+            # Merely probing a locally held stage is not evidence of inclusion.
             # Preserve its cursor and local state when the remaining character
             # or token budget cannot carry a single item or supported reuse.
             del omitted[before_phase[2]:]
@@ -635,7 +642,8 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             continue
         prior_deferred += scan["deferred"]
         scan_updates[phase["id"]] = {"cursor": last_key, "more": more,
-            "deferred": scan["deferred"] + deferred}
+            "deferred": scan["deferred"] + deferred,
+            "included": {item["problem"]["id"] for item in items[before_phase[0]:] + duplicates[before_phase[1]:]}}
         scanned_remainder += int(more)
     # Unused locally held stages do not become queued or count as reviewed.
     phases = [phase for phase in phases if phase["id"] in scan_updates]
@@ -656,6 +664,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     base_omitted_ids = body["omitted_problem_ids"]
     base_omitted_count = body["omitted_problem_count"]
     removed_ids = []
+    held_fresh = set()
     while True:
         included_signatures = {(_fingerprint(item), dependency_signature(item, _fingerprint(item)))
                                for item in body["items"]}
@@ -667,6 +676,10 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 supported_duplicates.append(item)
             else:
                 unsupported_ids.append(identity)
+        retained = {item["problem"]["id"] for item in body["items"] + supported_duplicates}
+        held_fresh = {identity for identity in ids if fresh_requires_continuation and identity in fresh_ids
+                      and not scan_updates[identity]["included"].intersection(retained)}
+        body["phase_ids"] = [identity for identity in ids if identity not in held_fresh]
         # Removing a representative can also remove its duplicate-reuse proof.
         # Account for those diagnostics before the final size check, not after.
         body["omitted_problem_ids"] = (base_omitted_ids + removed_ids + unsupported_ids)[:32]
@@ -685,6 +698,17 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     # pending rows; a removed case must remain available to a later scan.
     items = body["items"]
     duplicates = supported_duplicates
+    for identity in held_fresh:
+        # Final wrapper admission can remove a fresh stage's last contribution.
+        # Restore its pre-selection cursor and keep it outside this paid batch.
+        before = progress[identity]
+        runtime.db.execute("INSERT INTO phase_scan_progress(phase_id,signature,cursor,deferred,exhausted,last_checked) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(phase_id) DO UPDATE SET signature=excluded.signature,cursor=excluded.cursor,"
+            "deferred=excluded.deferred,exhausted=excluded.exhausted,last_checked=excluded.last_checked",
+            (identity, before["signature"], before["cursor"], before["deferred"], before["exhausted"], before["last_checked"]))
+        del scan_updates[identity]
+    phases = [phase for phase in phases if phase["id"] not in held_fresh]
+    ids = body["phase_ids"]
     runtime.db.execute("INSERT INTO phase_review_batches VALUES(?,?,?,?,?,?,?,?,'pending',?,NULL)",
         (project, parent["id"], runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"],
          encode(ids), encode(body), time.time()))

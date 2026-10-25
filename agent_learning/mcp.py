@@ -439,6 +439,7 @@ class Server:
                 r.assert_session_epoch(self.epoch)
             return result
         if name in {"knowledge_search", "knowledge_read"}:
+            file_observations = {}
             handle = self._handle(args)
             if handle is not None:
                 # 先验证身份再读知识；无效句柄不能得到正文后才报错。
@@ -446,9 +447,12 @@ class Server:
             if name == "knowledge_search":
                 body = {key: value for key, value in args.items() if key not in {"context_handle", "max_chars"}}
                 found = r.search(p, **body)
-                from .work_files import knowledge_file_state
+                from .work_files import knowledge_file_observation
                 for item in found.get("items", []):
-                    item.update(knowledge_file_state(r, p, item, self.workspace))
+                    observation = knowledge_file_observation(r, p, item, self.workspace)
+                    file_observations[f"{item['knowledge_id']}@{item['revision']}"] = observation
+                    if observation and observation["changed"]:
+                        item["source_files_changed"] = True
                 result = search_preview(found, args.get("max_chars", 6000))
                 items = result["items"]
             else:
@@ -456,8 +460,11 @@ class Server:
                     raise ContractError("expected_revision is required to continue a section page")
                 try:
                     current = r.read(p, args["knowledge_id"])
-                    from .work_files import knowledge_file_state
-                    current.update(knowledge_file_state(r, p, current, self.workspace))
+                    from .work_files import knowledge_file_observation
+                    observation = knowledge_file_observation(r, p, current, self.workspace)
+                    file_observations[f"{current['knowledge_id']}@{current['revision']}"] = observation
+                    if observation and observation["changed"]:
+                        current["source_files_changed"] = True
                     if "expected_revision" in args and current["revision"] != args["expected_revision"]:
                         raise ContractError("knowledge revision changed; restart reading from offset 0")
                     result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0),
@@ -467,7 +474,7 @@ class Server:
                 items = [result]
             if handle is not None:
                 # 登记生成响应中实际存在的修订；再次验证epoch关闭身份变更窗口。
-                r.record_exposure(p, handle, items, expected_epoch=self.epoch)
+                r.record_exposure(p, handle, items, expected_epoch=self.epoch, file_observations=file_observations)
                 self._bind(handle)
             else:
                 r.assert_session_epoch(self.epoch)

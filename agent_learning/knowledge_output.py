@@ -37,17 +37,22 @@ def _state(item):
                 source.get("problem_changed", False) for source in item.get("sources", []))))}
 
 
-def _summary(item, limit=700):
+def _summary_projection(item, limit=700):
     content = _text(item.get("content"))
     if len(content) <= limit:
-        return content
+        return content, 0, len(content), False
     matched = item.get("match", {}).get("matched_terms", [])
     lowered = content.lower()
     positions = [position for term in matched if isinstance(term, str) and term
                  if (position := lowered.find(term.lower())) >= 0]
     # 选取命中附近的原文，并明确标识摘录，不把首段当成全部解决方案。
     start = max(0, min(positions) - 100) if positions else 0
-    return ("…" if start else "") + content[start:start + limit - 2] + "…"
+    end = min(len(content), start + limit - 2)
+    return ("…" if start else "") + content[start:end] + "…", start, end, True
+
+
+def _summary(item, limit=700):
+    return _summary_projection(item, limit)[0]
 
 
 def _card(item):
