@@ -11,7 +11,8 @@ from agent_learning.admin import _select_review
 from agent_learning.admin_lifecycle import claim_call, finish_call, mark_launch_intent
 from agent_learning.admin_publication import publication_gate
 from agent_learning.admin_queue import (claim_dispatch, dispatch_diagnostic, eligible_query,
-    ready_executor, record_executor_failure, scan_signatures, executor_signature, routing_signature)
+    ready_executor, record_executor_failure, scan_signatures, executor_signature, routing_signature,
+    routing_scan_pending)
 from agent_learning.admin_usage import (admin_admission_status, configure_project_budget,
     pending_phase_reservation, project_budget_policy)
 from agent_learning.phase_review import configure, policy
@@ -69,6 +70,58 @@ class ExecutorFairnessTests(unittest.TestCase):
             result = self.select()
         self.assertEqual(result["status"], "reserved")
         self.assertEqual(result["selected"]["conversation"], "ready")
+
+    def test_unrelated_new_or_changed_chat_does_not_restart_case_scan(self):
+        self.cases(blocked=11)
+        with patch("agent_learning.admin_providers.executor_availability", return_value={"cli_available": True}):
+            self.assertEqual(self.select()["status"], "executor_not_ready")
+            before = routing_signature(self.r, self.p)
+            self.r.admin_observe_model(self.p, "unrelated", "new-unrelated-model")
+            self.r.admin_observe_model(self.p, "unrelated", "another-unrelated-model")
+            self.assertEqual(before, routing_signature(self.r, self.p))
+            selected = self.select()
+        self.assertEqual(selected["status"], "reserved")
+        self.assertEqual(selected["selected"]["conversation"], "ready")
+
+    def test_current_source_model_change_invalidates_only_its_case_route_check(self):
+        self.cases(blocked=11)
+        with patch("agent_learning.admin_providers.executor_availability", return_value={"cli_available": True}):
+            self.assertEqual(self.select()["status"], "executor_not_ready")
+            before = routing_signature(self.r, self.p)
+            self.r.admin_observe_model(self.p, "blocked-0", "repaired-model")
+            self.assertEqual(before, routing_signature(self.r, self.p))
+            selected = self.select()
+        # A source-model change wakes its own old position immediately, rather
+        # than retaining the check for that source's previous failing executor.
+        self.assertEqual(selected["status"], "reserved")
+        self.assertEqual(selected["selected"]["conversation"], "blocked-0")
+        self.assertEqual(selected["provider_plan"]["model"], "repaired-model")
+
+    def test_new_chats_cannot_starve_automatic_scan_past_one_hundred_twenty(self):
+        self.cases(blocked=250)
+        cfg = dict(SCHEDULER_DEFAULTS, enabled=True, poll_seconds=1)
+        outcomes = []
+        with patch("agent_learning.admin_providers.executor_availability", return_value={"cli_available": True}):
+            for number in range(3):
+                # Every wake has a new root model observation with a different
+                # model, but it has no dependency on any queued old case.
+                self.r.admin_observe_model(self.p, f"unrelated-new-{number}", f"new-model-{number}")
+                with self.r.transaction():
+                    result = self.r._scheduler_admin_state(self.p, cfg)
+                outcomes.append((result[1], result[3]))
+        self.assertEqual(outcomes[:2], [("waiting", "executor_scan_pending")] * 2)
+        self.assertEqual(outcomes[2][0], "ready")
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_affected_inactive_source_reactivates_without_reusing_its_old_scan(self):
+        self.cases(blocked=11)
+        with patch("agent_learning.admin_providers.executor_availability", return_value={"cli_available": True}):
+            self.assertEqual(self.select()["status"], "executor_not_ready")
+            self.r.admin_observe_model(self.p, "blocked-0", active=False)
+            self.r.admin_observe_model(self.p, "blocked-0", "repaired-model", active=True)
+            selected = self.select()
+        self.assertEqual(selected["status"], "reserved")
+        self.assertEqual(selected["selected"]["conversation"], "blocked-0")
 
     def test_recovered_executor_restarts_routing_order_and_unknown_call_stays_locked(self):
         self.cases(blocked=11)
@@ -151,6 +204,29 @@ class ExecutorFairnessTests(unittest.TestCase):
 class PhaseAdmissionTests(unittest.TestCase):
     setUp = phase_fixtures.PhaseReviewTests.setUp
     phase = phase_fixtures.PhaseReviewTests.phase
+
+    def test_current_stage_route_depends_on_its_executor_source_chat(self):
+        self.r.admin_configure(self.p, True, "host", "current", "", expected_policy_version=0)
+        for conversation in ("one", "two"):
+            self.r.admin_observe_model(self.p, conversation, "old-model")
+        self.phase("one")
+        self.phase("two", "Independent build convention")
+        batch = json.loads(self.r.db.execute("SELECT packet FROM phase_review_batches WHERE state='pending'").fetchone()[0])
+        source = batch["executor_conversation"]
+        record_executor_failure(self.r, self.p, self.r.resolve_admin_executor(self.p, source), "configuration_change_required")
+        signature, preflight = scan_signatures(self.r, self.p)
+        query, args = eligible_query(signature, preflight_signature=preflight,
+                                     phase_scope=self.r._session_scope())
+        with patch("agent_learning.admin_providers.executor_availability", return_value={"cli_available": True}):
+            with self.r.transaction():
+                self.assertFalse(ready_executor(self.r, self.p, query, args, advance=True))
+            self.assertFalse(routing_scan_pending(self.r, self.p, query, args))
+            self.r.admin_observe_model(self.p, "unrelated-new", "other-model")
+            self.assertFalse(routing_scan_pending(self.r, self.p, query, args))
+            self.r.admin_observe_model(self.p, source, "repaired-source-model")
+            self.assertTrue(routing_scan_pending(self.r, self.p, query, args))
+            self.assertTrue(ready_executor(self.r, self.p, query, args))
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
     def setup_pending(self):
         configure(self.r, self.p, {"daily_tokens": 5000}, policy(self.r, self.p)["version"])
@@ -312,6 +388,43 @@ class ExecutorSignatureCompatibilityTests(unittest.TestCase):
                         with self.assertRaisesRegex(ContractError, "dsh_profile_unavailable"):
                             runtime.resolve_admin_executor(project)
                 self.assertEqual(runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_default_fixed_first_ignore_unrelated_root_observations(self):
+        workspace = self.root / "model-mode-project"
+        workspace.mkdir()
+        for mode in ("default", "fixed", "first"):
+            with self.subTest(mode=mode):
+                runtime = Runtime(self.root / mode, config={"admin": {"enabled": True,
+                    "command": [sys.executable], "model_mode": mode,
+                    "model": "fixed-model" if mode == "fixed" else ""}})
+                self.addCleanup(runtime.close)
+                project = runtime.project(workspace)
+                runtime.admin_observe_model(project, "first-root", "first-model")
+                before = routing_signature(runtime, project)
+                runtime.admin_observe_model(project, "unrelated-new", "another-model")
+                runtime.admin_observe_model(project, "unrelated-new", "changed-again")
+                self.assertEqual(before, routing_signature(runtime, project))
+                runtime.account_changed("explicit-test-boundary")
+                self.assertNotEqual(before, routing_signature(runtime, project))
+
+    def test_current_dsh_profile_drift_invalidates_scan_even_without_aggregate_model(self):
+        workspace = self.root / "dsh-project"
+        workspace.mkdir()
+        profile = self.root / "profile.json"
+        body = {"version": 1, "profile_directory": str(self.root / "profiles" / "one"), "entries": [
+            {"name": "@deepseek-ai/dsh-llm-pi-ai", "config": {"providers": {"fixture": {"baseURL": "https://one.invalid"}}}}]}
+        profile.write_text(json.dumps(body), encoding="utf-8")
+        runtime = Runtime(self.root / "current-dsh", host="dsh", config={"admin": {"enabled": True,
+            "command": [sys.executable], "model_mode": "current", "dsh_profile": str(profile)}})
+        self.addCleanup(runtime.close)
+        project = runtime.project(workspace)
+        with patch("agent_learning.admin_providers.dsh_sdk_launcher", return_value={"args": [sys.executable]}):
+            # No current-model source observation is available at global scope.
+            self.assertIsNone(runtime.admin_effective_config(project)["executor"])
+            before = routing_signature(runtime, project)
+            profile.write_text(json.dumps(body) + " ", encoding="utf-8")
+            self.assertNotEqual(before, routing_signature(runtime, project))
+        self.assertEqual(runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

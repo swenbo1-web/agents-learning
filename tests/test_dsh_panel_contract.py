@@ -227,7 +227,7 @@ import {EventEmitter} from 'node:events';
 import {syncBuiltinESMExports} from 'node:module';
 import childProcess from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-const [modulePath,workspace]=process.argv.slice(1),browsers=[],opened=[];
+const [modulePath,workspace]=process.argv.slice(1),browsers=[],opened=[],tools=new Map(),commands=new Map();
 const view={project_id:'project-a',host_scope:'dsh:default',expected:{}};
 childProcess.spawn=(_exe,args)=>{
  const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
@@ -250,10 +250,10 @@ childProcess.spawn=(_exe,args)=>{
  return child;
 };syncBuiltinESMExports();
 let route;
-const scope={skills:{register(){}},commands:{register(){}},effect:fn=>fn(),
+const scope={skills:{register(){}},commands:{register:spec=>{commands.set(spec.name,spec);}},effect:fn=>fn(),
  webServer:{register:value=>{if(value.path==='/agent-learning/panel-v2')route=value;}}};
 const {apply}=await import(pathToFileURL(modulePath).href);
-apply({tools:{register(){}},on(){},effect(){},inject(_names,callback){callback(scope);}});
+apply({tools:{register:spec=>{tools.set(spec.name,spec);}},on(){},effect(){},inject(_names,callback){callback(scope);}});
 const request=async(method,body)=>{
  let status,value;
  const req={method,url:'/agent-learning/panel-v2?cwd='+encodeURIComponent(workspace),headers:{},
@@ -265,9 +265,22 @@ try{
  const initial=await request('GET'),binding={cwd:workspace,project_id:'project-a',installation_id:initial.panel_snapshot.installation_id};
  assert.equal((await request('POST',{...binding,action:'open_review'})).mode,'review');
  assert(opened.at(-1).includes('admin_token'));
+ const modelBrowser=tools.get('learning_browser');assert(modelBrowser);
+ const modelStatus=await modelBrowser.execute({action:'status'},{});
+ assert.equal(modelStatus.running,false);assert(!JSON.stringify(modelStatus).includes('admin_token'));assert(!JSON.stringify(modelStatus).includes('review_token'));
+ assert.equal((await modelBrowser.execute({action:'stop'},{})).stopped,false);assert.equal(browsers[0].killed,false);
+ const slash=commands.get('learning-browser');assert(slash);
+ const slashStatus=await slash.handler({rawInput:'status'});
+ assert(!slashStatus.text.includes('admin_token'));assert(!slashStatus.text.includes('review_token'));assert(slashStatus.text.includes('只读知识库浏览器未运行'));
+ await assert.rejects(modelBrowser.execute({action:'start',adminControl:true},{}),/read-only browsers only/);
  const reads=await Promise.all([request('POST',{...binding,action:'open_browser'}),request('POST',{...binding,action:'open_browser'})]);
  assert(reads.every(item=>item.mode==='readonly'));assert.equal(browsers.length,2);
  assert(!opened.at(-1).includes('admin_token'));assert(!opened.at(-1).includes('review_token'));
+ const active=await modelBrowser.execute({action:'status'},{});assert.equal(active.read_only,true);assert.equal(active.pid,browsers[1].pid);
+ assert(!JSON.stringify(active).includes('admin_token'));assert(!JSON.stringify(active).includes('review_token'));
+ await modelBrowser.execute({action:'stop'},{});assert.equal(browsers[0].killed,false);assert.equal(browsers[1].killed,true);
+ assert.equal((await request('GET')).browser_running,true);
+ await request('POST',{...binding,action:'stop_browser'});assert(browsers.every(child=>child.killed));
 }finally{globalThis.__ALP_DSH_DISPOSE__();}
 assert(browsers.every(child=>child.killed));console.log('ok');
 '''

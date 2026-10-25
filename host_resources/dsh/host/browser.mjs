@@ -94,9 +94,14 @@ export function createBrowserManager({ loadReceipt, runPython, environment = () 
     });
   }
 
-  async function manage(action, options, workspace, signal) {
+  async function manage(action, options, workspace, signal, operator = false) {
     if (closed) throw new Error("Agent Learning browser manager is closed");
     if (!["start", "status", "stop"].includes(action)) throw new Error("learning_browser action must be start, status or stop");
+    // Model tools and slash output share the read-only lane. Human controls
+    // enter through a separate closure, never a model-supplied option.
+    if (!operator && (options?.review !== undefined || options?.adminControl !== undefined)) {
+      throw new Error("learning_browser supports read-only browsers only");
+    }
     const receipt = loadReceipt();
     const targetWorkspace = canonicalWorkspace(workspace || receipt.workspace || process.cwd());
     const workspaceKey = browserPathKey(targetWorkspace, platform);
@@ -105,15 +110,23 @@ export function createBrowserManager({ loadReceipt, runPython, environment = () 
       if (entry.workspaceKey === workspaceKey && entry.installation !== installation) cancel(key, entry);
       else if (entry.info && !alive(entry)) processes.delete(key);
     }
-    const matching = () => [...processes.values()].filter(entry => entry.workspaceKey === workspaceKey);
+    const matching = () => [...processes.values()].filter(entry => entry.workspaceKey === workspaceKey
+      && (operator || !entry.review && !entry.adminControl));
     if (action === "stop") {
       const entries = matching();
       for (const entry of entries) cancel(entry.key, entry);
-      return { status: "stopped", running: false, stopped: entries.length > 0, workspace: targetWorkspace };
+      return { status: "stopped", running: false, stopped: entries.length > 0, workspace: targetWorkspace,
+        ...(operator ? {} : { read_only: true, review: false, admin_control: false, mode: "readonly" }) };
     }
     if (action === "status") {
       const entry = matching().find(item => item.info && alive(item));
-      return entry ? { status: "serving", running: true, ...entry.info }
+      // Status displayed in a human panel needs no access capabilities. The
+      // read-only lane can return its own read link, never another mode's URL.
+      const info = entry && (operator
+        ? Object.fromEntries(["project", "workspace", "url", "port", "pid", "read_only", "review", "admin_control"]
+          .map(name => [name, entry.info[name]]))
+        : entry.info);
+      return entry ? { status: "serving", running: true, ...info }
         : { status: matching().length ? "starting" : "stopped", running: false, workspace: targetWorkspace, read_only: true };
     }
     const review = Boolean(options?.review), adminControl = Boolean(options?.adminControl);
@@ -123,11 +136,12 @@ export function createBrowserManager({ loadReceipt, runPython, environment = () 
     if (entry && !entry.info) {
       await entry.promise;
       // Recheck installation identity and an explicit port after shared startup.
-      return manage(action, options, targetWorkspace, signal);
+      return manage(action, options, targetWorkspace, signal, operator);
     }
     if (entry && port !== 0 && entry.info.port !== port) { cancel(key, entry); entry = null; reused = false; }
     if (!entry) {
-      entry = { key, workspaceKey, installation, cancelled: false, child: null, info: null, promise: null };
+      entry = { key, workspaceKey, installation, review, adminControl,
+        cancelled: false, child: null, info: null, promise: null };
       // Reserve before the preflight await, so no concurrent start can escape tracking.
       processes.set(key, entry);
       entry.promise = launch(entry, receipt, targetWorkspace, port, review, adminControl, signal);
@@ -139,5 +153,9 @@ export function createBrowserManager({ loadReceipt, runPython, environment = () 
     return { status: "serving", running: true, reused, opened, ...entry.info };
   }
 
-  return { manage, close() { closed = true; for (const [key, entry] of processes) cancel(key, entry); } };
+  return {
+    manage: (action, options, workspace, signal) => manage(action, options, workspace, signal),
+    manageControl: (action, options, workspace, signal) => manage(action, options, workspace, signal, true),
+    close() { closed = true; for (const [key, entry] of processes) cancel(key, entry); },
+  };
 }

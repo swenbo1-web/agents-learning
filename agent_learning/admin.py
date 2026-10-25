@@ -337,7 +337,8 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     from .admin_decisions import find_receipt, persist_receipt, receipt_for_problem, review_signature
     from .admin_lifecycle import claim_call, recover_calls
     from .admin_queue import (eligible_query, executor_query, remember_check, scan_signatures,
-                              executor_backoff, executor_wait_reason, routing_signature, executor_review_order)
+                              executor_backoff, executor_wait_reason, routing_signature, executor_review_order,
+                              remember_executor_check)
     from .admin_providers import executor_availability
     cfg = runtime.admin_effective_config(project)
     if history_job_id is None and not cfg["enabled"]:
@@ -361,7 +362,7 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
     if history_job_id is None:
         query, args = executor_query(runtime, project, query, args)
     route_signature = routing_signature(runtime, project)
-    order, order_args = executor_review_order(route_signature)
+    order, order_args = executor_review_order(runtime, project, route_signature)
     rows = runtime.db.execute(query + order + "LIMIT ?",
                               (project, *args, *order_args, 1 if problem_id is not None else scan_limit)).fetchall()
     skipped, routing_skipped, scanned = [], [], 0
@@ -396,16 +397,16 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
             availability = executor_availability(provider_plan)
         except ValueError as exc:
             routing_skipped.append({"problem_id": selected["id"], "reason": str(exc).split(":", 1)[0]})
-            remember_check(runtime, project, selected, route_signature, blocked_call="executor_scan")
+            remember_executor_check(runtime, project, selected, route_signature)
             continue
         if not availability["cli_available"]:
             routing_skipped.append({"problem_id": selected["id"], "reason": availability["reason"]})
-            remember_check(runtime, project, selected, route_signature, blocked_call="executor_scan")
+            remember_executor_check(runtime, project, selected, route_signature)
             continue
         backoff = executor_backoff(runtime, project, provider_plan)
         if backoff:
             routing_skipped.append({"problem_id": selected["id"], "reason": executor_wait_reason(backoff)})
-            remember_check(runtime, project, selected, route_signature, blocked_call="executor_scan")
+            remember_executor_check(runtime, project, selected, route_signature)
             continue
         review_cfg = _review_configuration(cfg, provider_plan)
         if summary_context:

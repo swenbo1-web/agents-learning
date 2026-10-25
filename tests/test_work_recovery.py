@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent_learning.runtime import Runtime
 from agent_learning.work_memory import WORK_INDEX_VERSION
+from agent_learning.work_files import knowledge_file_state
 
 
 class WorkRecoveryTests(unittest.TestCase):
@@ -144,6 +145,104 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertEqual(self.r.work_memory_status(self.p)["index_rebuild_pending"], 0)
         self.assertEqual(before, [tuple(row) for row in self.r.db.execute("SELECT id,body,source_hash FROM work_memories")])
         self.assertNotEqual(self.r.db.execute("SELECT text FROM work_memory_fts").fetchone()[0], "obsolete")
+
+    def failed_tool(self, raw):
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "tool-chat", "PostToolUse", raw, outcome="succeeded")
+            with patch.object(self.r, "_work_index", side_effect=sqlite3.OperationalError("synthetic index failure")):
+                self.r._work_capture_safely(self.p, event["id"], self.workspace, raw=raw)
+        self.due()
+        return event
+
+    def test_delayed_retry_preserves_original_file_metadata_and_source_change(self):
+        file = self.workspace / "engine.py"
+        file.write_text("first", encoding="utf-8")
+        event = self.failed_tool({"tool_name": "write_file", "tool_input": {"path": "engine.py"},
+                                  "tool_response": {"exit_code": 0}})
+        job = self.r.db.execute("SELECT capture FROM work_capture_pending").fetchone()
+        self.assertEqual(json.loads(job[0])["file_projection"]["links"][0]["version"]["size"], 5)
+        file.write_text("changed since the first observation", encoding="utf-8")
+        with self.r.transaction():
+            self.r._work_repair_safely(self.p)
+        stored = json.loads(self.r.db.execute("SELECT version FROM work_file_links").fetchone()[0])
+        self.assertEqual(stored["size"], 5)
+        row = self.r.db.execute("SELECT * FROM work_memories").fetchone()
+        self.assertTrue(self.r._work_item(self.p, row, workspace=self.workspace)["files"][0]["version_changed"])
+        self.assertTrue(knowledge_file_state(self.r, self.p, {"evidence": [{"event_id": event["id"]}]},
+                                            self.workspace)["source_files_changed"])
+
+    def test_long_patch_retry_preserves_all_original_bounded_file_targets(self):
+        text = "*** Begin Patch\n" + "".join(
+            f"*** Update File: part{i}.py\n@@\n-" + "old " * 600 + "\n+" + "new " * 600 + "\n"
+            for i in range(4)) + "*** End Patch"
+        event = self.failed_tool({"tool_name": "apply_patch", "tool_input": {"patch": text},
+                                  "tool_response": {"exit_code": 0}})
+        self.assertTrue(json.loads(event["payload"])["truncated"])
+        serialized = self.r.db.execute("SELECT capture FROM work_capture_pending").fetchone()[0]
+        self.assertNotIn("old old old", serialized)
+        with self.r.transaction():
+            self.r._work_repair_safely(self.p)
+        self.assertEqual([row[0] for row in self.r.db.execute("SELECT relative_path FROM work_file_links ORDER BY relative_path")],
+                         [f"part{i}.py" for i in range(4)])
+        self.assertEqual(self.r.work_memory_status(self.p)["capture_repair_pending"], 0)
+
+    def test_legacy_tool_retry_marks_missing_original_metadata_unknown(self):
+        file = self.workspace / "engine.py"
+        file.write_text("first", encoding="utf-8")
+        self.failed_tool({"tool_name": "write_file", "tool_input": {"path": "engine.py"},
+                          "tool_response": {"exit_code": 0}})
+        with self.r.transaction():
+            self.r.db.execute("UPDATE work_capture_pending SET capture='{}'")
+        file.write_text("a later file", encoding="utf-8")
+        with self.r.transaction():
+            self.r._work_repair_safely(self.p)
+        stored = json.loads(self.r.db.execute("SELECT version FROM work_file_links").fetchone()[0])
+        self.assertEqual(stored["status"], "unknown")
+        row = self.r.db.execute("SELECT * FROM work_memories").fetchone()
+        item = self.r._work_item(self.p, row, workspace=self.workspace)
+        self.assertTrue(item["file_projection_incomplete"])
+        self.assertFalse(item["automatic_eligible"])
+
+    def test_retry_cannot_apply_a_projection_bound_to_different_evidence(self):
+        self.failed_tool({"tool_name": "write_file", "tool_input": {"path": "engine.py"},
+                          "tool_response": {"exit_code": 0}})
+        with self.r.transaction():
+            capture = json.loads(self.r.db.execute("SELECT capture FROM work_capture_pending").fetchone()[0])
+            capture["file_projection"]["capture_digest"] = "different-source"
+            self.r.db.execute("UPDATE work_capture_pending SET capture=?", (json.dumps(capture),))
+            self.r._work_repair_safely(self.p)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+        self.assertEqual(self.r.work_memory_status(self.p)["capture_repair_pending"], 1)
+
+    def test_explicit_rebuild_uses_pending_original_observation_and_reindexes_without_sampling(self):
+        file = self.workspace / "engine.py"
+        file.write_text("first", encoding="utf-8")
+        self.failed_tool({"tool_name": "write_file", "tool_input": {"path": "engine.py"},
+                          "tool_response": {"exit_code": 0}})
+        file.write_text("changed later", encoding="utf-8")
+        self.r.work_rebuild(self.p, self.workspace)
+        original = self.r.db.execute("SELECT version FROM work_file_links").fetchone()[0]
+        self.assertEqual(json.loads(original)["size"], 5)
+        self.assertEqual(self.r.work_memory_status(self.p)["capture_repair_pending"], 0)
+        with self.r.transaction():
+            self.r.db.execute("DELETE FROM work_memory_fts")
+        with patch("agent_learning.work_memory.current_file_version", side_effect=AssertionError("Reindex must not resample")):
+            result = self.r.work_rebuild(self.p, self.workspace)
+        self.assertEqual(result["reindexed"], 1)
+        self.assertEqual(self.r.db.execute("SELECT version FROM work_file_links").fetchone()[0], original)
+
+    def test_large_escaped_public_capture_keeps_plan_and_marks_truncation(self):
+        from agent_learning.work_recovery import register
+        text = "\x01" * 65536
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "chat", "Stop", {"last_assistant_message": text}, outcome="reported")
+            register(self.r, self.p, event["id"], self.workspace, {"last_assistant_message": text})
+        serialized = self.r.db.execute("SELECT capture FROM work_capture_pending").fetchone()[0]
+        self.assertLessEqual(len(serialized), 150000)
+        capture = json.loads(serialized)
+        self.assertTrue(capture["file_projection"]["complete"])
+        self.assertTrue(capture["last_assistant_message_truncated"])
+        self.assertLess(len(capture["last_assistant_message"]), len(text))
 
 
 if __name__ == "__main__":

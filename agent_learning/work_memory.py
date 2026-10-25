@@ -334,7 +334,28 @@ class WorkMemoryMixin:
             return None
         return rows[0]["id"] if _verification(*attempts[0]) else None
 
-    def _work_capture_event(self, project, event_id, workspace, *, raw=None, native_context_hint=False):
+    def _work_file_projection(self, project, event, workspace, *, raw=None, observe_version=True):
+        """Bounded file observations made once at the original callback boundary."""
+        from .runtime import clean
+        payload = json.loads(event["payload"])
+        raw = clean(raw) if isinstance(raw, dict) else payload
+        name, args = _tool(raw)
+        stored_name, _ = _tool(payload)
+        if _learning_tool(name or stored_name):
+            return []
+        links = file_links_from_payload(name, args, workspace, observe_version=observe_version)
+        if not links and event.get("operation"):
+            links = [dict(row) for row in self.db.execute(
+                "SELECT relative_path,path_key,checkout_key,relation,version FROM work_file_links l "
+                "JOIN events e ON e.id=l.event_id AND e.project=l.project WHERE l.project=? AND e.operation=? "
+                "AND l.checkout_key=? ORDER BY e.created LIMIT 16", (project, event["operation"], checkout_key(workspace)))]
+            for link in links:
+                link["version"] = (current_file_version(link["relative_path"], workspace) if observe_version
+                                   else {"status": "not_observed", "content_hash": None})
+        return links
+
+    def _work_capture_event(self, project, event_id, workspace, *, raw=None, native_context_hint=False,
+                            _file_projection=None):
         """调用者已保存事件和当前操作状态；不扩大历史读取范围。"""
         from .runtime import clean, clip, digest
         if not _config(self)["enabled"]:
@@ -356,15 +377,13 @@ class WorkMemoryMixin:
         stored_name, stored_args = _tool(payload)
         if _learning_tool(name or stored_name):
             return None
-        links = file_links_from_payload(name, args, workspace)
-        # PostToolUse 有时无输入，用同一 operation 的前置明确目标补关系。
-        if not links and event.get("operation"):
-            links = [dict(row) for row in self.db.execute(
-                "SELECT relative_path,path_key,checkout_key,relation,version FROM work_file_links l "
-                "JOIN events e ON e.id=l.event_id AND e.project=l.project WHERE l.project=? AND e.operation=? "
-                "AND l.checkout_key=? ORDER BY e.created LIMIT 16", (project, event["operation"], checkout_key(workspace)))]
-            for link in links:
-                link["version"] = current_file_version(link["relative_path"], workspace)
+        if _file_projection is None:
+            links = self._work_file_projection(project, event, workspace, raw=raw)
+            file_projection_complete = True
+        else:
+            from .work_recovery import projection_links
+            links = projection_links(event, current_checkout, _file_projection)
+            file_projection_complete = _file_projection["complete"]
         for link in links:
             self.db.execute("INSERT OR IGNORE INTO work_file_links VALUES(?,?,?,?,?,?,?)",
                 (project, event_id, link["checkout_key"], link["relative_path"], link["path_key"],
@@ -436,6 +455,8 @@ class WorkMemoryMixin:
                 "coverage": {"projection_only": True, "truncated": bool(payload.get("truncated"))
                              or projection_truncated or len(text) > 1400,
                              "full_original_available": not bool(payload.get("truncated"))}}
+        if not file_projection_complete:
+            body["coverage"]["file_projection_complete"] = False
         if classification_source:
             body["classification_source_event"] = classification_source
             source = self.db.execute("SELECT business_digest,payload FROM events WHERE project=? AND id=?",
@@ -585,6 +606,8 @@ class WorkMemoryMixin:
             source_identity.append({"capture_state": state})
         return {"memory_id": row["id"], "revision": row["revision"],
                 "source_version": digest(source_identity), "state": state,
+                **({"automatic_eligible": False, "file_projection_incomplete": True}
+                   if body.get("coverage", {}).get("file_projection_complete") is False else {}),
                 **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
                 "type": body["type"], "title": body["title"],
                 "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
@@ -614,6 +637,8 @@ class WorkMemoryMixin:
                 return []
             clauses.extend(["m.workspace_key=?", "json_extract(m.body,'$.type') IN ('public_summary','work_summary')",
                             "COALESCE(json_extract(m.body,'$.completion'),'complete')='complete'",
+                            "COALESCE(json_extract(m.body,'$.coverage.segments'),1)=1",
+                            "COALESCE(json_extract(m.body,'$.coverage.truncated'),0)=0",
                             "json_extract(m.body,'$.assignment_id') IS ?"])
             params.extend((checkout_key(workspace), task_state.get("assignment_id")))
         if exclude_event_id is not None:
@@ -975,6 +1000,8 @@ class WorkMemoryMixin:
                 preview_query = None if handoff_scope else query
                 item = self._work_item(project, row, workspace=workspace,
                                        file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
+                if item.get("file_projection_incomplete"):
+                    continue
                 item["_preview_query"] = preview_query
                 if handoff_scope:
                     if not self._work_handoff_usable(item):
@@ -1014,6 +1041,7 @@ class WorkMemoryMixin:
         return (item.get("type") in {"public_summary", "work_summary"}
                 and item.get("completion") == "complete"
                 and not item.get("coverage", {}).get("truncated")
+                and item.get("coverage", {}).get("segments", 1) == 1
                 and item.get("state") in {"reported", "model_reported"}
                 and not item.get("source_changed")
                 and not item.get("candidate_reference_risk")
@@ -1054,7 +1082,8 @@ class WorkMemoryMixin:
                 # 缺少旧checkout身份不猜；只重建本checkout可确认的已有事件。
                 if (recorded_checkout and recorded_checkout[0] == checkout_key(workspace)
                         or recorded_workspace and checkout_key(recorded_workspace) == checkout_key(workspace)):
-                    result = self._work_capture_event(project, row["id"], workspace)
+                    from .work_recovery import restore
+                    result = restore(self, project, row["id"], workspace, reindex=True)
                     indexed += bool(result and result.get("indexed"))
                     reindexed += bool(result and result.get("reindexed"))
                 else:
@@ -1163,6 +1192,8 @@ class WorkMemoryMixin:
             if row is not None and row["revision"] == item.get("revision"):
                 current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"),
                                           preview_query=item.get("_preview_query"))
+                if current.get("file_projection_incomplete"):
+                    continue
                 if item.get("reference_role") == "task_handoff":
                     scope = item.get("_handoff_scope")
                     body = json.loads(row["body"])

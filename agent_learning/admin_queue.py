@@ -161,39 +161,77 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
 
 
 def routing_signature(runtime, project):
-    """Only executor changes restart failed-route scans, never new candidates."""
+    """Shared executor changes invalidate scans; source-model changes are per case."""
     from .runtime import digest
     cfg = runtime.admin_effective_config(project)
-    plan = cfg.get("executor") or {"provider": cfg["provider"], "command": cfg["command"], "model": cfg["model"],
-                                  "session_epoch": runtime.session_epoch()}
-    observations = [list(row) for row in runtime.db.execute(
-        "SELECT conversation,model,active,version FROM admin_model_observations "
-        "WHERE project=? AND host_scope=? AND session_epoch=? ORDER BY conversation",
-        (project, runtime._session_scope(), runtime.session_epoch()))]
+    # Resolving `current` without a source conversation observes every chat and
+    # may alternate between an aggregate model and ambiguity. Neither changes
+    # an existing case's own executor, so do not put that aggregate in this key.
+    plan = (cfg.get("executor") if cfg["model_mode"] != "current" else None) or {
+        "provider": cfg["provider"], "command": cfg["command"], "model": cfg["model"],
+        "session_epoch": runtime.session_epoch()}
+    if plan["provider"] == "dsh" and not plan.get("dsh_profile"):
+        # A current-model aggregate may be unavailable even while a trusted
+        # profile is configured. Profile/configuration drift still invalidates
+        # every affected executor check; resolving identity grants no routing.
+        from .dsh_profile import resolve_profile
+        try:
+            plan = {**plan, "dsh_profile": resolve_profile(cfg.get("dsh_profile", ""))}
+        except ValueError:
+            pass
     failures = [list(row) for row in runtime.db.execute(
         "SELECT signature,reason,next_try,updated FROM admin_executor_failures WHERE project=? AND host_scope=? "
         "AND (next_try>? OR reason='configuration_change_required') ORDER BY signature",
         (project, runtime._session_scope(), time.time()))]
     return digest([runtime._session_scope(), runtime.host_epoch(), runtime.admin_policy(project),
-                   executor_signature(plan), cfg.get("dsh_profile"), observations, failures])
+                   executor_signature(plan), cfg.get("dsh_profile"), failures])
 
 
-def executor_review_order(signature):
+def _case_route_signature(runtime, signature):
+    """SQL expression, evaluated for one `problems p` in the same queue snapshot."""
+    # The policy mode is part of signature. Only current-model cases depend on
+    # a mutable root observation; default/fixed/first resolve independently.
+    source = ("COALESCE((SELECT json_extract(batch.packet,'$.executor_conversation') "
+              "FROM phase_review_batches batch WHERE batch.project=p.project "
+              "AND batch.problem_id=p.id),p.conversation)")
+    expression = ("(? || ':' || COALESCE((SELECT json_array(model.conversation,model.model,model.active,model.version) "
+        "FROM admin_model_observations model WHERE model.project=p.project AND model.host_scope=? "
+        "AND model.session_epoch=? AND model.conversation=" + source + "),'missing'))")
+    return expression, (signature, runtime._session_scope(), runtime.session_epoch())
+
+
+def _route_check(runtime, project, signature):
+    if runtime.admin_policy(project)["model_mode"] == "current":
+        return _case_route_signature(runtime, signature)
+    return "?", (signature,)
+
+
+def remember_executor_check(runtime, project, selected, signature):
+    expression, args = _route_check(runtime, project, signature)
+    current = runtime.db.execute("SELECT " + expression + " FROM problems p WHERE p.project=? AND p.id=?",
+                                  (*args, project, selected["id"])).fetchone()
+    if current is not None:
+        remember_check(runtime, project, selected, current[0], blocked_call="executor_scan")
+
+
+def executor_review_order(runtime, project, signature):
     # Existing checks are a disposable projection. A routing check neither
     # accepts evidence nor hides a case from eligible_query's review signature.
+    expression, args = _route_check(runtime, project, signature)
     return ("ORDER BY COALESCE((SELECT route.updated FROM admin_review_checks route "
             "WHERE route.project=p.project AND route.problem=p.id AND route.revision=p.revision "
-            "AND route.blocked_call='executor_scan' AND route.signature=?),0),"
-            + REVIEW_ORDER.removeprefix("ORDER BY "), (signature,))
+            "AND route.blocked_call='executor_scan' AND route.signature=" + expression + "),0),"
+            + REVIEW_ORDER.removeprefix("ORDER BY "), args)
 
 
 def routing_scan_pending(runtime, project, query, args):
     query, args = executor_query(runtime, project, query, args)
     signature = routing_signature(runtime, project)
+    expression, check_args = _route_check(runtime, project, signature)
     return bool(runtime.db.execute(query + "AND NOT EXISTS(SELECT 1 FROM admin_review_checks route "
         "WHERE route.project=p.project AND route.problem=p.id AND route.revision=p.revision "
-        "AND route.blocked_call='executor_scan' AND route.signature=?) LIMIT 1",
-        (project, *args, signature)).fetchone())
+        "AND route.blocked_call='executor_scan' AND route.signature=" + expression + ") LIMIT 1",
+        (project, *args, *check_args)).fetchone())
 
 
 def executor_query(runtime, project, query, args):
@@ -235,7 +273,7 @@ def ready_executor(runtime, project, query, args, *, advance=False):
     from .admin_providers import executor_availability
     query, args = executor_query(runtime, project, query, args)
     signature = routing_signature(runtime, project)
-    order, order_args = executor_review_order(signature)
+    order, order_args = executor_review_order(runtime, project, signature)
     seen = []
     for _ in range(3 if advance else 1):
         suffix = "AND p.id NOT IN (" + ",".join("?" for _ in seen) + ") " if seen else ""
@@ -251,7 +289,7 @@ def ready_executor(runtime, project, query, args, *, advance=False):
             if available and not executor_backoff(runtime, project, plan):
                 return True
             if advance:
-                remember_check(runtime, project, item, signature, blocked_call="executor_scan")
+                remember_executor_check(runtime, project, item, signature)
         if len(rows) < 40:
             break
     return False
@@ -510,7 +548,7 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
         summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
     routed, routed_args = executor_query(runtime, project, query, args)
-    order, order_args = executor_review_order(routing_signature(runtime, project))
+    order, order_args = executor_review_order(runtime, project, routing_signature(runtime, project))
     rows = runtime.db.execute(routed + order + "LIMIT 40", (project, *routed_args, *order_args)).fetchall()
     if not rows:
         if runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():

@@ -1256,7 +1256,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self._work_repair_safely(project, exclude_event=event_id)
         from .work_recovery import register, complete, failed
         self.db.execute("SAVEPOINT work_capture_identity")
-        registered = False
+        registered = None
         try:
             registered = register(self, project, event_id, workspace, raw, pending=False)
         except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
@@ -1278,8 +1278,15 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 self.db.execute("RELEASE phase_seal_registration")
         self.db.execute("SAVEPOINT work_capture_extension")
         try:
+            if registered is None:
+                # Missing original metadata must not be replaced by a later stat.
+                from .work_recovery import legacy_projection
+                original_event = self.db.execute("SELECT * FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
+                projection = legacy_projection(self, project, dict(original_event), workspace, raw=raw) if original_event else None
+            else:
+                projection = registered
             self._work_capture_event(project, event_id, workspace, raw=raw,
-                                     native_context_hint=native_context_hint)
+                                     native_context_hint=native_context_hint, _file_projection=projection)
         except (OSError, ValueError, TypeError, sqlite3.Error, ContractError) as exc:
             self.db.execute("ROLLBACK TO work_capture_extension")
             self.db.execute("RELEASE work_capture_extension")
@@ -1287,7 +1294,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             if registered:
                 self.db.execute("SAVEPOINT work_capture_retry_registration")
                 try:
-                    register(self, project, event_id, workspace, raw)
+                    register(self, project, event_id, workspace, raw, projection=registered)
                     failed(self, project, event_id, exc)
                 except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
                     self.db.execute("ROLLBACK TO work_capture_retry_registration")

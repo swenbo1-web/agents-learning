@@ -35,15 +35,44 @@ const spawnProcess=(_python,args)=>{
 const manager=createBrowserManager({loadReceipt:()=>({...receipt}),runPython,spawnProcess,canonicalWorkspace:value=>value,
  platform:scenario==='windows'?'win32':'linux',startupTimeout:scenario==='timeout'?5:10000});
 const start=(options={},workspace='/audit/Foo')=>manager.manage('start',{open:false,...options},workspace);
+const control=(action,options={},workspace='/audit/Foo')=>manager.manageControl(action,{open:false,...options},workspace);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 try{
  if(scenario==='modes'){
-  const review=await start({review:true,adminControl:true,open:true});
+  const review=await control('start',{review:true,adminControl:true,open:true});
   const read=await start({open:true});
   assert.equal(children.length,2);assert.equal(read.read_only,true);assert.equal(read.review,false);assert.equal(read.admin_control,false);
   assert.notEqual(read.pid,review.pid);assert(!opened.at(-1).includes('admin_token'));assert(!opened.at(-1).includes('review_token'));
   assert.equal((await start()).pid,read.pid);assert.equal(children.length,2);
-  await manager.manage('stop',{},'/audit/Foo');assert(children.every(child=>child.killed));
+  await manager.manage('stop',{},'/audit/Foo');assert.equal(children[0].killed,false);assert.equal(children[1].killed,true);
+  await control('stop');assert(children.every(child=>child.killed));
+ }else if(scenario==='readonly_status_after_review'){
+  const review=await control('start',{review:true,adminControl:true});
+  const absent=await manager.manage('status',{},'/audit/Foo');assert.equal(absent.running,false);assert.equal(absent.status,'stopped');
+  assert(!JSON.stringify(absent).includes('admin_token'));assert(!JSON.stringify(absent).includes('review_token'));
+  assert.equal((await control('status')).running,true);assert.equal(children.length,1);
+  assert.equal((await manager.manage('stop',{},'/audit/Foo')).stopped,false);assert.equal(children[0].killed,false);
+  const read=await start();const status=await manager.manage('status',{},'/audit/Foo');
+  assert.equal(status.pid,read.pid);assert.notEqual(status.pid,review.pid);assert.equal(status.read_only,true);
+  assert(!JSON.stringify(status).includes('admin_token'));assert(!JSON.stringify(status).includes('review_token'));
+  const human=await control('status');assert.equal(human.running,true);assert(!Object.hasOwn(human,'browser_url'));assert(!Object.hasOwn(human,'access_token'));
+ }else if(scenario==='readonly_rejects_privileged_options'){
+  for(const action of ['start','status','stop'])for(const options of [{review:true},{adminControl:true},{review:false}]){
+   await assert.rejects(manager.manage(action,{open:false,...options},'/audit/Foo'),/read-only browsers only/);
+  }
+  assert.equal(children.length,0);
+ }else if(scenario==='operator_stop_workspace'){
+  await control('start',{review:true,adminControl:true},'/audit/Foo');await start({},'/audit/Foo');
+  await control('start',{review:true,adminControl:true},'/audit/Bar');await start({},'/audit/Bar');
+  await manager.manage('stop',{},'/audit/Foo');
+  assert.deepEqual(children.map(child=>child.killed),[false,true,false,false]);
+  await control('stop',{},'/audit/Foo');assert.deepEqual(children.map(child=>child.killed),[true,true,false,false]);
+  assert.equal((await manager.manage('status',{},'/audit/Bar')).running,true);
+ }else if(scenario==='readonly_stop_during_operator_start'){
+  let release;preflight=new Promise(resolve=>{release=resolve;});const pending=control('start',{review:true,adminControl:true});
+  assert.equal((await manager.manage('status',{},'/audit/Foo')).status,'stopped');
+  assert.equal((await manager.manage('stop',{},'/audit/Foo')).stopped,false);
+  release();const review=await pending;assert.equal(review.admin_control,true);assert.equal(children[0].killed,false);
  }else if(scenario==='concurrent'){
   let release;preflight=new Promise(resolve=>{release=resolve;});
   const first=start(),second=start();assert.equal(preflights,1);release();
@@ -87,7 +116,9 @@ try{
 @unittest.skipUnless(shutil.which("node"), "Node.js required for DSH browser checks")
 class DshBrowserTests(unittest.TestCase):
     def test_browser_identity_modes_concurrency_and_cleanup(self):
-        for scenario in ("modes", "concurrent", "stop_pending", "close_pending", "posix", "windows",
+        for scenario in ("modes", "readonly_status_after_review", "readonly_rejects_privileged_options",
+                         "operator_stop_workspace", "readonly_stop_during_operator_start",
+                         "concurrent", "stop_pending", "close_pending", "posix", "windows",
                          "installation", "failure", "timeout", "invalid", "late_close", "abort"):
             with self.subTest(scenario=scenario):
                 result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", PROBE],

@@ -455,7 +455,7 @@ const WORKER_TOOL_SPECS = [
   {
     name: "learning_browser",
     description:
-      "DSH 原生可视化知识库浏览器工具（learning-browser 技能）。在本机 127.0.0.1 启动、查看或关闭当前项目的只读可视化知识库页面（搜索筛选正式知识、查看正文/条件/限制、来源健康、修订历史、事件时间线与管理员待办）。action='start' 启动并默认打开浏览器，'status' 查看运行状态与链接，'stop' 停止服务。",
+      "DSH 原生可视化知识库浏览器工具（learning-browser 技能）。在本机 127.0.0.1 启动、查看或关闭当前项目的只读可视化知识库页面（搜索筛选正式知识、查看正文/条件/限制、来源健康、修订历史、事件时间线与管理员待办）。action='start' 启动并默认打开浏览器，'status' 仅查看只读实例状态与链接，'stop' 仅停止只读实例；不返回或关闭人工审批和管理员页面。",
     parameters: {
       type: "object",
       properties: {
@@ -909,6 +909,7 @@ export function apply(ctx, config = {}) {
   }
 
   const manageBrowser = (...args) => browsers.manage(...args);
+  const manageControlBrowser = (...args) => browsers.manageControl(...args);
 
   async function invokeMcpTool(toolName, rawArgs, exec) {
     const receipt = loadRuntimeReceipt();
@@ -984,20 +985,20 @@ export function apply(ctx, config = {}) {
           return {
             kind: "success",
             text: res.stopped
-              ? "已停止当前项目的可视化知识库浏览器服务。"
-              : "当前项目没有正在运行的可视化知识库浏览器服务。",
+              ? "已停止当前项目的只读知识库浏览器服务；人工审批页面保持运行。"
+              : "当前项目没有正在运行的只读知识库浏览器服务。",
           };
         }
         if (!res.running) {
           return {
             kind: "success",
-            text: "当前项目的可视化知识库浏览器未运行。输入 `/learning-browser` 或 `/learning-browser start` 即可启动并打开。",
+            text: "当前项目的只读知识库浏览器未运行。输入 `/learning-browser` 或 `/learning-browser start` 即可启动并打开；人工审批页面由项目面板管理。",
           };
         }
         return {
           kind: "success",
           text: [
-            `### 可视化知识库浏览器已就绪（只读模式）`,
+            `### 可视化知识库浏览器已就绪（${res.read_only ? "只读模式" : "管理模式"}）`,
             `- **项目 ID**: \`${res.project}\`（\`${res.workspace}\`）`,
             `- **直连地址（含临时访问码）**: [点击打开可视化知识库](${res.browser_url})`,
             `- **本机监听地址**: \`${res.url}\` | **PID**: \`${res.pid}\``,
@@ -1251,7 +1252,7 @@ export function apply(ctx, config = {}) {
               }
               if (!parsed?.ok || !parsed.result?.data) throw new Error(parsed?.error || "project status unavailable");
               const data = parsed.result.data;
-              const browserStat = await manageBrowser("status", {}, workspace).catch(() => ({ running: false }));
+              const browserStat = await manageControlBrowser("status", {}, workspace).catch(() => ({ running: false }));
               const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
               const projectUsage = data.project_usage?.scope === "project" && data.project_usage.project_id === data.project_id ? data.project_usage : null;
               const budgetValues = data.project_budget_policy?.values || {};
@@ -1384,7 +1385,7 @@ export function apply(ctx, config = {}) {
             }
 
             if (action === "open_browser") {
-              const info = await manageBrowser(
+              const info = await manageControlBrowser(
                 "start",
                 { open: true, review: false, adminControl: false },
                 workspace,
@@ -1393,7 +1394,7 @@ export function apply(ctx, config = {}) {
               return;
             }
             if (action === "open_review") {
-              const info = await manageBrowser(
+              const info = await manageControlBrowser(
                 "start",
                 { open: true, review: true, adminControl: true },
                 workspace,
@@ -1402,7 +1403,7 @@ export function apply(ctx, config = {}) {
               return;
             }
             if (action === "stop_browser") {
-              const info = await manageBrowser("stop", {}, workspace);
+              const info = await manageControlBrowser("stop", {}, workspace);
               send(200, { ok: true, running: false, stopped: Boolean(info.stopped) });
               return;
             }

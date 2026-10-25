@@ -105,10 +105,8 @@ def recover(runtime, project, *, limit=8, force=False):
     for row in rows:
         runtime.db.execute("SAVEPOINT phase_seal_retry")
         try:
-            captured = runtime.db.execute("SELECT 1 FROM work_memories WHERE project=? AND event_id=? LIMIT 1",
-                                          (project, row["event_id"])).fetchone()
-            if not captured:
-                runtime._work_capture_event(project, row["event_id"], row["workspace"], raw=json.loads(row["capture"]))
+            from .work_recovery import restore
+            restore(runtime, project, row["event_id"], row["workspace"], raw=json.loads(row["capture"]))
             phase = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND id=?",
                                        (project, row["phase_id"])).fetchone()
             if not seal_phase(runtime, project, phase, row["event_id"]):

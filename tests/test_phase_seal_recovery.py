@@ -93,6 +93,24 @@ class PhaseSealRecoveryTests(unittest.TestCase):
             (p, phase["task_id"])).fetchall()
         self.assertTrue(any("ORIGINAL_LONG_TAIL" in row[0] for row in refs))
         self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+        self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 0)
+
+    def test_phase_recovery_completes_both_queues_without_replaying_work(self):
+        r, p, send, c = self.start(suffix="-work-confirm")
+        text = "Original sourced constraint. " * 90 + "ORIGINAL_LONG_TAIL"
+        with patch.object(r, "_work_index", side_effect=sqlite3.OperationalError("Projection interrupted")):
+            send("stop", turn=2, text=text)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 1)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 1)
+        with patch("subprocess.Popen", side_effect=AssertionError("Recovery cannot start a model")):
+            with r.transaction():
+                prepare(r, p, force=True)
+            self.assertEqual(r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 0)
+            self.assertEqual(r.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 0)
+            with patch.object(r, "_work_capture_event", side_effect=AssertionError("Completed work must not replay")):
+                with r.transaction():
+                    r._work_repair_safely(p)
+        self.assertEqual(r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
     def test_repeated_fault_retains_request_and_never_creates_call(self):
         r, p, send, c = self.start(suffix="-fault")

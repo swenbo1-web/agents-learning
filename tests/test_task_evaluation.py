@@ -373,6 +373,123 @@ class ArtifactMetricTests(unittest.TestCase):
         json.dumps(report, allow_nan=False)
 
 
+class NumericBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.protocol = create_protocol(spec())
+        self.rows = measured_rows(self.protocol)
+
+    def test_legal_json_large_integer_is_invalid_record_instead_of_a_crash(self):
+        huge = json.loads("1" + "0" * 400)
+        for field, value in (("wall_ms", huge), ("latency", huge), ("cost", huge),
+                             ("wall_ms", True), ("latency", False), ("cost", True)):
+            with self.subTest(field=field, value=str(value)[:32]):
+                rows = copy.deepcopy(self.rows)
+                if field == "wall_ms":
+                    rows[0][field] = value
+                elif field == "latency":
+                    rows[0]["retrieval"]["latencies_ms"] = [value]
+                else:
+                    rows[0]["cost"]["amount"] = value
+                report = summarize(self.protocol, rows)
+                self.assertEqual(len(report["invalid_records"]), 1)
+                self.assertIn("finite nonnegative", report["invalid_records"][0]["reason"])
+                self.assertFalse(report["complete_design"])
+                self.assertIsNone(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"])
+                json.dumps(report, allow_nan=False)
+
+    def test_finite_large_totals_stay_unknown_without_erasing_other_metrics(self):
+        for row in self.rows:
+            row["wall_ms"] = 1e308
+            row["retrieval"]["latencies_ms"] = [1e308, 1e308]
+            row["cost"]["amount"] = 1e308
+        report = summarize(self.protocol, self.rows)
+        self.assertTrue(report["complete_design"])
+        for variant in ("no_memory", "with_memory"):
+            for scope in ("paired_subset", "all_reported_observations"):
+                arm = report[scope][variant]
+                self.assertEqual(arm["wall_ms"]["p50"], 1e308)
+                self.assertEqual(arm["wall_ms"]["p95"], 1e308)
+                self.assertIsNone(arm["wall_ms"]["sum"])
+                self.assertEqual(arm["wall_ms"]["numeric_overflow"], ["sum"])
+                self.assertIsNone(arm["retrieval_latency_ms"]["sum"])
+                self.assertIsNone(arm["cost"]["reported_by_currency"]["USD"])
+                self.assertEqual(arm["cost"]["numeric_overflow"], ["USD"])
+                self.assertEqual(arm["cost"]["known_runs"], 2)
+                self.assertEqual(arm["cost"]["unknown_runs"], 0)
+                self.assertEqual(arm["acceptance"]["success_rate"], 1)
+        for metric, reason in (("wall_latency", "wall_latency_numeric_overflow"),
+                               ("retrieval_latency", "retrieval_latency_numeric_overflow"),
+                               ("monetary_cost", "cost_numeric_overflow")):
+            self.assertFalse(report["comparison_eligibility"][metric]["eligible"])
+            self.assertEqual(report["comparison_eligibility"][metric]["reason"], reason)
+        self.assertIsNone(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"])
+        self.assertIsNone(report["deltas_with_memory_minus_no_memory"]["monetary_cost"])
+        self.assertTrue(report["comparison_eligibility"]["total_tokens"]["eligible"])
+        json.dumps(report, allow_nan=False)
+
+    def test_one_arm_overflow_does_not_turn_cross_arm_difference_into_infinity(self):
+        for row in self.rows:
+            if row["variant"] == "with_memory":
+                row["wall_ms"] = 1e308
+                row["cost"]["amount"] = 1e308
+        report = summarize(self.protocol, self.rows)
+        self.assertEqual(report["paired_subset"]["no_memory"]["wall_ms"]["sum"], 400)
+        self.assertIsNone(report["paired_subset"]["with_memory"]["wall_ms"]["sum"])
+        self.assertFalse(report["comparison_eligibility"]["wall_latency"]["eligible"])
+        self.assertFalse(report["comparison_eligibility"]["monetary_cost"]["eligible"])
+        self.assertIsNone(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"])
+        json.dumps(report, allow_nan=False)
+
+    def test_large_finite_values_that_fit_remain_comparable(self):
+        for row in self.rows:
+            row["wall_ms"] = 8e307 if row["variant"] == "no_memory" else 1e307
+            row["retrieval"]["latencies_ms"] = [row["wall_ms"]]
+            row["cost"]["amount"] = row["wall_ms"]
+        report = summarize(self.protocol, self.rows)
+        self.assertTrue(report["comparison_eligibility"]["wall_latency"]["eligible"])
+        self.assertTrue(report["comparison_eligibility"]["monetary_cost"]["eligible"])
+        self.assertEqual(report["paired_subset"]["no_memory"]["wall_ms"]["sum"], 1.6e308)
+        self.assertEqual(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"], -1.4e308)
+        self.assertEqual(report["deltas_with_memory_minus_no_memory"]["monetary_cost"]["amount"], -1.4e308)
+        json.dumps(report, allow_nan=False)
+
+    def test_nonfinite_float_and_negative_observations_are_isolated(self):
+        for value in (float("inf"), float("-inf"), float("nan"), -1):
+            for field in ("wall_ms", "latency", "cost"):
+                with self.subTest(field=field, value=value):
+                    rows = copy.deepcopy(self.rows)
+                    if field == "wall_ms":
+                        rows[0][field] = value
+                    elif field == "latency":
+                        rows[0]["retrieval"]["latencies_ms"] = [value]
+                    else:
+                        rows[0]["cost"]["amount"] = value
+                    report = summarize(self.protocol, rows)
+                    self.assertEqual(len(report["invalid_records"]), 1)
+                    json.dumps(report, allow_nan=False)
+
+    def test_signed_artifact_scores_and_huge_criteria_share_finite_number_contract(self):
+        definition = artifact_spec()
+        quality = definition["tasks"][0]["artifact_metrics"][2]
+        quality.update(unit="score", criteria={"operator": "gte", "value": -1e308})
+        protocol = create_protocol(definition)
+        rows = artifact_rows(protocol)
+        for position, row in enumerate(rows):
+            row["artifact_metrics"][2]["value"] = 1e308 if position % 2 else -1e308
+        report = summarize(protocol, rows)
+        for variant in ("no_memory", "with_memory"):
+            group = next(item for item in report["artifact_metrics"]["groups"][variant]
+                         if item["metric_id"] == "accuracy")
+            self.assertIn(group["values"]["p50"], (-1e308, 0, 1e308))
+            self.assertEqual(group["criteria_results"]["status"], "passed")
+        json.dumps(report, allow_nan=False)
+        quality["criteria"]["value"] = 10 ** 400
+        with self.assertRaisesRegex(EvaluationError, "finite number"):
+            create_protocol(definition)
+        rows[0]["artifact_metrics"][2]["value"] = 10 ** 400
+        self.assertEqual(len(summarize(protocol, rows)["invalid_records"]), 1)
+
+
 class FileAndRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -383,6 +500,27 @@ class FileAndRunnerTests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(content), encoding="utf-8")
         return path
+
+    def test_extreme_numeric_jsonl_roundtrip_writes_a_strict_finite_report(self):
+        frozen = self.root / "finite-protocol.json"
+        protocol = write_protocol(self.write("finite-spec.json", spec()), frozen)
+        for label in ("huge-integer", "finite-total-overflow"):
+            rows = measured_rows(protocol)
+            if label == "huge-integer":
+                rows[0]["wall_ms"] = 10 ** 400
+            else:
+                for row in rows:
+                    row["wall_ms"] = 1e308
+                    row["cost"]["amount"] = 1e308
+            records = self.root / (label + ".jsonl")
+            records.write_text("\n".join(json.dumps(row, allow_nan=False) for row in rows), encoding="utf-8")
+            destination = self.root / (label + "-report.json")
+            report = report_files(frozen, records, destination)
+            loaded = json.loads(destination.read_text(encoding="utf-8"),
+                parse_constant=lambda value: self.fail("nonfinite output: " + value))
+            self.assertEqual(report, loaded)
+            self.assertIsNone(report["deltas_with_memory_minus_no_memory"]["wall_ms_total"])
+            self.assertEqual(bool(report["invalid_records"]), label == "huge-integer")
 
     def test_jsonl_roundtrip_trace_and_no_overwrite(self):
         definition = self.write("spec.json", spec())

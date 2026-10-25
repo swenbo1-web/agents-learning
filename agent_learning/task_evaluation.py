@@ -78,9 +78,61 @@ def _integer(value, field, low=0, high=10**12):
 
 
 def _number(value, field):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    if not _finite_number(value) or value < 0:
         raise EvaluationError(f"{field} must be a finite nonnegative number or null")
     return value
+
+
+def _finite_number(value):
+    """JSON integers may exceed float range; never leak conversion overflow."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _finite_sum(values):
+    """Keep ordinary sums byte-compatible; an unrepresentable total is unknown."""
+    try:
+        result = sum(values)
+    except OverflowError:
+        return None
+    return result if _finite_number(result) else None
+
+
+def _finite_difference(left, right):
+    if left is None or right is None:
+        return None
+    try:
+        result = left - right
+    except OverflowError:
+        return None
+    return result if _finite_number(result) else None
+
+
+def _finite_median(ordered, *, legacy_float=True):
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    pair = ordered[middle - 1:middle + 1]
+    if legacy_float:
+        # Preserve the existing normal-number JSON shape (e.g. 100.0).
+        try:
+            result = statistics.median(pair)
+        except OverflowError:
+            result = None
+        if _finite_number(result):
+            return result
+    # statistics.mean uses exact intermediates, unlike (left + right) / 2.
+    try:
+        result = statistics.mean(pair)
+    except OverflowError:
+        return None
+    return result if _finite_number(result) else None
 
 
 def _model(value):
@@ -107,11 +159,7 @@ def _artifact_descriptor(metric):
 
 
 def _artifact_value(value, metric):
-    try:
-        finite = not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
-    except OverflowError:
-        finite = False
-    if not finite:
+    if not _finite_number(value):
         raise EvaluationError("artifact metric value must be a finite number or null")
     if metric["unit"] == "score":
         return value
@@ -360,9 +408,13 @@ def _record(record):
 
 def _distribution(values):
     ordered = sorted(values)
-    return {"count": len(ordered), "p50": statistics.median(ordered) if ordered else None,
+    result = {"count": len(ordered), "p50": _finite_median(ordered),
             "p95": ordered[max(0, math.ceil(.95 * len(ordered)) - 1)] if ordered else None,
-            "sum": sum(ordered) if ordered else None}
+            "sum": _finite_sum(ordered) if ordered else None}
+    overflow = [field for field in ("p50", "sum") if ordered and result[field] is None]
+    if overflow:
+        result["numeric_overflow"] = overflow
+    return result
 
 
 def _arm_summary(rows):
@@ -382,8 +434,9 @@ def _arm_summary(rows):
                                        "complete_total_tokens": sum(item["total_tokens"] for item in known) if len(known) == len(rows) and rows else None}
     complete_tokens = bool(rows) and all(item["unknown_runs"] == 0 for item in token_components.values())
     currencies = Counter(row["cost"]["currency"] for row in rows if row.get("cost") is not None)
-    cost_totals = {currency: sum(row["cost"]["amount"] for row in rows if row.get("cost") is not None and row["cost"]["currency"] == currency)
+    cost_totals = {currency: _finite_sum(row["cost"]["amount"] for row in rows if row.get("cost") is not None and row["cost"]["currency"] == currency)
                    for currency in currencies}
+    overflow_currencies = [currency for currency, amount in cost_totals.items() if amount is None]
     return {"runs": len(rows), "acceptance": {"passed": outcomes["passed"], "failed": outcomes["failed"],
              "unknown": outcomes["unknown"], "success_rate": outcomes["passed"] / len(rows) if rows and not outcomes["unknown"] else None},
             "wall_ms": {**_distribution(wall), "missing_runs": len(rows) - len(wall)},
@@ -393,7 +446,8 @@ def _arm_summary(rows):
             "token_usage": {"components": token_components, "complete": complete_tokens,
                             "total_tokens": sum(item["reported_total_tokens"] for item in token_components.values()) if complete_tokens else None},
             "cost": {"known_runs": sum(currencies.values()), "unknown_runs": len(rows) - sum(currencies.values()),
-                     "reported_by_currency": cost_totals}}
+                     "reported_by_currency": cost_totals,
+                     **({"numeric_overflow": sorted(overflow_currencies)} if overflow_currencies else {})}}
 
 
 def _artifact_report(protocol, paired_rows, all_rows, complete):
@@ -440,10 +494,7 @@ def _artifact_report(protocol, paired_rows, all_rows, complete):
             expected = protocol["repeats"]
             status = ("passed" if passed == expected else "failed") if complete and checked == expected else "unknown"
             ordered = sorted(values)
-            middle = len(ordered) // 2
-            # mean uses exact intermediate sums; two finite large scores must
-            # not overflow while calculating their median.
-            median = (ordered[middle] if len(ordered) % 2 else statistics.mean(ordered[middle - 1:middle + 1])) if ordered else None
+            median = _finite_median(ordered, legacy_float=False)
             groups[variant].append({"task_id": task_id, "metric_id": identity, "kind": declared["kind"],
                 "unit": declared["unit"], "method": declared["method"], "criteria": criteria,
                 "criteria_sha256": declared["criteria_sha256"], "expected_runs": expected,
@@ -540,21 +591,26 @@ def summarize(protocol, records):
     currencies = {row["cost"]["currency"] for row in subset if row.get("cost") is not None}
     eligibility = {
         "success_rate": eligible(all(arm["acceptance"]["unknown"] == 0 for arm in arms.values()), "acceptance_unknown"),
-        "wall_latency": eligible(all(arm["wall_ms"]["missing_runs"] == 0 for arm in arms.values()), "wall_latency_unknown"),
+        "wall_latency": eligible(all(arm["wall_ms"]["missing_runs"] == 0 and arm["wall_ms"]["sum"] is not None for arm in arms.values()),
+                                 "wall_latency_numeric_overflow" if any(arm["wall_ms"].get("numeric_overflow") for arm in arms.values()) else "wall_latency_unknown"),
         "total_tokens": eligible(all(arm["token_usage"]["complete"] for arm in arms.values()), "worker_or_overhead_tokens_unknown"),
-        "monetary_cost": eligible(all(arm["cost"]["unknown_runs"] == 0 for arm in arms.values()) and len(currencies) == 1, "cost_unknown_or_currency_mismatch"),
-        "retrieval_latency": eligible(all(arm["retrieval_latency_ms"]["missing_runs"] == 0 and arm["retrieval_latency_ms"]["count"] > 0 for arm in arms.values()), "retrieval_latency_unknown_or_no_queries")}
+        "monetary_cost": eligible(all(arm["cost"]["unknown_runs"] == 0 and not arm["cost"].get("numeric_overflow") for arm in arms.values()) and len(currencies) == 1,
+                                  "cost_numeric_overflow" if any(arm["cost"].get("numeric_overflow") for arm in arms.values()) else "cost_unknown_or_currency_mismatch"),
+        "retrieval_latency": eligible(all(arm["retrieval_latency_ms"]["missing_runs"] == 0 and arm["retrieval_latency_ms"]["count"] > 0
+                                          and not arm["retrieval_latency_ms"].get("numeric_overflow") for arm in arms.values()),
+                                      "retrieval_latency_numeric_overflow" if any(arm["retrieval_latency_ms"].get("numeric_overflow") for arm in arms.values()) else "retrieval_latency_unknown_or_no_queries")}
     deltas = {"success_rate": None, "wall_ms_total": None, "total_tokens": None, "monetary_cost": None}
     baseline, memory = (arms[variant] for variant in VARIANTS)
     if eligibility["success_rate"]["eligible"]:
-        deltas["success_rate"] = memory["acceptance"]["success_rate"] - baseline["acceptance"]["success_rate"]
+        deltas["success_rate"] = _finite_difference(memory["acceptance"]["success_rate"], baseline["acceptance"]["success_rate"])
     if eligibility["wall_latency"]["eligible"]:
-        deltas["wall_ms_total"] = memory["wall_ms"]["sum"] - baseline["wall_ms"]["sum"]
+        deltas["wall_ms_total"] = _finite_difference(memory["wall_ms"]["sum"], baseline["wall_ms"]["sum"])
     if eligibility["total_tokens"]["eligible"]:
-        deltas["total_tokens"] = memory["token_usage"]["total_tokens"] - baseline["token_usage"]["total_tokens"]
+        deltas["total_tokens"] = _finite_difference(memory["token_usage"]["total_tokens"], baseline["token_usage"]["total_tokens"])
     if eligibility["monetary_cost"]["eligible"]:
         currency = next(iter(currencies))
-        deltas["monetary_cost"] = {"currency": currency, "amount": memory["cost"]["reported_by_currency"][currency] - baseline["cost"]["reported_by_currency"][currency]}
+        deltas["monetary_cost"] = {"currency": currency, "amount": _finite_difference(
+            memory["cost"]["reported_by_currency"][currency], baseline["cost"]["reported_by_currency"][currency])}
     report = {"kind": "agent_learning.task_evaluation_report", "version": PROTOCOL_VERSION,
             "protocol_id": protocol["id"], "protocol_sha256": protocol["protocol_sha256"],
             "expected_pairs": len(expected), "compatible_pairs": sum(pair["compatible"] for pair in pairs),
