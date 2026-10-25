@@ -336,8 +336,8 @@ class Server:
             result = self.panel.action(args["capability"], args["action"], context_handle=handle,
                 workspace=self.workspace, request_id=args.get("request_id"), expected=args.get("expected"),
                 preset=args.get("preset"), confirm=args.get("confirm", False))
-        public = {key: result[key] for key in ("visible", "reason", "summary", "diagnostics", "opened", "preset", "history")
-                  if key in result}
+        from .panel_output import model_panel_result
+        public = model_panel_result(result)
         private = dict(result)
         if result.get("visible") is True and handle is not None:
             private["context_handle"] = handle

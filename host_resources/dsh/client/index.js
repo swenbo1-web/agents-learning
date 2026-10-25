@@ -107,6 +107,14 @@ window.__ModuleLoader__.load({
       return message.includes("stage review uses token budgets") ? labels.tokenEstimate : message;
     }
 
+    Object.assign(TEXT.zh, {reason:"当前原因",dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
+    Object.assign(TEXT.en, {reason:"Current reason",dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
+
+    function reasonText(value, labels) {
+      return typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, "dispatch_" + value)
+        ? labels["dispatch_" + value] : value;
+    }
+
     function getLabels(activeLocale) {
       var lang = String(
         activeLocale ||
@@ -436,7 +444,8 @@ window.__ModuleLoader__.load({
             t.globalCalls + ": " + display(globalUsage.counted_attempts ?? globalUsage.used_calls) + " · " +
             t.globalRemaining + ": " + display(globalUsage.remaining_calls) +
             (projectUsage?.next_reset_at ? "\n" + t.reset + ": " + new Date(projectUsage.next_reset_at * 1000).toLocaleString(activeLocale || undefined) : "") +
-            (summary.admission?.blocking_scope ? "\n" + summary.admission.blocking_scope : "")) : null,
+            (summary.admission?.blocking_scope ? "\n" + summary.admission.blocking_scope : "") +
+            (summary.diagnostic?.reason ? "\n" + t.reason + ": " + reasonText(summary.diagnostic.reason, t) : "")) : null,
           h(
             "div",
             { style: { display: "flex", flexDirection: "column", gap: "5px" } },

@@ -63,7 +63,10 @@
   Object.assign(strings["zh-CN"], {inputTitle:"近期公开输入",inputAvailable:"公开输入已记录。",inputPartial:"仅保留部分公开输入。",inputMissing:"未取得公开输入。",inputUnknown:"公开输入采集尚未核对。",inputWindowBound:"该次调用的回复归属窗口已核对；不表示阶段完成。",inputWindowUnknown:"回复归属窗口尚未核对。",captureWindowLimited:"近期采集记录超出本次检查范围，当前覆盖尚未核对。"});
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
+  Object.assign(strings["zh-CN"], {dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
+  Object.assign(strings.en, {dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
   const t = (key) => strings[language][key];
+  function reasonText(value) { return typeof value === "string" && Object.prototype.hasOwnProperty.call(strings[language], "dispatch_" + value) ? t("dispatch_" + value) : value; }
   const count = (value) => Number.isFinite(value) && value >= 0 ? String(value) : t("unknown");
 
   function hide(message = "unavailable") {
@@ -115,7 +118,7 @@
     lines.push(`${t("globalCalls")}: ${count(g.counted_attempts ?? g.used_calls)} · ${t("globalLeft")}: ${count(g.remaining_calls)}`);
     if (p?.next_reset_at) lines.push(`${t("reset")}: ${new Date(p.next_reset_at * 1000).toLocaleString(language)}`);
     if (summary.admission?.blocking_scope) lines.push(`${t("blocking")}: ${summary.admission.blocking_scope}`);
-    if (summary.reason) lines.push(`${t("reason")}: ${summary.reason}`);
+    if (summary.reason) lines.push(`${t("reason")}: ${reasonText(summary.reason)}`);
     if (summary.admin_phase) lines.push(`${t("phase")}: ${summary.admin_phase}`);
     if (staged) {
       const phases = staged.phases || {}, latest = staged.recent_batches?.[0];
@@ -164,7 +167,7 @@
       [t("installedVersion"),val(i.version)+" / "+val(i.protocol)],
       [t("runtimeMatch"),typeof i.running_runtime_matches_installation === "boolean" ? t(i.running_runtime_matches_installation ? "matches" : "mismatch") : t("unknown")],
       [t("schema"),val(p.storage_schema)+" / "+val(p.index_version)],
-      [t("phase"),a.phase], [t("reason"),a.reason]];
+      [t("phase"),a.phase], [t("reason"),reasonText(a.reason)]];
     if (a.next_due) lines.push([t("nextDue"),new Date(a.next_due * 1000).toLocaleString(language)]);
     if (a.last_provider_failure) {
       const f = a.last_provider_failure;

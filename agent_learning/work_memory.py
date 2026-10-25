@@ -238,10 +238,27 @@ def _metadata_only_write(body):
     """Recognize only known write acknowledgements, not arbitrary tool output."""
     if body.get("type") != "file_change":
         return False
+    text = body.get("summary", "")
     try:
-        response = json.loads(body.get("summary", ""))
+        response = json.loads(text)
     except (ValueError, TypeError):
-        return False
+        response = text
+    if isinstance(response, str):
+        # Known patch acknowledgements are strings on several hosts. Require
+        # the whole visible result to contain only the success envelope and
+        # changed paths: warnings, errors and substantive explanations stay.
+        lines = response.strip().splitlines()
+        if lines and lines[0] == "Exit code: 0":
+            lines.pop(0)
+            if lines and re.fullmatch(r"Wall time: \d+(?:\.\d+)? seconds?", lines[0]):
+                lines.pop(0)
+            if lines and lines[0] == "Output:":
+                lines.pop(0)
+        coverage = body.get("coverage", {})
+        return bool(isinstance(coverage, dict) and len(lines) >= 2
+                    and lines[0] == "Success. Updated the following files:"
+                    and all(re.fullmatch(r"[ADM] [^\r\n]+", line) for line in lines[1:])
+                    and not coverage.get("truncated") and coverage.get("full_original_available") is not False)
     if not isinstance(response, dict) or not response:
         return False
     if any(key in response and response[key] is not True for key in ("written", "success")):
@@ -261,6 +278,32 @@ def _metadata_only_write(body):
                 "size", "sha256", "hash", "encoding", "created", "updated"}
     return (set(response) <= metadata and all(not isinstance(value, (dict, list)) for value in response.values())
             and (response.get("written") is True or response.get("success") is True))
+
+
+def _write_receipt_query(plan):
+    """Keep acknowledgements discoverable when the user explicitly asks for them."""
+    text = plan["meaningful"].casefold().replace("\\", "/")
+    marker_text = text
+    # A filename such as receipt_notes.py or archive/回执.md is an identity,
+    # not a request to prefer acknowledgement records.
+    for anchor in plan["exact_anchors"]:
+        marker_text = marker_text.replace(anchor, " ")
+    if "回执" in marker_text or re.search(
+            r"\b(?:receipts?|ack|acknowledg(?:e)?ments?)\b", marker_text):
+        return True
+    # Fault descriptions remain requests for explanatory evidence. An explicit
+    # receipt marker above still permits "the successful receipt before failure".
+    if re.search(r"失败|故障|错误|异常|崩溃|报错|原因|导致|损坏|死锁|回滚|丢失|"
+                 r"\b(?:fail(?:ed|ure|ing)?|errors?|crash(?:ed|es)?|bugs?|why|cause[ds]?|"
+                 r"exceptions?|broken|regressions?|corrupt(?:ed|ion)?|deadlock|timeout)\b", text):
+        return False
+    bare = re.sub(r"\b(?:show|find|list|latest|last|recent|the|me|please)\b|"
+                  r"查看|查询|查找|最近|最新|一次|一个|的|查|看", " ", text)
+    bare = re.sub(r"[\s。.!！?？,，;；:：`]+", "", bare)
+    if bare in {"apply_patch", "patch", "补丁", "write_file", "writefile", "edit_file", "editfile"}:
+        return True
+    return bool(re.search(r"(?:apply_patch|patch|补丁|写入|write).{0,32}"
+                          r"(?:成功|success(?:ful(?:ly)?)?).{0,24}(?:输出|回包|output|result)", text))
 
 
 def _work_priority(body):
@@ -679,20 +722,31 @@ class WorkMemoryMixin:
         select = "SELECT m.* FROM work_memories m" + joins + " WHERE " + " AND ".join(clauses)
         pool_limit = min(100 if automatic else 200, limit * 10)
         rows = self.db.execute(select + ordering + " LIMIT ?", (*params, pool_limit)).fetchall()
-        if automatic and len(rows) == pool_limit and any(_metadata_only_write(json.loads(row["body"])) for row in rows):
+        plan = normalized_query_plan(query)
+        receipt_query = _write_receipt_query(plan)
+        if (not handoff and not receipt_query and len(rows) == pool_limit
+                and any(_metadata_only_write(json.loads(row["body"])) for row in rows)):
             # A bounded second lane prevents a burst of write receipts from
             # hiding older results. It retains the same scope and query gates.
             other = self.db.execute(select + " AND json_extract(m.body,'$.type')!='file_change'" + ordering
                                     + " LIMIT ?", (*params, pool_limit)).fetchall()
             found = {row["id"] for row in rows}
             rows.extend(row for row in other if row["id"] not in found)
-        if (query.strip() or automatic) and not handoff:
-            selected = normalized_query_plan(query)["terms"][:64]
+        if (query.strip() or automatic or file_path is not None) and not handoff:
+            selected = plan["terms"][:64]
             from .knowledge_index import match_terms
             def score(row):
                 body = json.loads(row["body"])
                 values = set(match_terms(body["title"] + " " + body["summary"]))
-                return (sum(term in values for term in selected), _work_priority(body) if automatic else 0,
+                matches = sum(term in values for term in selected)
+                exact = all(anchor in values for anchor in plan["exact_anchors"])
+                # A file acknowledgement is still an audit record, but a
+                # matching public explanation is a more useful answer. Exact
+                # technical identities and explicit receipt requests retain
+                # normal lexical ordering; no source or authority is changed.
+                receipt = _metadata_only_write(body)
+                content_role = receipt if receipt_query else not receipt
+                return (exact, bool(matches), content_role, matches, _work_priority(body),
                         row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
         selected_rows, counts, requests = [], {}, []

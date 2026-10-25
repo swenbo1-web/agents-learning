@@ -14,6 +14,28 @@ def _version(row):
     return digest(dict(row))
 
 
+def blocked_review_summary(runtime, project):
+    """Classify unresolved attempts without treating another host as this one.
+
+    Old attempts without a frozen execution plan remain unattributed project
+    records. They retain their locks but cannot be presented as this host's
+    confirmed calls or offered a guessed host recovery action.
+    """
+    rows = runtime.db.execute(
+        "SELECT CASE WHEN p.call_id IS NULL THEN 'unattributed' ELSE 'host' END AS attribution,"
+        "CASE WHEN a.state='failed' THEN 'failed' ELSE 'result_unknown' END AS kind,COUNT(*) AS count "
+        "FROM admin_calls a LEFT JOIN admin_execution_plans p ON p.call_id=a.id AND p.project=a.project "
+        "WHERE a.project=? AND (p.host_scope=? OR p.call_id IS NULL) AND " + unresolved_failure_sql("a")
+        + " GROUP BY attribution,kind", (project, runtime._session_scope())).fetchall()
+    result = {"host_scope": runtime._session_scope(), "failed": 0, "result_unknown": 0,
+              "unattributed": {"failed": 0, "result_unknown": 0}}
+    for row in rows:
+        target = result if row["attribution"] == "host" else result["unattributed"]
+        target[row["kind"]] = row["count"]
+    result["total"] = result["failed"] + result["result_unknown"]
+    return result
+
+
 def _call(runtime, project, identity):
     return runtime.db.execute(
         "SELECT a.id,a.problem,a.revision,a.state,a.created,a.finished,a.retry_allowed,a.retry_requested,a.usage "
@@ -50,6 +72,7 @@ def recovery_status(runtime, project, *, include_history=True):
         (project,)).fetchone()
     memory_count = db.execute("SELECT COUNT(*) FROM work_memories WHERE project=?", (project,)).fetchone()[0]
     calls = []
+    blocked = blocked_review_summary(runtime, project)
     identities = db.execute(
         "SELECT a.id FROM admin_calls a JOIN admin_execution_plans p ON p.call_id=a.id AND p.project=a.project "
         "WHERE a.project=? AND p.host_scope=? AND " + unresolved_failure_sql("a") + " "
@@ -61,14 +84,23 @@ def recovery_status(runtime, project, *, include_history=True):
             execution = usage.get("execution") or {}
         except (ValueError, TypeError, AttributeError):
             usage, execution = {}, {}
+        from .admin_usage import normalize_usage
+        try:
+            completeness = normalize_usage(usage)["completeness"]
+        except (ContractError, ValueError, TypeError, AttributeError):
+            completeness = "unknown"
         from .admin_response_store import status as response_status
         from .admin_observations import execution_observations, review_failure_reason
         saved_response = response_status(runtime, project, row["id"])
+        local = saved_response.get("can_recheck") is True
+        historical = (saved_response.get("history_recovery") or {}).get("can_recheck") is True
         calls.append({"id": row["id"], "version": _version(row), "state": row["state"],
+            "failure_class": "failed" if row["state"] == "failed" else "result_unknown",
+            "suggested_recovery": "local_recheck" if local else "history_local_recheck" if historical else "explicit_retry",
             "saved_response": saved_response,
             "execution_observations": execution_observations(usage),
             "created": row["created"], "reported_turns": usage.get("reported_turns"),
-            "usage_known": bool(usage.get("token_totals")),
+            "usage_known": completeness == "complete", "usage_completeness": completeness,
             "reason": review_failure_reason(usage),
             "can_retry": row["state"] in RETRYABLE_STATES})
     history = []
@@ -76,7 +108,9 @@ def recovery_status(runtime, project, *, include_history=True):
         history = history_recovery_page(runtime, project, limit=10)["items"]
     return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
                 "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},
-            "blocked_reviews": calls, "history_jobs": history, "history_separate": not include_history,
+            "blocked_reviews": calls, "blocked_review_summary": blocked,
+            "blocked_reviews_truncated": blocked["total"] > len(calls),
+            "history_jobs": history, "history_separate": not include_history,
             "models_started": False}
 
 

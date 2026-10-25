@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.24 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.25 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -32,6 +32,13 @@ No real-task net token, speed or quality gains have been established by paired e
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
 
+## Review recovery, retrieval noise and card summaries (1.4.25)
+
+- **Distinguish pending work from selectable batches:** administrator settings explain selectable batches, previous failures and blocked stages for the current project/host. Historical review keeps its separate batch authority. Failed and unknown-result calls are displayed separately while preserving unknown usage and old locks. Saved replies can be locally rechecked; a new model attempt still needs explicit confirmation, never an upgrade-triggered retry.
+- **Prefer substantive topic matches:** formal ranking considers title/body topic coverage; working history downranks recognized patch-success acknowledgements and adds bounded recall for earlier public explanations. Explicit patch, path and error queries remain supported. Version strings do not establish staleness or expand automatic injection authority.
+- **Keep card output small for the model:** text and structured results share a summary capped at 3000 characters, excluding repeated budgets, full policies and batch lists. The UI retains full state, button capabilities and version snapshots in its private channel; native menu results still carry no model-visible body. Characters are not platform token usage and establish no savings percentage.
+- **Compatibility:** schema/protocol 25 and indexes 6/2/1 remain. Models, accounts, publication policy and real failed records are preserved. Ranking cannot supply knowledge that has not been organized, and offline checks do not establish a successful real administrator review.
+
 ## Administrator launchers and protocol checks (1.4.24)
 
 - **Follow the current Codex desktop backend:** on Windows, the default bare `codex` command and the plugin's exact HTTP preset use bounded current-process ancestry when `CODEX_CLI_PATH` is absent. This avoids an older PATH CLI lacking the desktop's model. Background dispatch carries a bounded backend identity snapshot, rechecking the original backend process and file after the Hook exits. Explicit paths, custom arguments and host hints remain authoritative. No version-directory scan or newest-file selection occurs. An identified backend that becomes invalid stops the launch; without an identified host, PATH behavior remains. Independent terminals may need an explicit launcher.
@@ -43,7 +50,7 @@ No real-task net token, speed or quality gains have been established by paired e
 - **Keep the business focus**: action-only follow-ups such as “continue testing” reuse a valid business query, then the current task goal. Without a business focus, unrelated recent history is not injected. Prompts containing a subject remain new queries.
 - **Bounded, private diagnostics**: recognized machine fields and narrow known error templates produce fixed authentication, quota, model, schema or argument categories before temporary output is removed. Unknown errors stay unknown; raw errors, credentials, paths and private reasoning are not retained. Text does not establish an HTTP status or authorize retries.
 - **Separate terminal events from replies**: recovery and debug views distinguish completed, failed, cancelled or conflicting protocol events, collected review replies and process exit codes. A terminal event does not mean a reply was accepted. Missing fields in older attempts remain unknown; usage, locks and local recheck authority are preserved.
-- **Compatibility is unchanged**: schema/protocol25 and indexes6/2/1; no administrator, history or publication policy is enabled. Offline simulations do not establish that earlier real model failures have recovered.
+- **Compatibility is unchanged**: schema/protocol 25 and indexes 6/2/1; no administrator, history or publication policy is enabled. Offline simulations do not establish that earlier real model failures have recovered.
 
 ## Review frequency, context coverage and boundary protection (1.4.22)
 
@@ -938,7 +945,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.24 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. It fixes Codex default review launcher inheritance from the desktop backend and false protocol failures caused by CLI help output streams. Models, original knowledge, provenance, permissions, usage and old failure locks remain. Back up the external database, then update and reload all shared-database hosts together. Installation backups do not replace database backups and upgrades do not enable administrator or publication policies. Antigravity real review and public-text coverage still need live-host acceptance. The original v1.0.0 download uses schema/protocol 15 and lacks newer capabilities.
+Current `main` v1.4.25 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. It separates failed and unknown-result calls, explains host-scoped selectable batches, improves topic ranking and acknowledgement noise, and caps model-visible card summaries at 3000 characters. Failed-call locks, knowledge and usage remain; no retry occurs automatically. Full UI state stays private. Back up the external database and update/reload shared-database hosts together. Installation enables no administrator, history or publication policy. Real review and cross-host behavior require separate acceptance; the original v1.0.0 distribution lacks newer capabilities.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1266,7 +1273,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.24 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It fixes Codex default review launcher inheritance and standard CLI help detection. A protocol terminal never replaces reply acceptance or authorizes automatic retries or new model requests. Original data and protections remain; unknown identity and usage stay conservative. Update and reload shared-database hosts together and back up the external database first. Installation does not enable administrators, historical review or automatic publication. Live-host effects require separate acceptance. Source updates do not imply a new downloadable Release; the original 1.0.0 distribution uses schema/protocol 15.
+**Current source version 1.4.25 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** Failed-call classification, retrieval noise handling and bounded card summaries preserve explicit recovery, unknown usage and existing publication policy. Character budgets establish no platform token cost or savings rate. Update and reload shared-database hosts together; installation enables neither administrators nor historical review. Source updates do not imply a new downloadable Release.
 
 The following entries describe changes and release status at the time of each historical version:
 

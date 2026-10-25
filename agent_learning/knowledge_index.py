@@ -36,6 +36,7 @@ _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
 _MATCH_POLICY_VERSION = 4
+_RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
@@ -144,6 +145,7 @@ def normalized_query_plan(query):
             "input_fingerprint": hashlib.sha256(query.encode("utf-8", errors="surrogatepass")).hexdigest()
                                  if any(diagnostics[key] for key in ("input_truncated", "terms_truncated")) else None,
             "match_policy_version": _MATCH_POLICY_VERSION,
+            "rank_policy_version": _RANK_POLICY_VERSION,
             "recall_policy_version": _RECALL_POLICY_VERSION}
 
 
@@ -159,14 +161,19 @@ def _index_text(body):
     return " ".join(terms(" ".join(value for value in parts if isinstance(value, str))))
 
 
-def _match_values(body_json, query_weights, denominator):
+def _match_values(body_json, query_weights, denominator, *, _ranking=False):
     """查询覆盖优先；每个词只取最高字段权重，重复字段不能累加刷高分。"""
     body = json.loads(body_json)
-    matches = {}
+    matches, topical = {}, set()
+    positive_terms = set()
     for field, weight in _FIELD_WEIGHTS.items():
         value = body.get(field, "solution" if field == "knowledge_kind" else "")
         if isinstance(value, str):
-            for token in match_terms(value):
+            tokens = match_terms(value)
+            if _ranking and field in {"title", "content"}:
+                positive_terms.update(tokens)
+                topical.update(token for token in tokens if token in query_weights)
+            for token in tokens:
                 if token in query_weights:
                     matches[token] = max(weight, matches.get(token, 0))
     values = body.get("metadata", {}).values()
@@ -176,7 +183,16 @@ def _match_values(body_json, query_weights, denominator):
     coverage = sum(query_weights[token] for token in matches) / denominator
     field_score = sum(query_weights[token] * weight for token, weight in matches.items()) / denominator
     # 查询最多128词且权重最多2，因此相差一个词的覆盖增益始终大于字段增益。
-    return coverage * 2048 + field_score, coverage, matches
+    values = (coverage * 2048 + field_score, coverage, matches)
+    if _ranking:
+        # Conditions, restrictions and environment fields remain searchable,
+        # but cannot make a broad mention outrank a focused explanation merely
+        # by completing more of the query in contextual fields. This is ranking
+        # only: the independent automatic/identifier/health gates stay intact.
+        topic_coverage = sum(query_weights[token] for token in topical) / denominator
+        specificity = len(topical) / max(1, len(positive_terms))
+        return (*values, (topic_coverage, specificity))
+    return values
 
 
 def _rank(body_json, query_weights, denominator):
@@ -198,8 +214,8 @@ def _positive_anchors_allowed(body_json, anchors):
 
 def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
-    score, coverage, matches = (_match_values(body_json, query_weights, denominator)
-                                if _values is None else _values)
+    values = (_match_values(body_json, query_weights, denominator) if _values is None else _values)
+    score, coverage, matches = values[:3]
     strong = [token for token in matches if len(token) > 1]
     anchors = ([word for word in _exact_anchors(query) if word in query_weights]
                if _anchors is None else _anchors)
@@ -218,9 +234,12 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
                     break
             if eligible:
                 break
-    return {"score": round(score, 6), "coverage": round(coverage, 6),
+    result = {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
+    if len(values) > 3:
+        result["topic_coverage"] = round(values[3][0], 6)
+    return result
 
 
 def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
@@ -379,12 +398,12 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 identity = (row["id"], row["revision"])
                 if identity not in analyses:
                     try:
-                        analyses[identity] = _match_values(row["body"], weights, denominator)
+                        analyses[identity] = _match_values(row["body"], weights, denominator, _ranking=True)
                     except json.JSONDecodeError:
                         if not _automatic:
                             raise
                         unreadable.add(identity)
-                        analyses[identity] = (0, 0, {})
+                        analyses[identity] = (0, 0, {}, (0, 0))
                 return analyses[identity]
             semantic_matches = self._semantic_candidates(project, semantic, filters) if hybrid else {}
             rows = []
@@ -406,7 +425,7 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             def lexical_order(row):
                 values = analyze(row)
                 exact = all(anchor in values[2] for anchor in plan["exact_anchors"])
-                return (-int(exact), -values[0], row["id"])
+                return (-int(exact), -values[3][0], -values[1], -values[3][1], -values[0], row["id"])
             if references is None:
                 rows = lexical_rows(self.db, project, recall_plan, filters, diagnostics=page_state)
                 recall["pages"] = 1

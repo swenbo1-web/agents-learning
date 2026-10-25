@@ -56,13 +56,14 @@ def readonly_runtime(database, db, host, instance):
 
 
 def _control_queue(runtime, project, *, include_history=True):
-    from .admin_queue import eligible_query, scan_signatures
+    from .admin_queue import eligible_query, executor_query, scan_signatures
     from .admin_workload import workload_summary
     signature, preflight_signature = scan_signatures(runtime, project)
     query, args = eligible_query(signature,
         preflight_signature=preflight_signature,
         summary_enabled=runtime.work_summary_enabled(project),
         summary_host_scope=runtime._session_scope(), phase_scope=phase_scope(runtime, project))
+    query, args = executor_query(runtime, project, query, args)
     eligible = runtime.db.execute("SELECT COUNT(*) FROM (" + query + ")", (project, *args)).fetchone()[0]
     pending = runtime.db.execute("SELECT COUNT(*) FROM problems WHERE project=? AND status='pending'", (project,)).fetchone()[0]
     history = runtime.db.execute("SELECT COUNT(DISTINCT problem_id) FROM history_case_links WHERE project=?", (project,)).fetchone()[0]
@@ -71,7 +72,11 @@ def _control_queue(runtime, project, *, include_history=True):
     blocked = runtime.db.execute("SELECT COUNT(*) FROM admin_calls a WHERE a.project=? AND a.retry_allowed=0 "
         "AND a.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
         "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=a.project AND r.call_id=a.id)", (project,)).fetchone()[0]
-    return {"pending": pending, "eligible": eligible, "awaiting_evidence": awaiting,
+    from .admin_recovery import blocked_review_summary
+    return {"pending": pending, "eligible": eligible,
+            "eligible_unit": "stage_batch" if phase_scope(runtime, project) is not None else "case",
+            "eligible_scope": "project_host", "eligible_requires_preflight": True, "history_separate": True,
+            "blocked_review_summary": blocked_review_summary(runtime, project), "awaiting_evidence": awaiting,
             "blocked_calls": blocked, "history_excluded": history,
             "workload": workload_summary(runtime.db, project, history_stages=include_history)}
 

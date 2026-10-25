@@ -579,10 +579,13 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
             "AND p.task_id IS o.task_id AND p.task_revision IS o.task_revision WHERE p.project=? AND p.status='pending' "
             "AND o.state IN ('running','started') LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="awaiting_tool_completion")
-        from .admin_lifecycle import unresolved_failure_sql
-        if runtime.db.execute("SELECT 1 FROM admin_calls c WHERE c.project=? AND "
-            + unresolved_failure_sql("c") + " LIMIT 1", (project,)).fetchone():
-            return dict(detail, reason="unknown_call_requires_review")
+        from .admin_recovery import blocked_review_summary
+        blocked = blocked_review_summary(runtime, project)
+        selected = blocked if blocked["total"] else blocked["unattributed"]
+        if selected["failed"] or selected["result_unknown"]:
+            return dict(detail, reason="unknown_call_requires_review" if selected["result_unknown"]
+                        else "failed_call_requires_review", blocked_review_summary=blocked,
+                        blocked_review_scope="host" if blocked["total"] else "project_unattributed")
         if runtime.db.execute("SELECT 1 FROM admin_preflights WHERE project=? LIMIT 1", (project,)).fetchone():
             return dict(detail, reason="awaiting_evidence")
         return detail

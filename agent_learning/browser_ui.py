@@ -81,7 +81,17 @@ recoveryHeading:['Capture coverage and recovery','采集覆盖与流程恢复'],
 recoveryCapture:['Recorded conversations: {conversations}; work observations: {memories}; latest event: {time}','已记录会话：{conversations}；工作观察：{memories}；最近事件：{time}'],
 recoveryCaptureNote:['These totals do not verify this chat. Reload existing host conversations and check their next supported event. File imports do not include unselected chat history.','这些汇总不能证明当前聊天已接通。已有会话需重载后核对下一次受支持事件；文件归档不包含未选择的对话历史。'],
 recoveryBlocked:['Blocked review attempts','被阻塞的审核尝试'],recoveryNone:['No blocked attempts in this host','当前宿主没有被阻塞的审核尝试'],
-recoveryUnknownUsage:['Previous usage is unknown; retry may use additional platform quota.','原调用消费未知，重试可能再次使用平台额度。'],
+recoveryUnknownUsage:['Previous usage is incomplete or unknown; retry may use additional platform quota.','原调用用量未完整上报或未知，重试可能再次使用平台额度。'],
+failed_call_requires_review:['Previous review failed; inspect recovery options before allowing a retry','旧审核已失败，请核对恢复方式后再明确允许重试'],
+recoveryBlockedSummary:['This host: {failed} failed attempts; {unknown} attempts with unknown results. Showing {shown} of {total}.','当前宿主：已失败 {failed} 次，结果未知 {unknown} 次；显示 {shown}/{total} 次。'],
+recoveryUnattributed:['{count} older project attempts have no confirmed host attribution. They are not included in this host count or assigned a guessed recovery action.','另有 {count} 条旧项目调用无法确认宿主归属；未计入当前宿主，也不会猜测恢复入口。'],
+recoveryFailedClass:['Failed execution or local acceptance; this does not establish zero usage.','执行或本地验收失败；不代表未消耗平台额度。'],
+recoveryUnknownClass:['The attempt result is unknown; inspect the recorded process and public reply before retrying.','调用结果未知；请先核对进程记录及公开答复，再决定是否重试。'],
+recoveryLocalFirst:['A saved public reply can be checked locally first, without another model request. Existing evidence and publication boundaries still apply.','已有公开答复，可优先本地重新验收，无需再次调用模型；证据和发布边界仍保持。'],
+recoveryRetryAlternative:['Request a new model review instead','改为申请重新调用模型'],
+recoveryPhaseQueue:['Selectable stage batches: {eligible}; waiting stages: {waiting}; blocked stages: {blocked}; stages awaiting Stop: {stopping}.','当前可选阶段批次：{eligible}；待整理阶段：{waiting}；旧阻塞阶段：{blocked}；待交付回调阶段：{stopping}。'],
+recoveryCaseQueue:['Selectable cases in this host: {eligible}.','当前宿主可选案例：{eligible}。'],
+recoveryQueueNote:['Selectable work still requires evidence, model, budget and concurrency checks. Total pending work also includes historical batches, evidence waits and approval; it is not the number of immediately runnable calls.','可选材料仍需通过证据、模型、预算和并发检查。总待办还包含历史批次、待补证及待批准内容，不等于可立即执行的调用数。'],
 executionObservation:['Protocol terminal: {terminal}; review reply collected: {response}; process exit code: {exit}','协议终态：{terminal}；审核答复已收集：{response}；进程退出码：{exit}'],
 observationYes:['Yes','是'],observationNo:['No','否'],terminalNotObserved:['Not observed','未观察到'],
 terminal_completed:['Completed event','完成事件'],terminal_failed:['Failed event','失败事件'],terminal_cancelled:['Cancelled event','取消事件'],terminal_conflicted:['Conflicting terminal events','终态事件冲突'],terminal_unknown:['Unknown','未知'],
@@ -116,18 +126,25 @@ function renderAdminRecovery(data){
  const capture=recovery.capture||{};
  if(loaded)root.append(node('p',t('recoveryCapture',{conversations:capture.conversations??0,memories:capture.work_memories??0,time:stamp(capture.last_event_at)})),node('p',t('recoveryCaptureNote'),'note'));
  if(state.adminResult?.recovery_action)root.append(node('p',t('recoverySaved'),'checks ready'));
+ const phase=data.phase_review;
+ if(phase?.policy?.mode==='phase')root.append(node('p',t('recoveryPhaseQueue',{eligible:data.queue?.eligible??t('unknown'),waiting:phase.waiting_phase_count??t('unknown'),blocked:phase.blocked_phase_count??t('unknown'),stopping:phase.phases?.awaiting_stop??0})));
+ else if(data.queue)root.append(node('p',t('recoveryCaseQueue',{eligible:data.queue.eligible??t('unknown')})));
+ root.append(node('p',t('recoveryQueueNote'),'note'));
  root.append(node('h4',t('recoveryBlocked')));
+ const blocked=recovery.blocked_review_summary;
+ if(loaded&&blocked){root.append(node('p',t('recoveryBlockedSummary',{failed:blocked.failed,unknown:blocked.result_unknown,shown:recovery.blocked_reviews?.length??0,total:blocked.total})));const unattributed=(blocked.unattributed?.failed??0)+(blocked.unattributed?.result_unknown??0);if(unattributed)root.append(node('p',t('recoveryUnattributed',{count:unattributed}),'note'));}
  if(loaded&&!recovery.blocked_reviews?.length)root.append(node('p',t('recoveryNone'),'muted'));
  for(const item of recovery.blocked_reviews||[]){
   const card=node('article',undefined,'history-item');card.append(node('strong',item.id),node('p',label(item.state)+' · '+label(item.reason)));
+  if(item.failure_class)card.append(node('p',t(item.failure_class==='failed'?'recoveryFailedClass':'recoveryUnknownClass'),'note'));
   card.append(node('p',executionObservationText(item.execution_observations),'note'));
   if(!item.usage_known)card.append(node('p',t('recoveryUnknownUsage'),'note'));
   if(item.saved_response?.rejection)card.append(node('p',t('responseRejection',{code:label(item.saved_response.rejection.code),path:item.saved_response.rejection.path||'—'}),'note'));
   if(item.saved_response?.history_recovery)addHistoryResponseControl(card,item);
-  else if(item.saved_response?.can_recheck){const button=node('button',t('responseRecheck'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>recheckSavedResponse(item)));card.append(button);}
+  else if(item.saved_response?.can_recheck){card.append(node('p',t('recoveryLocalFirst'),'note'));const button=node('button',t('responseRecheck'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>recheckSavedResponse(item)));card.append(button);}
   else if(item.saved_response&&!item.saved_response.available)card.append(node('p',t('responseUnavailable'),'note'));
   else if(item.saved_response?.reason)card.append(node('p',label(item.saved_response.reason),'note'));
-  if(item.can_retry){const button=node('button',t('recoveryRetry'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>confirmAdminRecovery('retry_call',item)));card.append(button);}root.append(card);
+  if(item.can_retry){const button=node('button',t(item.saved_response?.can_recheck?'recoveryRetryAlternative':'recoveryRetry'));button.disabled=state.busy||Boolean(state.adminPending)||state.adminDirty;button.addEventListener('click',()=>run(()=>confirmAdminRecovery('retry_call',item)));card.append(button);}root.append(card);
  }
  root.append(node('h4',t('recoveryHistory')),node('p',t('recoveryHistoryNote'),'note'));
  if(recovery.history_separate&&adminHistoryError)root.append(node('p',t('flowHistoryUnavailable',{message:errorText(adminHistoryError)}),'note'));

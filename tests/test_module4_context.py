@@ -244,7 +244,9 @@ class Module4ContextTests(unittest.TestCase):
     def test_automatic_retrieval_refills_after_five_conflicted_matches(self):
         for index in range(5):
             title = f"compiler recovery bad{index}"
-            self.publish(title, success=True)
+            # Match the useful record's topic density; strong title matches
+            # deliberately fill the manual page before source-health refill.
+            self.publish(title, content="compiler recovery", success=True)
             self.hook("PostToolUse", tool_use_id=title, tool_name="Bash", tool_response={"exit_code": 1})
         valid = self.publish("diagnosis", content="compiler recovery")
         default = self.r.search(self.p, "compiler recovery")["items"]
