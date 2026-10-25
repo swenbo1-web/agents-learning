@@ -233,11 +233,13 @@ class KnowledgeContextMixin:
 
     def _context(self, project, conversation, query="", compact=False, agent_id=None, context_handle=None,
                  expected_epoch=None, tool_only=False, delivery="persistent", _phase_guard=None, _outcome=None,
-                 workspace=None, raw=None, _source_event_id=None):
+                 workspace=None, raw=None, _source_event_id=None, _query_available=True):
         if delivery not in {"persistent", "ephemeral"}:
             from .runtime import ContractError
             raise ContractError("unsupported context delivery")
         from .runtime import ContractError, clean, clip, digest, encode
+        if not isinstance(_query_available, bool):
+            raise ContractError("context query availability must be boolean")
         if _outcome is not None and not isinstance(_outcome, dict):
             raise ContractError("context outcome must be a dictionary")
         from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
@@ -261,8 +263,12 @@ class KnowledgeContextMixin:
                 (project, conversation, agent_id or "", *self._task_key(task)[:2],
                  *((self._task_key(task)[2],) if agent_id else ()), epoch)).fetchone()
         query = clean(query).strip()
-        continuation = _continuation_query(query)
-        if not (tool_only or continuation or compact):
+        if not _query_available and query:
+            raise ContractError("unavailable context query must be empty")
+        # Missing or partial native input cannot assert that the user meant
+        # "continue". Keep real faults, task boundaries and notices independent.
+        continuation = _query_available and _continuation_query(query)
+        if _query_available and not (tool_only or continuation or compact):
             # 新提示优先查询当前问题；旧故障保留到后续工具前置，不抢占注意力。
             fault = None
         # Older contexts may already contain an acknowledgement as last_query.
@@ -272,7 +278,8 @@ class KnowledgeContextMixin:
             # 恢复当前讨论焦点；旧故障继续排队到工具前置，不能抢占当前
             # 查询后再通过历史展示 ID 补回一批未经相关度核对的旧卡。
             fault = None
-        if not effective and task and not _continuation_query(task["goal"]):
+        if (not effective and task and not _continuation_query(task["goal"])
+                and (_query_available or task.get("status") == "active")):
             effective = task["goal"]
         # An explicit action without a business focus cannot select unrelated
         # recent history through the blank-query fallback. Empty startup events
@@ -355,6 +362,7 @@ class KnowledgeContextMixin:
                         task_state=task_state, delivery=delivery, compact=compact,
                         context_epoch=work_context_epoch, file_only=tool_only,
                         exclude_event_id=_source_event_id,
+                        allow_unfocused_history=_query_available or bool(effective.strip()),
                         handoff_only=bool(work_query and not effective_plan["automatic_safe"]))
                 else:
                     # Safety/expiry notices stay independent of optional recall.
@@ -703,7 +711,9 @@ class KnowledgeContextMixin:
                     saved_signature = f"retry:{time.time() + delay}:{signature}"
                 self.db.execute(f"UPDATE {table} SET retrieval_signature=?,retrieval_refs=? WHERE {where}",
                                 (saved_signature, encode(refs), *key))
-            if not tool_only:
+            if not tool_only and (_query_available or effective.strip()):
+                # Missing input without an active goal leaves the saved focus
+                # intact for a later, explicitly observed continuation.
                 # Preserve the identity guard on continuation/compaction. One
                 # extra character preserves the unsafe boundary for huge input;
                 # its truncated prefix can never silently become a safe query.

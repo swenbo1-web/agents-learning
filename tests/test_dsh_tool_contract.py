@@ -27,7 +27,7 @@ const agent = {id:'worker-contract'};
 handlers.get('session/created')({id:agent.id,header:{cwd:process.argv[2]}});
 await handlers.get('agent/created')({agent});
 const errors = [];
-const cases = [['learning_status',{}],['session_context',{}],
+const cases = [['learning_status',{view:'summary'}],['session_context',{}],
   ['knowledge_search',{query:'synthetic tool contract'}],
   ['task_update',{goal:'Verify synthetic worker tools',new_task:true}]];
 for (const [name,args] of cases) {
@@ -37,6 +37,11 @@ for (const [name,args] of cases) {
     const decision = await handlers.get('tools/pre-execute')(exec,async()=>({kind:'allow'}));
     assert.notEqual(decision?.kind,'deny',JSON.stringify(decision));
     const value = await definitions.get(name).execute(args,exec);
+    if(name==='learning_status'){
+      assert.equal(value.view,'summary');
+      assert.ok(JSON.stringify(value).length<=3000);
+      assert.equal(Object.hasOwn(value,'history_import'),false);
+    }
     result = {isError:false,content:[{type:'text',text:JSON.stringify(value)}]};
   } catch(error) {
     errors.push({name,error:String(error)});
@@ -139,6 +144,9 @@ if(rereading){
 }
 await definitions.get('learning_status').execute({}, {agent,name:'learning_status',callId:'status'});
 assert.deepEqual(calls.at(-1).payload.args,{},'status has no context_handle property');
+assert.deepEqual(definitions.get('learning_status').parameters.properties.view.enum,['summary','full']);
+await definitions.get('learning_status').execute({view:'summary'}, {agent,name:'learning_status',callId:'status-summary'});
+assert.deepEqual(calls.at(-1).payload.args,{view:'summary'},'status view must reach the Python dispatcher unchanged');
 for (const handle of ['', 'invalid-explicit-handle']) {
   await definitions.get('session_context').execute({context_handle:handle},
     {agent,name:'session_context',callId:'explicit-'+handle});
@@ -266,12 +274,28 @@ class DshToolContractTests(unittest.TestCase):
 
     def test_python_entrypoint_preserves_explicit_invalid_args_for_rejection(self):
         for name, args in (("learning_status", {"unexpected": "keep validation"}),
+                           ("learning_status", {"view": "unknown"}),
+                           ("learning_status", {"view": True}),
                            ("session_context", {"context_handle": ""}),
                            ("session_context", {"context_handle": "invalid-explicit-handle"})):
             with self.subTest(tool=name, args=args):
                 result = self.tool(name, args)
                 self.assertFalse(result["ok"], result)
                 self.assertTrue(result.get("error"))
+
+    def test_python_status_summary_is_explicit_and_default_status_remains_full(self):
+        full = self.tool("learning_status", {})["result"]
+        explicit = self.tool("learning_status", {"view": "full"})["result"]
+        summary = self.tool("learning_status", {"view": "summary"})["result"]
+        self.assertIn("history_import", full)
+        self.assertIn("history_import", explicit)
+        self.assertNotIn("view", full)
+        self.assertEqual(summary["view"], "summary")
+        self.assertEqual(summary["project_id"], full["project_id"])
+        self.assertEqual(summary["home"], full["home"])
+        self.assertFalse(summary["admin_admission_enabled"])
+        self.assertNotIn("history_import", summary)
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, separators=(",", ":"))), 3000)
 
     def test_python_work_read_accepts_boolean_reread_and_rejects_other_types(self):
         from agent_learning.runtime import Runtime

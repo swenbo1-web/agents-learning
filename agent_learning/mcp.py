@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .runtime import CATEGORIES, KNOWLEDGE_KINDS, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
 from .knowledge_output import read_page, search_preview
+from .status_output import StatusSummary, status_summary
 
 
 def schema(properties, required=()):
@@ -125,7 +126,8 @@ WORKER_TOOLS = [
         "operation_id": NONEMPTY,
         "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
     }, ["knowledge_id", "knowledge_revision", "expected_task_id", "expected_task_revision", "expected_write_version"])),
-    ("learning_status", "查看本项目记录和待治理状态。", schema({})),
+    ("learning_status", "查看本项目状态；调试用view=summary的有界摘要，省略view或full保留完整状态。",
+     schema({"view": {"type": "string", "enum": ["summary", "full"]}})),
 ]
 ADMIN_TOOLS = [
     ("problem_list", "获取本项目待治理增量。", schema({"limit": {"type": "integer", "minimum": 1, "maximum": 100}})),
@@ -494,7 +496,9 @@ class Server:
             body.update(context_handle=handle, expected_epoch=self.epoch)
             if name == "task_update": return r.task_update(p, **body)
             return r.feedback(p, **body)
-        if name == "learning_status": return r.status(p)
+        if name == "learning_status":
+            status = r.status(p)
+            return status_summary(status) if args.get("view") == "summary" else status
         if name == "knowledge_use":
             handle = self._handle(args)
             body = {key: value for key, value in args.items() if key != "context_handle"}
@@ -622,7 +626,8 @@ class Server:
                             "_meta": {"agentLearningPanel": body.panel_private}}}
                     result = {"content": [{"type": "text", "text": encode(body)}], "isError": False}
                     # 旧协议保留文本结果；新版同时提供机器可直接读取的结构化结果。
-                    if self.protocol_version in {"2025-06-18", "2025-11-25"} and isinstance(body, dict):
+                    if (self.protocol_version in {"2025-06-18", "2025-11-25"}
+                            and isinstance(body, dict) and not isinstance(body, StatusSummary)):
                         result["structuredContent"] = body
                     if isinstance(body, _PanelResult):
                         result["_meta"] = {"agentLearningPanel": body.panel_private}

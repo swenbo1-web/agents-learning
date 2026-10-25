@@ -11,8 +11,10 @@ from agent_learning.runtime import ContractError, Runtime
 
 
 class AntigravityTranscriptTests(unittest.TestCase):
+    TRANSCRIPT_FILENAME = "transcript.jsonl"
+
     def setUp(self):
-        base = Path(__file__).resolve().parents[1] / "build" / "local" / "ag1412" / "transcript-tests"
+        base = Path(__file__).resolve().parents[1] / "build" / "local" / "opt1426" / "transcript-tests"
         base.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=base)
         self.addCleanup(self.temp.cleanup)
@@ -20,7 +22,7 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
         self.artifact = self.root / "brain" / "chat"
-        self.path = self.artifact / ".system_generated" / "logs" / "transcript.jsonl"
+        self.path = self.artifact / ".system_generated" / "logs" / self.TRANSCRIPT_FILENAME
         self.path.parent.mkdir(parents=True)
         self.rows = []
         self.r = Runtime(self.root / "home", config={}, host="antigravity")
@@ -497,6 +499,187 @@ class AntigravityTranscriptTests(unittest.TestCase):
         with patch("agent_learning.antigravity_transcript.read_public", side_effect=AssertionError("orphan I/O")):
             self.post()
         self.assertEqual(self.coverage()["reason"], "transcript_window_unbound")
+
+    def sibling(self):
+        name = "transcript_full.jsonl" if self.TRANSCRIPT_FILENAME == "transcript.jsonl" else "transcript.jsonl"
+        return self.path.with_name(name)
+
+    def test_only_explicit_supported_path_is_read_without_sibling_fallback(self):
+        self.add("USER_INPUT", "public request")
+        other = self.sibling()
+        other.write_bytes(self.path.read_bytes())
+        for name in ("transcript_private.jsonl", "transcript_full.jsonl.bak", "other.jsonl"):
+            with self.subTest(name=name), patch.object(Path, "open", side_effect=AssertionError("unrelated I/O")):
+                result = read_public(self.raw(transcriptPath=str(self.path.with_name(name))))
+            self.assertEqual(result["reason"], "transcript_path_invalid")
+        self.path.unlink()
+        self.assertEqual(read_public(self.raw())["reason"], "transcript_unavailable")
+
+    def test_uri_unc_and_parent_traversal_are_rejected_before_io(self):
+        self.add("USER_INPUT", "public request")
+        for fields in ({"transcriptPath": self.path.as_uri()},
+                       {"artifactDirectoryPath": self.artifact.as_uri()},
+                       {"transcriptPath": r"\\server\share\brain\chat\.system_generated\logs" + "\\" + self.path.name},
+                       {"transcriptPath": "//server/share/brain/chat/.system_generated/logs/" + self.path.name},
+                       {"transcriptPath": str(self.path.parent / ".." / "logs" / self.path.name)}):
+            with self.subTest(fields=fields), patch.object(Path, "open", side_effect=AssertionError("invalid I/O")):
+                result = read_public(self.raw(**fields))
+            self.assertEqual(result["reason"], "transcript_path_invalid")
+
+    def test_parent_reparse_point_is_rejected(self):
+        from types import SimpleNamespace
+
+        self.add("USER_INPUT", "public request")
+        original = Path.stat
+        def metadata(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path == self.path.parent:
+                return SimpleNamespace(st_mode=value.st_mode, st_file_attributes=0x400)
+            return value
+        with patch.object(Path, "stat", metadata):
+            self.assertEqual(read_public(self.raw())["reason"], "transcript_path_redirected")
+
+    def test_pre_post_cannot_switch_between_compact_and_full_files(self):
+        self.add("USER_INPUT", "public request")
+        self.invoke()
+        self.add("PLANNER_RESPONSE", "public response")
+        other = self.sibling()
+        other.write_bytes(self.path.read_bytes())
+        self.post(transcriptPath=str(other))
+        self.assertEqual(self.coverage()["reason"], "transcript_file_changed")
+        self.assertEqual(len(self.events("PublicMessageSegment")), 0)
+
+    def test_replaced_transcript_cannot_borrow_pre_file_identity(self):
+        self.add("USER_INPUT", "public request")
+        self.invoke()
+        self.add("PLANNER_RESPONSE", "public response")
+        replacement = self.path.with_suffix(".replacement")
+        replacement.write_bytes(self.path.read_bytes())
+        replacement.replace(self.path)
+        self.post()
+        self.assertEqual(self.coverage()["reason"], "transcript_file_changed")
+        self.assertEqual(len(self.events("PublicMessageSegment")), 0)
+
+    def test_record_budget_remains_a_capture_gap(self):
+        self.add("USER_INPUT", "public request")
+        self.add("PLANNER_RESPONSE", "public response")
+        with patch("agent_learning.antigravity_transcript.MAX_RECORDS", 1):
+            self.assertEqual(read_public(self.raw())["reason"], "transcript_scan_budget")
+
+    def test_missing_stop_body_keeps_input_and_response_without_completing_delivery(self):
+        from agent_learning.antigravity_health import capture_status
+
+        self.normal()
+        status = capture_status(self.r, self.p)
+        self.assertEqual(status["input_window"]["public_input"], "available")
+        self.assertTrue(status["input_window"]["available"])
+        self.assertEqual(status["public_response"], "available")
+        self.assertEqual(status["public_delivery"], "unavailable")
+        self.assertEqual(status["reason"], "public_output_missing")
+        self.assertEqual(len(self.events("Stop")), 0)
+        self.assertEqual(json.loads(self.events("PublicMessageSegment")[0]["payload"])["completion"], "partial")
+        for table in ("deliveries", "review_phases", "admin_calls"):
+            self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], 0)
+
+    def test_delayed_stop_after_another_invocation_never_promotes_its_response(self):
+        self.add("USER_INPUT", "first public request")
+        self.invoke()
+        self.add("PLANNER_RESPONSE", "first public response")
+        self.post()
+        self.add("USER_INPUT", "second public request")
+        self.invoke(1)
+        self.add("PLANNER_RESPONSE", "second public response")
+        self.post()
+        with patch("agent_learning.antigravity_transcript.read_public", side_effect=AssertionError("no Stop I/O")), \
+             patch.object(self.r, "_capture_delivery") as capture:
+            self.stop(0)
+            self.stop(0)
+        capture.assert_not_called()
+        self.assertEqual(len(self.events("Stop")), 0)
+        self.assertEqual(len(self.events("AntigravityStop")), 1)
+        self.assertEqual(len(self.events("PublicMessageSegment")), 2)
+        self.assertTrue(all(json.loads(row["payload"])["completion"] == "partial"
+                            for row in self.events("PublicMessageSegment")))
+
+    def test_missing_public_prompt_does_not_supply_context_query(self):
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke()
+        self.assertEqual(context.call_args.kwargs["query"], "")
+        self.assertIs(context.call_args.kwargs["_query_available"], False)
+        self.assertEqual(len(self.events("UserPromptSubmit")), 0)
+
+    def test_partial_continue_is_retained_but_cannot_reuse_prior_context_query(self):
+        self.invoke(lastUserInput="current sqlite outbox business question")
+        self.add("USER_INPUT", "继续", truncated_fields=["content"])
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            self.invoke(1)
+        self.assertEqual(context.call_args.kwargs["query"], "")
+        self.assertIs(context.call_args.kwargs["_query_available"], False)
+        payload = json.loads(self.events("UserPromptSubmit")[-1]["payload"])
+        self.assertEqual(payload["prompt"], "继续")
+        self.assertTrue(payload["capture_coverage"]["lastUserInput"]["truncated"])
+
+    def test_complete_native_prompt_remains_query_when_transcript_window_unbound(self):
+        self.add("USER_INPUT", "a different transcript request")
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke(lastUserInput="native sqlite outbox request")
+        self.assertEqual(self.input_metadata()["public_window"]["reason"], "transcript_native_prompt_mismatch")
+        self.assertEqual(context.call_args.kwargs["query"], "native sqlite outbox request")
+        self.assertIs(context.call_args.kwargs["_query_available"], True)
+
+    def test_complete_transcript_prompt_supplies_context_query(self):
+        self.add("USER_INPUT", "current sqlite outbox request")
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke()
+        self.assertEqual(context.call_args.kwargs["query"], "current sqlite outbox request")
+        self.assertIs(context.call_args.kwargs["_query_available"], True)
+
+    def test_real_fault_query_has_priority_when_public_prompt_missing_or_partial(self):
+        for number, partial in enumerate((False, True)):
+            with self.subTest(partial=partial):
+                if partial:
+                    self.add("USER_INPUT", "继续", truncated_fields=["content"])
+                self.r.db.execute("INSERT INTO antigravity_faults VALUES(?,?,?,?,?,'pending',?)",
+                    (self.p, self.c, "controlled-fault-" + str(number), self.r.session_epoch(),
+                     "sqlite database is locked", 1.0))
+                with patch.object(self.r, "_context", return_value="") as context:
+                    self.invoke(number)
+                self.assertEqual(context.call_args.kwargs["query"], "sqlite database is locked")
+                self.assertIs(context.call_args.kwargs["_query_available"], True)
+                coverage = self.input_metadata()["capture_coverage"]["lastUserInput"]
+                self.assertTrue(coverage["truncated"] if partial else not coverage["available"])
+
+    def test_bounded_native_prompt_is_retained_without_context_query(self):
+        from agent_learning.antigravity import PUBLIC_TEXT_MAX_CHARS
+
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke(lastUserInput="continue sqlite outbox " * PUBLIC_TEXT_MAX_CHARS)
+        self.assertEqual(context.call_args.kwargs["query"], "")
+        self.assertIs(context.call_args.kwargs["_query_available"], False)
+        payload = json.loads(self.events("UserPromptSubmit")[0]["payload"])
+        self.assertTrue(payload["capture_coverage"]["lastUserInput"]["truncated"])
+        self.assertLessEqual(len(payload["prompt"]), PUBLIC_TEXT_MAX_CHARS)
+
+    def test_unassociated_native_prompt_does_not_keep_query_available(self):
+        other = self.root / "other-workspace"
+        other.mkdir()
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke(lastUserInput="native public request",
+                        workspacePaths=[str(self.workspace), str(other)])
+        self.assertEqual(context.call_args.kwargs["query"], "")
+        self.assertIs(context.call_args.kwargs["_query_available"], False)
+        self.r.db.execute("UPDATE antigravity_trajectories SET ambiguous=1 WHERE project=? AND conversation=?",
+                          (self.p, self.c))
+        with patch.object(self.r, "_context", return_value="") as context:
+            self.invoke(1, lastUserInput="native public request")
+        self.assertEqual(context.call_args.kwargs["query"], "")
+        self.assertIs(context.call_args.kwargs["_query_available"], False)
+
+
+class AntigravityFullTranscriptTests(AntigravityTranscriptTests):
+    """The same public-field, identity, budget and replay contract applies to full JSONL."""
+
+    TRANSCRIPT_FILENAME = "transcript_full.jsonl"
 
 
 if __name__ == "__main__":

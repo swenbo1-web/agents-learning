@@ -965,7 +965,8 @@ class WorkMemoryMixin:
 
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
-                           context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False):
+                           context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False,
+                           allow_unfocused_history=True):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
@@ -1007,18 +1008,12 @@ class WorkMemoryMixin:
                 rows.extend(self._work_search_rows(project, query[:8000],
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
                     exclude_event_id=exclude_event_id, automatic=True))
-            if not links and not handoff_only:
-                # 空查询先查当前会话；新会话可读取同checkout的公开交接索引。
+            if not links and not handoff_only and (query.strip() or allow_unfocused_history):
+                # 缺少当前请求时不猜历史焦点。空查询只恢复本会话；跨会话
+                # 资料必须通过实际问题召回或明确文件关联，不能仅按新近程度。
                 rows = self._work_search_rows(project, query, limit=limit,
                     conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state,
                     exclude_event_id=exclude_event_id, automatic=bool(query.strip()))
-                if not rows and not query.strip() and not agent_id and workspace:
-                    rows = self.db.execute("SELECT * FROM work_memories WHERE project=? AND workspace_key=? "
-                        "AND agent IS NULL AND conversation!=? "
-                        "AND json_extract(body,'$.type') IN ('public_summary','user_request','user_correction','work_summary') "
-                        "AND COALESCE(json_extract(body,'$.completion'),'complete')='complete' "
-                        "ORDER BY created DESC,id DESC LIMIT ?",
-                        (project, checkout_key(workspace), conversation, limit * 4)).fetchall()
             # A query that cannot represent every identity is not a blank query.
             # Its compact-only lane never infers files or falls back to other
             # conversations. Reserve one healthy current-task handoff so ordinary

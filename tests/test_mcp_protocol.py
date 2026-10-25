@@ -142,6 +142,30 @@ class MCPProtocolTests(unittest.TestCase):
         self.assertEqual(self.data(self.tool(admin, "problem_list")), [])
         self.assertEqual(self.tool(admin, "publish")["error"]["code"], -32602)
 
+    def test_status_summary_schema_and_full_compatibility_across_protocols(self):
+        from tests.test_status_output import fixture
+        from agent_learning.status_output import MAX_MODEL_CHARS
+        full = fixture()
+        for protocol in Server.SUPPORTED_VERSIONS:
+            with self.subTest(protocol=protocol), patch.object(self.runtime, "status", return_value=full):
+                server = self.ready(version=protocol)
+                self.assertIs(server.call("learning_status", {}), full)
+                self.assertIs(server.call("learning_status", {"view": "full"}), full)
+                listing = self.request(server, "tools/list")["result"]["tools"]
+                contract = next(t["inputSchema"] for t in listing if t["name"] == "learning_status")
+                self.assertEqual(contract["properties"]["view"]["enum"], ["summary", "full"])
+                result = self.tool(server, "learning_status", {"view": "summary"})["result"]
+                self.assertFalse(result["isError"])
+                self.assertEqual(json.loads(result["content"][0]["text"])["view"], "summary")
+                self.assertNotIn("structuredContent", result)
+                self.assertLessEqual(len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))), MAX_MODEL_CHARS)
+                complete = self.tool(server, "learning_status")["result"]
+                self.assertEqual(json.loads(complete["content"][0]["text"]), full)
+                if protocol in {"2025-06-18", "2025-11-25"}:
+                    self.assertEqual(complete["structuredContent"], full)
+                for invalid in ("unknown", None, True, 1, []):
+                    self.assertTrue(self.tool(server, "learning_status", {"view": invalid})["result"]["isError"])
+
     def test_unbound_context_returns_only_project_and_requires_handle_for_writes(self):
         self.bind("another-session")
         server = self.ready()

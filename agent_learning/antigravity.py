@@ -841,11 +841,19 @@ class AntigravityAdapter:
             access = r.register_context(project, conversation, expected_epoch=epoch, _phase_guard=phase_guard)
             fault = r.db.execute("SELECT signature,query FROM antigravity_faults WHERE project=? AND conversation=? AND host_epoch=? AND state='pending' "
                                  "ORDER BY created LIMIT 1", (project, conversation, epoch)).fetchone()
+            public_input = observed["capture_coverage"].get("lastUserInput", {})
+            complete_input = (public_input.get("available") is True
+                              and public_input.get("truncated") is False
+                              and public_input.get("full_original_available") is True)
+            # A missing/partial public prompt is still recorded with coverage,
+            # but cannot become a new query or inherit an old continuation.
+            query = fault["query"] if fault and fault["query"].strip() else (
+                observed.get("lastUserInput", "") if complete_input else "")
             outcome = {}
             text = r._context(project, conversation,
-                              query=fault["query"] if fault else observed.get("lastUserInput", ""), context_handle=access["context_handle"],
+                              query=query, context_handle=access["context_handle"],
                               expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard, _outcome=outcome,
-                              workspace=str(self.workspace), raw=raw)
+                              workspace=str(self.workspace), raw=raw, _query_available=bool(query.strip()))
             if fault:
                 with r.transaction():
                     phase_guard()

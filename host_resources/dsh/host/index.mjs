@@ -389,10 +389,10 @@ const WORKER_TOOL_SPECS = [
   },
   {
     name: "learning_status",
-    description: "查看本项目记录、工作历史索引和待治理状态。",
+    description: "查看本项目状态；调试用view=summary的有界摘要，省略view或full保留完整状态。",
     parameters: {
       type: "object",
-      properties: {},
+      properties: { view: { type: "string", enum: ["summary", "full"] } },
       additionalProperties: false,
     },
     readOnly: true,

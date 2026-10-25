@@ -17,6 +17,7 @@ MAX_SCAN_BYTES = 1024 * 1024
 MAX_LINE_BYTES = 256 * 1024
 MAX_RECORDS = 1024
 READ_SECONDS = .15
+_TRANSCRIPT_FILENAMES = ("transcript.jsonl", "transcript_full.jsonl")
 
 
 def _hash(value):
@@ -40,8 +41,12 @@ def _regular_path(raw):
             return None, "transcript_path_invalid"
         if root.name != native or root.parent.name != "brain":
             return None, "transcript_conversation_mismatch"
-        expected = root / ".system_generated" / "logs" / "transcript.jsonl"
-        if os.path.normcase(str(path)) != os.path.normcase(str(expected)):
+        # App 2.23 supplies its full JSONL path; other supported surfaces use
+        # the compact name. Read only the explicitly supplied native path,
+        # never discover or fall back to a sibling transcript.
+        logs = root / ".system_generated" / "logs"
+        expected = {os.path.normcase(str(logs / name)) for name in _TRANSCRIPT_FILENAMES}
+        if os.path.normcase(str(path)) not in expected:
             return None, "transcript_path_invalid"
         # Reject reparse points before resolving: a matching spelling must not
         # redirect a public-file read to another conversation or arbitrary file.
