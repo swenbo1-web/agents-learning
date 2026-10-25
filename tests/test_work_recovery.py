@@ -28,7 +28,7 @@ class WorkRecoveryTests(unittest.TestCase):
         return self.r.handle_hook(dict(hook_event_name="UserPromptSubmit", session_id="chat",
             cwd=str(self.workspace), turn_id="stable-turn", prompt="compiler boundary", **fields))
 
-    def fail(self, **fields):
+    def capture_failure(self, **fields):
         with patch.object(self.r, "_work_index", side_effect=sqlite3.OperationalError("synthetic interruption")):
             self.hook(**fields)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
@@ -42,7 +42,7 @@ class WorkRecoveryTests(unittest.TestCase):
             self.r.db.execute("UPDATE work_capture_pending SET next_try=0")
 
     def test_exact_event_replay_repairs_once_after_restart(self):
-        job = self.fail()
+        job = self.capture_failure()
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_event_checkouts").fetchone()[0], 1)
         self.r.close()
         self.r = Runtime(self.home, config={})
@@ -55,7 +55,7 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertEqual(self.r.db.execute("SELECT event_id FROM work_memories").fetchone()[0], job["event_id"])
 
     def test_retry_is_bounded_and_backoff_prevents_hot_loop(self):
-        job = self.fail()
+        job = self.capture_failure()
         with patch.object(self.r, "_work_capture_event", side_effect=AssertionError("must not retry before due")):
             self.hook()
         self.due()
@@ -66,7 +66,7 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertGreater(updated["next_try"], 0)
 
     def test_disabled_capture_keeps_pending_without_replaying(self):
-        self.fail()
+        self.capture_failure()
         self.due()
         self.r.config["work_memory"]["enabled"] = False
         with patch.object(self.r, "_work_capture_event", side_effect=AssertionError("capture disabled")):
@@ -74,7 +74,7 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 1)
 
     def test_source_digest_change_keeps_original_pending_and_no_projection(self):
-        self.fail()
+        self.capture_failure()
         self.due()
         with self.r.transaction():
             self.r.db.execute("UPDATE events SET capture_digest='changed'")
@@ -246,7 +246,7 @@ class WorkRecoveryTests(unittest.TestCase):
 
     def test_restore_distinguishes_disabled_pending_existing_and_empty_public_events(self):
         from agent_learning.work_recovery import restore
-        job = self.fail()
+        job = self.capture_failure()
         capture = job["capture"]
         self.r.config["work_memory"]["enabled"] = False
         with patch.object(self.r, "_work_capture_event", side_effect=AssertionError("Disabled capture must stay private")):
@@ -352,8 +352,8 @@ class WorkRecoveryTests(unittest.TestCase):
 
     def test_original_workspace_rejects_changed_pending_identity_without_falling_back(self):
         from agent_learning.work_recovery import original_workspace
-        job = self.fail()
-        self.assertEqual(original_workspace(self.r, self.p, job["event_id"]), str(self.workspace))
+        job = self.capture_failure()
+        self.assertEqual(original_workspace(self.r, self.p, job["event_id"]), str(self.workspace.resolve()))
         with self.r.transaction():
             self.r.db.execute("UPDATE work_capture_pending SET capture_digest='changed-source'")
         self.assertIsNone(original_workspace(self.r, self.p, job["event_id"]))
