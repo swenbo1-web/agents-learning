@@ -119,23 +119,19 @@ def resolve_command(command, *, _windows=None):
     windows = os.name == "nt" if _windows is None else _windows
     standard_agy = windows and len(command) == 1 and command[0].lower() in {"agy", "agy.exe"}
     executable_source = "configured_or_path"
-    # A desktop may ship a newer backend than the independently installed CLI.
-    # The default name and our exact HTTP preset inherit this host-owned hint. Explicit paths
-    # and custom launchers remain authoritative; project evidence is never read.
-    host_cli = os.environ.get("CODEX_CLI_PATH") if ((len(command) == 1 or _codex_http_command(command)) and not candidate.is_absolute()
-                and command[0].lower() in {"codex", "codex.exe"}) else None
-    if host_cli:
-        hinted = Path(host_cli)
-        if not hinted.is_absolute() or hinted.name.lower() not in {"codex", "codex.exe"} or not hinted.is_file():
-            exc = FileNotFoundError("host Codex executable unavailable")
-            exc.launch_reason = "host_cli_unavailable"
-            raise exc
-        executable = str(hinted)
-        executable_source = "host_cli"
-    elif standard_agy:
-        executable, executable_source = _windows_agy(command)
-    else:
-        executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
+    # Standard Codex launches follow the running desktop backend. Explicit paths
+    # and custom arguments remain authoritative; no project evidence is consulted.
+    executable = None
+    if ((len(command) == 1 or _codex_http_command(command)) and not candidate.is_absolute()
+            and command[0].lower() in {"codex", "codex.exe"}):
+        from .host_cli import codex_host_launcher
+        executable, source = codex_host_launcher(windows=windows)
+        executable_source = source or executable_source
+    if executable is None:
+        if standard_agy:
+            executable, executable_source = _windows_agy(command)
+        else:
+            executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
     if not executable:
         raise FileNotFoundError("administrator executable unavailable")
     executable = Path(executable).resolve()
@@ -268,16 +264,20 @@ def executor_capability(plan):
             # Do not expose an inherited DSH snapshot to another executable.
             probe_environment.pop("ALP_DSH_REVIEW_PROFILE", None)
             result = subprocess.run(resolved + (["--probe"] if sdk else ["exec", "--help"] if provider == "codex" else ["--help"]),
-                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL, timeout=8 if sdk else 3,
+                # Standard CLIs may print help to either stream (agy uses stderr).
+                # SDK probes must keep stdout JSON separate from diagnostics.
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL if sdk else subprocess.STDOUT,
+                timeout=8 if sdk else 3,
                 env=probe_environment,
                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
             output.seek(0)
-            text = output.read(65537).decode("utf-8", errors="replace")
+            raw_output = output.read(65537)
+            text = raw_output.decode("utf-8", errors="replace")
         if sdk:
-            value = json.loads(text) if len(text) <= 65536 else {}
+            value = json.loads(text) if len(raw_output) <= 65536 else {}
             good = result.returncode == 0 and isinstance(value, dict) and value.get("protocol") == "alp-dsh-sdk-v1" and value.get("ready") is True
         else:
-            good = result.returncode == 0 and len(text) <= 65536 and all(flag in text for flag in required)
+            good = result.returncode == 0 and len(raw_output) <= 65536 and all(flag in text for flag in required)
         answer = {"ready": good, "reason": None if good else "dsh_sdk_unavailable" if sdk else "cli_protocol_unsupported", "checked": "sdk" if sdk else "help"}
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         answer = {"ready": False, "reason": "cli_help_timeout" if isinstance(exc, subprocess.TimeoutExpired)

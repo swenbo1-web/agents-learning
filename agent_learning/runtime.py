@@ -1344,6 +1344,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         options = {"start_new_session": True} if os.name != "nt" else {
             "creationflags": subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS}
         env = dict(os.environ, ALP_HOME=str(self.home), ALP_DISABLED="1")
+        if self.host == "codex" and command in {"admin-drain", "scheduler-run"}:
+            from .host_cli import codex_background_environment
+            env = codex_background_environment(env)
         root = Path(__file__).resolve().parents[1]
         env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
         entry = root / "scripts/learning.py"
