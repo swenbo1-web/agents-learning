@@ -59,20 +59,17 @@ def recovery_status(runtime, project, *, include_history=True):
         try:
             usage = json.loads(row["usage"] or "{}")
             execution = usage.get("execution") or {}
-            from .admin_diagnostics import safe_diagnostic
-            diagnostic = safe_diagnostic(execution.get("provider_diagnostic")) if isinstance(execution, dict) else None
-            diagnostic = diagnostic or safe_diagnostic(usage.get("provider_diagnostic"))
         except (ValueError, TypeError, AttributeError):
-            usage, execution, diagnostic = {}, {}, None
+            usage, execution = {}, {}
         from .admin_response_store import status as response_status
+        from .admin_observations import execution_observations, review_failure_reason
         saved_response = response_status(runtime, project, row["id"])
         calls.append({"id": row["id"], "version": _version(row), "state": row["state"],
             "saved_response": saved_response,
+            "execution_observations": execution_observations(usage),
             "created": row["created"], "reported_turns": usage.get("reported_turns"),
             "usage_known": bool(usage.get("token_totals")),
-            "reason": diagnostic["reason_code"] if diagnostic else (
-                "reviewer_process_failed" if isinstance(execution, dict) and type(execution.get("returncode")) is int
-                and execution["returncode"] != 0 else "historical_failure_details_unavailable"),
+            "reason": review_failure_reason(usage),
             "can_retry": row["state"] in RETRYABLE_STATES})
     history = []
     if include_history:

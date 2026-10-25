@@ -233,7 +233,6 @@ class PanelControl:
         from .release import PROTOCOL_VERSION
         from .install import _hook_commands
         from .install_update import inspect_installation
-        from .admin_diagnostics import safe_diagnostic
         from .installation_maintenance import panel_backup_preview
 
         installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
@@ -265,14 +264,14 @@ class PanelControl:
         latest = self.runtime.db.execute("SELECT c.usage FROM admin_calls c JOIN admin_execution_plans p ON p.call_id=c.id "
             "WHERE c.project=? AND p.host_scope=? AND c.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
             "ORDER BY c.created DESC LIMIT 1", (self.project, self.runtime._session_scope())).fetchone()
-        failure = None
+        from .admin_observations import execution_observations, provider_failure_diagnostic
+        failure, latest_execution = None, execution_observations(None)
         if latest and isinstance(latest[0], str) and len(latest[0]) <= 65536:
             try:
                 observed = json.loads(latest[0])
                 if isinstance(observed, dict):
-                    execution = observed.get("execution") or {}
-                    failure = safe_diagnostic(execution.get("provider_diagnostic")) if isinstance(execution, dict) else None
-                    failure = failure or safe_diagnostic(observed.get("provider_diagnostic"))
+                    latest_execution = execution_observations(observed)
+                    failure = provider_failure_diagnostic(observed)
             except (ValueError, TypeError):
                 pass
         return {"version": 1, "backups": panel_backup_preview(self.installation),
@@ -295,7 +294,7 @@ class PanelControl:
                     "failure_reason": code(dispatch.get("failure_reason")), "next_due": number(dispatch.get("next_due")),
                     "blocking_scope": admission.get("blocking_scope") if admission.get("blocking_scope") in {"project", "ALP_HOME"} else None,
                     "project_usage": usage(state.get("project_usage")), "global_usage": usage(state.get("global_usage")),
-                    "last_provider_failure": failure}}
+                    "last_provider_failure": failure, "last_execution_observations": latest_execution}}
 
     @staticmethod
     def _ui_session(value):

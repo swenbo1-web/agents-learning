@@ -170,16 +170,19 @@ def _fingerprint(packet):
 
 def _usage(log_path, elapsed):
     """有界流式累计全部可读报告；预览裁剪不丢累计，缺失不写成零。"""
-    from .admin_diagnostics import codex_failure
+    from .admin_diagnostics import codex_failure, codex_text_failure, merge_codex_diagnostic
     records, totals, seen = [], {}, {}
     failure_diagnostic = None
     pending, failed = set(), set()
     anonymous_pending, anonymous_failed, started_turns = 0, 0, 0
+    protocol_states, anonymous_states = {}, []
+    protocol_conflicted, protocol_incomplete = False, False
     truncated, incomplete, count, scanned = False, False, 0, 0
     if log_path is None:
         return {"elapsed_seconds": round(elapsed, 3), "token_usage": [], "token_totals": {},
                 "completeness": "unknown", "log_tail_truncated": False, "preview_truncated": False,
-                "reported_turns": 0}
+                "reported_turns": 0, "observations": {
+                    "protocol_terminal_observed": False, "protocol_terminal_status": "unknown"}}
     try:
         with log_path.open("rb") as stream:
             while True:
@@ -205,15 +208,29 @@ def _usage(log_path, elapsed):
                     event = json.loads(line)
                 except (UnicodeError, ValueError):
                     incomplete |= line.lstrip().startswith(b"{")
+                    protocol_incomplete |= line.lstrip().startswith(b"{")
+                    failure_diagnostic = merge_codex_diagnostic(failure_diagnostic, codex_text_failure(line))
                     continue
                 if not isinstance(event, dict):
                     continue
                 kind = event.get("type")
+                kind = kind if isinstance(kind, str) else None
                 observed_failure = codex_failure(event)
-                if observed_failure and (failure_diagnostic is None or observed_failure["reason_code"] != "model_request_failed"):
-                    failure_diagnostic = observed_failure
+                failure_diagnostic = merge_codex_diagnostic(failure_diagnostic, observed_failure)
                 identity = event.get("turn_id", event.get("id"))
                 identity = identity if isinstance(identity, str) and identity else None
+                terminal_status = {"turn.completed": "completed", "turn.failed": "failed",
+                                   "turn.cancelled": "cancelled", "turn.canceled": "cancelled"}.get(kind)
+                if terminal_status:
+                    if identity is not None:
+                        previous = protocol_states.get(identity)
+                        protocol_conflicted |= previous is not None and previous != terminal_status
+                        protocol_states[identity] = terminal_status
+                    else:
+                        # Anonymous repeats cannot establish replay identity. A new
+                        # observed start is needed to distinguish another turn.
+                        protocol_conflicted |= bool(anonymous_states) and anonymous_pending == 0
+                        anonymous_states.append(terminal_status)
                 if kind == "turn.started":
                     if identity is None:
                         anonymous_pending += 1
@@ -252,6 +269,7 @@ def _usage(log_path, elapsed):
                     if identity in seen:
                         if seen[identity] != numeric:
                             incomplete = True
+                            protocol_conflicted = True
                             # 冲突报告保留已观察最大值；不重复累加同一turn。
                             old = seen[identity]
                             for key, value in numeric.items():
@@ -272,7 +290,12 @@ def _usage(log_path, elapsed):
     except OSError:
         truncated = True
     unreported_turns = len(pending) + len(failed) + anonymous_pending + anonymous_failed
-    incomplete |= unreported_turns > 0
+    incomplete |= unreported_turns > 0 or protocol_conflicted
+    states = set(protocol_states.values()) | set(anonymous_states)
+    protocol_status = ("conflicted" if protocol_conflicted else "unknown"
+                       if truncated or protocol_incomplete or pending or anonymous_pending else
+                       "failed" if "failed" in states else "cancelled" if "cancelled" in states else
+                       "completed" if "completed" in states else "unknown")
     if failure_diagnostic:
         failure_diagnostic["usage_observed"] = bool(totals)
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": records, "token_totals": totals,
@@ -280,25 +303,42 @@ def _usage(log_path, elapsed):
             "started_turns": started_turns, "unreported_turns": unreported_turns,
             "completeness": "complete" if count and not truncated and not incomplete else "partial" if totals else "unknown",
             "log_tail_truncated": truncated,
+            "observations": {"protocol_terminal_observed": bool(states),
+                             "protocol_terminal_status": protocol_status},
             **({"provider_diagnostic": failure_diagnostic} if failure_diagnostic else {})}
 
 
-def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *, execution=None):
-    from .admin_lifecycle import UNKNOWN_STATES, finish_call
+def _observe_usage(log_path, started_at, provider_plan=None):
     from .admin_providers import antigravity_usage
     elapsed = time.monotonic() - started_at
     stream_provider = provider_plan["provider"] if provider_plan and provider_plan.get("provider") in {"antigravity", "dsh"} else None
-    usage = (antigravity_usage(log_path, elapsed, provider=stream_provider) if stream_provider
-             else _usage(log_path, elapsed))
+    return (antigravity_usage(log_path, elapsed, provider=stream_provider) if stream_provider
+            else _usage(log_path, elapsed))
+
+
+def _execution_observations(execution, usage):
+    result = dict(execution)
+    for key in ("protocol_terminal_observed", "protocol_terminal_status"):
+        if key in usage.get("observations", {}):
+            result[key] = usage["observations"][key]
+    diagnostic = usage.get("provider_diagnostic") or usage.get("observations", {}).get("provider_diagnostic")
+    if diagnostic:
+        result.setdefault("provider_diagnostic", diagnostic)
+    return result
+
+
+def _finish(runtime, call_id, state, log_path, started_at, provider_plan=None, *, execution=None, observed_usage=None):
+    from .admin_lifecycle import UNKNOWN_STATES, finish_call
+    usage = (copy.deepcopy(observed_usage) if observed_usage is not None else
+             _observe_usage(log_path, started_at, provider_plan))
+    usage["elapsed_seconds"] = round(time.monotonic() - started_at, 3)
     if provider_plan:
         usage["executor"] = {key: provider_plan.get(key) for key in
                              ("provider", "model", "model_source", "model_mode", "host", "host_scope", "policy_version", "executor_signature")}
-    if execution is not None:
+    if execution is not None or usage.get("observations"):
         # Only adapter-owned scalar observations survive temporary log cleanup.
         # Input submission does not establish model receipt or paid inference.
-        usage["execution"] = dict(execution)
-        if usage.get("provider_diagnostic"):
-            usage["execution"].setdefault("provider_diagnostic", usage["provider_diagnostic"])
+        usage["execution"] = _execution_observations(execution or {}, usage)
     summary = runtime.db.execute("SELECT source_digest FROM work_summary_links WHERE call_id=?", (call_id,)).fetchone()
     if summary:
         usage.update(purpose="work_summary", work_source_digest=summary["source_digest"])
@@ -835,14 +875,15 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
     provider_plan = reserved["provider_plan"]
     context = {"scanned_count": reserved["scanned_count"],
                **({"skipped_problem_ids": reserved["skipped_problem_ids"]} if reserved["skipped_problem_ids"] else {})}
-    log_path, temporary, output_thread, output_state = None, None, None, None
+    log_path, temporary, output_thread, output_state, observed_usage = None, None, None, None, None
     execution_state = {"phase": "capability", "input_submission_attempted": False,
-                       "terminal_observed": False}
+                       "terminal_observed": False, "response_collected": False}
     try:
         capability = executor_capability(provider_plan)
         if not capability["ready"]:
             record_executor_failure(runtime, project, provider_plan, capability["reason"])
-            usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan)
+            usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan,
+                            execution=execution_state)
             return {"status": "not_started", "reason": capability["reason"], "call_id": call_id, "usage": usage, **context}
         execution_state["phase"] = "build_execution"
         temporary = tempfile.TemporaryDirectory(prefix="agent-learning-review-")
@@ -867,7 +908,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             except (OSError, ValueError) as exc:
                 detail = launch_error(exc)
                 record_executor_failure(runtime, project, provider_plan, detail["reason"], detail)
-                usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan)
+                usage = _finish(runtime, call_id, "not_started", None, started_at, provider_plan,
+                                execution=execution_state)
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **detail, **context}
             args = resolved["args"] + execution["args"][len(provider_plan["command"]):]
         env = dict(os.environ, ALP_DISABLED="1", ALP_HOME=str(runtime.home))
@@ -883,7 +925,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                     if reserved.get("summary_context"):
                         runtime.work_summary_guard(project, reserved["packet"]["problem"]["id"])
                     if _history_job_id is None and not runtime.admin_effective_config(project)["enabled"]:
-                        usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
+                        usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan,
+                                        execution=execution_state)
                         return {"status": "disabled", "call_id": call_id, "usage": usage, **context}
                     mark_launch_intent(runtime, call_id, reserved["owner"], reserved["host_epoch"])
             if _history_job_id is not None:
@@ -904,7 +947,8 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                                            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
             except OSError as exc:
                 # Popen明确失败才释放未启动额度；崩溃窗口由持久intent按未知恢复。
-                usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan)
+                usage = _finish(runtime, call_id, "not_started", log_path, started_at, provider_plan,
+                                execution=execution_state)
                 detail = launch_error(exc)
                 record_executor_failure(runtime, project, provider_plan, detail["reason"], detail)
                 return {"status": "not_started", "call_id": call_id, "usage": usage, **detail, **context}
@@ -936,9 +980,13 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 execution_state["reason_code"] = "executor_timeout"
                 if output_state is not None:
                     execution_state["terminal_observed"] = bool(output_state.get("terminal"))
+                if isinstance(process.returncode, int) and not isinstance(process.returncode, bool):
+                    execution_state["returncode"] = process.returncode
+                observed_usage = _observe_usage(log_path, started_at, provider_plan)
+                execution_state = _execution_observations(execution_state, observed_usage)
                 record_executor_failure(runtime, project, provider_plan, "executor_timeout", execution_state)
                 usage = _finish(runtime, call_id, "timeout_unknown", log_path, started_at, provider_plan,
-                                execution=execution_state)
+                                execution=execution_state, observed_usage=observed_usage)
                 return {"status": runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0],
                         "call_id": call_id, "usage": usage, **context}
             if output_thread:
@@ -947,6 +995,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
                 execution_state["terminal_observed"] = bool(output_state.get("terminal"))
                 if output_thread.is_alive() or output_state["error"]:
                     raise ContractError("administrator output could not be collected completely")
+        observed_usage = _observe_usage(log_path, started_at, provider_plan)
         execution_state["phase"] = "process_exit"
         if isinstance(process.returncode, int) and not isinstance(process.returncode, bool):
             execution_state["returncode"] = process.returncode
@@ -954,6 +1003,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             raise ContractError("administrator produced no usable response")
         execution_state["phase"] = "response_validation"
         response = read_response(provider_plan["provider"], output, log_path)
+        execution_state["response_collected"] = True
         reserved["terminal_observation"] = {"version": 1, "returncode": 0,
             "bounded_public_response_collected": True, "response_digest": digest(clean(response)),
             "provider": provider_plan["provider"]}
@@ -965,7 +1015,7 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
         with runtime.transaction():
             result = _accept_response(runtime, project, reserved, response)
             result["usage"] = _finish(runtime, call_id, response["decision"], log_path, started_at, provider_plan,
-                                      execution=execution_state)
+                                      execution=execution_state, observed_usage=observed_usage)
             actual = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
             if actual != response["decision"]:
                 # 同一事务回滚候选、治理提议、回执和错误终态；异常路径补真实未知结果。
@@ -992,20 +1042,27 @@ def admin_once(runtime, project, problem_id=None, *, expected_epoch=None, _deadl
             execution_state["terminal_observed"] = bool(output_state.get("terminal"))
         if process is not None and isinstance(process.returncode, int) and not isinstance(process.returncode, bool):
             execution_state["returncode"] = process.returncode
+        if observed_usage is None:
+            observed_usage = _observe_usage(log_path, started_at, provider_plan)
+        execution_state = _execution_observations(execution_state, observed_usage)
         if isinstance(exc, ReviewStateChanged):
             execution_state["reason_code"] = "review_context_changed"
         else:
             from .admin_diagnostics import safe_diagnostic, configuration_failure
-            diagnostic = safe_diagnostic(output_state.get("diagnostic")) if output_state is not None else None
+            diagnostic = safe_diagnostic(execution_state.get("provider_diagnostic"))
+            if diagnostic is None and output_state is not None:
+                diagnostic = safe_diagnostic(output_state.get("diagnostic"))
             failure_reason = execution_state["reason_code"]
-            if diagnostic:
+            # A retryable intermediate provider error can precede a valid
+            # response. It remains an observation, not a later local rejection.
+            if diagnostic and execution_state["phase"] not in {"response_validation", "decision_commit"}:
                 execution_state["provider_diagnostic"] = diagnostic
                 execution_state["reason_code"] = diagnostic["reason_code"]
                 failure_reason = ("configuration_change_required" if configuration_failure(diagnostic)
                                   else diagnostic["reason_code"])
             record_executor_failure(runtime, project, provider_plan, failure_reason, execution_state)
         usage = _finish(runtime, call_id, "not_started" if process is None else "failed", log_path, started_at, provider_plan,
-                        execution=execution_state)
+                        execution=execution_state, observed_usage=observed_usage)
         state = runtime.db.execute("SELECT state FROM admin_calls WHERE id=?", (call_id,)).fetchone()[0]
         return {"status": state, "error_type": type(exc).__name__, "call_id": call_id, "usage": usage, **context}
     finally:

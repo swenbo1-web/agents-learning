@@ -429,14 +429,16 @@ def claim_dispatch_worker(runtime, project, token, seconds):
 
 def record_dispatch_diagnostic(runtime, project, reason, details=None, *, host_scope=None):
     from .runtime import encode
+    from .admin_observations import TERMINAL_STATUSES
     # details must be fixed fields; never persist CLI stderr/exception messages.
     numeric = {"errno", "winerror", "returncode", "failures", "next_try"}
     labels = {"error_type", "phase", "reason_code"}
-    flags = {"input_submission_attempted", "terminal_observed"}
+    flags = {"input_submission_attempted", "terminal_observed", "protocol_terminal_observed", "response_collected"}
     details = {key: value for key, value in (details or {}).items()
                if (key in numeric and type(value) in {int, float})
                or (key in labels and isinstance(value, str) and len(value) <= 80 and value.isidentifier())
-               or (key in flags and type(value) is bool)}
+               or (key in flags and type(value) is bool)
+               or (key == "protocol_terminal_status" and isinstance(value, str) and value in TERMINAL_STATUSES)}
     runtime.db.execute("INSERT INTO admin_dispatch_diagnostics VALUES(?,?,?,?,?) ON CONFLICT(project,host_scope) "
                        "DO UPDATE SET reason=excluded.reason,details=excluded.details,updated=excluded.updated",
                        (project, host_scope or runtime._session_scope(), reason, encode(details), time.time()))

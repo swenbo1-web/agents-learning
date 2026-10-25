@@ -7,6 +7,30 @@ import sqlite3
 import time
 
 
+_CONTINUATION_ACKS = {
+    "继续", "好的", "可以", "接着", "继续吧", "好", "确认", "确定", "同意",
+    "continue", "go on", "ok", "yes", "confirm", "confirmed",
+}
+_ZH_ACTION = r"(?:确认修复|验证|检查|测试|核对|确认|修复|复查|复验)"
+_ZH_CONTINUATION = re.compile(
+    r"(?:请|麻烦)?(?:继续|接着|接下来|再|先)?" + _ZH_ACTION
+    + r"(?:(?:并且|然后|并|和|及|再|、|，|,)" + _ZH_ACTION + r")*"
+    + r"(?:一下|一遍|一轮|下去)?(?:吧)?\Z")
+_EN_ACTION = (r"(?:test(?:ing)?|check(?:ing)?|verify|verifying|verification|validate|validating|validation|"
+              r"inspect(?:ing)?|fix(?:ing)?|repair(?:ing)?|confirm(?:ing)?(?: (?:the )?(?:fix|repair))?)")
+_EN_CONTINUATION = re.compile(
+    r"(?:please )?(?:(?:continue|keep|resume|go on|carry on)(?: with| to)? )?" + _EN_ACTION
+    + r"(?: (?:and(?: then)?|then) " + _EN_ACTION + r")*(?: again)?\Z")
+
+
+def _continuation_query(value):
+    """Recognize whole action-only prompts; remaining subject words start a query."""
+    value = re.sub(r"\s+", " ", value.lower()).strip("。.!！?？,，;；:： ")
+    return (not value or value in _CONTINUATION_ACKS
+            or bool(_ZH_CONTINUATION.fullmatch(value.replace(" ", "")))
+            or bool(_EN_CONTINUATION.fullmatch(value)))
+
+
 class KnowledgeContextMixin:
     def _context_state(self, project, conversation, agent_id=None):
         if agent_id:
@@ -237,23 +261,23 @@ class KnowledgeContextMixin:
                 (project, conversation, agent_id or "", *self._task_key(task)[:2],
                  *((self._task_key(task)[2],) if agent_id else ()), epoch)).fetchone()
         query = clean(query).strip()
-        def continuation_query(value):
-            return not value or value.lower().strip("。.!！ ") in {
-                "继续", "好的", "可以", "接着", "继续吧", "好", "确认", "确定", "同意",
-                "continue", "go on", "ok", "yes", "confirm", "confirmed"}
-        continuation = continuation_query(query)
+        continuation = _continuation_query(query)
         if not (tool_only or continuation or compact):
             # 新提示优先查询当前问题；旧故障保留到后续工具前置，不抢占注意力。
             fault = None
         # Older contexts may already contain an acknowledgement as last_query.
         # Recover the current task focus instead of recalling that generic word.
-        effective = (initial["last_query"] if not continuation_query(initial["last_query"]) else "") if continuation else query
+        effective = (initial["last_query"] if not _continuation_query(initial["last_query"]) else "") if continuation else query
         if compact and effective:
             # 恢复当前讨论焦点；旧故障继续排队到工具前置，不能抢占当前
             # 查询后再通过历史展示 ID 补回一批未经相关度核对的旧卡。
             fault = None
-        if not effective and task:
+        if not effective and task and not _continuation_query(task["goal"]):
             effective = task["goal"]
+        # An explicit action without a business focus cannot select unrelated
+        # recent history through the blank-query fallback. Empty startup events
+        # retain their existing recovery path; source/file notices stay separate.
+        focus_missing = bool(query) and continuation and not effective
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         effective_plan = normalized_query_plan(effective)
@@ -324,7 +348,7 @@ class KnowledgeContextMixin:
             work_query = ("" if tool_only or (self.host == "antigravity" and delivery == "ephemeral"
                                               and not query.strip()) else effective)
             try:
-                if effective_plan["automatic_safe"] or not work_query or (compact and not tool_only):
+                if not focus_missing and (effective_plan["automatic_safe"] or not work_query or (compact and not tool_only)):
                     work_items = self.work_context_items(
                         project, conversation, query=work_query, workspace=workspace, raw=raw,
                         agent_id=agent_id, limit=work_settings.get("max_items", 3),

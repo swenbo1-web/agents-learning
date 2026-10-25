@@ -620,17 +620,24 @@ def _token_values(usage):
 def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
     """终态 usage 为累计会话值，缓存输入属于输入量；step usage 不重复累加。"""
     totals, complete, terminals, truncated = {}, True, 0, False
-    terminal_turns, diagnostic = None, None
+    terminal_turns, diagnostic, terminal_status = None, None, "unknown"
+    protocol_conflicted = False
     if log_path is not None:
         try:
             for event in _events(log_path):
                 if event.get("event") == "adapter_protocol_error":
                     complete, truncated = False, True
+                    protocol_conflicted |= terminals > 0
                 if event.get("event") != "result":
                     continue
                 result = event.get("result")
                 terminals += 1
                 if isinstance(result, dict):
+                    status = result.get("status")
+                    terminal_status = {"SUCCESS": "completed", "ERROR": "failed", "CANCELLED": "cancelled",
+                                       "CANCELED": "cancelled"}.get(status, "unknown") if isinstance(status, str) else "unknown"
+                    protocol_conflicted |= result.get("status") == "SUCCESS" and bool(
+                        result.get("error") or result.get("denied_actions"))
                     turns = result.get("num_turns")
                     if type(turns) is int and turns >= 0:
                         terminal_turns = turns if terminals == 1 else None
@@ -645,7 +652,9 @@ def antigravity_usage(log_path, elapsed, *, provider="antigravity"):
     else:
         complete = False
     observations = {"terminal_observed": terminals == 1, "terminal_reported_turns": terminal_turns,
-                    "usage_observed": bool(totals)}
+                    "usage_observed": bool(totals), "protocol_terminal_observed": terminals > 0,
+                    "protocol_terminal_status": "conflicted" if terminals > 1 or protocol_conflicted else
+                    "unknown" if truncated else terminal_status}
     if diagnostic:
         observations["provider_diagnostic"] = diagnostic
     return {"elapsed_seconds": round(elapsed, 3), "token_usage": [totals] if totals else [],

@@ -82,6 +82,9 @@ recoveryCapture:['Recorded conversations: {conversations}; work observations: {m
 recoveryCaptureNote:['These totals do not verify this chat. Reload existing host conversations and check their next supported event. File imports do not include unselected chat history.','这些汇总不能证明当前聊天已接通。已有会话需重载后核对下一次受支持事件；文件归档不包含未选择的对话历史。'],
 recoveryBlocked:['Blocked review attempts','被阻塞的审核尝试'],recoveryNone:['No blocked attempts in this host','当前宿主没有被阻塞的审核尝试'],
 recoveryUnknownUsage:['Previous usage is unknown; retry may use additional platform quota.','原调用消费未知，重试可能再次使用平台额度。'],
+executionObservation:['Protocol terminal: {terminal}; review reply collected: {response}; process exit code: {exit}','协议终态：{terminal}；审核答复已收集：{response}；进程退出码：{exit}'],
+observationYes:['Yes','是'],observationNo:['No','否'],terminalNotObserved:['Not observed','未观察到'],
+terminal_completed:['Completed event','完成事件'],terminal_failed:['Failed event','失败事件'],terminal_cancelled:['Cancelled event','取消事件'],terminal_conflicted:['Conflicting terminal events','终态事件冲突'],terminal_unknown:['Unknown','未知'],
 recoveryRetry:['Allow one retry','允许一次重试'],
 recoveryRetryConfirm:['Allow this one retry? The original attempt and usage remain recorded. A later event or explicit wake can run it and use platform quota.','确认允许本案例再审一次？原调用与用量记录保留，后续事件或明确唤醒可能启动审核并使用平台额度。'],
 recoveryHistory:['Historical batches (separate approval)','历史批次（单独授权）'],
@@ -93,7 +96,18 @@ recoveryReason:['Enter a reason for this explicit recovery decision:','请填写
 recoverySaved:['Recovery permission saved. No model was started or knowledge published.','恢复权限已保存；本次未启动模型、未发布知识。'],
 historical_failure_details_unavailable:['This historical attempt has no retained structured failure detail','该历史调用未保留结构化失败详情'],
 host_cli_unavailable:['The host-provided Codex backend is unavailable; check its installation','宿主提供的 Codex 后端不可用，请检查安装'],
-model_unavailable:['The provider reported an unavailable model','提供方报告模型不可用']});
+model_unavailable:['The provider reported an unavailable model','提供方报告模型不可用'],
+model_request_failed:['The model request failed; the specific cause is unknown','模型请求失败；具体原因未知'],
+provider_quota_exceeded:['The provider reported a rate or quota limit','提供方报告频率或额度限制'],
+invalid_credential:['The provider reported an authentication failure','提供方报告认证失败'],
+invalid_response_schema:['The review output schema was rejected','审核输出格式约定被拒绝'],
+invalid_arguments:['The review launcher rejected its arguments','审核启动程序拒绝了参数']});
+function executionObservationText(value){
+ const v=value&&typeof value==='object'?value:{},flag=x=>x===true?t('observationYes'):x===false?t('observationNo'):t('unknown');
+ const status=['completed','failed','cancelled','conflicted','unknown'].includes(v.protocol_terminal_status)?v.protocol_terminal_status:'unknown';
+ const terminal=v.protocol_terminal_observed===true?t('terminal_'+status):v.protocol_terminal_observed===false?t('terminalNotObserved'):t('unknown');
+ return t('executionObservation',{terminal,response:flag(v.response_collected),exit:Number.isInteger(v.returncode)?v.returncode:t('unknown')});
+}
 function renderAdminRecovery(data){
  const root=$('admin-recovery');if(!root)return;root.replaceChildren();
  const recovery=data.recovery||{history_separate:true};
@@ -106,6 +120,7 @@ function renderAdminRecovery(data){
  if(loaded&&!recovery.blocked_reviews?.length)root.append(node('p',t('recoveryNone'),'muted'));
  for(const item of recovery.blocked_reviews||[]){
   const card=node('article',undefined,'history-item');card.append(node('strong',item.id),node('p',label(item.state)+' · '+label(item.reason)));
+  card.append(node('p',executionObservationText(item.execution_observations),'note'));
   if(!item.usage_known)card.append(node('p',t('recoveryUnknownUsage'),'note'));
   if(item.saved_response?.rejection)card.append(node('p',t('responseRejection',{code:label(item.saved_response.rejection.code),path:item.saved_response.rejection.path||'—'}),'note'));
   if(item.saved_response?.history_recovery)addHistoryResponseControl(card,item);
