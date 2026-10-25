@@ -67,6 +67,8 @@ def _read_file_check(runtime, project, memory_id, workspace):
 
 def _read_metadata_preview(result, max_chars, *, paginated=False):
     """Reserve page space by shortening previews, never identity or live checks."""
+    from .work_read_delivery import coverage_limits
+    original_limits = coverage_limits(result.get("coverage"))
     # A fixed 128-character reserve left small pages almost entirely metadata.
     # Repeated pages need only the live identity/checks, not another index card.
     target = max_chars - 128
@@ -84,7 +86,7 @@ def _read_metadata_preview(result, max_chars, *, paginated=False):
         result["file_state_omitted"] = len(result["file_state"])
         result["file_state"] = None
     if len(_json(result)) > target and result.get("coverage"):
-        result["coverage"] = {}
+        result["coverage"] = original_limits
         result["coverage_omitted"] = True
     if len(_json(result)) > target and result.get("candidate_reference_risk"):
         result["candidate_reference_risk"] = [{"blocked": True, "details_omitted": True}]
@@ -94,6 +96,8 @@ def _read_metadata_preview(result, max_chars, *, paginated=False):
                 "created", "task_binding_known", "type", "coverage"):
         if len(_json(result)) <= target:
             break
+        if key == "coverage" and original_limits:
+            continue
         if key in result:
             result.pop(key)
             result["metadata_omitted"] = True
@@ -1084,8 +1088,9 @@ class WorkMemoryMixin:
                         or recorded_workspace and checkout_key(recorded_workspace) == checkout_key(workspace)):
                     from .work_recovery import restore
                     result = restore(self, project, row["id"], workspace, reindex=True)
-                    indexed += bool(result and result.get("indexed"))
-                    reindexed += bool(result and result.get("reindexed"))
+                    if result["status"] == "completed":
+                        indexed += bool(result.get("indexed"))
+                        reindexed += bool(result.get("reindexed"))
                 else:
                     skipped += 1
             event_scanned = min(len(rows), limit)

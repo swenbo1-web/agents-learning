@@ -201,6 +201,13 @@ def seal(runtime, project, conversation, event_id):
         return
     from .phase_seal_recovery import pinned_event, complete
     event_id = pinned_event(runtime, project, row["id"], event_id)
+    capture = runtime.db.execute("SELECT workspace,capture FROM phase_seal_requests WHERE project=? AND phase_id=? "
+                                "AND event_id=?", (project, row["id"], event_id)).fetchone()
+    if capture:
+        from .work_recovery import restore
+        restored = restore(runtime, project, event_id, capture["workspace"], raw=json.loads(capture["capture"]))
+        if restored["status"] == "deferred":
+            return
     if seal_phase(runtime, project, row, event_id):
         complete(runtime, project, row["id"], event_id)
         prepare(runtime, project)
@@ -338,25 +345,35 @@ def _case_source(runtime, project, phase):
 
 
 def _scan_progress(runtime, project, phase, cfg):
-    from .runtime import digest
+    from .runtime import digest, encode
     from .review_packet import PACKET_FORMAT
     from .admin_usage import RESERVATION_ESTIMATE_VERSION
     sql, args = _case_source(runtime, project, phase)
     # Review outcomes remove eligible rows, but do not move this source version.
-    # Real evidence/context revisions and changed input settings restart a pass.
+    # Real source/context revisions and changed input settings restart a pass.
     facts = runtime.db.execute("SELECT COUNT(*),COALESCE(SUM(p.revision),0),"
         "COALESCE(SUM((SELECT revision FROM admin_case_epochs c WHERE c.project=p.project AND c.problem=p.id)),0)" + sql, args).fetchone()
     knowledge = runtime.db.execute("SELECT generation,source_epoch FROM projects WHERE id=?", (project,)).fetchone()
     candidates = runtime.db.execute("SELECT candidates FROM admin_queue_epochs WHERE project=?", (project,)).fetchone()
-    signature = digest([list(facts), list(knowledge) if knowledge else None, candidates[0] if candidates else 0,
-                        cfg["version"], runtime.admin_effective_config(project)["max_input_chars"],
-                        runtime.admin_policy(project)["policy_version"], PACKET_FORMAT, RESERVATION_ESTIMATE_VERSION])
+    signature = {"source": digest([list(facts), cfg["version"],
+        runtime.admin_effective_config(project)["max_input_chars"], runtime.admin_policy(project)["policy_version"],
+        PACKET_FORMAT, RESERVATION_ESTIMATE_VERSION]),
+        "comparison": digest([list(knowledge) if knowledge else None, candidates[0] if candidates else 0])}
     row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
-    changed = not row or row["signature"] != signature
-    if changed:
+    try:
+        previous = json.loads(row["signature"]) if row else None
+    except (ValueError, TypeError):
+        previous = None  # Legacy digest-only scan state is a disposable projection.
+    changed = previous != signature
+    source_changed = not isinstance(previous, dict) or previous.get("source") != signature["source"]
+    # Comparison changes still need a fresh pass, but only after this bounded
+    # traversal reaches its tail. Unrelated candidate/publication churn must
+    # not restart the same first page forever. Keep the old comparison marker
+    # until exhaustion so the next pass cannot forget its pending recheck.
+    if source_changed or (changed and (row["exhausted"] or not row["cursor"])):
         runtime.db.execute("INSERT INTO phase_scan_progress(phase_id,signature,cursor,deferred,exhausted) "
             "VALUES(?,?,NULL,0,0) ON CONFLICT(phase_id) "
-            "DO UPDATE SET signature=excluded.signature,cursor=NULL,deferred=0,exhausted=0", (phase["id"], signature))
+            "DO UPDATE SET signature=excluded.signature,cursor=NULL,deferred=0,exhausted=0", (phase["id"], encode(signature)))
         row = runtime.db.execute("SELECT * FROM phase_scan_progress WHERE phase_id=?", (phase["id"],)).fetchone()
     runtime.db.execute("UPDATE phase_scan_progress SET last_checked=? WHERE phase_id=?", (time.time(), phase["id"]))
     return dict(row), changed

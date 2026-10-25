@@ -160,6 +160,23 @@ class PhaseScanProgressTests(unittest.TestCase):
         row = self.r.db.execute("SELECT cursor,deferred,exhausted,last_checked FROM phase_scan_progress").fetchone()
         self.assertEqual(tuple(row), ('[1,2,"source"]', 3, 1, 0))
 
+    def test_old_digest_scan_projection_restarts_once_without_a_schema_change(self):
+        from agent_learning import phase_review
+        self.phase("old-signature")
+        phase = self.r.db.execute("SELECT * FROM review_phases LIMIT 1").fetchone()
+        cfg = policy(self.r, self.p)
+        with self.r.transaction():
+            phase_review._scan_progress(self.r, self.p, phase, cfg)
+            self.r.db.execute("UPDATE phase_scan_progress SET signature=?,cursor='[1,2,\"old\"]',deferred=3,exhausted=1",
+                              ("a" * 64,))
+            reset, changed = phase_review._scan_progress(self.r, self.p, phase, cfg)
+            self.assertTrue(changed)
+            self.assertEqual((reset["cursor"], reset["deferred"], reset["exhausted"]), (None, 0, 0))
+            self.r.db.execute("UPDATE phase_scan_progress SET cursor='[1,3,\"continued\"]'")
+            continued, changed = phase_review._scan_progress(self.r, self.p, phase, cfg)
+        self.assertFalse(changed)
+        self.assertEqual(continued["cursor"], '[1,3,"continued"]')
+
     def test_input_policy_change_releases_unpaid_batch_without_losing_members(self):
         members = self.pending_members()
         cfg = policy(self.r, self.p)
@@ -236,6 +253,62 @@ class PhaseScanProgressTests(unittest.TestCase):
         self.recover_member(identity)
         self.advance()
         self.assertTrue(self.reviewed(identity))
+
+    def add_candidate(self, number, *, related=False):
+        title = (self.r.db.execute("SELECT summary FROM problems WHERE conversation='long-stage' "
+            "AND summary LIKE '阶段公开记录：%' LIMIT 1").fetchone()[0] if related else "Quartz telescope calibration")
+        source = self.r.feedback(self.p, "candidate-source", title + " " + str(number), category="project")
+        refs = [row[0] for row in self.r.db.execute("SELECT event FROM problem_events WHERE problem=?", (source["id"],))]
+        return self.r.submit_candidate(self.p, problem_id=source["id"], problem_revision=source["revision"],
+            title=title + " " + str(number), content=title + " independent observation " + str(number),
+            category="project", knowledge_kind="fact", applicability="This project" if related else "Astronomy",
+            limitations="Reported source", validation_level="reported", evidence_refs=refs)["candidate_id"]
+
+    def test_continuous_unrelated_candidate_changes_preserve_bounded_tail_progress(self):
+        from agent_learning.phase_review import prepare
+        _, _, tail, _ = self.backlog(count=700)
+        with patch("agent_learning.admin.subprocess.Popen", fixtures.reviewer("skip")):
+            self.assertEqual(admin_once(self.r, self.p)["status"], "skip")
+        source_ids = {row[0] for row in self.r.db.execute("SELECT id FROM problems WHERE conversation='long-stage'")}
+        reached = False
+        for number in range(6):
+            self.add_candidate(number)
+            self.assertEqual(self.r.review_packet(self.p, tail["id"])["related_candidates"], [])
+            with patch.object(self.r, "review_packet", wraps=self.r.review_packet) as packets:
+                with self.r.transaction():
+                    prepare(self.r, self.p, _page_budget=1)
+            # One source page remains bounded even while a new project-wide
+            # candidate epoch arrives before every continuation.
+            self.assertLessEqual(sum(call.args[1] in source_ids for call in packets.call_args_list), 100)
+            pending = self.r.db.execute("SELECT packet FROM phase_review_batches WHERE state='pending'").fetchall()
+            reached = any(tail["id"] in {item["problem"]["id"] for item in json.loads(row[0])["items"]} for row in pending)
+            if reached:
+                break
+        self.assertTrue(reached, "Unrelated candidate churn must not keep a complete tail behind the same first page")
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 1)
+
+    def test_related_candidate_change_rechecks_previously_visited_evidence_wait_after_tail(self):
+        from agent_learning.phase_review import prepare
+        self.backlog(count=700, ready_tail=False)
+        with patch("agent_learning.admin.subprocess.Popen", fixtures.reviewer("needs_evidence")):
+            self.assertEqual(admin_once(self.r, self.p)["status"], "needs_evidence")
+        waiting = self.r.db.execute("SELECT p.* FROM phase_review_members m JOIN problems p ON p.id=m.problem_id "
+            "WHERE p.conversation='long-stage' AND m.state='needs_evidence' LIMIT 1").fetchone()
+        self.assertIsNotNone(waiting)
+        candidate = self.add_candidate(0, related=True)
+        compared = self.r.review_packet(self.p, waiting["id"])["related_candidates"]
+        self.assertIn(candidate, {item["candidate_id"] for item in compared})
+        reached = False
+        for _ in range(8):
+            with self.r.transaction():
+                prepare(self.r, self.p, _page_budget=1)
+            pending = self.r.db.execute("SELECT packet FROM phase_review_batches WHERE state='pending'").fetchall()
+            reached = any(waiting["id"] in {item["problem"]["id"] for item in json.loads(row[0])["items"]} for row in pending)
+            if reached:
+                break
+        self.assertTrue(reached, "Finishing the current pass must preserve a pending comparison recheck")
+        self.assertEqual(self.r.db.execute("SELECT revision FROM problems WHERE id=?", (waiting["id"],)).fetchone()[0], waiting["revision"])
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 1)
 
     def test_only_phase_containing_waiting_member_remains_partial(self):
         self.pending_members()

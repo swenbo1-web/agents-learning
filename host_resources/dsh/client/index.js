@@ -41,6 +41,8 @@ window.__ModuleLoader__.load({
         openedBrowser: "已在浏览器打开只读可视化知识库",
         openedReview: "已在浏览器打开知识审批与细致参数设置",
         stoppedBrowser: "已停止后台知识库服务",
+        browserNotRunning: "当前项目没有正在运行的知识库服务",
+        browserStopUnconfirmed: "停止结果待核对，请刷新状态",
         archiving: "正在扫描并归档项目历史…",
         archivedPrefix: "仅归档完成，尚未整理或发布；案例数 ",
         reusedHistory: "已复用历史批次；请打开审批查看进度并继续主审。未调用模型。",
@@ -77,6 +79,8 @@ window.__ModuleLoader__.load({
         openedBrowser: "Opened read-only knowledge browser",
         openedReview: "Opened review & advanced fine-tuning page",
         stoppedBrowser: "Stopped background browser server",
+        browserNotRunning: "No knowledge browser server is running for this project",
+        browserStopUnconfirmed: "Stop result is unconfirmed; refresh the status",
         archiving: "Scanning and archiving project history...",
         archivedPrefix: "Archived only, not reviewed or published; cases ",
         reusedHistory: "Existing history batch reused. Open review for progress; no model call.",
@@ -560,8 +564,10 @@ window.__ModuleLoader__.load({
                     disabled: busy,
                     style: btnStyle(false),
                     onClick: function () {
-                      trigger("stop_browser", t.opening, function () {
-                        return t.stoppedBrowser;
+                      trigger("stop_browser", t.opening, function (res) {
+                        if (res.running === false && res.stopped === true) return t.stoppedBrowser;
+                        if (res.running === false && res.stopped === false) return t.browserNotRunning;
+                        return t.browserStopUnconfirmed;
                       });
                     },
                   },

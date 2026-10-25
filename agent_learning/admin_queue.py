@@ -311,7 +311,7 @@ def unrouted_reason(runtime, project, query, args, fallback):
 def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
     """Hook先预留后台进程位置；实际模型额度仍由claim_call统一预留。"""
     from .admin_lifecycle import ACTIVE_STATES, recover_calls
-    from .admin_usage import admin_admission_status, budget_settings
+    from .admin_usage import admin_admission_status
     cfg = runtime.admin_effective_config(project)
     if not cfg["enabled"] or cfg["max_calls_per_day"] <= 0 and phase_scope(runtime, project) is None:
         return None
@@ -335,8 +335,7 @@ def claim_dispatch(runtime, project, *, expected_epoch=None, _phase_guard=None):
         if runtime.db.execute("SELECT 1 FROM admin_calls WHERE project=? AND state IN (" + placeholders + ")",
                               (project, *ACTIVE_STATES)).fetchone():
             return None
-        budget = admin_admission_status(runtime, project, now=now,
-            required_tokens=budget_settings(runtime)["token_reservation_per_call"])
+        budget = admin_admission_status(runtime, project, now=now)
         if budget["admission_status"] != "available":
             return None
         # 已在审核的派发与调用占同一槽，不能重复计算并发占用。

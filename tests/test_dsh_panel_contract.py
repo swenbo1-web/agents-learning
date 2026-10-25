@@ -147,6 +147,41 @@ const flush=()=>new Promise(resolve=>setTimeout(resolve,10));
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js required")
+    def test_client_reports_only_confirmed_browser_stops(self):
+        client = Path(__file__).resolve().parents[1] / "host_resources/dsh/client/index.js"
+        code = r"""
+const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
+let factory,receipt;
+const summary={ok:true,installed:true,project_id:'p',browser_running:true,panel_snapshot:{installation_id:'install-a'}};
+const response=value=>({ok:true,status:200,json:async()=>value});
+const fetch=async(_url,options)=>response(options?{ok:true,...receipt}:summary);
+const window={__ModuleLoader__:{load:item=>{factory=item.factory;}}};
+vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8').replace('exports.apply = apply;',
+ 'exports.buildControlPanel = buildControlPanel; exports.apply = apply;'),{window,fetch,navigator:{language:'en'}});
+const plugin=factory(()=>({})),states=[];let cursor=0;
+const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),
+ useState:value=>{const n=cursor++;if(!(n in states))states[n]=value;return[states[n],v=>{states[n]=v;}];},
+ useCallback:fn=>fn,useEffect(){}};
+const Panel=plugin.buildControlPanel(react,null),render=()=>{cursor=0;return Panel({initialSummary:summary,cwd:'bound',sessionId:'session'});};
+const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
+const stop=tree=>nodes(tree).find(n=>n.type==='button'&&nodes(n).some(item=>item.type==='span'&&item.children.includes('Stop Background Browser Server')));
+const flush=()=>new Promise(resolve=>setTimeout(resolve,10));
+(async()=>{
+ for(const [value,note] of [
+  [{running:false,stopped:true},'Stopped background browser server'],
+  [{running:false,stopped:false},'No knowledge browser server is running for this project'],
+  [{running:true,stopped:true},'Stop result is unconfirmed; refresh the status'],
+  [{},'Stop result is unconfirmed; refresh the status']]){
+  receipt=value;stop(render()).props.onClick();await flush();assert.equal(states[1],note);
+ }
+ console.log('ok');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run([shutil.which("node"), "-e", code, str(client)], capture_output=True,
+                                text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required")
     def test_actual_host_route_forwards_frozen_request_and_rejects_changed_installation(self):
         plugin = self.root / "bundle"
         (plugin / "host").mkdir(parents=True)
@@ -287,6 +322,90 @@ assert(browsers.every(child=>child.killed));console.log('ok');
         result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", code,
                                  str(plugin / "host/index.mjs"), str(self.workspace)], capture_output=True,
                                 text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required")
+    def test_host_route_shares_project_browsers_across_subdirectories_and_isolates_other_roots(self):
+        plugin = self.root / "root-browser-bundle"
+        host_source = Path(__file__).resolve().parents[1] / "host_resources/dsh/host"
+        shutil.copytree(host_source, plugin / "host")
+        sub = self.workspace / "src"
+        sub.mkdir()
+        other = self.root / "other-project"
+        other.mkdir()
+        nested = self.workspace / "nested-checkout"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        (plugin / "runtime-release.json").write_text(json.dumps({"workspace": str(self.workspace),
+            "workspaces": [str(self.workspace), str(other)], "runtime_directory": str(self.root / "runtime"),
+            "home": str(self.root / "home"), "python": sys.executable, "release_id": "isolated-v1"}), encoding="utf-8")
+        code = r'''
+import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+import childProcess from 'node:child_process';
+import {pathToFileURL} from 'node:url';
+const [modulePath,workspace,sub,other,nested]=process.argv.slice(1),browsers=[],checks=[];
+const project=cwd=>cwd===other?'project-b':'project-a';
+childProcess.spawn=(_exe,args)=>{
+ const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+ child.stdout.setEncoding=()=>{};child.exitCode=null;child.killed=false;let input='';
+ child.kill=()=>{child.killed=true;queueMicrotask(()=>child.emit('close',0));};
+ child.stdin={write:value=>{input+=value;},end:()=>queueMicrotask(()=>{
+  const payload=input?JSON.parse(input):{};if(payload.panel_status)checks.push(payload);
+  const identity=project(payload.workspace),valid=!payload.panel_project_id||payload.panel_project_id===identity;
+  const data=payload.panel_status?{ok:valid,result:{data:{project_id:identity,panel_snapshot:{project_id:identity,host_scope:'dsh:default',expected:{}}}}}:{};
+  child.stdout.emit('data',Buffer.from(JSON.stringify(data)));child.exitCode=0;child.emit('close',0);
+ })};
+ if(args.includes('browser')){
+  child.workspace=args[args.indexOf('--workspace')+1];child.pid=400+browsers.length;browsers.push(child);queueMicrotask(()=>{
+   const url='http://127.0.0.1:'+(12340+child.pid)+'/',review=args.includes('--review'),admin=args.includes('--admin-control');
+   child.stdout.emit('data',JSON.stringify({project:project(child.workspace),url,access_token:'read',read_only:!review&&!admin,
+    ...(review?{review_url:url+'#token=read&review_token=review'}:{}),
+    ...(admin?{admin_control_url:url+'#token=read&review_token=review&admin_token=admin'}:{})})+'\n');
+  });
+ }
+ return child;
+};syncBuiltinESMExports();
+let route;
+const scope={skills:{register(){}},commands:{register(){}},effect:fn=>fn(),
+ webServer:{register:value=>{if(value.path==='/agent-learning/panel-v2')route=value;}}};
+const {apply}=await import(pathToFileURL(modulePath).href);
+apply({tools:{register(){}},on(){},effect(){},inject(_names,callback){callback(scope);}});
+const request=async(method,cwd,body)=>{
+ let status,value;
+ const req={method,url:'/agent-learning/panel-v2?cwd='+encodeURIComponent(cwd),headers:{},
+  async *[Symbol.asyncIterator](){if(body)yield Buffer.from(JSON.stringify(body));}};
+ const res={writeHead:code=>{status=code;return res;},end:raw=>{value=JSON.parse(raw);}};
+ await route.handler(req,res);return{status,value};
+};
+const post=async(cwd,view,action,extra={})=>request('POST',cwd,{cwd,project_id:view.project_id,
+ installation_id:view.panel_snapshot.installation_id,action,...extra});
+try{
+ const rootView=(await request('GET',workspace)).value,subView=(await request('GET',sub)).value,otherView=(await request('GET',other)).value;
+ assert(rootView.installed&&subView.installed&&otherView.installed);
+ assert.equal(rootView.project_id,subView.project_id);assert.notEqual(rootView.project_id,otherView.project_id);
+ assert.equal((await post(workspace,rootView,'open_review')).status,200);
+ assert.equal((await request('GET',sub)).value.browser_running,true);
+ assert.equal((await post(sub,subView,'open_review')).status,200);assert.equal(browsers.length,1);
+ await post(other,otherView,'open_review');await post(sub,subView,'open_browser');
+ assert.deepEqual(browsers.map(child=>child.workspace),[workspace,other,workspace]);
+ const before=browsers.length,wrongProject=await post(sub,subView,'stop_browser',{project_id:otherView.project_id});
+ assert.equal(wrongProject.status,409);assert.equal(browsers.length,before);assert(browsers.every(child=>!child.killed));
+ assert.equal((await post(nested,rootView,'stop_browser')).status,403);
+ const stopped=await post(sub,subView,'stop_browser');assert.equal(stopped.status,200);assert.equal(stopped.value.stopped,true);
+ assert.deepEqual(browsers.map(child=>child.killed),[true,false,true]);
+ assert.equal((await request('GET',workspace)).value.browser_running,false);
+ assert.equal((await request('GET',sub)).value.browser_running,false);
+ assert.equal((await request('GET',other)).value.browser_running,true);
+ assert.equal((await post(sub,subView,'stop_browser')).value.stopped,false);
+ assert(checks.some(row=>row.workspace===sub&&row.panel_bound_workspace===workspace&&row.panel_project_id==='project-a'));
+}finally{globalThis.__ALP_DSH_DISPOSE__();}
+assert(browsers.every(child=>child.killed));console.log('ok');
+'''
+        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", code,
+                                 str(plugin / "host/index.mjs"), str(self.workspace), str(sub), str(other), str(nested)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

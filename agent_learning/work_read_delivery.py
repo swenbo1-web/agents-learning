@@ -11,6 +11,18 @@ def _hash(value):
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def coverage_limits(coverage):
+    """Keep restrictive original-coverage facts when presentation details shrink."""
+    if not isinstance(coverage, dict):
+        return {}
+    limits = {key: coverage[key] for key, value in (
+        ("truncated", True), ("full_original_available", False), ("file_projection_complete", False))
+        if coverage.get(key) is value}
+    if isinstance(coverage.get("segments"), int) and coverage["segments"] > 1:
+        limits.update({key: coverage[key] for key in ("segment", "segments") if key in coverage})
+    return limits
+
+
 class WorkReadDelivery:
     MAX_RECEIPTS = 128
     MAX_RANGES = 16
@@ -50,12 +62,25 @@ class WorkReadDelivery:
 
     @staticmethod
     def _receipt(result):
+        # Returning a complete section is distinct from having a complete
+        # original observation. Keep restrictive flags on both receipt paths.
+        limits = {}
+        if result.get("file_projection_incomplete"):
+            limits.update(file_projection_incomplete=True, automatic_eligible=False)
+        if result.get("automatic_eligible") is False:
+            limits["automatic_eligible"] = False
+        if result.get("completion") not in (None, "complete"):
+            limits["completion"] = result["completion"]
+        restricted = coverage_limits(result.get("coverage"))
+        if restricted:
+            limits["coverage"] = restricted
         return {"status": "ok", "memory_id": result["memory_id"], "revision": result["revision"],
             "source_version": result["source_version"], "state": result["state"],
             "source_changed": result["source_changed"], "validation_level": result["validation_level"],
             "file_check": result["file_check"],
             **({"candidate_reference_risk": [{"blocked": True, "details_omitted": True}],
                 "automatic_eligible": False} if result.get("candidate_reference_risk") else {}),
+            **limits,
             "section": result["section"], "section_length": result["section_length"], "offset": result["offset"],
             "next_offset": None, "truncated": False, "content_omitted": True,
             "already_read": True, "section_previously_returned_complete": True,

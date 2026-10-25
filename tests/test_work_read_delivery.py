@@ -1,5 +1,6 @@
 """MCP full-section receipts retain live source, identity and pagination checks."""
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -36,6 +37,78 @@ class WorkReadDeliveryTests(unittest.TestCase):
 
     def read(self, **kwargs):
         return self.server.call("work_memory_read", {"memory_id": self.memory_id, **kwargs})
+
+    def test_legacy_incomplete_observation_remains_limited_in_both_short_receipt_paths(self):
+        payload = {"tool_name": "write_file", "tool_input": {"path": "marker.py"},
+                   "tool_response": {"exit_code": 0, "output": "legacy recovery source"}}
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "legacy", "PostToolUse", payload, outcome="succeeded")
+            with patch.object(self.r, "_work_index", side_effect=sqlite3.OperationalError("synthetic failure")):
+                self.r._work_capture_safely(self.p, event["id"], self.workspace, raw=payload)
+            self.r.db.execute("UPDATE work_capture_pending SET capture='{}',next_try=0")
+            self.r._work_repair_safely(self.p)
+        self.memory_id = self.r.db.execute("SELECT id FROM work_memories WHERE event_id=?", (event["id"],)).fetchone()[0]
+        for section in ("summary", "evidence"):
+            with self.subTest(section=section):
+                first = self.read(section=section, max_chars=10000)
+                self.assertTrue(first["file_projection_incomplete"])
+                self.assertFalse(first["automatic_eligible"])
+                short = self.read(section=section, max_chars=1024)
+                self.assertTrue(short["already_read"])
+                self.assertTrue(short["file_projection_incomplete"])
+                self.assertFalse(short["automatic_eligible"])
+                self.assertFalse(short["coverage"]["file_projection_complete"])
+                self.assertFalse(short["execution_authority"])
+                self.assertLessEqual(len(encode(short)), 1024)
+                with patch.object(self.server.work_read_delivery, "completed", return_value=None):
+                    fallback = self.read(section=section, max_chars=10000)
+                self.assertTrue(fallback["already_read"])
+                self.assertTrue(fallback["file_projection_incomplete"])
+                self.assertFalse(fallback["automatic_eligible"])
+                self.assertTrue(self.read(section=section, max_chars=10000, reread=True)["file_projection_incomplete"])
+
+    def test_partial_original_keeps_coverage_limits_after_section_was_fully_returned(self):
+        payload = {"last_assistant_message": "Partial visible explanation. " * 80, "completion": "partial"}
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "partial", "Stop", payload, outcome="reported")
+            memory = self.r._work_capture_event(self.p, event["id"], self.workspace, raw=payload)
+        self.memory_id = memory["memory_id"]
+        self.read(section="summary", max_chars=10000)
+        receipt = self.read(section="summary", max_chars=1024)
+        self.assertTrue(receipt["already_read"])
+        self.assertEqual(receipt["completion"], "partial")
+        self.assertTrue(receipt["coverage"]["truncated"])
+        self.assertFalse(receipt["coverage"]["full_original_available"])
+        self.assertFalse(receipt["execution_authority"])
+        self.assertLessEqual(len(encode(receipt)), 1024)
+        with patch.object(self.server.work_read_delivery, "completed", return_value=None):
+            fallback = self.read(section="summary", max_chars=1024)
+        self.assertTrue(fallback["already_read"])
+        self.assertEqual(fallback["completion"], "partial")
+        self.assertEqual(fallback["coverage"], receipt["coverage"])
+        self.assertLessEqual(len(encode(fallback)), 1024)
+
+    def test_segment_limits_survive_paging_and_both_receipt_paths(self):
+        payload = {"last_assistant_message": "Long public source. " * 500}
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "segmented", "Stop", payload, outcome="reported")
+            self.r._work_capture_event(self.p, event["id"], self.workspace, raw=payload)
+        self.memory_id = self.r.db.execute("SELECT id FROM work_memories WHERE project=? AND conversation=? "
+            "AND json_extract(body,'$.coverage.segments')>1 ORDER BY id LIMIT 1", (self.p, "segmented")).fetchone()[0]
+        full = self.read(section="summary", max_chars=10000)
+        self.assertGreater(full["coverage"]["segments"], 1)
+        receipt = self.read(section="summary", max_chars=1024)
+        self.assertTrue(receipt["already_read"])
+        with patch.object(self.server.work_read_delivery, "completed", return_value=None):
+            fallback = self.read(section="summary", max_chars=1024)
+        self.assertTrue(fallback["already_read"])
+        self.assertEqual(fallback["coverage"], receipt["coverage"])
+        self.assertEqual(fallback["coverage"]["segments"], full["coverage"]["segments"])
+        self.assertLessEqual(len(encode(fallback)), 1024)
+        page = self.read(section="summary", max_chars=1024, reread=True)
+        self.assertEqual(page["coverage"], receipt["coverage"])
+        self.assertTrue(page["content"])
+        self.assertLessEqual(len(encode(page)), 1024)
 
     def test_complete_receipt_skips_evidence_assembly_but_keeps_live_guards(self):
         with patch.object(self.r, "_work_evidence_text", wraps=self.r._work_evidence_text) as assemble:

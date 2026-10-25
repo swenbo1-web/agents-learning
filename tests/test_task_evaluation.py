@@ -79,11 +79,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(set(firsts), {"no_memory", "with_memory"})
 
     def test_require_multiple_repeats_and_explicit_source(self):
-        for key, value in (("repeats", 1), ("data_class", None), ("seed", True)):
+        for key, value in (("repeats", 1), ("data_class", None), ("data_class", []),
+                           ("data_class", {}), ("seed", True)):
             definition = spec()
             definition[key] = value
             with self.assertRaises(EvaluationError):
                 create_protocol(definition)
+
+    def test_protocol_version_requires_the_declared_integer_type(self):
+        for version in (True, 1.0, [], {}):
+            protocol = create_protocol(spec())
+            protocol["version"] = version
+            with self.subTest(version=version), self.assertRaises(EvaluationError):
+                summarize(protocol, [])
 
     def test_changed_frozen_prompt_is_rejected(self):
         protocol = create_protocol(spec())
@@ -540,6 +548,30 @@ class FileAndRunnerTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             write_protocol(definition, frozen)
 
+    def test_malformed_jsonl_enums_are_invalid_records_without_erasing_other_runs(self):
+        frozen = self.root / "protocol.json"
+        protocol = write_protocol(self.write("spec.json", spec()), frozen)
+        malformed = ((("source",), []), (("source",), {}), (("variant",), []),
+                     (("conditions", "memory_mode"), {}), (("acceptance", "method"), []),
+                     (("acceptance", "status"), {}), (("cost", "scope"), []))
+        for index, (fields, value) in enumerate(malformed):
+            with self.subTest(fields=fields, value=value):
+                rows = measured_rows(protocol)
+                target = rows[0]
+                for field in fields[:-1]:
+                    target = target[field]
+                target[fields[-1]] = value
+                records = self.root / f"malformed-{index}.jsonl"
+                records.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+                destination = self.root / f"malformed-{index}-report.json"
+                report = report_files(frozen, records, destination)
+                self.assertEqual(report, json.loads(destination.read_text(encoding="utf-8")))
+                self.assertEqual(len(report["invalid_records"]), 1)
+                self.assertEqual(report["invalid_records"][0]["record"], 1)
+                self.assertEqual(sum(arm["runs"] for arm in report["all_reported_observations"].values()), 3)
+                self.assertFalse(report["complete_design"])
+                self.assertTrue(all(not item["eligible"] for item in report["comparison_eligibility"].values()))
+
     def test_duplicate_json_keys_rejected(self):
         frozen = self.write("protocol.json", create_protocol(spec()))
         records = self.root / "records.jsonl"
@@ -646,6 +678,45 @@ else: sys.exit(9)
         (self.root / "adapter.py").write_text('print(\'{"initial_state_sha256":"wrong"}\')\n', encoding="utf-8")
         report = run_protocol(frozen, adapter, output, timeout_seconds=10)
         self.assertEqual(report["runner"]["outcomes"], {"dataset_unverified": 4})
+
+    def test_malformed_adapter_enums_preserve_every_attempt_and_unknown_usage(self):
+        frozen, adapter, output = self.runner_fixture('''import json,sys
+request=json.load(sys.stdin)
+acceptance={"method":[],"status":"unknown","evidence_sha256":None} if request["variant"]=="no_memory" else {"method":"automated","status":{},"evidence_sha256":None}
+print(json.dumps({"initial_state_sha256":request["task"]["dataset_sha256"],"acceptance":acceptance}))
+''')
+        report = run_protocol(frozen, adapter, output, timeout_seconds=10)
+        self.assertEqual(report["runner"]["outcomes"], {"invalid_observations": 4})
+        rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len({row["run_id"] for row in rows}), 4)
+        self.assertEqual([row["runner"]["schedule_position"] for row in rows], [1, 2, 3, 4])
+        for row in rows:
+            self.assertEqual(row["runner"]["status"], "invalid_observations")
+            self.assertEqual(row["runner"]["exit_code"], 0)
+            self.assertGreater(row["wall_ms"], 0)
+            self.assertFalse(row["isolation"]["reset_verified"])
+            self.assertEqual(row["acceptance"]["status"], "unknown")
+            self.assertTrue(all(value is None for value in row["token_usage"].values()))
+            self.assertIsNone(row["cost"])
+        imported = report_files(frozen, output, self.root / "failed-attempts-report.json")
+        self.assertEqual(imported["input_records"], 4)
+        self.assertFalse(imported["invalid_records"])
+        for arm in imported["all_reported_observations"].values():
+            self.assertEqual(arm["runs"], 2)
+            self.assertFalse(arm["token_usage"]["complete"])
+            self.assertIsNone(arm["token_usage"]["total_tokens"])
+            self.assertEqual(arm["cost"]["unknown_runs"], 2)
+
+    def test_malformed_adapter_data_class_is_rejected_before_launch(self):
+        frozen, adapter, output = self.runner_fixture('raise AssertionError("must not launch")\n')
+        definition = json.loads(adapter.read_text(encoding="utf-8"))
+        for value in ([], {}):
+            definition["data_class"] = value
+            adapter.write_text(json.dumps(definition), encoding="utf-8")
+            with self.subTest(value=value), self.assertRaises(EvaluationError):
+                run_protocol(frozen, adapter, output)
+            self.assertFalse(output.exists())
 
     def test_snapshot_mismatch_and_synthetic_real_mix_rejected_before_launch(self):
         frozen, adapter, output = self.runner_fixture('raise AssertionError("must not launch")\n', real=True)

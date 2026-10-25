@@ -12,9 +12,9 @@ from agent_learning.admin_lifecycle import claim_call, finish_call, mark_launch_
 from agent_learning.admin_publication import publication_gate
 from agent_learning.admin_queue import (claim_dispatch, dispatch_diagnostic, eligible_query,
     ready_executor, record_executor_failure, scan_signatures, executor_signature, routing_signature,
-    routing_scan_pending)
+    routing_scan_pending, release_dispatch)
 from agent_learning.admin_usage import (admin_admission_status, configure_project_budget,
-    pending_phase_reservation, project_budget_policy)
+    pending_phase_reservation, project_budget_policy, admin_budget_policy, configure_admin_budget)
 from agent_learning.phase_review import configure, policy
 from agent_learning.runtime import ContractError, Runtime
 from agent_learning.scheduler import SCHEDULER_DEFAULTS
@@ -265,6 +265,104 @@ class PhaseAdmissionTests(unittest.TestCase):
                                  expected_version=project_budget_policy(self.r, self.p)["version"])
         self.assertEqual(admin_admission_status(self.r, self.p)["admission_status"], "available")
         self.assertEqual(self.r._scheduler_admin_state(self.p, self.r._scheduler_config())[1], "ready")
+
+    def high_fixed_reservation(self, *, defer_prepare=False):
+        configure_admin_budget(self.r, {"token_reservation_per_call": 80000,
+            "max_reported_tokens_per_day": 50000}, expected_version=admin_budget_policy(self.r)["version"])
+        configure(self.r, self.p, {"daily_tokens": 50000}, policy(self.r, self.p)["version"])
+        if defer_prepare:
+            with patch("agent_learning.phase_review.prepare"):
+                self.phase("one")
+                self.phase("two", "Another independent convention")
+        else:
+            self.phase("one")
+            self.phase("two", "Another independent convention")
+        self.r.config["scheduler"].update(SCHEDULER_DEFAULTS, enabled=True, poll_seconds=1)
+
+    def test_phase_estimate_drives_both_budget_scopes_and_final_atomic_reservation(self):
+        self.high_fixed_reservation()
+        required = pending_phase_reservation(self.r, self.p)
+        self.assertLess(required, 50000)
+        self.assertGreater(required, 12000)
+        before = self.r.db.total_changes
+        admission = admin_admission_status(self.r, self.p)
+        self.assertEqual(self.r.db.total_changes, before)
+        self.assertEqual(admission["admission_status"], "available")
+        for scope in ("project_usage", "global_usage"):
+            self.assertEqual(admission[scope]["required_token_reservation"], required)
+            self.assertEqual(admission[scope]["token_reservation_per_call"], 80000)
+        self.assertEqual(dispatch_diagnostic(self.r, self.p)["reason"], "ready")
+        self.assertEqual(self.r._scheduler_admin_state(self.p, self.r._scheduler_config())[1], "ready")
+        token = claim_dispatch(self.r, self.p)
+        self.assertIsNotNone(token)
+        release_dispatch(self.r, self.p, token)
+        with self.r.transaction():
+            result = _select_review(self.r, self.p, None, 10, 5, self.r.host_epoch())
+        self.assertEqual(result["status"], "reserved")
+        self.assertEqual(self.r.db.execute("SELECT reserved_tokens FROM admin_call_budgets WHERE call_id=?",
+            (result["call_id"],)).fetchone()[0], required)
+        finish_call(self.r, result["call_id"], "not_started")
+
+    def test_dispatch_can_prepare_phase_below_old_fixed_reservation(self):
+        self.high_fixed_reservation(defer_prepare=True)
+        self.assertIsNone(pending_phase_reservation(self.r, self.p))
+        with patch("subprocess.Popen") as model:
+            token = claim_dispatch(self.r, self.p)
+        model.assert_not_called()
+        self.assertIsNotNone(token)
+        self.assertLess(pending_phase_reservation(self.r, self.p), 50000)
+        release_dispatch(self.r, self.p, token)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_dynamic_phase_reservation_still_obeys_each_scope_limit(self):
+        self.high_fixed_reservation()
+        required = pending_phase_reservation(self.r, self.p)
+        configure_project_budget(self.r, self.p, {"max_reported_tokens_per_day": required - 1},
+            expected_version=project_budget_policy(self.r, self.p)["version"])
+        blocked = admin_admission_status(self.r, self.p)
+        self.assertEqual((blocked["admission_status"], blocked["blocking_scope"]),
+            ("token_budget_exhausted", "project"))
+        configure_project_budget(self.r, self.p, {"max_reported_tokens_per_day": 50000},
+            expected_version=project_budget_policy(self.r, self.p)["version"])
+        configure_admin_budget(self.r, {"max_reported_tokens_per_day": required - 1},
+            expected_version=admin_budget_policy(self.r)["version"])
+        blocked = admin_admission_status(self.r, self.p)
+        self.assertEqual((blocked["admission_status"], blocked["blocking_scope"]),
+            ("token_budget_exhausted", "ALP_HOME"))
+        self.assertIsNone(claim_dispatch(self.r, self.p))
+
+    def test_old_fixed_and_unknown_reservations_remain_charged_and_concurrency_is_shared(self):
+        self.high_fixed_reservation()
+        other = self.r.project(self.root / "legacy-project")
+        with self.r.transaction():
+            blocked = claim_call(self.r, other, "legacy-case", 1, "legacy", self.r.host_epoch(), 5)
+        self.assertEqual((blocked["status"], blocked["blocking_scope"]),
+            ("token_budget_exhausted", "ALP_HOME"))
+        with self.r.transaction():
+            explicit = claim_call(self.r, other, "legacy-small", 1, "legacy-small", self.r.host_epoch(), 5,
+                                  reserved_tokens=20000)
+        self.assertEqual((explicit["status"], explicit["blocking_scope"]),
+            ("token_budget_exhausted", "ALP_HOME"))
+        configure_admin_budget(self.r, {"max_reported_tokens_per_day": 160000},
+            expected_version=admin_budget_policy(self.r)["version"])
+        with self.r.transaction():
+            legacy = claim_call(self.r, other, "legacy-case", 1, "legacy", self.r.host_epoch(), 5)
+        self.assertEqual(legacy["status"], "reserved")
+        self.assertEqual(self.r.db.execute("SELECT reserved_tokens FROM admin_call_budgets WHERE call_id=?",
+            (legacy["call_id"],)).fetchone()[0], 80000)
+        admission = admin_admission_status(self.r, self.p)
+        self.assertEqual((admission["admission_status"], admission["blocking_scope"]),
+            ("concurrency_limited", "ALP_HOME"))
+        mark_launch_intent(self.r, legacy["call_id"], legacy["owner"], self.r.host_epoch())
+        finish_call(self.r, legacy["call_id"], "timeout_unknown")
+        configure_admin_budget(self.r, {"max_reported_tokens_per_day": 100000},
+            expected_version=admin_budget_policy(self.r)["version"])
+        admission = admin_admission_status(self.r, self.p)
+        self.assertEqual(admission["global_usage"]["token_reservations"], 80000)
+        self.assertEqual(admission["global_usage"]["remaining_reported_tokens"], 20000)
+        self.assertEqual((admission["admission_status"], admission["blocking_scope"]),
+            ("token_budget_exhausted", "ALP_HOME"))
+        self.assertIsNone(claim_dispatch(self.r, self.p))
 
     def test_explicit_history_request_keeps_its_own_reservation_beside_pending_phase(self):
         from agent_learning.history_review_control import request_history_review

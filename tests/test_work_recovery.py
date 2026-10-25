@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from agent_learning.runtime import Runtime
 from agent_learning.work_memory import WORK_INDEX_VERSION
-from agent_learning.work_files import knowledge_file_state
+from agent_learning.work_files import checkout_key, knowledge_file_state
 
 
 class WorkRecoveryTests(unittest.TestCase):
@@ -243,6 +243,112 @@ class WorkRecoveryTests(unittest.TestCase):
         self.assertTrue(capture["file_projection"]["complete"])
         self.assertTrue(capture["last_assistant_message_truncated"])
         self.assertLess(len(capture["last_assistant_message"]), len(text))
+
+    def test_restore_distinguishes_disabled_pending_existing_and_empty_public_events(self):
+        from agent_learning.work_recovery import restore
+        job = self.fail()
+        capture = job["capture"]
+        self.r.config["work_memory"]["enabled"] = False
+        with patch.object(self.r, "_work_capture_event", side_effect=AssertionError("Disabled capture must stay private")):
+            with self.r.transaction():
+                result = restore(self.r, self.p, job["event_id"], self.workspace, reindex=True)
+            self.assertEqual(result["status"], "deferred")
+            self.assertFalse(result["indexed"])
+            self.assertFalse(result["reindexed"])
+            self.assertEqual(self.r.db.execute("SELECT capture FROM work_capture_pending").fetchone()[0], capture)
+            self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+            page = self.r.work_rebuild(self.p, self.workspace)
+            self.assertEqual((page["indexed"], page["reindexed"]), (0, 0))
+            with self.r.transaction():
+                empty, _ = self.r._event(self.p, "chat", "Stop", {})
+                result = restore(self.r, self.p, empty["id"], self.workspace)
+            self.assertEqual(result["status"], "not_applicable")
+        self.r.config["work_memory"]["enabled"] = True
+        with self.r.transaction():
+            result = restore(self.r, self.p, job["event_id"], self.workspace)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["indexed"])
+        before = tuple(self.r.db.execute("SELECT body,source_hash,workspace_key FROM work_memories").fetchone())
+        self.r.config["work_memory"]["enabled"] = False
+        with patch.object(self.r, "_work_capture_event", side_effect=AssertionError("Existing capture must not replay")):
+            with self.r.transaction():
+                result = restore(self.r, self.p, job["event_id"], self.workspace, reindex=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["already_captured"])
+        self.assertTrue(result["reindexed"])
+        self.assertEqual(before, tuple(self.r.db.execute("SELECT body,source_hash,workspace_key FROM work_memories").fetchone()))
+
+    def test_not_applicable_pending_is_retired_without_counting_a_projection_repair(self):
+        from agent_learning.work_recovery import register, recover
+        with self.r.transaction():
+            event, _ = self.r._event(self.p, "chat", "Stop", {})
+            register(self.r, self.p, event["id"], self.workspace)
+            repaired = recover(self.r, self.p)
+        self.assertEqual(repaired, 0)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_capture_pending").fetchone()[0], 0)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+
+    def test_disabled_uncaptured_public_text_requires_complete_matching_original_evidence(self):
+        from agent_learning.work_recovery import restore
+        self.r.config["work_memory"]["enabled"] = False
+        variants = [({}, None, "not_applicable"), ({"truncated": True}, None, "deferred"),
+                    ({"last_assistant_message_truncated": True}, None, "deferred"),
+                    ({"capture_coverage": {"finalModelOutput": {"full_original_available": False}}}, None, "deferred"),
+                    ({}, {"last_assistant_message": "A longer frozen public capture"}, "deferred")]
+        for fields, raw, expected in variants:
+            with self.subTest(fields=fields, raw=raw):
+                with self.r.transaction():
+                    event, _ = self.r._event(self.p, "chat", "Stop", {"last_assistant_message": "Available public text", **fields})
+                    result = restore(self.r, self.p, event["id"], self.workspace, raw=raw)
+                self.assertEqual(result["status"], expected)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_memories").fetchone()[0], 0)
+
+    def test_root_rebuild_reuses_subdirectory_pre_links_and_post_cannot_inherit_a_guessed_path(self):
+        sub = self.workspace / "src"
+        sub.mkdir()
+        (sub / "a.py").write_text("Original tool target", encoding="utf-8")
+        (self.workspace / "a.py").write_text("Unrelated root file", encoding="utf-8")
+        raw = {"tool_name": "write_file", "tool_input": {"path": "a.py"}}
+        with self.r.transaction():
+            pre, _ = self.r._event(self.p, "chat", "PreToolUse", raw, operation_id="subdirectory-operation")
+            self.r._work_capture_safely(self.p, pre["id"], sub, raw=raw)
+        original = [tuple(row) for row in self.r.db.execute("SELECT * FROM work_file_links")]
+        (sub / "a.py").write_text("A later file version must not replace the original observation", encoding="utf-8")
+        with patch.object(self.r, "_work_file_projection", side_effect=AssertionError("Reuse original file paths and metadata")):
+            result = self.r.work_rebuild(self.p, self.workspace)
+        self.assertEqual(result["indexed"], 0)
+        self.assertEqual(original, [tuple(row) for row in self.r.db.execute("SELECT * FROM work_file_links")])
+        raw = {"tool_name": "write_file", "tool_response": {"exit_code": 0,
+               "output": "A meaningful update of the actual source target was observed."}}
+        with self.r.transaction():
+            post, _ = self.r._event(self.p, "chat", "PostToolUse", raw, outcome="succeeded",
+                                    operation_id="subdirectory-operation")
+            self.r._work_capture_safely(self.p, post["id"], sub, raw=raw)
+        self.assertEqual([row[0] for row in self.r.db.execute("SELECT relative_path FROM work_file_links WHERE event_id=?",
+                                                           (post["id"],))], ["src/a.py"])
+        self.assertEqual(self.r.work_search(self.p, file_path="a.py", workspace=self.workspace)["items"], [])
+        self.assertEqual(len(self.r.work_search(self.p, file_path="src/a.py", workspace=self.workspace)["items"]), 1)
+
+    def test_rebuild_legacy_tool_requires_original_cwd_before_deriving_relative_targets(self):
+        sub = self.workspace / "src"
+        sub.mkdir()
+        with self.r.transaction():
+            unknown, _ = self.r._event(self.p, "chat", "PostToolUse", {
+                "tool_name": "write_file", "tool_input": {"path": "a.py"}, "tool_response": {"exit_code": 0}},
+                outcome="succeeded")
+            self.r.db.execute("INSERT INTO work_event_checkouts VALUES(?,?,?)", (self.p, unknown["id"],
+                checkout_key(self.workspace)))
+            known, _ = self.r._event(self.p, "chat", "PostToolUse", {"cwd": str(sub),
+                "tool_name": "write_file", "tool_input": {"path": "a.py"}, "tool_response": {"exit_code": 0}},
+                outcome="succeeded")
+        result = self.r.work_rebuild(self.p, self.workspace)
+        self.assertEqual(result["indexed"], 1)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_file_links WHERE event_id=?",
+                                          (unknown["id"],)).fetchone()[0], 0)
+        link = self.r.db.execute("SELECT relative_path,version FROM work_file_links WHERE event_id=?",
+                                 (known["id"],)).fetchone()
+        self.assertEqual(link["relative_path"], "src/a.py")
+        self.assertEqual(json.loads(link["version"])["status"], "unknown")
 
 
 if __name__ == "__main__":

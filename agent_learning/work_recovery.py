@@ -45,10 +45,19 @@ def projection_links(event, key, projection):
     return projection["links"]
 
 
-def legacy_projection(runtime, project, event, workspace, *, raw=None):
+def legacy_projection(runtime, project, event, workspace, *, raw=None, infer_targets=True):
     """Missing original file metadata stays unknown; recovery never samples T2 as T1."""
-    return {"version": 1, "checkout_key": checkout_key(workspace), "capture_digest": _capture_digest(event),
-            "links": runtime._work_file_projection(project, event, workspace, raw=raw, observe_version=False),
+    key = checkout_key(workspace)
+    links = [dict(row) for row in runtime.db.execute(
+        "SELECT relative_path,path_key,checkout_key,relation,version FROM work_file_links "
+        "WHERE project=? AND event_id=? ORDER BY checkout_key,path_key,relation LIMIT 17",
+        (project, event["id"]))]
+    for link in links:
+        link["version"] = json.loads(link["version"])
+    if not links and infer_targets:
+        links = runtime._work_file_projection(project, event, workspace, raw=raw, observe_version=False)
+    return {"version": 1, "checkout_key": key, "capture_digest": _capture_digest(event),
+            "links": links,
             "complete": event["type"] in {"Stop", "UserPromptSubmit", "PublicMessageSegment"}}
 
 
@@ -125,8 +134,9 @@ def failed(runtime, project, event_id, error):
 
 
 def restore(runtime, project, event_id, workspace, *, raw=None, reindex=False):
-    """Both retry queues confirm the same projection in their existing transaction."""
+    """Return completed, not_applicable or deferred without confusing a disabled channel with success."""
     from .runtime import ContractError
+    from .public_observations import observed_public
     if not runtime.db.in_transaction:
         raise ContractError("work restoration requires an existing write transaction")
     event = runtime.db.execute("SELECT * FROM events WHERE project=? AND id=?", (project, event_id)).fetchone()
@@ -157,23 +167,49 @@ def restore(runtime, project, event_id, workspace, *, raw=None, reindex=False):
                 "SELECT relative_path FROM work_file_links WHERE project=? AND event_id=?", (project, event_id))]
             runtime._work_index(project, existing["id"], json.loads(existing["body"]), links)
         complete(runtime, project, event_id)
-        return {"memory_id": existing["id"], "indexed": False, "already_captured": True, "reindexed": reindex}
-    if not runtime.config["work_memory"]["enabled"]:
-        return None
-    observed = json.loads(event["payload"])
+        return {"status": "completed", "memory_id": existing["id"], "indexed": False,
+                "already_captured": True, "reindexed": reindex}
+    payload = json.loads(event["payload"])
+    observed = dict(payload)
     if isinstance(raw, dict):
         # Only trusted public capture is supplied by the phase recovery queue.
         observed.update({key: value for key, value in raw.items() if key in {
             "last_assistant_message", "prompt", "completion", "capture_coverage",
             "last_assistant_message_truncated", "prompt_truncated", "truncated"}})
     observed.update({key: value for key, value in capture.items() if key != "file_projection"})
+    public_field = {"Stop": "last_assistant_message", "UserPromptSubmit": "prompt",
+                    "PublicMessageSegment": "text"}.get(event["type"])
+    public_text = observed.get(public_field, observed.get("message", "") if event["type"] == "Stop" else "")
+    if (event["type"] not in {"PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PublicMessageSegment"}
+            or public_field and (not isinstance(public_text, str) or not public_text.strip())):
+        complete(runtime, project, event_id)
+        return {"status": "not_applicable", "indexed": False, "reindexed": False}
+    if not runtime.config["work_memory"]["enabled"]:
+        # A normal short Stop already retains its available public evidence in
+        # events. Optional work history must not become a prerequisite to seal
+        # that stage. Existing repair jobs and a longer frozen public capture
+        # still need recovery before their stage can consume the original Stop.
+        if (event["type"] == "Stop" and not job
+                and observed_public("Stop", payload, require_complete=True)
+                and observed_public("Stop", observed, require_complete=True)
+                and public_text == payload.get("last_assistant_message")):
+            return {"status": "not_applicable", "reason": "public_evidence_preserved",
+                    "indexed": False, "reindexed": False}
+        return {"status": "deferred", "reason": "work_memory_disabled", "indexed": False, "reindexed": False}
     projection = capture.get("file_projection")
     if projection is None:
-        projection = legacy_projection(runtime, project, event, workspace, raw=observed)
+        source_workspace = payload.get("cwd", payload.get("workspace"))
+        if not job and source_workspace:
+            if not isinstance(source_workspace, str) or checkout_key(source_workspace) != key:
+                raise ContractError("work recovery checkout changed")
+            workspace = source_workspace
+        projection = legacy_projection(runtime, project, event, workspace, raw=observed,
+                                       infer_targets=bool(job or source_workspace))
     projection_links(event, checkout_key(workspace), projection)
     result = runtime._work_capture_event(project, event_id, workspace, raw=observed, _file_projection=projection)
     complete(runtime, project, event_id)
-    return result
+    return dict(result, status="completed") if result is not None else {
+        "status": "not_applicable", "indexed": False, "reindexed": False}
 
 
 def recover(runtime, project, *, exclude_event=None, event_id=None, limit=2):
@@ -190,12 +226,12 @@ def recover(runtime, project, *, exclude_event=None, event_id=None, limit=2):
     for job in rows:
         runtime.db.execute("SAVEPOINT work_projection_retry")
         try:
-            restore(runtime, project, job["event_id"], job["workspace"])
+            result = restore(runtime, project, job["event_id"], job["workspace"])
         except (OSError, ValueError, TypeError, sqlite3.Error, ContractError) as exc:
             runtime.db.execute("ROLLBACK TO work_projection_retry")
             runtime.db.execute("RELEASE work_projection_retry")
             failed(runtime, project, job["event_id"], exc)
         else:
             runtime.db.execute("RELEASE work_projection_retry")
-            repaired += 1
+            repaired += result["status"] == "completed"
     return repaired

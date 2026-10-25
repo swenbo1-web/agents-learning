@@ -223,7 +223,7 @@ def create_protocol(spec):
     """
     spec = _object(spec, "spec")
     _text(spec.get("id"), "id", 200)
-    if spec.get("data_class") not in {"real_protocol", "synthetic_template"}:
+    if not isinstance(spec.get("data_class"), str) or spec["data_class"] not in {"real_protocol", "synthetic_template"}:
         raise EvaluationError("data_class must explicitly be real_protocol or synthetic_template")
     _model(spec.get("model"))
     _sha(spec.get("environment_sha256"), "environment_sha256")
@@ -268,7 +268,8 @@ def create_protocol(spec):
 
 def _protocol(value):
     _object(value, "protocol")
-    if value.get("kind") != "agent_learning.task_evaluation" or value.get("version") != PROTOCOL_VERSION:
+    if (value.get("kind") != "agent_learning.task_evaluation" or type(value.get("version")) is not int
+            or value["version"] != PROTOCOL_VERSION):
         raise EvaluationError("unsupported task evaluation protocol")
     spec = {key: value.get(key) for key in ("id", "data_class", "model", "environment_sha256", "knowledge_sha256",
                                          "repeats", "seed", "tasks")}
@@ -302,7 +303,7 @@ def record_template(protocol, task_id, repeat, variant):
 def _new_record(protocol, task_id, repeat, variant):
     """Internal template constructor for an already validated frozen protocol."""
     task = next((item for item in protocol["tasks"] if item["id"] == task_id), None)
-    if task is None or variant not in VARIANTS:
+    if task is None or not isinstance(variant, str) or variant not in VARIANTS:
         raise EvaluationError("unknown task or variant")
     _integer(repeat, "repeat", 1, protocol["repeats"])
     conditions = _conditions(protocol, task, variant)
@@ -327,7 +328,8 @@ def _record(record):
     for key in ("run_id", "task_id"):
         _text(record.get(key), key, 200)
     _integer(record.get("repeat"), "repeat", 1, 100)
-    if record.get("variant") not in VARIANTS or record.get("source") not in {"real_external", "synthetic_template"}:
+    if (not isinstance(record.get("variant"), str) or record["variant"] not in VARIANTS
+            or not isinstance(record.get("source"), str) or record["source"] not in {"real_external", "synthetic_template"}):
         raise EvaluationError("invalid variant or result source")
     _sha(record.get("protocol_sha256"), "protocol_sha256")
     _sha(record.get("condition_sha256"), "condition_sha256")
@@ -335,14 +337,15 @@ def _record(record):
     _model(conditions.get("model"))
     for key in ("environment_sha256", "prompt_sha256", "dataset_sha256", "acceptance_sha256"):
         _sha(conditions.get(key), f"conditions.{key}")
-    if conditions.get("memory_mode") not in VARIANTS:
+    if not isinstance(conditions.get("memory_mode"), str) or conditions["memory_mode"] not in VARIANTS:
         raise EvaluationError("invalid conditions.memory_mode")
     if conditions.get("knowledge_sha256") is not None:
         _sha(conditions["knowledge_sha256"], "conditions.knowledge_sha256")
     if "artifact_metrics_sha256" in conditions:
         _sha(conditions["artifact_metrics_sha256"], "conditions.artifact_metrics_sha256")
     acceptance = _object(record.get("acceptance"), "acceptance")
-    if acceptance.get("method") not in {"user", "automated"} or acceptance.get("status") not in {"passed", "failed", "unknown"}:
+    if (not isinstance(acceptance.get("method"), str) or acceptance["method"] not in {"user", "automated"}
+            or not isinstance(acceptance.get("status"), str) or acceptance["status"] not in {"passed", "failed", "unknown"}):
         raise EvaluationError("acceptance requires user/automated method and passed/failed/unknown status")
     if acceptance.get("evidence_sha256") is not None:
         _sha(acceptance["evidence_sha256"], "acceptance.evidence_sha256")
@@ -386,7 +389,7 @@ def _record(record):
         currency = cost.get("currency")
         if not isinstance(currency, str) or len(currency) != 3 or not currency.isascii() or not currency.isalpha() or currency != currency.upper():
             raise EvaluationError("cost.currency must be a three-letter uppercase currency code")
-        if cost.get("scope") != "all_calls":
+        if not isinstance(cost.get("scope"), str) or cost["scope"] != "all_calls":
             raise EvaluationError("reported cost must cover all calls, including administrator overhead")
     isolation = _object(record.get("isolation"), "isolation")
     _text(isolation.get("workspace_id"), "isolation.workspace_id", 500)
@@ -791,7 +794,7 @@ def run_protocol(protocol_path, adapter_path, output_path, timeout_seconds=300):
         if not path.is_file():
             raise EvaluationError("adapter file argument does not exist")
         argv[index] = str(path.resolve())
-    if adapter.get("data_class") not in {"real_adapter", "synthetic_template"}:
+    if not isinstance(adapter.get("data_class"), str) or adapter["data_class"] not in {"real_adapter", "synthetic_template"}:
         raise EvaluationError("adapter.data_class must explicitly declare real_adapter or synthetic_template")
     if protocol["data_class"] == "real_protocol" and adapter["data_class"] != "real_adapter":
         raise EvaluationError("a synthetic adapter cannot produce a real task evaluation")

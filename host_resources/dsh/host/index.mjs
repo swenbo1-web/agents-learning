@@ -1252,7 +1252,7 @@ export function apply(ctx, config = {}) {
               }
               if (!parsed?.ok || !parsed.result?.data) throw new Error(parsed?.error || "project status unavailable");
               const data = parsed.result.data;
-              const browserStat = await manageControlBrowser("status", {}, workspace).catch(() => ({ running: false }));
+              const browserStat = await manageControlBrowser("status", {}, matchedWorkspace).catch(() => ({ running: false }));
               const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
               const projectUsage = data.project_usage?.scope === "project" && data.project_usage.project_id === data.project_id ? data.project_usage : null;
               const budgetValues = data.project_budget_policy?.values || {};
@@ -1388,7 +1388,7 @@ export function apply(ctx, config = {}) {
               const info = await manageControlBrowser(
                 "start",
                 { open: true, review: false, adminControl: false },
-                workspace,
+                matchedPostWorkspace,
               );
               send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: info.read_only ? "readonly" : "review" });
               return;
@@ -1397,14 +1397,14 @@ export function apply(ctx, config = {}) {
               const info = await manageControlBrowser(
                 "start",
                 { open: true, review: true, adminControl: true },
-                workspace,
+                matchedPostWorkspace,
               );
               send(200, { ok: true, running: Boolean(info.running), url: info.url, mode: "review" });
               return;
             }
             if (action === "stop_browser") {
-              const info = await manageControlBrowser("stop", {}, workspace);
-              send(200, { ok: true, running: false, stopped: Boolean(info.stopped) });
+              const info = await manageControlBrowser("stop", {}, matchedPostWorkspace);
+              send(200, { ok: true, running: Boolean(info.running), stopped: Boolean(info.stopped) });
               return;
             }
             if (action === "archive_history") {

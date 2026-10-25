@@ -309,7 +309,7 @@ def record_usage(runtime, call_id, usage):
     return result
 
 
-def _usage_status(runtime, policy, settings, *, now=None, project=None):
+def _usage_status(runtime, policy, settings, *, now=None, project=None, required_tokens=None):
     """Derive counters from the same call ledger; no duplicate debit or stored totals."""
     cfg = policy["values"]
     current = time.time() if now is None else now
@@ -375,15 +375,17 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
             maximum = min(maximum, phase_cfg["daily_tokens"]) if maximum is not None else phase_cfg["daily_tokens"]
     remaining = None if maximum is None else max(0, maximum - accounted)
     remaining_calls = max(0, cfg["max_calls_per_day"] - counts["counted_attempts"])
+    required = settings["token_reservation_per_call"] if required_tokens is None else required_tokens
     admission = ("budget_exhausted" if remaining_calls == 0 and not phase_mode else
                  "concurrency_limited" if project is None and active >= settings["max_concurrent_calls"] else
-                 "token_budget_exhausted" if remaining is not None and remaining < settings["token_reservation_per_call"] else "available")
+                 "token_budget_exhausted" if remaining is not None and remaining < required else "available")
     scope = "project" if project is not None else "ALP_HOME"
     return {"utc_day": day, "used_calls": counts["counted_attempts"], "remaining_calls": remaining_calls,
             "next_reset_at": next_reset, "global_active_calls": active, **settings, **counts,
             "max_reported_tokens_per_day": maximum,
             "reported_tokens": reported, "token_reservations": reservations, "accounted_tokens": accounted,
             "remaining_reported_tokens": remaining, "usage_states": usage_states, "admission_status": admission,
+            **({"required_token_reservation": required} if required_tokens is not None else {}),
             "scope": scope, "budget_scope": scope, "budget_policy": policy,
             **({"project_id": project, "project_active_calls": project_active} if project is not None else {}),
             "max_calls_per_day": cfg["max_calls_per_day"], "budget_mode": "tokens" if phase_mode else "legacy",
@@ -391,23 +393,23 @@ def _usage_status(runtime, policy, settings, *, now=None, project=None):
             "limitation": "Counted attempts are not confirmed paid model requests. Reported usage admission does not guarantee an executor token or fee cap."}
 
 
-def admin_budget_status(runtime, *, now=None):
+def admin_budget_status(runtime, *, now=None, required_tokens=None):
     """Read the unchanged ALP_HOME budget scope; unknown usage remains reserved."""
     with _read_snapshot(runtime):
         policy = admin_budget_policy(runtime)
         settings = {key: policy["values"][key] for key in
                     ("max_concurrent_calls", "token_reservation_per_call", "max_reported_tokens_per_day")}
-        return _usage_status(runtime, policy, settings, now=now)
+        return _usage_status(runtime, policy, settings, now=now, required_tokens=required_tokens)
 
 
-def admin_project_budget_status(runtime, project, *, now=None):
+def admin_project_budget_status(runtime, project, *, now=None, required_tokens=None):
     """Read this project's own ledger and daily cap, summed across every host."""
     with _read_snapshot(runtime):
         policy = project_budget_policy(runtime, project)
         global_policy = admin_budget_policy(runtime)
         settings = {key: global_policy["values"][key] for key in
                     ("max_concurrent_calls", "token_reservation_per_call")}
-        return _usage_status(runtime, policy, settings, now=now, project=project)
+        return _usage_status(runtime, policy, settings, now=now, project=project, required_tokens=required_tokens)
 
 
 def pending_phase_reservation(runtime, project):
@@ -432,18 +434,22 @@ def admin_admission_status(runtime, project, *, now=None, required_tokens=None):
     """Both scopes must admit the same call; legacy terminal status names stay stable."""
     current = time.time() if now is None else now
     with _read_snapshot(runtime):
-        project_usage = admin_project_budget_status(runtime, project, now=current)
-        global_usage = admin_budget_status(runtime, now=current)
+        from .phase_review import policy as phase_policy
+        phase_mode = phase_policy(runtime, project)["mode"] == "phase"
         if required_tokens is None:
             required_tokens = pending_phase_reservation(runtime, project)
+            if required_tokens is None and phase_mode:
+                # Before local preparation there is no complete request.
+                # Its empty-payload estimate is only a lower-bound gate;
+                # dispatch and claim recheck the eventual frozen request.
+                required_tokens = estimate_reservation(runtime, project, "", phase=True)["reserved_tokens"]
         if required_tokens is not None:
             if type(required_tokens) is not int or not 1 <= required_tokens <= 1000000000:
                 raise ContractError("invalid administrator token reservation")
-            for usage in (project_usage, global_usage):
-                usage["required_token_reservation"] = required_tokens
-                if (usage["admission_status"] == "available" and usage["remaining_reported_tokens"] is not None
-                        and usage["remaining_reported_tokens"] < required_tokens):
-                    usage["admission_status"] = "token_budget_exhausted"
+            if not phase_mode:
+                required_tokens = max(required_tokens, budget_settings(runtime)["token_reservation_per_call"])
+        project_usage = admin_project_budget_status(runtime, project, now=current, required_tokens=required_tokens)
+        global_usage = admin_budget_status(runtime, now=current, required_tokens=required_tokens)
         if project_usage["admission_status"] != "available":
             status, scope = project_usage["admission_status"], "project"
         elif global_usage["admission_status"] != "available":

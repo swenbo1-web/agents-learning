@@ -106,12 +106,18 @@ def recover(runtime, project, *, limit=8, force=False):
         runtime.db.execute("SAVEPOINT phase_seal_retry")
         try:
             from .work_recovery import restore
-            restore(runtime, project, row["event_id"], row["workspace"], raw=json.loads(row["capture"]))
-            phase = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND id=?",
-                                       (project, row["phase_id"])).fetchone()
-            if not seal_phase(runtime, project, phase, row["event_id"]):
-                raise ContractError("original stage boundary is unavailable")
-            complete(runtime, project, row["phase_id"], row["event_id"])
+            restored = restore(runtime, project, row["event_id"], row["workspace"], raw=json.loads(row["capture"]))
+            if restored["status"] == "deferred":
+                # Rotate disabled captures behind other due requests without
+                # classifying the user's disabled channel as a local failure.
+                runtime.db.execute("UPDATE phase_seal_requests SET next_try=? WHERE phase_id=?",
+                                   (now + 2, row["phase_id"]))
+            else:
+                phase = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND id=?",
+                                           (project, row["phase_id"])).fetchone()
+                if not seal_phase(runtime, project, phase, row["event_id"]):
+                    raise ContractError("original stage boundary is unavailable")
+                complete(runtime, project, row["phase_id"], row["event_id"])
         except (OSError, ValueError, TypeError, sqlite3.Error):
             runtime.db.execute("ROLLBACK TO phase_seal_retry")
             runtime.db.execute("RELEASE phase_seal_retry")
