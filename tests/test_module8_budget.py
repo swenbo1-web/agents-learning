@@ -255,8 +255,9 @@ class Module8BudgetTests(unittest.TestCase):
 
     def test_full_log_accumulation_survives_preview_limit(self):
         log = Path(self.temp.name) / "usage.log"
-        log.write_text("\n".join(json.dumps({"type": "turn.completed", "usage": {
-            "input_tokens": 100, "output_tokens": 10}}) for _ in range(20)), encoding="utf-8")
+        # Distinct turns test preview limits; anonymous repeats remain ambiguous.
+        log.write_text("\n".join(json.dumps({"type": "turn.completed", "turn_id": f"turn-{index}", "usage": {
+            "input_tokens": 100, "output_tokens": 10}}) for index in range(20)), encoding="utf-8")
         usage = _usage(log, 1.0)
         self.assertEqual(usage["token_totals"], {"input_tokens": 2000, "output_tokens": 200})
         self.assertEqual(len(usage["token_usage"]), 16)
