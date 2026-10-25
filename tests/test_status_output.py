@@ -44,8 +44,9 @@ def fixture():
 
 def wire_size(value):
     body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    return len(json.dumps({"content": [{"type": "text", "text": body}], "isError": False},
-                          ensure_ascii=False, separators=(",", ":")))
+    envelope = json.dumps({"content": [{"type": "text", "text": body}], "isError": False},
+                          ensure_ascii=False, separators=(",", ":"))
+    return len(envelope.encode("utf-16-le", errors="surrogatepass")) // 2
 
 
 class StatusOutputTests(unittest.TestCase):
@@ -90,7 +91,7 @@ class StatusOutputTests(unittest.TestCase):
         json.dumps(result, allow_nan=False)
 
     def test_string_escaping_and_maximum_counters_cannot_exceed_total_reply_budget(self):
-        for character in ('"', "\\", "\n", "中文"):
+        for character in ('"', "\\", "\n", "中文", "\U0001f642", '\U0001f642"\\'):
             with self.subTest(character=repr(character)):
                 value = fixture()
                 def flood(data):

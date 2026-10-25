@@ -14,7 +14,7 @@ class AntigravityTranscriptTests(unittest.TestCase):
     TRANSCRIPT_FILENAME = "transcript.jsonl"
 
     def setUp(self):
-        base = Path(__file__).resolve().parents[1] / "build" / "local" / "opt1426" / "transcript-tests"
+        base = Path(__file__).resolve().parents[1] / "build" / "local" / "fix1427" / "transcript-tests"
         base.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=base)
         self.addCleanup(self.temp.cleanup)
@@ -159,10 +159,13 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.add("USER_INPUT", "public task")
         self.invoke()
         self.r.db.execute("DELETE FROM events WHERE type='AntigravityPublicInput'")
-        with patch("agent_learning.antigravity_transcript.read_public", side_effect=AssertionError("no replay I/O")):
+        with patch("agent_learning.antigravity_transcript.read_public", side_effect=AssertionError("no replay I/O")), \
+             patch.object(self.adapter, "_capture_prompt") as capture, patch.object(self.r, "_context") as context:
             self.invoke()
             self.r.db.execute("UPDATE antigravity_receipts SET state='pending' WHERE kind='PreInvocation'")
             self.invoke()
+        capture.assert_not_called()
+        context.assert_not_called()
         self.assertEqual(len(self.events("AntigravityPublicInput")), 0)
 
     def test_multimount_pre_reports_isolation_without_private_payload(self):
@@ -194,6 +197,126 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.assertEqual(len(self.events("UserPromptSubmit")), 1)
         self.assertEqual(len(self.events("PublicMessageSegment")), 1)
         self.assertEqual(len(self.events("AntigravityPublicWindow")), 2)
+
+    def test_every_invocation_excludes_its_single_saved_prompt(self):
+        self.add("USER_INPUT", "saturnringdiagnostic")
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            for number in range(11):
+                with self.subTest(invocation=number):
+                    output = self.invoke(number)
+                    source, = self.events("UserPromptSubmit")
+                    memory, = self.r.db.execute(
+                        "SELECT id,body FROM work_memories WHERE project=? AND event_id=?",
+                        (self.p, source["id"])).fetchall()
+                    self.assertEqual(json.loads(memory["body"])["type"], "user_request")
+                    self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+                    self.assertNotIn(memory["id"], json.dumps(output))
+                    self.assertNotIn("[工作历史]", json.dumps(output, ensure_ascii=False))
+                    self.assertTrue(self.input_metadata()["public_window"]["available"])
+                    self.add("PLANNER_RESPONSE", tool_calls=[{"name": "synthetic_read_only"}])
+                    tool_raw = self.raw(stepIdx=len(self.rows), toolCall={"name": "view_file",
+                        "args": {"AbsolutePath": str(self.workspace / "synthetic-read-only.txt")}})
+                    self.adapter.handle("PreToolUse", tool_raw)
+                    self.adapter.handle("PostToolUse", {**tool_raw, "error": ""})
+                    self.add("GENERIC", "synthetic read-only tool result")
+                    self.post()
+                    self.assertEqual(self.coverage()["reason"], "transcript_final_public_missing")
+        self.assertEqual(len(self.events("AntigravityPublicInput")), 11)
+        self.assertEqual(len(self.events("AntigravityPublicResponse")), 11)
+        self.assertEqual(len(self.events("PostToolUse")), 11)
+        self.assertTrue(all(row["outcome"] == "call_completed" for row in self.events("PostToolUse")))
+        self.assertTrue(self.r.work_search(self.p, "saturnringdiagnostic")["items"])
+
+    def test_current_prompt_exclusion_keeps_relevant_history(self):
+        with self.r.transaction():
+            prior, _ = self.r._event(self.p, self.r.host_conversation("past"), "Stop",
+                {"last_assistant_message": "orbitguard: retain launch evidence for orbitguard."},
+                outcome="reported")
+            self.r._work_capture_event(self.p, prior["id"], self.workspace)
+        self.add("USER_INPUT", "orbitguard")
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            output = self.invoke()
+        source, = self.events("UserPromptSubmit")
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+        text = output["injectSteps"][0]["ephemeralMessage"]
+        cards = [json.loads(line.removeprefix("[工作历史] ")) for line in text.splitlines()
+                 if line.startswith("[工作历史] ")]
+        self.assertTrue(cards)
+        for card in cards:
+            event_id = self.r.db.execute("SELECT event_id FROM work_memories WHERE project=? AND id=?",
+                (self.p, card["memory_id"])).fetchone()[0]
+            self.assertEqual(event_id, prior["id"])
+
+    def test_long_prompt_segments_are_excluded_with_real_fault_query(self):
+        self.add("USER_INPUT", "不对，segmentfence 应保留原始证据。" * 150)
+        self.r.db.execute("INSERT INTO antigravity_faults VALUES(?,?,?,?,?,'pending',?)",
+            (self.p, self.c, "controlled-segment-fault", self.r.session_epoch(), "segmentfence", 1.0))
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            output = self.invoke()
+        source, = self.events("UserPromptSubmit")
+        own = self.r.db.execute(
+            "SELECT id FROM work_memories WHERE project=? AND (event_id=? OR "
+            "json_extract(body,'$.public_message_id')=?)",
+            (self.p, source["id"], source["id"])).fetchall()
+        self.assertGreater(len(own), 2)
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+        self.assertEqual(context.call_args.kwargs["query"], "segmentfence")
+        self.assertIs(context.call_args.kwargs["_query_available"], True)
+        for memory in own:
+            self.assertNotIn(memory["id"], json.dumps(output))
+        self.assertNotIn("[工作历史]", json.dumps(output, ensure_ascii=False))
+        self.assertTrue(self.r.work_search(self.p, "segmentfence")["items"])
+
+    def test_same_correction_after_stop_keeps_prior_source_and_excludes_current(self):
+        text = "不对，signingcompat 应保留已发布应用签名。"
+        self.add("USER_INPUT", text)
+        self.invoke()
+        first, = self.events("UserPromptSubmit")
+        self.stop()
+        self.add("USER_INPUT", text)
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            output = self.invoke(1)
+        sources = self.events("UserPromptSubmit")
+        self.assertEqual(len(sources), 2)
+        current = sources[-1]
+        self.assertNotEqual(current["id"], first["id"])
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], current["id"])
+        memories = {row["event_id"]: row["id"] for row in self.r.db.execute(
+            "SELECT event_id,id FROM work_memories WHERE project=?", (self.p,))}
+        self.assertIn(memories[first["id"]], json.dumps(output))
+        self.assertNotIn(memories[current["id"]], json.dumps(output))
+
+    def test_legacy_native_prompt_reuse_returns_its_canonical_source(self):
+        original = self.r._event
+        def legacy(project, conversation, kind, payload, event_id=None, **kwargs):
+            if (isinstance(event_id, list) and event_id[0] == "antigravity-public-prompt"
+                    and event_id[1] == conversation):
+                event_id = [event_id[0], *event_id[2:]]
+            return original(project, conversation, kind, payload, event_id=event_id, **kwargs)
+        with patch.object(self.r, "_event", side_effect=legacy):
+            self.invoke(lastUserInput="legacyfence")
+        source, = self.events("UserPromptSubmit")
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            output = self.invoke(1, lastUserInput="legacyfence")
+        self.assertEqual(len(self.events("UserPromptSubmit")), 1)
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+        memory = self.r.db.execute("SELECT id FROM work_memories WHERE project=? AND event_id=?",
+                                  (self.p, source["id"])).fetchone()[0]
+        self.assertNotIn(memory, json.dumps(output))
+
+    def test_same_native_prompt_in_another_chat_keeps_its_own_source(self):
+        self.invoke(lastUserInput="samechatfence")
+        first, = self.events("UserPromptSubmit")
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            output = self.adapter.handle("PreInvocation", self.raw(conversationId="another-chat",
+                invocationNum=0, initialNumSteps=0, lastUserInput="samechatfence"))
+        first, current = self.events("UserPromptSubmit")
+        self.assertNotEqual(first["conversation"], current["conversation"])
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], current["id"])
+        memories = {row["event_id"]: row["id"] for row in self.r.db.execute(
+            "SELECT event_id,id FROM work_memories WHERE project=?", (self.p,))}
+        self.assertIn(memories[first["id"]], json.dumps(output))
+        self.assertNotIn(memories[current["id"]], json.dumps(output))
 
     def test_same_text_new_user_after_stop_preserved(self):
         self.normal()
@@ -268,9 +391,14 @@ class AntigravityTranscriptTests(unittest.TestCase):
     def test_task_update_followed_by_native_pre_refreshes_snapshot(self):
         self.add("USER_INPUT", "current request")
         self.invoke()
+        source, = self.events("UserPromptSubmit")
         self.r.task_update(self.p, self.c, "current task")
         self.add("GENERIC", "observable tool result")
-        self.invoke(1)
+        with patch.object(self.r, "_context", wraps=self.r._context) as context:
+            self.invoke(1)
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+        current_source, = self.events("UserPromptSubmit")
+        self.assertEqual(dict(current_source), dict(source), "a reused input must not be rebound to a new task")
         self.add("PLANNER_RESPONSE", "bound public reply")
         self.post()
         self.assertEqual(len(self.events("PublicMessageSegment")), 1)
@@ -606,6 +734,7 @@ class AntigravityTranscriptTests(unittest.TestCase):
             self.invoke()
         self.assertEqual(context.call_args.kwargs["query"], "")
         self.assertIs(context.call_args.kwargs["_query_available"], False)
+        self.assertIsNone(context.call_args.kwargs["_source_event_id"])
         self.assertEqual(len(self.events("UserPromptSubmit")), 0)
 
     def test_partial_continue_is_retained_but_cannot_reuse_prior_context_query(self):
@@ -615,7 +744,9 @@ class AntigravityTranscriptTests(unittest.TestCase):
             self.invoke(1)
         self.assertEqual(context.call_args.kwargs["query"], "")
         self.assertIs(context.call_args.kwargs["_query_available"], False)
-        payload = json.loads(self.events("UserPromptSubmit")[-1]["payload"])
+        source = self.events("UserPromptSubmit")[-1]
+        self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"])
+        payload = json.loads(source["payload"])
         self.assertEqual(payload["prompt"], "继续")
         self.assertTrue(payload["capture_coverage"]["lastUserInput"]["truncated"])
 
@@ -646,6 +777,8 @@ class AntigravityTranscriptTests(unittest.TestCase):
                     self.invoke(number)
                 self.assertEqual(context.call_args.kwargs["query"], "sqlite database is locked")
                 self.assertIs(context.call_args.kwargs["_query_available"], True)
+                source = self.events("UserPromptSubmit")[-1] if partial else None
+                self.assertEqual(context.call_args.kwargs["_source_event_id"], source["id"] if source else None)
                 coverage = self.input_metadata()["capture_coverage"]["lastUserInput"]
                 self.assertTrue(coverage["truncated"] if partial else not coverage["available"])
 
@@ -668,12 +801,14 @@ class AntigravityTranscriptTests(unittest.TestCase):
                         workspacePaths=[str(self.workspace), str(other)])
         self.assertEqual(context.call_args.kwargs["query"], "")
         self.assertIs(context.call_args.kwargs["_query_available"], False)
+        self.assertIsNone(context.call_args.kwargs["_source_event_id"])
         self.r.db.execute("UPDATE antigravity_trajectories SET ambiguous=1 WHERE project=? AND conversation=?",
                           (self.p, self.c))
         with patch.object(self.r, "_context", return_value="") as context:
             self.invoke(1, lastUserInput="native public request")
         self.assertEqual(context.call_args.kwargs["query"], "")
         self.assertIs(context.call_args.kwargs["_query_available"], False)
+        self.assertIsNone(context.call_args.kwargs["_source_event_id"])
 
 
 class AntigravityFullTranscriptTests(AntigravityTranscriptTests):

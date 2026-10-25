@@ -37,12 +37,14 @@ for (const [name,args] of cases) {
     const decision = await handlers.get('tools/pre-execute')(exec,async()=>({kind:'allow'}));
     assert.notEqual(decision?.kind,'deny',JSON.stringify(decision));
     const value = await definitions.get(name).execute(args,exec);
+    const content = definitions.get(name).output.render(args,value);
     if(name==='learning_status'){
       assert.equal(value.view,'summary');
-      assert.ok(JSON.stringify(value).length<=3000);
+      assert.ok(JSON.stringify({content,isError:false}).length<=3000);
+      assert.equal(content[0].text,JSON.stringify(value));
       assert.equal(Object.hasOwn(value,'history_import'),false);
     }
-    result = {isError:false,content:[{type:'text',text:JSON.stringify(value)}]};
+    result = {isError:false,value,content};
   } catch(error) {
     errors.push({name,error:String(error)});
     result = {isError:true,error:{message:String(error)}};
@@ -59,6 +61,87 @@ const recovered=await handlers.get('tools/post-execute')(compat,
 assert.equal(recovered.kind,'accept');
 globalThis.__ALP_DSH_DISPOSE__?.();
 console.log(JSON.stringify({errors}));
+"""
+
+
+NATIVE_OUTPUT_BRIDGE = r"""
+import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+import childProcess from 'node:child_process';
+import {readFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const fixtures=JSON.parse(readFileSync(process.argv[3],'utf8'));
+const handlers=new Map(),definitions=new Map();let candidate;
+childProcess.spawn=()=>{
+ const child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();
+ child.kill=()=>{};let input='';
+ child.stdin={write(value){input+=value;},end(){queueMicrotask(()=>{
+  const payload=JSON.parse(input);
+  const result=payload.tool?{ok:true,result:candidate}:{};
+  child.stdout.emit('data',Buffer.from(JSON.stringify(result)));child.emit('close',0);
+ });}};
+ return child;
+};
+syncBuiltinESMExports();
+const {apply}=await import(pathToFileURL(process.argv[1]).href);
+apply({tools:{register(spec){definitions.set(spec.name,spec);}},effect(){},inject(){},
+ on(name,handler){handlers.set(name,handler);},systemPrompt:{context(){}}});
+const agent={id:'native-render-contract'};
+handlers.get('session/created')({id:agent.id,header:{cwd:process.argv[2]}});
+assert.deepEqual(definitions.get('learning_status').parameters.properties.view.enum,['summary','full']);
+// dsh-tools createSuccessResult retains a canonical program value and renders
+// content. dsh-agent-loop appendToolResult passes only content/isError into
+// dsh-llm createToolResultMessage: neither value nor details is model content.
+function materializeNativeMessage(definition,args,value){
+ const canonical={value,content:definition.output.render(args,value),isError:false};
+ return {canonical,message:{role:'tool',source:{kind:'tool',callId:'synthetic-call'},
+  toolCallId:'synthetic-call',content:canonical.content,isError:canonical.isError,id:'synthetic-id'}};
+}
+function assertSummary(content,expected){
+ assert.equal(content.length,1);assert.equal(content[0].type,'text');
+ assert.equal(content[0].text,JSON.stringify(expected));
+ assert.deepEqual(JSON.parse(content[0].text),expected,'render must retain valid complete JSON');
+ assert.ok(JSON.stringify({content,isError:false}).length<=3000,'final escaped UTF-16 envelope');
+}
+try{
+ for(const fixture of fixtures){
+  candidate=fixture.value;const args={view:'summary'};
+  const exec={agent,name:'learning_status',arguments:args,callId:'summary-'+fixture.name};
+  const definition=definitions.get(exec.name);
+  const value=await definition.execute(args,exec);
+  const {canonical,message}=materializeNativeMessage(definition,args,value);
+  assert.deepEqual(canonical.value,candidate);
+  assertSummary(message.content,value);
+  for(const key of ['value','details','structuredContent','meta'])assert.equal(Object.hasOwn(message,key),false);
+  assert.equal(Object.hasOwn(definition.output,'presentationMeta'),false);
+  assert.equal(value.admin_admission_enabled,false);
+  assert.ok(value.project_usage&&value.global_usage,'two ledgers survive');
+  assert.equal(value.project_usage.reported_tokens,candidate.project_usage.reported_tokens,
+   'unknown and observed zero remain distinct');
+  assert.equal(value.full_view.arguments.view,'full');
+  const recovered=await handlers.get('tools/post-execute')(exec,
+   {isError:true,error:{message:'SyntaxError: invalid syntax'}},async()=>({kind:'passthrough'}));
+  assert.equal(recovered.kind,'accept');assertSummary(recovered.content,value);
+  assert.deepEqual(recovered.content,message.content,'recovery shares the exact renderer');
+ }
+ candidate={history_import:{complete:'synthetic full status '.repeat(400)},value:42};
+ const formatted=JSON.stringify(candidate,null,2);
+ for(const [name,args] of [['learning_status',{}],['learning_status',{view:'full'}],
+   ['knowledge_search',{query:'synthetic'}],['task_update',{goal:'synthetic'}]]){
+  const exec={agent,name,arguments:args,callId:'unchanged-'+name};
+  const definition=definitions.get(name),value=await definition.execute(args,exec);
+  const {message}=materializeNativeMessage(definition,args,value);
+  assert.equal(message.content[0].text,formatted,'full and other read/write tools retain pretty output');
+  const recovered=await handlers.get('tools/post-execute')(exec,
+   {isError:true,error:{message:'SyntaxError: invalid syntax'}},async()=>({kind:'passthrough'}));
+  assert.equal(recovered.content[0].text,formatted,'other recovery formats are unchanged');
+ }
+ assert.throws(()=>definitions.get('learning_status').output.render({view:'summary'},
+  {view:'summary',unexpected:'x'.repeat(3100)}),/model result budget/,
+  'an invalid oversized producer result must fail rather than leak or slice JSON');
+ console.log(JSON.stringify({ok:true,cases:fixtures.length}));
+}finally{globalThis.__ALP_DSH_DISPOSE__?.();}
 """
 
 
@@ -296,6 +379,34 @@ class DshToolContractTests(unittest.TestCase):
         self.assertFalse(summary["admin_admission_enabled"])
         self.assertNotIn("history_import", summary)
         self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, separators=(",", ":"))), 3000)
+
+    @unittest.skipUnless(NODE, "Node.js is required for native result rendering")
+    def test_native_summary_final_render_and_recovery_obey_the_model_budget(self):
+        from agent_learning.status_output import status_summary
+        produced = self.tool("learning_status", {"view": "summary"})["result"]
+        fixtures = [{"name": "real-runtime-producer", "value": produced}]
+        for name, character in (("long-chinese", "中文"), ("escaped", '"\\'),
+                                ("non-bmp", "\U0001f642"), ("mixed", '\U0001f642"\\\n')):
+            usage = {"scope": "project", "project_id": character * 5000,
+                     "reported_tokens": None, "usage_unknown_attempts": 2**63 - 1,
+                     "result_unknown_attempts": 2**63 - 1, "active_attempts": 2**63 - 1,
+                     "counted_attempts": 2**63 - 1, "remaining_calls": 2**63 - 1}
+            source = {"project_id": "synthetic", "home": "D:/" + character * 5000,
+                      "host_scope": "dsh:default", "host_epoch": 5, "storage_schema_version": 25,
+                      "admin_enabled": True, "admin_admission_enabled": False,
+                      "admin_routing": {"reason": character * 5000,
+                          "policy": {"enabled": True, "provider": "host", "model_mode": "default"},
+                          "executor": {"provider": "dsh", "model_mode": "default", "model": character * 5000}},
+                      "project_usage": usage, "global_usage": {**usage, "scope": "ALP_HOME"}}
+            frozen = json.dumps(source)
+            value = status_summary(source)
+            self.assertEqual(json.dumps(source), frozen, "projection must not mutate producer state")
+            fixtures.append({"name": name, "value": value})
+        fixture_path = self.root / "native-render-cases.json"
+        fixture_path.write_text(json.dumps(fixtures, ensure_ascii=False), encoding="utf-8")
+        result = self.bridge(NATIVE_OUTPUT_BRIDGE, str(fixture_path))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cases"], len(fixtures))
 
     def test_python_work_read_accepts_boolean_reread_and_rejects_other_types(self):
         from agent_learning.runtime import Runtime

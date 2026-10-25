@@ -573,6 +573,9 @@ class AntigravityAdapter:
             if fresh:
                 self.runtime._work_capture_safely(project, item["id"], str(self.workspace),
                                                  raw=payload, conversation=conversation)
+            # Repeated invocations and legacy IDs still refer to this exact
+            # user statement; exclude its indexed record and public segments.
+            return item["id"]
 
     def _stop(self, project, conversation, observed, event_key, phase_guard):
         with self.runtime.transaction():
@@ -836,8 +839,10 @@ class AntigravityAdapter:
                                         epoch, generation, phase_guard)
         if event == "PreInvocation":
             self._public_input(project, conversation, observed, event_key, phase_guard)
+            source_event_id = None
             if not trajectory["ambiguous"]:
-                self._capture_prompt(project, conversation, observed, generation, epoch, phase_guard, mounted)
+                source_event_id = self._capture_prompt(
+                    project, conversation, observed, generation, epoch, phase_guard, mounted)
             access = r.register_context(project, conversation, expected_epoch=epoch, _phase_guard=phase_guard)
             fault = r.db.execute("SELECT signature,query FROM antigravity_faults WHERE project=? AND conversation=? AND host_epoch=? AND state='pending' "
                                  "ORDER BY created LIMIT 1", (project, conversation, epoch)).fetchone()
@@ -853,7 +858,8 @@ class AntigravityAdapter:
             text = r._context(project, conversation,
                               query=query, context_handle=access["context_handle"],
                               expected_epoch=epoch, delivery="ephemeral", _phase_guard=phase_guard, _outcome=outcome,
-                              workspace=str(self.workspace), raw=raw, _query_available=bool(query.strip()))
+                              workspace=str(self.workspace), raw=raw, _query_available=bool(query.strip()),
+                              _source_event_id=source_event_id)
             if fault:
                 with r.transaction():
                     phase_guard()

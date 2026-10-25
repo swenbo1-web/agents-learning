@@ -116,8 +116,11 @@ def status_summary(status):
 
     def size():
         body = json.dumps(public, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        return len(json.dumps({"content": [{"type": "text", "text": body}], "isError": False},
-                              ensure_ascii=False, separators=(",", ":")))
+        envelope = json.dumps({"content": [{"type": "text", "text": body}], "isError": False},
+                              ensure_ascii=False, separators=(",", ":"))
+        # DSH renders this projection in JavaScript: non-BMP code points use
+        # two UTF-16 units there. Count the final escaped envelope the same way.
+        return len(envelope.encode("utf-16-le", errors="surrogatepass")) // 2
 
     # Extended coverage and workload details are optional; identity, actual
     # admission, routing and the two separate ledgers have priority.

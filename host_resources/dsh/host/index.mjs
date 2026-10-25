@@ -219,6 +219,20 @@ const GENERIC_JSON_OUTPUT = {
   render: (_args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }],
 };
 
+const STATUS_JSON_OUTPUT = {
+  schema: GENERIC_JSON_OUTPUT.schema,
+  render: (args, value) => {
+    if (args?.view !== "summary") return GENERIC_JSON_OUTPUT.render(args, value);
+    // The registry retains value for programmatic callers; only these rendered
+    // blocks enter the model's ToolMessage. Do not pretty-print or repeat it.
+    const content = [{ type: "text", text: JSON.stringify(value) }];
+    if (JSON.stringify({ content, isError: false }).length > 3000) {
+      throw new Error("Agent Learning status summary exceeds its model result budget");
+    }
+    return content;
+  },
+};
+
 const WORKER_TOOL_SPECS = [
   {
     name: "knowledge_search",
@@ -1064,7 +1078,7 @@ export function apply(ctx, config = {}) {
       name: spec.name,
       description: spec.description,
       parameters: spec.parameters,
-      output: GENERIC_JSON_OUTPUT,
+      output: spec.name === "learning_status" ? STATUS_JSON_OUTPUT : GENERIC_JSON_OUTPUT,
       timeoutMs: 20000,
       isConcurrencySafe: () => spec.readOnly,
       presentCall: (args) => ({
@@ -1744,7 +1758,8 @@ export function apply(ctx, config = {}) {
     }
     if (recoveryError) throw recoveryError;
     if (didRecover) {
-      return { kind: "accept", content: [{ type: "text", text: JSON.stringify(recovered, null, 2) }] };
+      const output = exec.name === "learning_status" ? STATUS_JSON_OUTPUT : GENERIC_JSON_OUTPUT;
+      return { kind: "accept", content: output.render(exec.arguments || {}, recovered) };
     }
     return next();
   });

@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.26 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.27 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,13 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Exclude current AG input and bound native DSH summaries (1.4.27)
+
+- **Do not recall the current request as history:** after capturing or reusing a public AG request, pass its canonical source ID to retrieval and exclude its work index and long-message segments. The request remains stored and relevant earlier history stays available. No text-based history deletion or completed-receipt rewrite occurs; the fix applies to subsequent fresh calls.
+- **Keep native output compact:** DSH uses compact JSON for `learning_status(view="summary")` on both normal execution and syntax recovery. Omitted view, full status and other tools retain their formatting; programmatic results stay available to the UI.
+- **Count escaping and non-BMP characters:** the summary `{content,isError}` envelope is capped at 3000 UTF-16 units. Host-generated call IDs and transport fields are outside this budget; units are not tokens. Only rendered content enters the model message, without a duplicate programmatic value.
+- **Compatibility and acceptance:** schema/internal protocol 25 and indexes 6/2/1 are unchanged. Administrator, model, publication and failed-call permissions remain. Partial AG responses are not complete delivery; isolated regressions and model-free entry checks do not establish real-task acceptance.
 
 ## Compact DSH diagnostics and AG public records (1.4.26)
 
@@ -953,7 +960,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.26 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. It adds explicit compact diagnostics, native AG full/compact public record compatibility and retrieval boundaries when input is unavailable. Full status, private UI data and failed-call locks remain. Partial public responses do not establish complete phase delivery. Back up the external database and update/reload shared-database hosts together; installation enables no administrator, history or publication policy. Native-host behavior and gains need separate acceptance; the original v1.0.0 distribution lacks newer capabilities.
+Current `main` v1.4.27 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. AG excludes the canonical current request and its segments; native DSH summaries stay compact on success and recovery, with escaped-envelope UTF-16 budgeting. History, completed receipts, full status and UI programmatic results remain. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1281,7 +1288,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.26 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** Compact diagnostics and native AG record paths preserve full status on demand. Missing input cannot invent an old focus or retrieve another conversation by recency alone. Unknown usage, failed-call locks and publication policy remain; public records and complete delivery are separate. Character budgets establish no token savings. Update/reload shared-database hosts together; installation enables neither administrators nor historical review. Source updates do not imply a new downloadable Release.
+**Current source version 1.4.27 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It fixes current-input echo in AG and redundant native DSH summary formatting, preserving unknown usage, history and existing publication policy. Escaped UTF-16 budgets establish no token savings. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
