@@ -6,6 +6,7 @@ import hashlib
 import re
 import sqlite3
 from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matched_labels
+from .automatic_relevance import automatic_action_plan, automatic_state_exclusion
 from .semantic_retrieval import SemanticRetrievalMixin
 
 
@@ -35,7 +36,7 @@ _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
-_MATCH_POLICY_VERSION = 4
+_MATCH_POLICY_VERSION = 5
 _RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
@@ -139,6 +140,7 @@ def normalized_query_plan(query):
                       and (bool(anchors) or not diagnostics["input_truncated"]))
     diagnostics["automatic_safe"] = automatic_safe
     return {"terms": selected, "meaningful": meaningful,
+            "automatic_intent": automatic_action_plan(scanned),
             "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION,
             "exact_anchors": anchors, "automatic_safe": automatic_safe,
             "query_diagnostics": diagnostics,
@@ -212,7 +214,7 @@ def _positive_anchors_allowed(body_json, anchors):
     return all(anchor in positive for anchor in anchors)
 
 
-def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None):
+def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None, _intent=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
     values = (_match_values(body_json, query_weights, denominator) if _values is None else _values)
     score, coverage, matches = values[:3]
@@ -237,6 +239,13 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
     result = {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
+    # Consumers opt into the original-query rule. Review-packet comparison
+    # still needs old records for deduplication; concrete questions add no
+    # extra full-body JSON parse just to test this optional material gate.
+    if _intent and _intent.get("action_only"):
+        exclusion = automatic_state_exclusion(json.loads(body_json), _intent)
+        if exclusion:
+            result.update(auto_eligible=False, auto_exclusion_reason=exclusion)
     if len(values) > 3:
         result["topic_coverage"] = round(values[3][0], 6)
     return result
@@ -454,7 +463,8 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 values = analyze(row)
                 identity = (row["id"], row["revision"])
                 explanation = (_match_info(row["body"], weights, denominator, meaningful, _values=values,
-                                           _anchors=plan["exact_anchors"]) if identity not in unreadable else
+                                           _anchors=plan["exact_anchors"], _intent=plan["automatic_intent"])
+                               if identity not in unreadable else
                                {"score": 0, "coverage": 0, "matched_terms": [], "auto_eligible": False})
                 # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
                 semantic_match = semantic_matches.get(row["id"])
@@ -477,6 +487,10 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         and not _positive_anchors_allowed(row["body"], plan["exact_anchors"])):
                     explanation["auto_eligible"] = False
                 if not plan["automatic_safe"] or identity in unreadable:
+                    explanation["auto_eligible"] = False
+                # A semantic similarity shortcut must not revive an excluded
+                # delivery snapshot. Manual recall still returns its evidence.
+                if explanation.get("auto_exclusion_reason"):
                     explanation["auto_eligible"] = False
                 if (explanation["score"] > 0 or semantic_match is not None) and (
                         not _automatic or explanation["auto_eligible"]):

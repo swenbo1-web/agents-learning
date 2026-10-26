@@ -22,13 +22,37 @@ _EN_CONTINUATION = re.compile(
     r"(?:please )?(?:(?:continue|keep|resume|go on|carry on)(?: with| to)? )?" + _EN_ACTION
     + r"(?: (?:and(?: then)?|then) " + _EN_ACTION + r")*(?: again)?\Z")
 
+# New action families require an explicit follow-up marker. A bare install or
+# deployment request starts its own query; continuation only preserves search
+# focus and never resumes a task or extends its execution permission.
+_ZH_FOLLOWUP_ACTION = (
+    r"(?:(?:进一步|深入|深度|全面|详细|仔细|重新|彻底))*"
+    r"(?:优化|分析|解析|推送|安装|部署|验证|检查|测试|核对|修复|复查|复验)"
+    r"(?:一下|一遍|一轮|下去|好)?")
+_ZH_FOLLOWUP = re.compile(
+    r"(?:请|麻烦)?(?:继续|接着|接下来|再|确认|按你说的|按此|按上述方案)"
+    r"(?:继续)?[，,、]*(?:对此|对其)?(?:进行)?" + _ZH_FOLLOWUP_ACTION
+    + r"(?:(?:并且|然后|之后|并|和|及|再|、|，|,|；|;)?" + _ZH_FOLLOWUP_ACTION + r")*(?:吧)?\Z")
+_EN_FOLLOWUP_ACTION = (
+    r"(?:(?:deeply|carefully|thoroughly|further|fully) )*"
+    r"(?:optimi[sz](?:e|ing|ation)|refin(?:e|ing|ement)|improv(?:e|ing|ement)|"
+    r"analy[sz](?:e|ing)|analysis|push(?:ing)?|install(?:ing|ation)?|deploy(?:ing|ment)?|"
+    + _EN_ACTION + r")(?: (?:deeply|carefully|thoroughly|further|fully|again))*")
+_EN_FOLLOWUP = re.compile(
+    r"(?:please )?(?:continue|keep|resume|go on|carry on|confirm)(?: with| to)? (?:the )?"
+    + _EN_FOLLOWUP_ACTION
+    + r"(?:(?: and(?: then)? | then |[,;] ?(?:and(?: then)? |then )?)"
+    + _EN_FOLLOWUP_ACTION + r")*\Z")
+
 
 def _continuation_query(value):
     """Recognize whole action-only prompts; remaining subject words start a query."""
     value = re.sub(r"\s+", " ", value.lower()).strip("。.!！?？,，;；:： ")
     return (not value or value in _CONTINUATION_ACKS
             or bool(_ZH_CONTINUATION.fullmatch(value.replace(" ", "")))
-            or bool(_EN_CONTINUATION.fullmatch(value)))
+            or bool(_EN_CONTINUATION.fullmatch(value))
+            or bool(_ZH_FOLLOWUP.fullmatch(value.replace(" ", "")))
+            or bool(_EN_FOLLOWUP.fullmatch(value)))
 
 
 class KnowledgeContextMixin:

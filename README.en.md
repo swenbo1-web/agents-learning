@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.28 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.29 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,14 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Automatic-context noise and follow-up focus (1.4.29)
+
+- **Fewer old delivery claims for generic actions:** inspect the original prompt before scoring removes request words. A definite delivery-status snapshot with only `reported`/`model_reported` support cannot qualify merely through generic install, push or test words. Guides, constraints and ambiguous material retain the existing gates; history is not declared incorrect or expired.
+- **One rule across channels:** formal knowledge, work history and enabled candidate references share the automatic gate. High semantic similarity cannot bypass it. `match.auto_exclusion_reason` explains exclusions; manual search and reading remain available.
+- **Keep the current focus:** whole action-only follow-ups such as “continue optimizing” reuse a valid current query. Requests naming SQLite, a path, a version or another subject still start a new query. Without a valid focus, generic old requests do not fill context. Search continuity grants no task or execution permission.
+- **Preserve independent recovery:** explicit historical versions, delivery history, errors and files retain their existing recall gates. Strict current-task compaction handoffs, source updates and file notices continue through their own boundaries.
+- **No extra model or migration:** concrete questions skip the new status classifier. The match-policy change invalidates old query caches without rebuilding FTS. Schema/protocol 25, indexes 6/2/1 and model, administrator and publication policies remain. Offline noise reduction establishes no real token return.
 
 ## AG panel reconnection and page restoration (1.4.28)
 
@@ -968,7 +976,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.28 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. AG excludes the canonical current request and its segments; native DSH summaries stay compact on success and recovery, with escaped-envelope UTF-16 budgeting. History, completed receipts, full status and UI programmatic results remain. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.29 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Generic action requests reduce old delivery-status and generic-request echoes; action-only follow-ups preserve a valid focus. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1296,7 +1304,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.28 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It fixes current-input echo in AG and redundant native DSH summary formatting, preserving unknown usage, history and existing publication policy. Escaped UTF-16 budgets establish no token savings. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.29 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It improves automatic material selection for generic actions and preserves follow-up focus, explicit historical queries, guides, source notices and compaction handoffs. The match-policy change refreshes query caches without migrating knowledge or rebuilding indexes; unknown usage and publication policy remain. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 

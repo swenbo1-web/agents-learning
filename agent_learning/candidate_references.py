@@ -562,7 +562,8 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
         if any((body.get(key, "solution" if key == "knowledge_kind" else "") if key in {"category", "knowledge_kind"}
                 else body.get("metadata", {}).get(key)) != value for key, value in filters.items()):
             continue
-        info = _match_info(candidate[0], weights, denominator, plan["meaningful"], _anchors=plan["exact_anchors"])
+        info = _match_info(candidate[0], weights, denominator, plan["meaningful"], _anchors=plan["exact_anchors"],
+                           _intent=plan["automatic_intent"])
         if not info["auto_eligible"] or not _positive_anchors_allowed(candidate[0], plan["exact_anchors"]):
             continue
         ranked.append((row["candidate_id"], info))

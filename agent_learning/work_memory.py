@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import re
 import time
+from .automatic_relevance import has_constraint as _constraint_request
 
 from .work_files import checkout_key, checkout_root, file_links_from_payload, normalize_file_target, current_file_version
 
@@ -227,11 +228,6 @@ def _verification(name, args):
 def _correction(text):
     return bool(isinstance(text, str) and re.match(
         r"\s*(?:不对|不是|纠正|更正|我说的是|你理解错|实际上|correction\b|actually\b|that's wrong\b)", text, re.I))
-
-
-def _constraint_request(text):
-    return bool(re.search(r"必须|禁止|不要|不得|保持|保留|仅限|只允许|务必|统一|偏好|以后|希望|"
-                          r"(?:\b(?:must|never|always|keep|preserve|only|require|use)\b)", text, re.I))
 
 
 def _metadata_only_write(body):
@@ -764,9 +760,17 @@ class WorkMemoryMixin:
             if automatic and _metadata_only_write(body):
                 continue
             if query_gate:
-                comparable = _json({"title": body["title"], "content": body["summary"], "knowledge_kind": ""})
+                if (plan["automatic_intent"]["action_only"] and body.get("type") == "user_request"
+                        and not _constraint_request(body["summary"])):
+                    continue
+                # A user's correction may quote the very status it rejects.
+                # Preserve that role without bypassing the original match gate.
+                intent = {} if body.get("type") == "user_correction" else plan["automatic_intent"]
+                comparable = _json({"title": body["title"], "content": body["summary"], "knowledge_kind": "",
+                                    "validation_level": body.get("validation_level")})
                 if not denominator or not _match_info(comparable, weights, denominator,
-                                                       plan["meaningful"], _anchors=plan["exact_anchors"])["auto_eligible"]:
+                                                       plan["meaningful"], _anchors=plan["exact_anchors"],
+                                                       _intent=intent)["auto_eligible"]:
                     continue
                 # Prefer recorded results over a previous short question about
                 # the same subject. Keep explicit user constraints/corrections;
