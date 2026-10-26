@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.30 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.31 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,13 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Routine checks, capture acknowledgements and phase backlogs (1.4.31)
+
+- **Avoid routine-status reviews**: in an explicitly read-only status task, a complete, conflict-free and correctly paired `call_completed` result from a known Agent Learning status tool may be deferred locally. Its recorded outcome stays protocol completion. Unknown tools, truncation, running results, missing pre-events and uncertain attribution retain normal review.
+- **Separate DSH turn completion from capture acknowledgement**: terminal and tool-result envelopes have stable capture identities. Unconfirmed persistence or responses retain a bounded envelope in the current bridge instance for limited redelivery. The receiver checks the original task, host and trajectory boundaries and returns confirmed receipts idempotently. Redelivery does not rerun business tools or old reviews. This memory queue does not survive host restarts or guarantee recovery of every lost event.
+- **Explain phase backlogs**: eligible work and protected failed batches/phases in the current host boundary are shown separately. Recent complete public replies explain a missing task, missing explicit delivery or pending capture seal. Reading a page creates no phase, unlocks no call and starts no review.
+- **Preserve policy**: schema/internal protocol 25 and indexes 6/2/1 stay unchanged, as do models, budgets, administrator and publication switches. AG long-trajectory and oversized-public-text limits remain; new complete delivery still requires separate real-task acceptance. Offline regressions do not establish token savings.
 
 ## Administrator wait attribution and AG delivery adaptation (1.4.30)
 
@@ -985,7 +992,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.30 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Generic action requests reduce old delivery-status and generic-request echoes; action-only follow-ups preserve a valid focus. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.31 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1313,7 +1320,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.30 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It separates current administrator waits from historical call protection and adapts AG Stop delivery through a strictly bound public transcript window. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.31 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 

@@ -97,6 +97,11 @@ function extractTextFromBlocks(blocks) {
 const OBSERVABLE_TEXT_LIMIT = 65536;
 const CAPTURE_TURN_LIMIT = 128;
 const CAPTURE_MESSAGE_LIMIT = 512;
+const CAPTURE_RETRY_LIMIT = 64;
+const CAPTURE_RETRY_BYTES = 1024 * 1024;
+const CAPTURE_RETRY_ITEM_BYTES = 256 * 1024;
+const CAPTURE_RETRY_ATTEMPTS = 3;
+const CAPTURE_RETRY_TTL_MS = 15 * 60 * 1000;
 
 function boundedPublicText(blocks, maximum = OBSERVABLE_TEXT_LIMIT) {
   // The SDK's assembled message is public text plus explicitly typed blocks.
@@ -186,7 +191,17 @@ function baseRunPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs
       signal,
       env: { ...process.env, ...hostEnvironment, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" },
     });
+    let settled = false;
+    const finish = (value, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(value);
+    };
     const timer = setTimeout(() => {
+      // A kill request is not a process completion receipt. Return uncertainty
+      // at the deadline even if Windows never delivers a close event.
+      finish({ code: null, stdout: "", stderr: "process completion unknown after deadline" });
       try {
         child.kill();
       } catch {}
@@ -194,19 +209,18 @@ function baseRunPythonProcess(pythonExe, args, stdinText, cwd, signal, timeoutMs
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
+      if (!settled) stdout += chunk.toString("utf8");
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
+      if (!settled) stderr += chunk.toString("utf8");
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
+      finish(null, err);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr });
+      finish({ code, stdout, stderr });
     });
+    child.stdin.on?.("error", (error) => finish(null, error));
     if (stdinText !== undefined && stdinText !== null) {
       child.stdin.write(stdinText, "utf8");
     }
@@ -646,6 +660,51 @@ export function apply(ctx, config = {}) {
   const browsers = createBrowserManager({ loadReceipt: loadRuntimeReceipt, runPython: runPythonProcess, environment: hostEnvironment });
   const scopedAgentIds = new Set();
   const capturedTurns = new Map();
+  const pendingCaptures = new Map();
+  const captureLosses = new Map();
+  const toolCaptureBindings = new Map();
+  let pendingCaptureBytes = 0;
+  function captureLost(workspace) {
+    const key = normalizeWinPath(workspace);
+    if (!captureLosses.has(key) && captureLosses.size >= CAPTURE_RETRY_LIMIT) captureLosses.delete(captureLosses.keys().next().value);
+    captureLosses.set(key, Math.min(1000000, (captureLosses.get(key) || 0) + 1));
+  }
+  function removeCapture(record, lost = false) {
+    if (lost && !record.lossReported) { captureLost(record.workspace); record.lossReported = true; }
+    if (pendingCaptures.get(record.id) !== record) return;
+    pendingCaptures.delete(record.id);
+    pendingCaptureBytes -= record.bytes;
+  }
+  function pruneCaptures() {
+    const now = Date.now();
+    for (const record of pendingCaptures.values()) {
+      if (!record.inFlight && now - record.created >= CAPTURE_RETRY_TTL_MS) removeCapture(record, true);
+    }
+  }
+  function captureTransportStatus(workspace) {
+    pruneCaptures();
+    const key = normalizeWinPath(workspace);
+    let pending = 0, retryable = 0, unresolved = captureLosses.get(key) || 0;
+    for (const record of pendingCaptures.values()) {
+      if (normalizeWinPath(record.workspace) !== key) continue;
+      pending += 1;
+      if (record.retryable && record.attempts < CAPTURE_RETRY_ATTEMPTS) retryable += 1;
+      else if (!record.inFlight) unresolved += 1;
+    }
+    return { pending_events: pending, retryable_events: retryable, unresolved_events: unresolved,
+      persistence: "bridge_memory_only" };
+  }
+  async function flushCapture(sessionId, signal, callId) {
+    pruneCaptures();
+    for (const record of pendingCaptures.values()) {
+      if (record.owner !== sessionId || record.inFlight || !record.retryable
+          || callId !== undefined && (record.kind !== "PostToolUse" || record.callId !== callId)
+          || record.attempts >= CAPTURE_RETRY_ATTEMPTS) continue;
+      // One bounded observation retry before the next native boundary. This
+      // never invokes the business tool or an administrator/model again.
+      return record.run(true, signal);
+    }
+  }
   const activeDisposers = [];
   activeDisposers.push(applyExtensions(ctx, extensions, ({ agent, sessionId }) => {
     try {
@@ -693,7 +752,10 @@ export function apply(ctx, config = {}) {
       }
     }
   }
-  activeDisposers.push(() => { capturedTurns.clear(); sessionStarts.clear(); toolContextBindings.clear(); });
+  activeDisposers.push(() => {
+    capturedTurns.clear(); sessionStarts.clear(); toolContextBindings.clear(); toolCaptureBindings.clear();
+    pendingCaptures.clear(); pendingCaptureBytes = 0; captureLosses.clear();
+  });
 
   if (typeof ctx.inject === "function") {
     ctx.inject(["sessionQuery"], (scope) => {
@@ -761,7 +823,7 @@ export function apply(ctx, config = {}) {
     return JSON.stringify([payload.sessionId, payload.agentId || null, normalizeWinPath(payload.cwd)]);
   }
 
-  async function dispatchEvent(eventName, payload, signal) {
+  async function dispatchEvent(eventName, payload, signal, captureBoundary) {
     if (process.env.ALP_DISABLED === "1") return {};
     const envMode = process.env.ALP_HOOK_MODE;
     const denyBridgeFailure = (code, detail) => ({
@@ -814,7 +876,8 @@ export function apply(ctx, config = {}) {
     const key = trajectoryKey(identityPayload);
     let binding = trajectoryBindings.get(key);
     if (!binding) {
-      binding = { instance: randomUUID(), trajectory: null, starting: null, recovering: null };
+      binding = { instance: randomUUID(), trajectory: null, starting: null, recovering: null,
+        captureBoundary: null, captureVersion: -1 };
       trajectoryBindings.set(key, binding);
     }
     const unconfirmed = (code, detail) => ({
@@ -828,38 +891,110 @@ export function apply(ctx, config = {}) {
       const capturedPayload = { ...identityPayload, dsh_bridge_instance: binding.instance,
         ...(handshakeOnly ? { source: "resume", dsh_handshake_only: true } : {}),
         ...(binding.trajectory ? { dsh_trajectory: { ...binding.trajectory } } : {}) };
-      try {
-        const { code, stdout } = await runPythonProcess(
-          receipt.python, [...argv, "--event", kind], JSON.stringify(capturedPayload), cwd, signal, 10000,
-        );
-        if (bridgeDisposed || signal?.aborted || trajectoryBindings.get(key) !== binding) {
-          return inactive();
+      const tracked = !handshakeOnly && ["Stop", "Interrupt", "SubagentStop", "PostToolUse"].includes(kind);
+      const expected = captureBoundary || binding.captureBoundary;
+      if (tracked) {
+        capturedPayload.dsh_capture_id = randomUUID();
+        if (/^[a-f0-9]{64}$/.test(expected || "")) capturedPayload.dsh_capture_expected = expected;
+      }
+      // Freeze the exact envelope before attempting Python. A retry must not
+      // pick up a new handle, task, requestContext, trajectory or installation.
+      let frozen, receiptIdentity;
+      try { frozen = JSON.stringify(capturedPayload); receiptIdentity = JSON.stringify(receipt); }
+      catch {
+        if (tracked) captureLost(effectiveWorkspace || cwd);
+        return unconfirmed("capture_envelope_invalid", "event persistence could not be confirmed.");
+      }
+      const record = tracked ? { id: capturedPayload.dsh_capture_id, owner: payload.agentId || payload.sessionId,
+        kind, callId: payload.callId,
+        workspace: effectiveWorkspace || cwd, created: Date.now(), bytes: Buffer.byteLength(frozen), attempts: 0,
+        retryable: Boolean(capturedPayload.dsh_capture_expected), inFlight: null, run: null } : null;
+      if (record) {
+        pruneCaptures();
+        if (record.bytes <= CAPTURE_RETRY_ITEM_BYTES && pendingCaptures.size < CAPTURE_RETRY_LIMIT
+            && pendingCaptureBytes + record.bytes <= CAPTURE_RETRY_BYTES) {
+          pendingCaptures.set(record.id, record); pendingCaptureBytes += record.bytes;
         }
-        if (code !== 0 || !stdout.trim()) {
+      }
+      async function execute(replay = false, liveSignal = signal) {
+        if (record) record.attempts += 1;
+        try {
+          if (replay && (bridgeDisposed || trajectoryBindings.get(key) !== binding || liveSignal?.aborted
+              || disposedSessions.has(payload.sessionId) || disposedSessions.has(payload.agentId)
+              || JSON.stringify(loadRuntimeReceipt()) !== receiptIdentity)) {
+            if (record) removeCapture(record, true);
+            return inactive();
+          }
+          const input = replay ? JSON.stringify({ ...JSON.parse(frozen), dsh_capture_replay: true }) : frozen;
+          const { code, stdout } = await runPythonProcess(
+            receipt.python, [...argv, "--event", kind], input, cwd, liveSignal, replay ? 1500 : 10000,
+          );
+          if (bridgeDisposed || liveSignal?.aborted || trajectoryBindings.get(key) !== binding) {
+            if (record) removeCapture(record, true);
+            return inactive();
+          }
+          if (code !== 0 || !stdout.trim()) {
+            return unconfirmed("runtime_unavailable", "runtime processing failed; event persistence could not be confirmed.");
+          }
+          const parsed = JSON.parse(stdout.trim());
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return unconfirmed("response_invalid", "runtime returned an invalid response.");
+          }
+          const trajectory = parsed.dsh_trajectory;
+          if (Number.isSafeInteger(trajectory?.generation) && trajectory.generation >= 1
+              && /^[a-f0-9]{32}$/.test(trajectory?.token || "")) {
+            if (binding.trajectory && (binding.trajectory.generation !== trajectory.generation
+                || binding.trajectory.token !== trajectory.token)) {
+              return { ...unconfirmed("trajectory_changed", "reload the session before continuing."),
+                dsh_reconnect_required: true };
+            }
+            binding.trajectory = { generation: trajectory.generation, token: trajectory.token };
+          }
+          if (typeof parsed.systemMessage === "string" && !trajectory && !parsed.hookSpecificOutput?.additionalContext) {
+            parsed.dsh_event_unconfirmed = true;
+          }
+          if (/^[a-f0-9]{64}$/.test(parsed.dsh_capture_boundary || "")
+              && Number.isSafeInteger(parsed.dsh_capture_write_version) && parsed.dsh_capture_write_version >= binding.captureVersion) {
+            binding.captureBoundary = parsed.dsh_capture_boundary;
+            binding.captureVersion = parsed.dsh_capture_write_version;
+          }
+          if (record) {
+            if (parsed.dsh_capture_rejected || parsed.dsh_reconnect_required || parsed.dsh_session_inactive) {
+              removeCapture(record, true);
+            } else if (!parsed.dsh_event_unconfirmed && (!record.retryable || parsed.dsh_capture_ack === record.id)) {
+              removeCapture(record);
+            } else {
+              parsed.dsh_event_unconfirmed = true;
+              if (pendingCaptures.get(record.id) !== record) removeCapture(record, true);
+            }
+          }
+          return parsed;
+        } catch {
+          if (bridgeDisposed || liveSignal?.aborted || trajectoryBindings.get(key) !== binding) {
+            if (record) removeCapture(record, true);
+            return inactive();
+          }
           return unconfirmed("runtime_unavailable", "runtime processing failed; event persistence could not be confirmed.");
         }
-        const parsed = JSON.parse(stdout.trim());
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          return unconfirmed("response_invalid", "runtime returned an invalid response.");
-        }
-        const trajectory = parsed.dsh_trajectory;
-        if (Number.isSafeInteger(trajectory?.generation) && trajectory.generation >= 1
-            && /^[a-f0-9]{32}$/.test(trajectory?.token || "")) {
-          if (binding.trajectory && (binding.trajectory.generation !== trajectory.generation
-              || binding.trajectory.token !== trajectory.token)) {
-            return { ...unconfirmed("trajectory_changed", "reload the session before continuing."),
-              dsh_reconnect_required: true };
-          }
-          binding.trajectory = { generation: trajectory.generation, token: trajectory.token };
-        }
-        if (typeof parsed.systemMessage === "string" && !trajectory && !parsed.hookSpecificOutput?.additionalContext) {
-          parsed.dsh_event_unconfirmed = true;
-        }
-        return parsed;
-      } catch {
-        if (bridgeDisposed || signal?.aborted || trajectoryBindings.get(key) !== binding) return inactive();
-        return unconfirmed("runtime_unavailable", "runtime processing failed; event persistence could not be confirmed.");
       }
+      const run = (replay = false, liveSignal = signal) => {
+        if (record?.inFlight) return record.inFlight;
+        const promise = execute(replay, liveSignal).then((result) => {
+          if (record && (result?.dsh_capture_rejected || result?.dsh_reconnect_required || result?.dsh_session_inactive)) {
+            removeCapture(record, true);
+          } else if (record && result?.dsh_event_unconfirmed && pendingCaptures.get(record.id) !== record) {
+            removeCapture(record, true);
+          }
+          return result;
+        });
+        if (record) {
+          record.inFlight = promise;
+          promise.finally(() => { if (record.inFlight === promise) record.inFlight = null; });
+        }
+        return promise;
+      };
+      if (record) record.run = run;
+      return run();
     }
     const isStart = eventName === "SessionStart" || eventName === "SubagentStart";
     if (!isStart && ["UserPromptSubmit", "PreToolUse"].includes(eventName) && !binding.trajectory) {
@@ -1281,6 +1416,7 @@ export function apply(ctx, config = {}) {
               const budgetValues = data.project_budget_policy?.values || {};
               send(200, {
                 ok: true,
+                capture_transport: captureTransportStatus(matchedWorkspace),
                 installed: true,
                 project_id: data.project_id || "unknown",
                 project_name: projectName,
@@ -1601,6 +1737,7 @@ export function apply(ctx, config = {}) {
       // The SDK does not await agent/created listeners. Serialize the pending
       // startup Hook before retrieval so its late reply cannot replace this step.
       await sessionStarts.get(agent.id);
+      await flushCapture(agent.id, payload.signal);
     }
     // systemPrompt assembly and inbox claiming already happened before this
     // waterfall. Its returned messages are the supported way to reach THIS step;
@@ -1713,6 +1850,10 @@ export function apply(ctx, config = {}) {
     if (contextKey && CONTEXT_TOOL_NAMES.has(exec.name)) {
       toolContextBindings.set(contextKey, { name: exec.name, handle: toolArgs.context_handle });
     }
+    if (contextKey && /^[a-f0-9]{64}$/.test(result?.dsh_capture_boundary || "")) {
+      if (toolCaptureBindings.size >= 4096) toolCaptureBindings.delete(toolCaptureBindings.keys().next().value);
+      toolCaptureBindings.set(contextKey, result.dsh_capture_boundary);
+    }
     return next();
   });
 
@@ -1738,7 +1879,7 @@ export function apply(ctx, config = {}) {
     try {
       if (agent?.id) {
         const meta = sessionMeta.get(agent.id) || {};
-        await dispatchEvent(
+        const captured = await dispatchEvent(
           "PostToolUse",
           {
             sessionId: meta.parentSession || agent.id,
@@ -1751,10 +1892,18 @@ export function apply(ctx, config = {}) {
               : didRecover ? { isError: false, output: JSON.stringify(recovered) } : toolResult,
           },
           exec.signal,
+          toolCaptureBindings.get(toolContextKey(exec)),
         );
+        if (captured?.dsh_event_unconfirmed && !captured.dsh_capture_rejected
+            && !captured.dsh_session_inactive && !captured.dsh_reconnect_required) {
+          // Resolve a lost task_update completion before the model can emit its
+          // Stop; otherwise it would only have the earlier active-task proof.
+          await flushCapture(agent.id, exec.signal, exec.callId);
+        }
       }
     } finally {
       toolContextBindings.delete(toolContextKey(exec));
+      toolCaptureBindings.delete(toolContextKey(exec));
     }
     if (recoveryError) throw recoveryError;
     if (didRecover) {
@@ -1782,7 +1931,8 @@ export function apply(ctx, config = {}) {
       };
     } else if (event.type === "turn/end" && event.data) {
       const state = captureTurn(session.id, event.data.turn);
-      if (!state || state.closed) return;
+      if (!state) return;
+      if (state.closed) return flushCapture(session.id);
       state.closed = true;
       const meta = sessionMeta.get(session.id) || { cwd: session.header?.cwd };
       const reasonKind = event.data.reason?.kind;
@@ -1816,6 +1966,12 @@ export function apply(ctx, config = {}) {
       sessionMeta.delete(session.id);
       for (const key of toolContextBindings.keys()) {
         if (JSON.parse(key)[0] === session.id) toolContextBindings.delete(key);
+      }
+      for (const key of toolCaptureBindings.keys()) {
+        if (JSON.parse(key)[0] === session.id) toolCaptureBindings.delete(key);
+      }
+      for (const record of pendingCaptures.values()) {
+        if (record.owner === session.id) removeCapture(record, true);
       }
       for (const key of trajectoryBindings.keys()) {
         const [root, child] = JSON.parse(key);

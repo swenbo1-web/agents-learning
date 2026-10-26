@@ -91,7 +91,9 @@ def control_status(runtime, project, *, include_history=True, details=True):
     from .candidate_references import policy as reference_policy
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
-    diagnostic = dispatch_diagnostic(runtime, project, check_queue=details)
+    phase = phase_status(runtime, project, include_health=details)
+    diagnostic = dispatch_diagnostic(runtime, project, check_queue=details,
+                                    _phase_backlog=phase.get("protected_backlog"))
     running = diagnostic["phase"] in {"worker_claimed", "model_reserved", "model_launching", "model_started"}
     enabled = bool(policy["enabled"] and state["enabled"])
     admission = admin_admission_status(runtime, project)
@@ -104,7 +106,7 @@ def control_status(runtime, project, *, include_history=True, details=True):
         "presets": {key: dict(values) for key, values in PRESETS.items()},
         "work_summary": runtime.work_summary_policy(project), "diagnostic": diagnostic,
         "publication_policy": publication_policy(runtime, project),
-        "phase_review": phase_status(runtime, project),
+        "phase_review": phase,
         "candidate_reference_policy": reference_policy(runtime, project),
         "effective_run_seconds": min(runtime.admin_effective_config(project)["max_run_seconds"], runtime.config["scheduler"]["max_run_seconds"]) if runtime.config["scheduler"]["enabled"] else runtime.admin_effective_config(project)["max_run_seconds"],
         "usage": global_usage,
@@ -126,6 +128,10 @@ def control_detail(runtime, project, section):
     from .runtime import ContractError
     if section == "queue":
         data = _control_queue(runtime, project, include_history=False)
+        if phase_scope(runtime, project) is not None:
+            from .phase_review import protected_backlog, delivery_registration
+            data["phase_health"] = {"protected_backlog": protected_backlog(runtime, project),
+                                    "latest_delivery_registration": delivery_registration(runtime, project)}
     elif section == "recovery":
         from .admin_recovery import recovery_status
         data = recovery_status(runtime, project, include_history=False)

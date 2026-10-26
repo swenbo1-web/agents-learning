@@ -794,11 +794,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                       historical_pending_units=workload["history_pending_units"])
         observed = {r[0]: r[1] for r in self.db.execute("SELECT type,COUNT(*) FROM events WHERE project=? GROUP BY type", (project,))}
         outbox_states = {r[0]: r[1] for r in self.db.execute("SELECT state,COUNT(*) FROM outbox WHERE project=? GROUP BY state", (project,))}
+        phase = phase_status(self, project)
         try:
             admission = admin_admission_status(self, project)
             budget = admission["global_usage"]
             project_usage = admission["project_usage"]
-            dispatch = dispatch_diagnostic(self, project)
+            dispatch = dispatch_diagnostic(self, project, _phase_backlog=phase.get("protected_backlog"))
         except ContractError:
             budget = {"admission_status": "invalid_configuration"}
             project_usage = {"admission_status": "invalid_configuration"}
@@ -819,7 +820,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
                 "admin_routing": self.admin_routing_status(project),
                 "admin_dispatch_diagnostic": dispatch, "work_summary_policy": self.work_summary_policy(project),
-                "phase_review": phase_status(self, project),
+                "phase_review": phase,
                 "admin_budget": budget, "global_usage": budget, "project_usage": project_usage,
                 "global_budget_policy": budget.get("budget_policy"),
                 "project_budget_policy": project_usage.get("budget_policy"), "admission": admission,

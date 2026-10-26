@@ -96,6 +96,14 @@ window.__ModuleLoader__.load({
     Object.assign(TEXT.zh, {stageLocallyDeferred:"纯状态检查本地暂存：{n} 个阶段，仍有未审核资料。仅余下资料尚未送审，不算审核完成。后续正常阶段可按剩余预算合批；在管理员页点击“检查并继续整理”可主动补审。"});
     Object.assign(TEXT.en, {stageLocallyDeferred:"Pure status checks retained locally: {n} stages; some material remains unreviewed. Only the remaining material has not been submitted; these stages are not complete. A later normal stage may include it within its remaining budget. Use “Check and continue” in administrator settings to request review."});
 
+    Object.assign(TEXT.zh,{"stageProtectedBacklog":"{batches} 个受保护失败批次关联 {phases} 个阶段待处理；新工作可继续，旧调用不会自动重试。","stageRegistration_task_missing":"最近完整公开回复未登记阶段：当时没有任务；若为阶段交付，请先登记任务。","stageRegistration_task_not_delivered":"最近完整公开回复未登记为交付阶段：任务当时尚未交付。","stageRegistration_delivery_already_registered":"最近完整公开回复未新增阶段：对应任务交付已经登记。","stageRegistration_delivery_not_registered":"最近完整公开回复已有任务交付，但未找到对应阶段；请在审批与设置核对记录。"});
+    Object.assign(TEXT.en,{"stageProtectedBacklog":"{batches} protected failed batches cover {phases} stages awaiting action. New work can proceed; old calls will not retry automatically.","stageRegistration_task_missing":"The latest complete public reply did not register a stage: it had no task. Register a task first when delivering a stage.","stageRegistration_task_not_delivered":"The latest complete public reply did not register a delivery stage: the task was not delivered at that point.","stageRegistration_delivery_already_registered":"The latest complete public reply added no stage: that task delivery was already registered.","stageRegistration_delivery_not_registered":"The latest complete public reply has a delivered task but no matching stage. Check the record in Review & settings."});
+    Object.assign(TEXT.zh,{"stageRegistration_awaiting_capture_seal": "最近完整公开回复仍待封存或采集恢复，尚不能确认阶段已登记完成。"});
+    Object.assign(TEXT.en,{"stageRegistration_awaiting_capture_seal": "The latest complete public reply still awaits sealing or capture recovery; completed stage registration is not confirmed."});
+    Object.assign(TEXT.zh,{"captureTransportPending": "采集未确认：{pending} 个待处理事件，其中 {retryable} 个可补传；{unresolved} 个仍未解决。仅在桥内存保留，宿主重启不能恢复。"});
+    Object.assign(TEXT.en,{"captureTransportPending": "Capture is unconfirmed: {pending} pending events, {retryable} retryable; {unresolved} remain unresolved. Retained in bridge memory only; host restart cannot recover them."});
+    function captureTransportLine(value,words){if(!value||value.persistence!=='bridge_memory_only'||!['pending_events','retryable_events','unresolved_events'].every(key=>Number.isSafeInteger(value[key])&&value[key]>=0)||value.retryable_events>value.pending_events||(!value.pending_events&&!value.unresolved_events))return '';return words.captureTransportPending.replace('{pending}',value.pending_events).replace('{retryable}',value.retryable_events).replace('{unresolved}',value.unresolved_events);}
+    function phaseHealthLines(value,words){const lines=[],b=value?.protected_backlog,r=value?.latest_delivery_registration;if(Number.isSafeInteger(b?.batches)&&b.batches>0&&Number.isSafeInteger(b.phases)&&b.phases>=0)lines.push(words.stageProtectedBacklog.replace('{batches}',b.batches).replace('{phases}',b.phases));if(['not_registered','pending'].includes(r?.state)&&['task_missing','task_not_delivered','delivery_already_registered','delivery_not_registered','awaiting_capture_seal'].includes(r.reason))lines.push(words['stageRegistration_'+r.reason]);return lines;}
     function stageReview(summary) {
       var value = summary?.phase_review || summary?.panel_snapshot?.phase_review;
       var host = summary?.host_scope || summary?.panel_snapshot?.host_scope;
@@ -109,8 +117,8 @@ window.__ModuleLoader__.load({
 
     Object.assign(TEXT.zh, {reason:"当前原因",dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
     Object.assign(TEXT.en, {reason:"Current reason",dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
-    Object.assign(TEXT.zh, {dispatch_protected_history_only:"历史调用受保护，暂无可审核新工作；新任务仍可正常审核，旧调用不会自动重试。"});
-    Object.assign(TEXT.en, {dispatch_protected_history_only:"Historical calls remain protected; no new reviewable work. New tasks can still be reviewed; old calls will not retry automatically."});
+    Object.assign(TEXT.zh, {dispatch_protected_history_only:"现有调用保护仍保留，当前没有可直接送审的新工作；待处置阶段另列，旧调用不会自动重试。"});
+    Object.assign(TEXT.en, {dispatch_protected_history_only:"Existing call protections remain; no new work is directly reviewable. Stages awaiting action are listed separately; old calls will not retry automatically."});
 
     function reasonText(value, labels) {
       return typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, "dispatch_" + value)
@@ -351,8 +359,13 @@ window.__ModuleLoader__.load({
           phaseNote = t.stageFrequency.replace("{n}", staged.policy.every_phases) + "\n" + t.stageQueue + ": " + ["awaiting_stop","sealed","queued","partial","completed"].map(function (key) { return phases[key] || 0; }).join(" / ");
           var deferred = staged.locally_deferred_phase_count ?? phases.routine_deferred ?? 0;
           if (deferred) phaseNote += "\n" + t.stageLocallyDeferred.replace("{n}", deferred);
+          var healthLines = phaseHealthLines(staged, t);
+          if (healthLines.length) phaseNote += "\n" + healthLines.join("\n");
           if (latest) phaseNote += "\n" + t.stageCoverage + ": " + (latest.coverage_complete === true ? t.coverageFull : latest.coverage_complete === false ? t.coveragePartial : t.unknown);
         }
+
+        var captureNote = captureTransportLine(summary?.capture_transport, t);
+        if (captureNote) phaseNote += (phaseNote ? '\n' : '') + captureNote;
 
         return h(
           "div",

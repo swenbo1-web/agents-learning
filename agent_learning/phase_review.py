@@ -269,7 +269,101 @@ def seal_phase(runtime, project, phase, event_id):
     return True
 
 
-def status(runtime, project):
+def protected_backlog(runtime, project):
+    """Current protected stage work, separate from the queue's admission state.
+
+    Reads only the configured host/current boundary. Accepted or explicitly
+    retryable attempts no longer count as protected, even before prepare() has
+    refreshed their disposable batch state. This projection grants no retry.
+    """
+    empty = {"batches": 0, "phases": 0}
+    if scope(runtime, project) is None:
+        return empty
+    if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='phase_review_batches'").fetchone():
+        return empty
+    current = (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())
+    protected = ("b.project=? AND b.host_scope=? AND b.session_epoch=? AND b.governance_epoch=? "
+        "AND b.state='blocked' AND EXISTS(SELECT 1 FROM admin_calls a JOIN problems problem "
+        "ON problem.project=a.project AND problem.id=a.problem AND problem.revision=a.revision "
+        "WHERE a.project=b.project AND a.problem=b.problem_id AND a.retry_allowed=0 "
+        "AND a.state IN ('failed','timeout_unknown','account_changed_unknown','orphaned_unknown') "
+        "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=a.project AND r.call_id=a.id))")
+    row = runtime.db.execute("WITH protected AS (SELECT b.phase_ids FROM phase_review_batches b WHERE "
+        + protected + "), members AS (SELECT DISTINCT ids.value AS id FROM protected b,"
+        "json_each(CASE WHEN json_valid(b.phase_ids) THEN b.phase_ids ELSE '[]' END) ids) "
+        "SELECT (SELECT COUNT(*) FROM protected) AS batches,(SELECT COUNT(*) FROM members m "
+        "JOIN review_phases p ON p.id=m.id WHERE p.project=? AND p.host_scope=? "
+        "AND p.session_epoch=? AND p.governance_epoch=? AND p.state='queued') AS phases",
+        (*current, *current)).fetchone()
+    return {"batches": row["batches"], "phases": row["phases"]}
+
+
+def delivery_registration(runtime, project):
+    """Explain the latest observed complete public reply without making a stage.
+
+    The global rowid tail is deliberately bounded before filtering by project,
+    host and epoch. A quiet project may be unobserved; old or partial replies
+    cannot supply a fresh diagnosis. No public text is returned to the caller.
+    """
+    from .public_observations import observed_public
+    result = {"state": "unobserved", "reason": "not_observed", "observed_at": None}
+    if scope(runtime, project) is None:
+        return result
+    rows = runtime.db.execute("SELECT id,conversation,task_id,task_revision,task_write_version,task_status,created,"
+        "length(payload) AS chars,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.host_epoch') END epoch,"
+        "CASE WHEN json_valid(payload) THEN json_type(payload,'$.host_epoch') END epoch_type "
+        "FROM (SELECT id,project,conversation,agent,type,task_id,task_revision,task_write_version,task_status,created,payload "
+        "FROM events ORDER BY rowid DESC LIMIT 128) WHERE project=? AND type='Stop' AND agent IS NULL "
+        "ORDER BY created DESC", (project,)).fetchall()
+    for row in rows:
+        if (not runtime.owns_conversation(row["conversation"]) or row["epoch_type"] != "integer"
+                or row["epoch"] != runtime.session_epoch()):
+            continue
+        if not 0 < row["chars"] <= 131072:
+            return {**result, "reason": "public_reply_unverified", "observed_at": row["created"]}
+        saved = runtime.db.execute("SELECT payload FROM events WHERE project=? AND id=?",
+                                   (project, row["id"])).fetchone()
+        try:
+            payload = json.loads(saved[0])
+        except (ValueError, TypeError):
+            return {**result, "reason": "public_reply_unverified", "observed_at": row["created"]}
+        if not observed_public("Stop", payload, require_complete=True):
+            return {**result, "reason": "public_reply_unverified", "observed_at": row["created"]}
+        result.update(state="not_registered", observed_at=row["created"])
+        if row["task_id"] is None:
+            return {**result, "reason": "task_missing"}
+        if type(row["task_write_version"]) is not int:
+            return {**result, "state": "unobserved", "reason": "task_snapshot_unavailable"}
+        task = runtime.task_snapshot(project, row["task_id"], row["task_revision"], row["task_write_version"])
+        if not task or task["status"] != row["task_status"]:
+            return {**result, "state": "unobserved", "reason": "task_snapshot_unavailable"}
+        if task["status"] != "delivered":
+            return {**result, "reason": "task_not_delivered"}
+        phase = runtime.db.execute("SELECT event_id,state FROM review_phases WHERE project=? AND host_scope=? "
+            "AND session_epoch=? AND governance_epoch=? AND conversation=? AND task_id=? AND task_revision=? "
+            "AND delivery_version=?", (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(),
+            row["conversation"], row["task_id"], row["task_revision"], row["task_write_version"])).fetchone()
+        if phase is None:
+            # Native stop fences may advance only the state write version.
+            # An intervening resume/cancel/pause is a new delivery boundary;
+            # its older stage cannot explain this reply as already registered.
+            phase = runtime.db.execute("SELECT p.event_id,p.state FROM review_phases p WHERE p.project=? "
+                "AND p.host_scope=? AND p.session_epoch=? AND p.governance_epoch=? AND p.conversation=? "
+                "AND p.task_id=? AND p.task_revision=? AND p.delivery_version<? "
+                "AND NOT EXISTS(SELECT 1 FROM task_states s WHERE s.project=p.project AND s.id=p.task_id "
+                "AND s.revision=p.task_revision AND s.write_version>p.delivery_version AND s.write_version<=? "
+                "AND s.status!='delivered') ORDER BY p.delivery_version DESC LIMIT 1",
+                (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), row["conversation"],
+                 row["task_id"], row["task_revision"], row["task_write_version"], row["task_write_version"])).fetchone()
+        if phase and (phase["state"] == "awaiting_stop" or phase["event_id"] is None):
+            return {**result, "state": "pending", "reason": "awaiting_capture_seal"}
+        if phase and phase["event_id"] == row["id"]:
+            return {**result, "state": "registered", "reason": "phase_registered"}
+        return {**result, "reason": "delivery_already_registered" if phase else "delivery_not_registered"}
+    return result
+
+
+def status(runtime, project, *, include_health=True):
     from .phase_metrics import batch_metrics
     cfg = policy(runtime, project)
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='review_phases'").fetchone()
@@ -282,11 +376,11 @@ def status(runtime, project):
         "AND host_scope=? AND session_epoch=? AND governance_epoch=?", current).fetchone()[0] if exists else 0
     recent = runtime.db.execute("SELECT problem_id,state,substr(result,1,60001) FROM phase_review_batches WHERE project=? "
         "AND host_scope=? ORDER BY created DESC LIMIT 3", (project, runtime._session_scope())).fetchall() if exists else []
-    blocked = runtime.db.execute("SELECT COUNT(*) FROM review_phases p WHERE p.project=? AND p.host_scope=? "
-        "AND p.session_epoch=? AND p.governance_epoch=? AND p.state='queued' AND EXISTS("
-        "SELECT 1 FROM phase_review_batches b,json_each(CASE WHEN json_valid(b.phase_ids) THEN b.phase_ids ELSE '[]' END) ids "
-        "WHERE b.project=p.project AND b.host_scope=p.host_scope AND b.session_epoch=p.session_epoch "
-        "AND b.governance_epoch=p.governance_epoch AND b.state='blocked' AND ids.value=p.id)", current).fetchone()[0] if exists else 0
+    blocked = runtime.db.execute("WITH members AS (SELECT DISTINCT ids.value AS id "
+        "FROM phase_review_batches b,json_each(CASE WHEN json_valid(b.phase_ids) THEN b.phase_ids ELSE '[]' END) ids "
+        "WHERE b.project=? AND b.host_scope=? AND b.session_epoch=? AND b.governance_epoch=? AND b.state='blocked') "
+        "SELECT COUNT(*) FROM members m JOIN review_phases p ON p.id=m.id WHERE p.project=? AND p.host_scope=? "
+        "AND p.session_epoch=? AND p.governance_epoch=? AND p.state='queued'", (*current, *current)).fetchone()[0] if exists else 0
     executor_waiting = runtime.db.execute("SELECT COUNT(*) FROM phase_review_batches WHERE project=? AND host_scope=? "
         "AND session_epoch=? AND governance_epoch=? AND state='executor_waiting'", current).fetchone()[0] if exists else 0
     seal_table = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='phase_seal_requests'").fetchone()
@@ -297,6 +391,8 @@ def status(runtime, project):
         "AND p.state='awaiting_stop'", current).fetchone()[0] if exists and seal_table else 0
     counts = {r[0]: r[1] for r in rows}
     return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": counts,
+            **({"protected_backlog": protected_backlog(runtime, project),
+                "latest_delivery_registration": delivery_registration(runtime, project)} if include_health else {}),
             "locally_deferred_phase_count": counts.get("routine_deferred", 0),
             "local_seal_pending_count": local_seal_pending,
             "executor_waiting_batch_count": executor_waiting,

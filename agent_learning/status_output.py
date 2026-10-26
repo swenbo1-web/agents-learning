@@ -83,6 +83,18 @@ def status_summary(status):
         blocked = dispatch["queue_blocked_by_protected_calls"]
         public["admin_dispatch_diagnostic"]["queue_blocked_by_protected_calls"] = (
             blocked if isinstance(blocked, bool) else None)
+    backlog = _object(dispatch.get("protected_phase_backlog"))
+    if backlog:
+        public["admin_dispatch_diagnostic"]["protected_phase_backlog"] = {
+            key: value if type(value) is int and 0 <= value < 2**63 else None
+            for key in ("batches", "phases") for value in (backlog.get(key),)}
+    phase = _object(status.get("phase_review"))
+    registration = _object(phase.get("latest_delivery_registration"))
+    if (isinstance(registration.get("state"), str) and isinstance(registration.get("reason"), str)
+            and registration.get("state") in {"not_registered", "pending"}
+            and registration.get("reason") in {"task_missing", "task_not_delivered", "delivery_already_registered",
+                                               "delivery_not_registered", "awaiting_capture_seal"}):
+        public["latest_delivery_registration"] = fields(registration, ("state", "reason", "observed_at"))
     for name in ("project_usage", "global_usage"):
         # Missing project statistics must not silently inherit global figures.
         public[name] = usage(status.get(name))

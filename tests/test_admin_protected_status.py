@@ -111,8 +111,8 @@ class ProtectedSummaryTests(unittest.TestCase):
 
 class ProtectedStatusUITests(unittest.TestCase):
     LABELS = {
-        "zh-CN": {"protected_history_only": "历史调用受保护，暂无可审核新工作；新任务仍可正常审核，旧调用不会自动重试。"},
-        "en": {"protected_history_only": "Historical calls remain protected; no new reviewable work. New tasks can still be reviewed; old calls will not retry automatically."},
+        "zh-CN": {"protected_history_only": "现有调用保护仍保留，当前没有可直接送审的新工作；待处置阶段另列，旧调用不会自动重试。"},
+        "en": {"protected_history_only": "Existing call protections remain; no new work is directly reviewable. Stages awaiting action are listed separately; old calls will not retry automatically."},
     }
 
     def exercise_control(self, method):

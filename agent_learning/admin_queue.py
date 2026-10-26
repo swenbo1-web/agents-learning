@@ -581,9 +581,13 @@ def clear_recovered_executor_failure(runtime, project, plan, call_id):
             (project, runtime._session_scope(), executor_signature(plan), call[0]))
 
 
-def dispatch_diagnostic(runtime, project, *, check_queue=True):
+def dispatch_diagnostic(runtime, project, *, check_queue=True, _phase_backlog=None):
     import json
     result = _dispatch_diagnostic(runtime, project, check_queue=check_queue)
+    if check_queue:
+        from .phase_review import protected_backlog
+        result["protected_phase_backlog"] = (protected_backlog(runtime, project)
+                                               if _phase_backlog is None else _phase_backlog)
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='admin_dispatch_diagnostics'").fetchone()
     last = runtime.db.execute("SELECT reason,details,updated FROM admin_dispatch_diagnostics WHERE project=? AND host_scope=?",
                               (project, runtime._session_scope())).fetchone() if exists else None

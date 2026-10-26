@@ -334,6 +334,88 @@ class DshAdapter:
         task = self.runtime.task(project, conversation)
         return digest([task[key] for key in ("id", "revision", "write_version", "execution_epoch", "status")]) if task else digest(None)
 
+    def _capture_boundary(self, project, conversation, agent, epoch, generation, task_signature=None,
+                          *, assignment_id=None, original_operation=False):
+        """A receipt of observable attribution, never an execution permission."""
+        if agent and not original_operation:
+            assignment = self.runtime.assignment_context(project, conversation, agent)
+            assignment_id = assignment["assignment_id"] if assignment else None
+        return digest(["dsh-capture-v1", project, conversation, agent, epoch, generation,
+                       task_signature or self._task_signature(project, conversation), assignment_id])
+
+    def _capture_observation(self, project, conversation, agent, epoch, generation):
+        task = self.runtime.task(project, conversation)
+        return {"dsh_capture_boundary": self._capture_boundary(project, conversation, agent, epoch, generation),
+                "dsh_capture_write_version": task["write_version"] if task else 0}
+
+    def _capture_replay_operation(self, project, conversation, agent, epoch, generation, raw, expected):
+        """A late Post retains the original Pre binding, including task_update."""
+        tool_name, _arguments, call_id = self._normalize_tool_call(raw)
+        native = digest(["dsh-generation", generation, call_id]) if generation > 1 else call_id
+        operation_id = digest([conversation, agent, native] if agent else [conversation, native])
+        row = self.runtime.db.execute("SELECT * FROM operations WHERE project=? AND id=?",
+                                      (project, operation_id)).fetchone()
+        if (row is None or row["conversation"] != conversation or row["agent"] != agent
+                or row["host_epoch"] != epoch or row["conflict"] or row["tool_name"] != tool_name):
+            return False
+        task = (self.runtime.task_snapshot(project, row["task_id"], row["task_revision"],
+                                          row["task_write_version"]) if row["task_id"] else None)
+        if row["task_id"] and task is None:
+            return False
+        signature = (digest([task[key] for key in ("id", "revision", "write_version", "execution_epoch", "status")])
+                     if task else digest(None))
+        return expected == self._capture_boundary(project, conversation, agent, epoch, generation, signature,
+                                                  assignment_id=row["assignment_id"], original_operation=True)
+
+    @staticmethod
+    def _capture_rejected(reason):
+        return {"systemMessage": "Agent Learning: " + reason,
+                "dsh_event_unconfirmed": True, "dsh_capture_rejected": True}
+
+    def _capture_receipt(self, project, conversation, agent, event, raw, epoch, generation):
+        """Reserve one stable native envelope; a missing acknowledgement is retryable.
+
+        Completed receipts win before current-task checks. Pending envelopes can
+        only be replayed against the original task or an existing Pre operation.
+        Legacy producers do not enter this additive protocol.
+        """
+        capture_id = raw.get("dsh_capture_id")
+        if capture_id is None:
+            if raw.get("dsh_capture_replay") or raw.get("dsh_capture_expected") is not None:
+                return None, self._capture_rejected("dsh_capture_identity_required")
+            return None, None
+        replay = raw.get("dsh_capture_replay", False)
+        expected = raw.get("dsh_capture_expected")
+        if (event not in {"Stop", "Interrupt", "SubagentStop", "PostToolUse"}
+                or not isinstance(capture_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", capture_id)
+                or type(replay) is not bool
+                or expected is not None and (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected))):
+            return None, self._capture_rejected("dsh_capture_identity_invalid")
+        key = digest(["capture-v1", agent, capture_id])
+        raw_digest = digest({k: v for k, v in raw.items() if k != "dsh_capture_replay"})
+        old = self.runtime.db.execute("SELECT * FROM dsh_receipts WHERE project=? AND conversation=? AND event_key=?",
+                                      (project, conversation, key)).fetchone()
+        if old is not None:
+            if (old["kind"], old["host_epoch"], old["generation"], old["raw_digest"]) != (event, epoch, generation, raw_digest):
+                return None, self._capture_rejected("dsh_capture_identity_conflict")
+            if old["state"] == "complete":
+                return None, json.loads(old["output"])
+        current = self._capture_boundary(project, conversation, agent, epoch, generation)
+        if replay:
+            valid = expected is not None and expected == current
+            if not valid and event == "PostToolUse" and expected is not None:
+                valid = self._capture_replay_operation(project, conversation, agent, epoch, generation, raw, expected)
+            if not valid:
+                return None, self._capture_rejected("dsh_capture_boundary_changed" if expected else "dsh_capture_boundary_unbound")
+        elif event in {"Stop", "SubagentStop", "Interrupt"} and expected is not None and expected != current:
+            return None, self._capture_rejected("dsh_capture_boundary_changed")
+        if old is None:
+            self.runtime.db.execute("INSERT INTO dsh_receipts(project,conversation,event_key,kind,host_epoch,generation,"
+                "raw_digest,task_signature,created) VALUES(?,?,?,?,?,?,?,?,?)",
+                (project, conversation, key, event, epoch, generation, raw_digest,
+                 self._task_signature(project, conversation), time.time()))
+        return key, None
+
     def _assert_phase(self, project, conversation, epoch, generation, task_signature=None):
         self.runtime.assert_session_epoch(epoch)
         row = self.runtime.db.execute("SELECT generation FROM dsh_sessions WHERE project=? AND conversation=?",
@@ -460,7 +542,11 @@ class DshAdapter:
                 # Recover a lost native receipt without retrieval, task delivery
                 # or administrator scheduling. Epoch/trajectory checks above
                 # still reject callbacks belonging to an earlier reset.
-                return {"dsh_trajectory": trajectory}
+                return {"dsh_trajectory": trajectory,
+                        **self._capture_observation(project, conversation, agent_id, epoch, generation)}
+            capture_key, captured_result = self._capture_receipt(project, conversation, agent_id, event, raw, epoch, generation)
+            if captured_result is not None:
+                return captured_result
             if not agent_id:
                 from .dsh_profile import bind_conversation_profile
                 bind_conversation_profile(r, project, conversation)
@@ -609,16 +695,24 @@ class DshAdapter:
         if event == "PreToolUse":
             denial = result.get("hookSpecificOutput", {})
             if denial.get("permissionDecision") == "deny":
-                return {
+                result = {
                     "decision": "deny",
                     "reason": denial.get("permissionDecisionReason", "Agent Learning: execution denied"),
                     **result,
                 }
-            if self.mode == "enforce":
-                return {
+            elif self.mode == "enforce":
+                result = {
                     "decision": "allow",
                     **result,
                 }
+        with r.transaction():
+            self._assert_phase(project, conversation, epoch, generation)
+            if trajectory is not None or capture_key is not None:
+                result = dict(result, **self._capture_observation(project, conversation, agent_id, epoch, generation))
+            if capture_key is not None:
+                result["dsh_capture_ack"] = raw["dsh_capture_id"]
+                r.db.execute("UPDATE dsh_receipts SET state='complete',output=? WHERE project=? AND conversation=? AND event_key=?",
+                             (encode(result), project, conversation, capture_key))
         return result
 
 

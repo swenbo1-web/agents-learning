@@ -54,6 +54,17 @@ def _partial(value):
     return isinstance(value, list) and any(_partial(item) for item in value)
 
 
+def _status_tool(host, name):
+    """Use host contracts, never a suffix match on an arbitrary tool name."""
+    if host not in {"codex", "antigravity", "dsh"} or not isinstance(name, str):
+        return False
+    names = {"mcp__agent_learning__" + tool for tool in ("learning_status", "session_context")}
+    if host == "dsh":
+        names.update(("learning_status", "session_context",
+                      "agent_learning_learning_status", "agent_learning_session_context"))
+    return name in names
+
+
 def _public_request_digest(runtime, project, phase, kind, body):
     """A metadata receipt needs the complete request actually saved as evidence."""
     from .public_observations import observed_public
@@ -133,7 +144,7 @@ def is_routine(runtime, project, phase):
     if len(events) > 40 or sum(row["chars"] for row in events) > 16000:
         return False
     requested = replied = False
-    request_digests, native_inputs = set(), []
+    request_digests, native_inputs, status_operations = set(), [], {}
     for event in events:
         if event["chars"] > 6000 or event["agent"] or event["outcome"] in {"failed", "conflict", "denied"}:
             return False
@@ -180,17 +191,33 @@ def is_routine(runtime, project, phase):
             # Exact plugin status tools only. Unknown/custom/shell tools retain
             # normal review even when their output claims everything is fine.
             name = body.get("tool_name", "")
-            if name not in {"mcp__agent_learning__learning_status", "mcp__agent_learning__session_context"}:
+            if not _status_tool(runtime.host, name):
                 return False
-            if kind == "PostToolUse" and event["outcome"] != "succeeded":
+            terminals = {"succeeded", "call_completed"}
+            if kind == "PostToolUse" and event["outcome"] not in terminals:
                 return False
             if event["operation"]:
-                operation = runtime.db.execute("SELECT state,conflict,decision,observation FROM operations WHERE project=? AND id=?",
+                operation = runtime.db.execute("SELECT state,conflict,decision,observation,conversation,task_id,"
+                                               "task_revision,host_epoch,agent,assignment_id,tool_name "
+                                               "FROM operations WHERE project=? AND id=?",
                                                (project, event["operation"])).fetchone()
-                if not operation or operation["conflict"] or operation["decision"] == "denied" or operation["observation"] != "succeeded":
+                if (not operation or operation["conflict"] or operation["decision"] not in {"allowed", "observed"}
+                        or operation["observation"] not in terminals or operation["state"] != operation["observation"]
+                        or operation["agent"] or operation["assignment_id"] or operation["tool_name"] != name
+                        or (operation["conversation"], operation["task_id"], operation["task_revision"], operation["host_epoch"])
+                           != (phase["conversation"], phase["task_id"], phase["task_revision"], phase["session_epoch"])):
                     return False
+                if kind == "PostToolUse":
+                    response = body.get("tool_response")
+                    if (event["outcome"] != operation["observation"] or not isinstance(response, dict)
+                            or event["outcome"] == "call_completed" and response.get("session_id") is not None):
+                        return False
+                status_operations.setdefault(event["operation"], set()).add(kind)
             else:
                 return False
         else:
             return False
-    return requested and replied and all(identity in request_digests for identity in native_inputs)
+    # A completed MCP call is sufficient only for this local transient-status
+    # decision. Its stored observation remains call_completed, never success.
+    return (requested and replied and all(identity in request_digests for identity in native_inputs)
+            and all(kinds == {"PreToolUse", "PostToolUse"} for kinds in status_operations.values()))
