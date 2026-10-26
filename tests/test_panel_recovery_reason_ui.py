@@ -73,7 +73,7 @@ class Element {
  append(...nodes){this.children.push(...nodes);}
  replaceChildren(){this.children=[];}
 }
-const ids=['language','panel','notice','result','refresh','debug','debugPanel','debugTitle','debugOutput','browser','review','frequencyTitle','shared','quota','historyTitle','historyNote','history','project','workspace','stats','admin','presets'];
+const ids=['language','panel','notice','result','refresh','reconnect','debug','debugPanel','debugTitle','debugOutput','browser','review','frequencyTitle','shared','quota','historyTitle','historyNote','history','project','workspace','stats','admin','presets'];
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const document={documentElement:{},getElementById:id=>elements[id],createElement:()=>new Element(),querySelectorAll:()=>[]};
 let summary={project_id:'p1',project_name:'project',counts:{active:1}},calls=[];
@@ -85,7 +85,7 @@ const window={parent:{},addEventListener(){},confirm(){throw Error('no action co
   if(body.action==='debug')response.diagnostics={version:1,project:{id:'p1'},administrator:{phase:'idle',reason:summary.reason}};
   return {ok:true,json:async()=>response};}
 }};
-vm.runInNewContext(input.script,{window,document,navigator:{language:'en'},crypto:globalThis.crypto,URL,console});
+vm.runInNewContext(input.script,{window,document,navigator:{language:'en'},crypto:globalThis.crypto,URL,console,setTimeout,clearTimeout});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  await flush();await flush();assert.equal(elements.panel.hidden,false);

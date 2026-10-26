@@ -299,8 +299,9 @@ assert.throws(() => api.guardRequests(new EventEmitter(),false));
 
     def test_ui_keeps_capability_in_memory_and_invalidates_on_workspace_switch(self):
         html = (RESOURCE / "index.html").read_text(encoding="utf-8")
-        self.assertIn("onWorkspaceChange((uris) => bind(uris))", html)
-        self.assertIn('const turn = ++generation;\n    hide("connecting")', html)
+        self.assertIn("onWorkspaceChange((uris) => { if (!disposed) bind(uris); })", html)
+        self.assertIn('const turn = ++generation;', html)
+        self.assertIn('hide("connecting")', html)
         self.assertIn("turn !== generation", html)
         self.assertIn('window.parent === window', html)
         for forbidden in ("localStorage", "sessionStorage", "agent.sendMessage", "innerHTML", "console.log", "http://translate"):
@@ -327,7 +328,7 @@ class Element {
   append(...nodes){this.children.push(...nodes);}
   replaceChildren(){this.children=[];}
 }
-const ids=['language','panel','notice','result','refresh','debug','debugPanel','debugTitle','debugOutput','browser','review','frequencyTitle','shared','quota','historyTitle','historyNote','history','project','workspace','stats','admin','presets'];
+const ids=['language','panel','notice','result','refresh','reconnect','debug','debugPanel','debugTitle','debugOutput','browser','review','frequencyTitle','shared','quota','historyTitle','historyNote','history','project','workspace','stats','admin','presets'];
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const document={documentElement:{},getElementById:id=>elements[id],createElement:()=>new Element(),querySelectorAll:()=>[]};
 let changed;const requests=[];

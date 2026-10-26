@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "1.4.27",
+  "version": "1.4.28",
   "description": "Local-first governed memory and work history plugin for DeepSeek Harness (DSH)",
   "license": "MIT",
   "type": "module",

@@ -20,6 +20,7 @@
 <main>
   <header><h1>Agent Learning</h1><select id="language" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option></select></header>
   <p id="notice" role="status" aria-live="polite"></p>
+  <button id="reconnect" type="button" hidden></button>
   <section id="panel" hidden>
     <h2 id="project"></h2><div id="workspace" class="path muted"></div>
     <div class="stats" id="stats"></div>
@@ -62,16 +63,22 @@
   Object.assign(strings.en, {inputTitle:"Recent public input",inputAvailable:"Public input was recorded.",inputPartial:"Only part of the public input was retained.",inputMissing:"Public input was unavailable.",inputUnknown:"Public input capture is unverified.",inputWindowBound:"The invocation's response window was checked; stage completion remains unverified.",inputWindowUnknown:"The response window remains unverified.",captureWindowLimited:"Recent capture records exceeded this status window; current coverage remains unverified."});
   Object.assign(strings["zh-CN"], {inputTitle:"近期公开输入",inputAvailable:"公开输入已记录。",inputPartial:"仅保留部分公开输入。",inputMissing:"未取得公开输入。",inputUnknown:"公开输入采集尚未核对。",inputWindowBound:"该次调用的回复归属窗口已核对；不表示阶段完成。",inputWindowUnknown:"回复归属窗口尚未核对。",captureWindowLimited:"近期采集记录超出本次检查范围，当前覆盖尚未核对。"});
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+  Object.assign(strings.en, {reconnect:"Reconnect",connectionLost:"The connection request did not finish. Reconnect to check the current project; the previous action will not be replayed.",actionUncertain:"The action result is unconfirmed. Reconnect and check the current state before deciding what to do next. The action is not retried automatically."});
+  Object.assign(strings["zh-CN"], {reconnect:"重新连接",connectionLost:"本次连接请求未完成。可重新连接核对当前项目，不会重放刚才的操作。",actionUncertain:"刚才的操作结果尚未确认。请重新连接并核对当前状态，再决定后续操作；不会自动重试。"});
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
+  let recoveryAvailable = false, recoveryIntent = false, reconnectTurn = null, bindTurn = null, noticeKey = "waiting", resumeRecovery = false;
   Object.assign(strings["zh-CN"], {dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
   Object.assign(strings.en, {dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
   const t = (key) => strings[language][key];
   function reasonText(value) { return typeof value === "string" && Object.prototype.hasOwnProperty.call(strings[language], "dispatch_" + value) ? t("dispatch_" + value) : value; }
   const count = (value) => Number.isFinite(value) && value >= 0 ? String(value) : t("unknown");
 
-  function hide(message = "unavailable") {
+  function hide(message = "unavailable", recoverable = false) {
     capability = null; summary = null; diagnostics = null; context = null; busy = false;
+    noticeKey = message; recoveryAvailable = recoverable; recoveryIntent = recoverable;
     $("panel").hidden = true;
+    $("reconnect").hidden = disposed || !recoveryAvailable;
+    $("reconnect").disabled = reconnectTurn !== null || bindTurn !== null;
     $("debugPanel").hidden = true; $("debugOutput").textContent = "";
     $("notice").textContent = t(message);
     $("result").textContent = "";
@@ -80,8 +87,11 @@
   function render() {
     document.documentElement.lang = language;
     $("language").value = language;
+    $("reconnect").textContent = t("reconnect");
+    $("reconnect").hidden = disposed || !recoveryAvailable;
+    $("reconnect").disabled = reconnectTurn !== null || bindTurn !== null;
     for (const [id, key] of [["refresh","refresh"],["debug","debug"],["debugTitle","debugTitle"],["browser","browser"],["review","review"],["frequencyTitle","frequency"],["shared","shared"],["quota","quota"],["historyTitle","historyTitle"],["historyNote","historyNote"],["history","history"]]) $(id).textContent = t(key);
-    if (!summary || !capability) return;
+    if (!summary || !capability) { $("notice").textContent = t(noticeKey); return; }
     $("project").textContent = summary.project_name || "Agent Learning";
     $("workspace").textContent = summary.workspace || "";
     $("stats").replaceChildren();
@@ -184,34 +194,67 @@
     return response.json();
   }
 
-  async function bind(uris) {
+  async function bind(uris, recoverable = false) {
+    if (disposed) return;
     const turn = ++generation;
+    reconnectTurn = null;
     hide("connecting");
+    recoveryIntent = recoverable;
+    bindTurn = turn;
     const conversation = window.sidecar?.conversationId;
-    if (!Array.isArray(uris) || uris.length !== 1 || typeof conversation !== "string" || !conversation) { hide(); return; }
+    if (!Array.isArray(uris) || uris.length !== 1 || typeof conversation !== "string" || !conversation) { bindTurn = null; hide(); return; }
     const next = {workspace_uris:uris.slice(),conversation_id:conversation};
     try {
       const result = await post("bootstrap", next);
       if (disposed || turn !== generation) return;
-      if (!result.visible || typeof result.capability !== "string" || !result.summary) { hide(); return; }
+      if (window.sidecar?.conversationId !== conversation) { hide(); return; }
+      if (!result.visible || typeof result.capability !== "string" || !result.summary) {
+        const retryable = recoverable && ["connection_unavailable", "panel_refresh_required"].includes(result.reason);
+        hide(retryable ? "connectionLost" : "unavailable", retryable); return;
+      }
+      recoveryIntent = false;
       context = next; capability = result.capability; summary = result.summary; render();
-    } catch { if (turn === generation) hide(); }
+    } catch { if (!disposed && turn === generation) hide("connectionLost", recoverable); }
+    finally { if (bindTurn === turn) { bindTurn = null; render(); } }
+  }
+
+  async function reconnect(recoverable = recoveryAvailable || !!context) {
+    if (disposed || busy || reconnectTurn !== null || bindTurn !== null) return;
+    const turn = ++generation, conversation = window.sidecar?.conversationId;
+    hide("connecting"); recoveryIntent = recoverable; reconnectTurn = turn; render();
+    let timer;
+    try {
+      const uris = await Promise.race([window.sidecar.getWorkspaceUris(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("workspace_context_timeout")), 15000);
+      })]);
+      clearTimeout(timer);
+      if (disposed || turn !== generation) return;
+      if (window.sidecar?.conversationId !== conversation) { hide(); return; }
+      await bind(uris, recoverable);
+    } catch {
+      if (!disposed && turn === generation) hide("connectionLost", recoverable);
+    } finally {
+      clearTimeout(timer);
+      if (reconnectTurn === turn) { reconnectTurn = null; render(); }
+    }
   }
 
   async function action(name, extra = {}) {
-    if (!context || !capability || busy) return;
+    if (disposed || !context || !capability || busy) return;
+    if (window.sidecar?.conversationId !== context.conversation_id) { ++generation; hide(); return; }
     const turn = generation;
     busy = true; render(); $("result").textContent = "";
     try {
       const request = {...context,capability,action:name,...(["status","debug"].includes(name) ? {} : {request_id:crypto.randomUUID()}),...extra};
       const result = await post("action", request);
       if (disposed || turn !== generation) return;
-      if (!result.visible || !result.summary) { hide(); return; }
+      if (window.sidecar?.conversationId !== context?.conversation_id) { ++generation; hide(); return; }
+      if (!result.visible || !result.summary) { hide(["status","debug"].includes(name) ? "connectionLost" : "actionUncertain", true); return; }
       summary = result.summary; diagnostics = result.diagnostics || null;
       $("result").textContent = result.opened ? t("opened") : name === "set_admin_preset" ? t("saved") : result.history ? `${["continue_existing","no_changes"].includes(result.history.preparation?.action) ? (language === "zh-CN" ? "已复用历史批次，请进入审批查看进度；未调用模型。" : "Existing history batch reused; open review for progress. No model call.") : t(result.history.state === "materialized" ? "archived" : "archivedPartial")} ${count(result.history.archived_cases)} (${result.history.state || "unknown"})` : "";
     } catch {
-      if (turn === generation) { hide(); $("notice").textContent = t("failed"); }
-    } finally { if (turn === generation) { busy = false; render(); } }
+      if (!disposed && turn === generation) hide(["status","debug"].includes(name) ? "connectionLost" : "actionUncertain", true);
+    } finally { if (!disposed && turn === generation) { busy = false; render(); } }
   }
 
   function changePreset(preset) {
@@ -219,20 +262,28 @@
     if (!summary || busy || !window.confirm(t(preset === "off" ? "confirmOff" : "confirmPreset"))) return;
     action("set_admin_preset", {preset,confirm:true,expected:{...summary.expected},request_id:crypto.randomUUID()});
   }
-  $("refresh").addEventListener("click", () => window.sidecar.getWorkspaceUris().then(bind).catch(() => hide()));
+  $("refresh").addEventListener("click", () => reconnect());
+  $("reconnect").addEventListener("click", () => reconnect());
   $("debug").addEventListener("click", () => action("debug"));
   $("browser").addEventListener("click", () => action("open_browser"));
   $("review").addEventListener("click", () => action("open_review"));
   $("history").addEventListener("click", () => { if (!busy && window.confirm(t("archiveConfirm"))) action("archive_history", {confirm:true,request_id:crypto.randomUUID()}); });
-  $("language").addEventListener("change", () => { language = $("language").value; render(); if (!summary) $("notice").textContent = t("unavailable"); });
-  window.addEventListener("pagehide", () => { disposed = true; ++generation; hide(); });
+  $("language").addEventListener("change", () => { language = $("language").value; render(); });
+  window.addEventListener("pagehide", () => {
+    resumeRecovery = !!context || recoveryAvailable || recoveryIntent;
+    disposed = true; ++generation; reconnectTurn = null; bindTurn = null; hide("waiting");
+  });
+  window.addEventListener("pageshow", () => {
+    if (!disposed) return;
+    disposed = false; reconnect(resumeRecovery);
+  });
   render(); hide("waiting");
   if (window.parent === window || !window.sidecar || typeof window.sidecar.getWorkspaceUris !== "function"
       || typeof window.sidecar.onWorkspaceChange !== "function") { hide(); return; }
   // Subscribe before awaiting the host's initial push. A switch invalidates old
   // controls immediately, even when an earlier bootstrap/action is still pending.
-  window.sidecar.onWorkspaceChange((uris) => bind(uris));
-  window.sidecar.getWorkspaceUris().then((uris) => { if (generation === 0 && !disposed) bind(uris); }).catch(() => hide());
+  window.sidecar.onWorkspaceChange((uris) => { if (!disposed) bind(uris); });
+  window.sidecar.getWorkspaceUris().then((uris) => { if (generation === 0 && !disposed) bind(uris); }).catch(() => { if (generation === 0 && !disposed) hide(); });
 })();
 </script>
 </body>
