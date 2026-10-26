@@ -52,7 +52,7 @@ globalThis.window={confirm:()=>false,prompt:()=>{throw Error('cancelled action r
 confirmAdminRecovery('retry_call',state.adminData.recovery.blocked_reviews[0]);
 `,context);
 assert(flatten(get('admin-recovery')).includes('These totals do not verify this chat'));
-assert(flatten(get('admin-recovery')).includes('Previous usage is unknown'));
+assert(flatten(get('admin-recovery')).includes('Previous usage is incomplete or unknown; retry may use additional platform quota.'));
 assert.equal(context.recoverySubmission,null);
 vm.runInContext(`window.confirm=()=>true;window.prompt=()=> 'User reviewed the unknown attempt';confirmAdminRecovery('retry_call',state.adminData.recovery.blocked_reviews[0]);`,context);
 assert.equal(context.recoverySubmission.path,'admin-control/recovery');

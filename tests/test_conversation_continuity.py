@@ -81,12 +81,18 @@ class ConversationContinuityTests(unittest.TestCase):
 
     def test_new_chat_has_a_same_checkout_handoff_without_old_task_authority(self):
         self.capture("Stop", last_assistant_message="Next step is to compare the optical calibration branches.")
-        items = self.r.work_context_items(self.p, "new-chat", workspace=self.workspace)
+        self.assertEqual(self.r.work_context_items(self.p, "new-chat", workspace=self.workspace), [])
+        items = self.r.work_context_items(self.p, "new-chat", query="optical calibration",
+                                          workspace=self.workspace)
         self.assertTrue(items)
         self.assertFalse(items[0]["permission_restored"])
+        self.assertFalse(items[0]["execution_authority"])
         other = Path(self.area.name) / "different-checkout"
         other.mkdir()
         self.assertEqual(self.r.work_context_items(self.p, "new-chat", workspace=other), [])
+        other_project = self.r.project(other)
+        self.assertEqual(self.r.work_context_items(other_project, "new-chat", query="optical calibration",
+                                                 workspace=other), [])
 
     def test_no_task_daily_summary_can_be_reviewed_without_creating_formal_knowledge(self):
         self.capture("UserPromptSubmit", prompt="Keep the optical assumptions explicit.")
