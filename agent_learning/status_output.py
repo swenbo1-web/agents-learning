@@ -76,8 +76,13 @@ def status_summary(status):
     for name in ("policy", "executor"):
         if name in routing:
             public["admin_routing"][name] = fields(routing[name], ("enabled", "provider", "model_mode", "model"))
-    public["admin_dispatch_diagnostic"] = fields(status.get("admin_dispatch_diagnostic"),
+    dispatch = _object(status.get("admin_dispatch_diagnostic"))
+    public["admin_dispatch_diagnostic"] = fields(dispatch,
         ("phase", "reason", "blocking_scope", "next_due", "blocked_review_scope"))
+    if "queue_blocked_by_protected_calls" in dispatch:
+        blocked = dispatch["queue_blocked_by_protected_calls"]
+        public["admin_dispatch_diagnostic"]["queue_blocked_by_protected_calls"] = (
+            blocked if isinstance(blocked, bool) else None)
     for name in ("project_usage", "global_usage"):
         # Missing project statistics must not silently inherit global figures.
         public[name] = usage(status.get(name))
@@ -110,6 +115,11 @@ def status_summary(status):
         if "input_window" in capture:
             public["host_capture"]["input_window"] = fields(capture["input_window"],
                 ("state", "public_input", "available", "reason"))
+        if "delivery_recovery_reason" in capture:
+            from .antigravity_health import DELIVERY_RECOVERY_REASONS
+            reason = capture["delivery_recovery_reason"]
+            if isinstance(reason, str) and reason in DELIVERY_RECOVERY_REASONS:
+                public["host_capture"]["delivery_recovery_reason"] = reason
     public["full_view"] = {"tool": "learning_status", "arguments": {"view": "full"}}
     if truncated:
         public["strings_truncated"] = True

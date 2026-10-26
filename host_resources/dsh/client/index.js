@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
 
     Object.assign(TEXT.zh, {reason:"当前原因",dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
     Object.assign(TEXT.en, {reason:"Current reason",dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
+    Object.assign(TEXT.zh, {dispatch_protected_history_only:"历史调用受保护，暂无可审核新工作；新任务仍可正常审核，旧调用不会自动重试。"});
+    Object.assign(TEXT.en, {dispatch_protected_history_only:"Historical calls remain protected; no new reviewable work. New tasks can still be reviewed; old calls will not retry automatically."});
 
     function reasonText(value, labels) {
       return typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, "dispatch_" + value)

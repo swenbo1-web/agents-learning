@@ -6,6 +6,11 @@ import sqlite3
 
 
 RECENT_RECEIPTS = 32
+DELIVERY_RECOVERY_REASONS = frozenset({
+    "stop_window_unbound", "stop_boundary_changed", "stop_public_response_unverified",
+    "stop_input_unverified", "stop_transcript_unavailable", "stop_transcript_not_terminal",
+    "stop_transcript_changed", "stop_public_output_recovered",
+})
 _INPUT_WINDOW_REASONS = frozenset({
     "bound", "native_prompt_empty", "native_prompt_unsupported_type",
     "transcript_path_missing", "transcript_path_invalid", "transcript_conversation_mismatch",
@@ -60,7 +65,8 @@ def _event(runtime, project, row, response, *, input_event=False):
         "json_extract(payload,'$.error') AS error,"
         "json_extract(payload,'$.public_window') AS input_window,"
         "json_extract(payload,'$.host_epoch') AS host_epoch,"
-        "json_extract(payload,'$.generation') AS generation "
+        "json_extract(payload,'$.generation') AS generation,"
+        "json_extract(payload,'$.delivery_recovery_reason') AS delivery_recovery_reason "
         "FROM events WHERE project=? AND conversation=? AND type=? AND id IN ("
         + ",".join("?" for _ in ids) + ") ORDER BY created DESC LIMIT 1",
         (project, row["conversation"], kind, *ids)).fetchone()
@@ -76,6 +82,8 @@ def _observation(runtime, project, row, response):
                 "source": None, "observed_at": row["created"]}
     view = {"state": "observed", "value": "unknown", "reason": "coverage_unavailable",
             "source": None, "observed_at": event["created"]}
+    if not response and event["delivery_recovery_reason"] in DELIVERY_RECOVERY_REASONS:
+        view["delivery_recovery_reason"] = event["delivery_recovery_reason"]
     raw = event["coverage"]
     if not isinstance(raw, str) or len(raw) > 8192:
         return view
@@ -187,6 +195,8 @@ def capture_status(runtime, project):
                     "source": current_input["source"], "observed_at": current_input["observed_at"]}
         current = _observation(runtime, project, latest, latest is post)
         result.update({key: current[key] for key in ("state", "reason", "source", "observed_at")})
+        if "delivery_recovery_reason" in current:
+            result["delivery_recovery_reason"] = current["delivery_recovery_reason"]
         if post is not None and post["conversation"] == latest["conversation"]:
             response = current if latest is post else _observation(runtime, project, post, True)
             result.update(public_response=response["value"], response_observed_at=response["observed_at"])

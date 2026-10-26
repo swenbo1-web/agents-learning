@@ -69,7 +69,18 @@
   let recoveryAvailable = false, recoveryIntent = false, reconnectTurn = null, bindTurn = null, noticeKey = "waiting", resumeRecovery = false;
   Object.assign(strings["zh-CN"], {dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
   Object.assign(strings.en, {dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
+  Object.assign(strings["zh-CN"], {dispatch_protected_history_only:"历史调用受保护，暂无可审核新工作；新任务仍可正常审核，旧调用不会自动重试。"});
+  Object.assign(strings.en, {dispatch_protected_history_only:"Historical calls remain protected; no new reviewable work. New tasks can still be reviewed; old calls will not retry automatically."});
   const t = (key) => strings[language][key];
+  Object.assign(strings.en,{"captureRecovery":"Public delivery check","captureRecoveryUnknown":"Confirm on the next complete invocation.","captureRecovery_stop_window_unbound":"No verifiable complete conversation window was recorded for this invocation. Confirm on the next complete invocation.","captureRecovery_stop_boundary_changed":"The invocation or project boundary changed; earlier output was not recovered.","captureRecovery_stop_public_response_unverified":"The public response could not be matched to this termination; delivery remains unverified.","captureRecovery_stop_input_unverified":"The current input source is unverified; complete delivery was not recovered.","captureRecovery_stop_transcript_unavailable":"The trusted public transcript is unavailable; complete delivery was not recovered.","captureRecovery_stop_transcript_not_terminal":"The public transcript has no verified complete terminal output. Confirm on the next complete invocation.","captureRecovery_stop_transcript_changed":"The public transcript changed during reading; this output was not adopted.","captureRecovery_stop_public_output_recovered":"Complete delivery was recovered from the trusted public transcript of this invocation."});
+  Object.assign(strings["zh-CN"],{"captureRecovery":"公开交付核对","captureRecoveryUnknown":"需要下一次完整调用确认。","captureRecovery_stop_window_unbound":"本轮尚无可核对的完整对话窗口，需下一次完整调用确认。","captureRecovery_stop_boundary_changed":"调用或项目边界已变化，未补取旧输出。","captureRecovery_stop_public_response_unverified":"公开回复与本次终止无法一致核对，完整交付仍未确认。","captureRecovery_stop_input_unverified":"当前输入来源未确认，未补取完整交付。","captureRecovery_stop_transcript_unavailable":"受信公开记录不可用，未补取完整交付。","captureRecovery_stop_transcript_not_terminal":"公开记录尚未形成可核对的完整终态，需下一次完整调用确认。","captureRecovery_stop_transcript_changed":"读取时公开记录发生变化，未采用该次输出。","captureRecovery_stop_public_output_recovered":"已从同一调用的受信公开记录补齐完整交付。"});
+  function captureRecoveryText(capture,scope) {
+    if(capture?.version!==1||capture.scope!=="project_recent_capture"||capture.host_scope!==scope||!Object.prototype.hasOwnProperty.call(capture,"delivery_recovery_reason"))return null;
+    if(typeof capture.delivery_recovery_reason!=="string"||capture.delivery_recovery_reason.length>64)return t("captureRecoveryUnknown");
+    const key="captureRecovery_"+capture.delivery_recovery_reason;
+    if(capture.delivery_recovery_reason==="stop_public_output_recovered"&&(capture.state!=="observed"||capture.public_delivery!=="complete"||capture.scan_limited===true))return t("captureRecoveryUnknown");
+    return Object.prototype.hasOwnProperty.call(strings[language],key)?t(key):t("captureRecoveryUnknown");
+  }
   function reasonText(value) { return typeof value === "string" && Object.prototype.hasOwnProperty.call(strings[language], "dispatch_" + value) ? t("dispatch_" + value) : value; }
   const count = (value) => Number.isFinite(value) && value >= 0 ? String(value) : t("unknown");
 
@@ -111,6 +122,8 @@
     if (capture?.version === 1 && capture.host_scope === summary.host_scope && capture.scope === "project_recent_capture") {
       const key = capture.scan_limited === true ? "captureWindowLimited" : capture.state === "unavailable" ? "captureUnavailable" : capture.state !== "observed" ? "captureUnknown" : capture.public_delivery === "complete" ? "captureComplete" : ({available:"captureResponse",partial:"captureResponsePartial"})[capture.public_response] || ({partial:"capturePartial",unavailable:"captureMissing"})[capture.public_delivery] || "captureUnknown";
       lines.push(`${t("captureTitle")}: ${t(key)}`);
+      const recovery=captureRecoveryText(capture,summary.host_scope);
+      if(recovery)lines.push(`${t("captureRecovery")}: ${recovery}`);
       const input = capture.input_window;
       if (input && typeof input === "object") {
         const inputKey = input.state === "observed" ? ({available:"inputAvailable",partial:"inputPartial",unavailable:"inputMissing"})[input.public_input] || "inputUnknown" : "inputUnknown";
@@ -183,6 +196,8 @@
       const f = a.last_provider_failure;
       lines.push([t("failure"),[f.reason_code,f.http_status,f.parameter_code].filter(v => v !== null && v !== undefined).join(" · ")]);
     }
+    const recovery=captureRecoveryText(d.capture,p.host_scope);
+    if(recovery)lines.push([t("captureRecovery"),recovery]);
     lines.push(...backupPreviewLines(d.backups));
     $("debugOutput").textContent = lines.map(([key,value]) => key+": "+val(value)).join("\n")+"\n"+t("latestUnchecked");
     $("debugPanel").hidden = false;

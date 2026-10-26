@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.29 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.30 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,15 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Administrator wait attribution and AG delivery adaptation (1.4.30)
+
+- **Historical protection is not a global stop:** distinguish calls affecting the current review policy, host, problem revision and phase from retained historical attempts. When no new work is ready, show historical protection separately. New tasks retain normal admission; old calls and unknown usage are not reset or retried.
+- **One explanation for scheduling and UI:** administrator settings, scheduler summaries and all three host panels share the scope decision. Other hosts, old per-case work and stale “model started” observations no longer imply current execution. `queue_blocked_by_protected_calls` explains the current queue and grants no retry permission.
+- **Use the actual AG Hook contract:** App 2.23 does not promise `finalModelOutput` on Stop. For subsequent new invocations, a clear, fully idle termination can trigger a fresh read of the explicitly supplied trusted public transcript instead of relying on that optional field.
+- **Strict recovery boundaries:** require the same conversation, host generation, task, input window, final invocation and stable file, a complete public response matching the associated Post record, and no later user or pending tool. Missing proof retains partial public history with an explanation. Old Post responses are not simply promoted; completed old receipts are not rewritten.
+- **Keep audits, reduce repeated presentation:** automatic context prefers a complete delivery over its explicitly linked partial response only when short text is identical and source/file checks are healthy. Manual access keeps both records. Long segments, truncated material and different boundaries are not merged by this rule.
+- **Preserve authorization:** no extra model call, schema/protocol 25 and indexes 6/2/1 remain. Administrator and publication policy, old failure locks and usage stay intact. Old calls lacking the new window proof are not backfilled; acceptance of a new native delivery is separate.
 
 ## Automatic-context noise and follow-up focus (1.4.29)
 
@@ -976,7 +985,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.29 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Generic action requests reduce old delivery-status and generic-request echoes; action-only follow-ups preserve a valid focus. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.30 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Generic action requests reduce old delivery-status and generic-request echoes; action-only follow-ups preserve a valid focus. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1304,7 +1313,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.29 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It improves automatic material selection for generic actions and preserves follow-up focus, explicit historical queries, guides, source notices and compaction handoffs. The match-policy change refreshes query caches without migrating knowledge or rebuilding indexes; unknown usage and publication policy remain. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.30 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It separates current administrator waits from historical call protection and adapts AG Stop delivery through a strictly bound public transcript window. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 

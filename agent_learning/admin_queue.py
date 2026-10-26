@@ -113,16 +113,19 @@ def scan_signatures(runtime, project):
 
 
 def eligible_query(signature, problem_id=None, *, include_cached=False, preflight_signature=None, history_job_id=None,
-                   summary_enabled=False, summary_host_scope=None, phase_scope=None):
+                   summary_enabled=False, summary_host_scope=None, phase_scope=None, _include_call_blocked=False,
+                   _include_running_tools=False):
     sql = ("SELECT p.*,t.updated AS source_task_updated FROM problems p LEFT JOIN task_snapshots t "
            "ON t.project=p.project AND t.id=p.task_id AND t.revision=p.task_revision "
            "WHERE p.project=? AND p.status='pending' AND (? IS NULL OR p.id=?) "
-           "AND (p.task_id IS NULL OR t.id IS NOT NULL) "
-           "AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.project=p.project AND o.conversation=p.conversation "
-           "AND o.task_id IS p.task_id AND o.task_revision IS p.task_revision AND o.state IN ('running','started')) "
-           "AND NOT EXISTS(SELECT 1 FROM admin_calls c WHERE c.project=p.project AND c.problem=p.id "
-           "AND c.revision=p.revision AND c.retry_allowed=0 AND c.state NOT IN ('not_started','deduplicated') "
-           "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) ")
+           "AND (p.task_id IS NULL OR t.id IS NOT NULL) ")
+    if not _include_running_tools:
+        sql += ("AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.project=p.project AND o.conversation=p.conversation "
+                "AND o.task_id IS p.task_id AND o.task_revision IS p.task_revision AND o.state IN ('running','started')) ")
+    if not _include_call_blocked:
+        sql += ("AND NOT EXISTS(SELECT 1 FROM admin_calls c WHERE c.project=p.project AND c.problem=p.id "
+                "AND c.revision=p.revision AND c.retry_allowed=0 AND c.state NOT IN ('not_started','deduplicated') "
+                "AND NOT EXISTS(SELECT 1 FROM review_receipts r WHERE r.project=c.project AND r.call_id=c.id)) ")
     args = (problem_id, problem_id)
     if phase_scope is not None and problem_id is None and history_job_id is None:
         sql += ("AND EXISTS(SELECT 1 FROM phase_review_batches b WHERE b.project=p.project AND b.problem_id=p.id "
@@ -158,6 +161,53 @@ def remember_check(runtime, project, selected, signature, blocked_call=None):
                        "task_updated=excluded.task_updated,updated=excluded.updated,blocked_call=excluded.blocked_call",
                        (project, selected["id"], selected["revision"], signature,
                         selected["source_task_updated"], time.time(), blocked_call))
+
+
+def _review_scope_query(runtime, project, signature, preflight_signature=None, *, include_running_tools=False):
+    return eligible_query(signature, include_cached=True, preflight_signature=preflight_signature,
+        summary_enabled=runtime.work_summary_enabled(project), summary_host_scope=runtime._session_scope(),
+        phase_scope=phase_scope(runtime, project), _include_call_blocked=True,
+        _include_running_tools=include_running_tools)
+
+
+def review_protection_status(runtime, project, signature, preflight_signature=None):
+    """Explain current locked work separately from retained historical attempts.
+
+    This read-only projection skips call locks and disposable scan caches only
+    to identify their affected work. Claim paths retain the original query;
+    neither this projection nor its boolean grants a retry or host permission.
+    """
+    from .admin_recovery import blocked_review_summary
+    preflight_signature = preflight_signature or signature
+    query, args = _review_scope_query(runtime, project, signature, preflight_signature)
+    current = blocked_review_summary(runtime, project, _problem_query=query,
+                                     _problem_args=(project, *args))
+    retained = blocked_review_summary(runtime, project)
+    selected = current if current["total"] else current["unattributed"]
+    blocking = bool(selected["failed"] or selected["result_unknown"])
+    historical = bool(retained["total"] or retained["unattributed"]["failed"]
+                      or retained["unattributed"]["result_unknown"])
+    tool_query, tool_args = _review_scope_query(runtime, project, signature, preflight_signature,
+                                               include_running_tools=True)
+    tools = bool(runtime.db.execute(tool_query + "AND EXISTS(SELECT 1 FROM operations o WHERE o.project=p.project "
+        "AND o.conversation=p.conversation AND o.task_id IS p.task_id AND o.task_revision IS p.task_revision "
+        "AND o.state IN ('running','started')) LIMIT 1", (project, *tool_args)).fetchone())
+    evidence = bool(runtime.db.execute(query + "AND (EXISTS(SELECT 1 FROM admin_preflights f WHERE f.project=p.project "
+        "AND f.problem=p.id AND f.revision=p.revision AND f.signature=? AND f.task_updated IS t.updated) "
+        "OR EXISTS(SELECT 1 FROM review_states s WHERE s.project=p.project AND s.problem=p.id "
+        "AND s.revision=p.revision AND s.state='awaiting_evidence')) LIMIT 1",
+        (project, *args, preflight_signature)).fetchone())
+    result = {"queue_blocked_by_protected_calls": blocking,
+              "awaiting_tool_completion": tools, "awaiting_evidence": evidence,
+              "blocked_review_summary": current, "protected_review_summary": retained,
+              "reason": "awaiting_tool_completion" if tools
+                        else ("unknown_call_requires_review" if selected["result_unknown"]
+                              else "failed_call_requires_review") if blocking
+                        else "awaiting_evidence" if evidence
+                        else "protected_history_only" if historical else None}
+    if blocking:
+        result["blocked_review_scope"] = "host" if current["total"] else "project_unattributed"
+    return result
 
 
 def routing_signature(runtime, project):
@@ -575,20 +625,8 @@ def _dispatch_diagnostic(runtime, project, *, check_queue=True):
     if not rows:
         if runtime.db.execute(query + "LIMIT 1", (project, *args)).fetchone():
             return dict(detail, reason=unrouted_reason(runtime, project, query, args, "model_missing"))
-        if runtime.db.execute("SELECT 1 FROM operations o JOIN problems p ON p.project=o.project AND p.conversation=o.conversation "
-            "AND p.task_id IS o.task_id AND p.task_revision IS o.task_revision WHERE p.project=? AND p.status='pending' "
-            "AND o.state IN ('running','started') LIMIT 1", (project,)).fetchone():
-            return dict(detail, reason="awaiting_tool_completion")
-        from .admin_recovery import blocked_review_summary
-        blocked = blocked_review_summary(runtime, project)
-        selected = blocked if blocked["total"] else blocked["unattributed"]
-        if selected["failed"] or selected["result_unknown"]:
-            return dict(detail, reason="unknown_call_requires_review" if selected["result_unknown"]
-                        else "failed_call_requires_review", blocked_review_summary=blocked,
-                        blocked_review_scope="host" if blocked["total"] else "project_unattributed")
-        if runtime.db.execute("SELECT 1 FROM admin_preflights WHERE project=? LIMIT 1", (project,)).fetchone():
-            return dict(detail, reason="awaiting_evidence")
-        return detail
+        protection = review_protection_status(runtime, project, signature, preflight_signature)
+        return {**detail, **protection, "reason": protection["reason"] or detail["reason"]}
     budget = admin_admission_status(runtime, project)
     if budget["admission_status"] != "available":
         if budget["admission_status"] == "token_budget_exhausted" and phase_scope(runtime, project) is not None:

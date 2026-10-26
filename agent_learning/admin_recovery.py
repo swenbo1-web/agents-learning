@@ -14,19 +14,22 @@ def _version(row):
     return digest(dict(row))
 
 
-def blocked_review_summary(runtime, project):
+def blocked_review_summary(runtime, project, *, _problem_query=None, _problem_args=()):
     """Classify unresolved attempts without treating another host as this one.
 
     Old attempts without a frozen execution plan remain unattributed project
     records. They retain their locks but cannot be presented as this host's
     confirmed calls or offered a guessed host recovery action.
     """
+    scope = (" AND EXISTS(SELECT 1 FROM (" + _problem_query + ") scoped_problem "
+             "WHERE scoped_problem.id=a.problem AND scoped_problem.revision=a.revision) "
+             if _problem_query is not None else "")
     rows = runtime.db.execute(
         "SELECT CASE WHEN p.call_id IS NULL THEN 'unattributed' ELSE 'host' END AS attribution,"
         "CASE WHEN a.state='failed' THEN 'failed' ELSE 'result_unknown' END AS kind,COUNT(*) AS count "
         "FROM admin_calls a LEFT JOIN admin_execution_plans p ON p.call_id=a.id AND p.project=a.project "
         "WHERE a.project=? AND (p.host_scope=? OR p.call_id IS NULL) AND " + unresolved_failure_sql("a")
-        + " GROUP BY attribution,kind", (project, runtime._session_scope())).fetchall()
+        + scope + " GROUP BY attribution,kind", (project, runtime._session_scope(), *_problem_args)).fetchall()
     result = {"host_scope": runtime._session_scope(), "failed": 0, "result_unknown": 0,
               "unattributed": {"failed": 0, "result_unknown": 0}}
     for row in rows:
@@ -106,12 +109,16 @@ def recovery_status(runtime, project, *, include_history=True):
     history = []
     if include_history:
         history = history_recovery_page(runtime, project, limit=10)["items"]
+    host_capture = {}
+    if runtime.host == "antigravity":
+        from .antigravity_health import capture_status
+        host_capture = {"host_capture": capture_status(runtime, project)}
     return {"capture": {**dict(capture), "work_memories": memory_count, "current_hook": "unknown",
                 "note": "Existing conversations need a host reload and a fresh supported event; archived files are not chat history."},
             "blocked_reviews": calls, "blocked_review_summary": blocked,
             "blocked_reviews_truncated": blocked["total"] > len(calls),
             "history_jobs": history, "history_separate": not include_history,
-            "models_started": False}
+            "models_started": False, **host_capture}
 
 
 def history_recovery_page(runtime, project, *, offset=0, limit=3):

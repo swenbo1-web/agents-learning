@@ -47,7 +47,8 @@ def _native_digest(observed):
     # identity, including compatibility with receipts from before this reader.
     return "v2:" + digest({key: value for key, value in observed.items() if key not in {
         "modelName", "lastUserInput", "finalModelOutput", "capture_coverage",
-        "host_epoch", "generation", "public_window"}})
+        "host_epoch", "generation", "public_window", "delivery_recovery_reason",
+        "proven_public_response_event"}})
 
 
 def install_storage(runtime):
@@ -327,7 +328,7 @@ class AntigravityAdapter:
                      (project, conversation, project, conversation))
 
     def _transcript_public(self, project, conversation, observed, raw,
-                           epoch, generation, phase_guard):
+                           epoch, generation, phase_guard, *, _snapshot=None):
         """Public input/response recovery uses the native invocation pair only.
 
         PostInvocation proves a model invocation, not completion of the user's
@@ -367,7 +368,7 @@ class AntigravityAdapter:
                         (project, window_id, conversation)).fetchone()):
                 coverage["reason"] = "transcript_window_unbound"
                 return
-        snapshot = read_public(raw)
+        snapshot = read_public(raw) if _snapshot is None else _snapshot
         if not snapshot["available"]:
             unavailable(snapshot["reason"])
             return
@@ -402,12 +403,28 @@ class AntigravityAdapter:
                 if receipt is None:
                     unavailable("transcript_pre_receipt_missing")
                     return
-                window = {"version": 1, "host_epoch": epoch, "generation": generation,
+                previous_stop = self.runtime.db.execute("SELECT id,json_extract(payload,'$.executionNum') AS execution_num,"
+                    "json_extract(payload,'$.host_epoch') AS host_epoch,json_extract(payload,'$.generation') AS generation "
+                    "FROM events WHERE project=? AND conversation=? "
+                    "AND type='AntigravityStop' ORDER BY created DESC,id DESC LIMIT 1", (project, conversation)).fetchone()
+                prior_stop_id = previous_stop["id"] if previous_stop else None
+                predecessor = self.runtime.db.execute("SELECT payload FROM events WHERE project=? AND conversation=? "
+                    "AND type='AntigravityPublicWindow' AND json_extract(payload,'$.version')=2 "
+                    "AND json_extract(payload,'$.host_epoch')=? AND json_extract(payload,'$.generation')=? "
+                    "AND json_extract(payload,'$.prior_stop_event') IS ? ORDER BY created DESC,id DESC LIMIT 1",
+                    (project, conversation, epoch, generation, prior_stop_id)).fetchone()
+                anchor = json.loads(predecessor[0]) if predecessor else {}
+                window = {"version": 2, "host_epoch": epoch, "generation": generation,
                           "invocation_num": invocation, "initial_steps": initial,
                           "user_step": user["step_index"], "user_digest": user_digest,
                           "file_identity": snapshot["file_identity"], "path_digest": snapshot["path_digest"],
                           "task_signature": self._task_signature(project, conversation),
-                          "pre_receipt_key": pre_key, "pre_receipt_signature": receipt["task_signature"]}
+                          "pre_receipt_key": pre_key, "pre_receipt_signature": receipt["task_signature"],
+                          "prior_stop_event": prior_stop_id,
+                          "expected_execution_num": (previous_stop["execution_num"] + 1 if previous_stop
+                              and previous_stop["host_epoch"] == epoch and previous_stop["generation"] == generation else None),
+                          "execution_user_step": anchor.get("execution_user_step", user["step_index"]),
+                          "execution_user_digest": anchor.get("execution_user_digest", user_digest)}
                 self.runtime._event(project, conversation, "AntigravityPublicWindow", window,
                     event_id=["antigravity-public-window", conversation, pre_key])
                 observed["public_window"] = {"available": True, "reason": "bound",
@@ -522,12 +539,14 @@ class AntigravityAdapter:
             metadata = {key: observed[key] for key in ("host_epoch", "generation", "capture_coverage")}
             metadata.update(invocation_num=observed["invocationNum"], initial_steps=observed["initialNumSteps"],
                             completion="partial", execution_completion="unverified")
+            text = observed.get("finalModelOutput")
+            if isinstance(text, str) and text.strip():
+                metadata["public_response_digest"] = digest(text)
             source, fresh = self.runtime._event(project, conversation, "AntigravityPublicResponse", metadata,
                 event_id=["antigravity-public-response", conversation, event_key],
                 task_id=task["id"] if task else None, task_revision=task["revision"] if task else None,
                 task_write_version=task["write_version"] if task else None,
                 execution_epoch=task["execution_epoch"] if task else None)
-            text = observed.get("finalModelOutput")
             if fresh and isinstance(text, str) and text.strip():
                 # Existing progressive public segments preserve the full bounded
                 # message. No Stop, delivery, AI summary or administrator wake.
@@ -577,13 +596,167 @@ class AntigravityAdapter:
             # user statement; exclude its indexed record and public segments.
             return item["id"]
 
-    def _stop(self, project, conversation, observed, event_key, phase_guard):
-        with self.runtime.transaction():
-            return self._stop_locked(project, conversation, observed, event_key, phase_guard)
+    def _stop_transcript_public(self, project, conversation, observed, raw, epoch, generation, phase_guard):
+        """Recover only a new terminal Stop from a newly verified public window.
 
-    def _stop_locked(self, project, conversation, observed, event_key, phase_guard):
+        App 2.23's Stop contract supplies execution state and transcriptPath,
+        not finalModelOutput. A matched Post remains partial evidence: this
+        routine re-reads the public file and proves its terminal boundary.
+        """
+        if ("finalModelOutput" in raw or not observed["fullyIdle"] or observed["error"]
+                or observed["terminationReason"] not in {"model_stop", "NO_TOOL_CALL"}
+                or observed["capture_coverage"].get("workspace_association") != "installed_workspace"
+                or observed["capture_coverage"].get("trajectory_identity") != "current"):
+            return None
+
+        def unavailable(reason):
+            observed["delivery_recovery_reason"] = reason
+            return None
+
+        r = self.runtime
+        with r.transaction():
+            phase_guard()
+            trajectory = r.db.execute("SELECT last_invocation,last_steps FROM antigravity_trajectories "
+                "WHERE project=? AND conversation=?", (project, conversation)).fetchone()
+            if not trajectory or min(trajectory) < 0:
+                return unavailable("stop_window_unbound")
+            invocation, initial = tuple(trajectory)
+            keys = {kind: digest([epoch, generation, _native_digest({"kind": kind,
+                "invocationNum": invocation, "initialNumSteps": initial})])
+                for kind in ("PreInvocation", "PostInvocation")}
+            window_id = digest([project, ["antigravity-public-window", conversation, keys["PreInvocation"]]])
+            post_id = digest([project, ["antigravity-public-response", conversation, keys["PostInvocation"]]])
+            input_id = digest([project, ["antigravity-public-input", conversation, keys["PreInvocation"]]])
+            def event_payload(identity, kind):
+                row = r.db.execute("SELECT payload FROM events WHERE project=? AND conversation=? AND id=? AND type=?",
+                                   (project, conversation, identity, kind)).fetchone()
+                return row[0] if row else None
+            window_raw = event_payload(window_id, "AntigravityPublicWindow")
+            post_raw = event_payload(post_id, "AntigravityPublicResponse")
+            input_raw = event_payload(input_id, "AntigravityPublicInput")
+            if not window_raw or not post_raw or not input_raw:
+                return unavailable("stop_window_unbound")
+            window, post, public_input = map(json.loads, (window_raw, post_raw, input_raw))
+            if window.get("version") != 2 or "prior_stop_event" not in window:
+                return unavailable("stop_window_unbound")
+            if (window.get("execution_user_step") != window.get("user_step")
+                    or window.get("execution_user_digest") != window.get("user_digest")
+                    or window.get("expected_execution_num") is not None
+                    and window["expected_execution_num"] != observed["executionNum"]):
+                return unavailable("stop_boundary_changed")
+            post_field = post.get("capture_coverage", {}).get("finalModelOutput", {})
+            input_field = public_input.get("capture_coverage", {}).get("lastUserInput", {})
+            if (not post.get("public_response_digest") or post_field.get("available") is not True
+                    or post_field.get("truncated") is not False
+                    or post_field.get("full_original_available") is not True):
+                return unavailable("stop_public_response_unverified")
+            if (public_input.get("public_input_digest") != window.get("user_digest")
+                    or input_field.get("available") is not True or input_field.get("truncated") is not False
+                    or input_field.get("full_original_available") is not True):
+                return unavailable("stop_input_unverified")
+            # The prompt archive must match the exact source selected by Pre,
+            # including the native-stop boundary used by prompt deduplication.
+            if input_field.get("source") == "antigravity_transcript":
+                source_keys = [["antigravity-public-prompt-step", conversation, epoch, generation,
+                                window["user_step"], window["user_digest"]]]
+            else:
+                legacy = ["antigravity-public-prompt", epoch, generation,
+                          window["prior_stop_event"], window["user_digest"]]
+                source_keys = [[legacy[0], conversation, *legacy[1:]], legacy]
+            archived = False
+            for key in source_keys:
+                payload = event_payload(digest([project, key]), "UserPromptSubmit")
+                if payload and digest(json.loads(payload).get("prompt")) == window["user_digest"]:
+                    archived = True
+            if not archived:
+                return unavailable("stop_input_unverified")
+
+            def boundary():
+                current = r.db.execute("SELECT generation,last_invocation,last_steps,ambiguous FROM antigravity_trajectories "
+                    "WHERE project=? AND conversation=?", (project, conversation)).fetchone()
+                prior = r.db.execute("SELECT id FROM events WHERE project=? AND conversation=? AND type='AntigravityStop' "
+                    "ORDER BY created DESC,id DESC LIMIT 1", (project, conversation)).fetchone()
+                if (not current or tuple(current) != (generation, invocation, initial, 0)
+                        or (prior[0] if prior else None) != window["prior_stop_event"]
+                        or self._task_signature(project, conversation) != window.get("task_signature")
+                        or event_payload(window_id, "AntigravityPublicWindow") != window_raw
+                        or event_payload(post_id, "AntigravityPublicResponse") != post_raw):
+                    return "stop_boundary_changed"
+                for kind, key in keys.items():
+                    receipt = r.db.execute("SELECT state,host_epoch,generation,task_signature FROM antigravity_receipts "
+                        "WHERE project=? AND conversation=? AND event_key=? AND kind=?",
+                        (project, conversation, key, kind)).fetchone()
+                    expected = window["pre_receipt_signature"] if kind == "PreInvocation" else window["task_signature"]
+                    if not receipt or tuple(receipt) != ("complete", epoch, generation, expected):
+                        return "stop_boundary_changed"
+                return None
+            reason = boundary()
+            if reason:
+                return unavailable(reason)
+
+        from .antigravity_transcript import _regular_path, read_public
+        path, _ = _regular_path(raw)
+        if path is None:
+            return unavailable("stop_transcript_unavailable")
+        def file_version():
+            current, _ = _regular_path(raw)
+            if current != path:
+                return None
+            try:
+                info = current.stat(follow_symlinks=False)
+                return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+            except OSError:
+                return None
+        version = file_version()
+        snapshot = read_public(raw)
+        if not snapshot.get("available"):
+            return unavailable("stop_transcript_unavailable")
+        if version is None or file_version() != version:
+            return unavailable("stop_transcript_changed")
+        response = {"kind": "PostInvocation", "invocationNum": invocation,
+                    "initialNumSteps": initial, "capture_coverage": {}}
+        self._transcript_public(project, conversation, response, raw, epoch, generation, phase_guard,
+                                _snapshot=snapshot)
+        text = response.get("finalModelOutput")
+        field = response["capture_coverage"].get("finalModelOutput", {})
+        if (not isinstance(text, str) or not text.strip() or field.get("truncated") is not False
+                or field.get("full_original_available") is not True
+                or digest(text) != post["public_response_digest"]
+                or field.get("step_index") != post_field.get("step_index")):
+            return unavailable("stop_public_response_unverified")
+        response_step = field["step_index"]
+        if any(item["step_index"] >= initial and item["step_index"] != response_step
+               and (item["type"], item["source"], item["status"]) != ("EPHEMERAL_MESSAGE", "SYSTEM_SDK", "DONE")
+               for item in snapshot["records"]):
+            return unavailable("stop_transcript_not_terminal")
+
+        def commit_guard():
+            reason = boundary()
+            if reason:
+                return reason
+            return None if file_version() == version else "stop_transcript_changed"
+        observed["finalModelOutput"] = text
+        observed["proven_public_response_event"] = post_id
+        observed["capture_coverage"]["finalModelOutput"] = {
+            **field, "execution_completion": "verified_native_stop"}
+        observed["delivery_recovery_reason"] = "stop_public_output_recovered"
+        return commit_guard
+
+    def _stop(self, project, conversation, observed, event_key, phase_guard, delivery_guard=None):
+        with self.runtime.transaction():
+            return self._stop_locked(project, conversation, observed, event_key, phase_guard, delivery_guard)
+
+    def _stop_locked(self, project, conversation, observed, event_key, phase_guard, delivery_guard=None):
         """调用者持写事务；旧碰撞恢复须与完成回执原子提交。"""
         phase_guard()
+        if delivery_guard:
+            reason = delivery_guard()
+            if reason:
+                observed.pop("finalModelOutput", None)
+                observed.pop("proven_public_response_event", None)
+                observed["capture_coverage"]["finalModelOutput"] = {"available": False,
+                    "full_original_available": False, "truncated": False, "source": "antigravity_transcript"}
+                observed["delivery_recovery_reason"] = reason
         task = self.runtime.task(project, conversation)
         event, fresh = self.runtime._event(project, conversation, "AntigravityStop", observed,
                             event_id=["antigravity", conversation, event_key],
@@ -609,6 +782,8 @@ class AntigravityAdapter:
                            "termination_reason": observed["terminationReason"],
                            "capture_coverage": observed["capture_coverage"],
                            "host_epoch": self._epoch()}
+                if observed.get("delivery_recovery_reason") == "stop_public_output_recovered":
+                    payload["proven_public_response_event"] = observed["proven_public_response_event"]
                 public, public_fresh = self.runtime._event(project, conversation, "Stop", payload,
                     event_id=["antigravity-public-stop", conversation, event_key],
                     task_id=task["id"] if task else None,
@@ -868,7 +1043,10 @@ class AntigravityAdapter:
                                  ("pending" if pending else "queried", project, conversation, fault["signature"]))
             output = {"injectSteps": [{"ephemeralMessage": text}]} if text else {}
         elif event == "Stop":
-            output, phase_task_signature = self._stop(project, conversation, observed, event_key, phase_guard)
+            delivery_guard = self._stop_transcript_public(project, conversation, observed, raw,
+                                                         epoch, generation, phase_guard)
+            output, phase_task_signature = self._stop(project, conversation, observed, event_key, phase_guard,
+                                                     delivery_guard)
         elif event == "PostInvocation":
             output = self._public_response(project, conversation, observed, event_key, phase_guard)
         else:

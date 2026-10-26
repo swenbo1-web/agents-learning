@@ -187,15 +187,15 @@ class SchedulerMixin:
                                          summary_host_scope=self._session_scope(), phase_scope=phase_scope(self, project))
             eligible = self.db.execute(query + "LIMIT 1", (project, *args)).fetchone()
             if not eligible:
-                from .admin_lifecycle import unresolved_failure_sql
-                unknown = self.db.execute("SELECT 1 FROM admin_calls a WHERE a.project=? AND "
-                    + unresolved_failure_sql("a") + " LIMIT 1", (project,)).fetchone()
-                blocked = self.db.execute("SELECT 1 FROM admin_preflights f JOIN problems p ON p.id=f.problem AND p.project=f.project "
-                    "WHERE f.project=? AND p.status='pending' AND f.revision=p.revision LIMIT 1", (project,)).fetchone()
-                awaiting = self.db.execute("SELECT 1 FROM review_states s JOIN problems p ON p.id=s.problem AND p.project=s.project "
-                    "WHERE s.project=? AND p.status='pending' AND s.revision=p.revision AND s.state='awaiting_evidence' LIMIT 1", (project,)).fetchone()
-                reason = "review_required" if unknown else "awaiting_evidence" if blocked or awaiting else "no_review_increment"
-                return signature, "waiting" if unknown or blocked or awaiting else "idle", None, reason
+                from .admin_queue import review_protection_status
+                protection = review_protection_status(self, project, scan, preflight_signature=preflight)
+                call_blocked = protection["queue_blocked_by_protected_calls"]
+                evidence_wait = protection.get("awaiting_evidence", False)
+                tool_wait = protection.get("awaiting_tool_completion", False)
+                reason = ("awaiting_tool_completion" if tool_wait else "review_required" if call_blocked
+                          else "awaiting_evidence" if evidence_wait
+                          else protection.get("reason") or "no_review_increment")
+                return signature, "waiting" if call_blocked or evidence_wait or tool_wait else "idle", None, reason
             if not ready_executor(self, project, query, args, advance=self.db.in_transaction):
                 if routing_scan_pending(self, project, query, args):
                     return signature, "waiting", now + cfg["poll_seconds"], "executor_scan_pending"

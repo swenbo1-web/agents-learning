@@ -511,6 +511,11 @@ class WorkMemoryMixin:
         if public:
             body.update(completion=completion, execution_authority=False,
                         public_message_id=payload.get("public_message_id", event_id))
+            # Internal provenance only. It never becomes a model-visible card
+            # field and does not grant source health or completion by itself.
+            proof = payload.get("proven_public_response_event")
+            if event["type"] == "Stop" and isinstance(proof, str) and re.fullmatch(r"[0-9a-f]{64}", proof):
+                body["proven_public_response_event"] = proof
             body["coverage"]["host"] = coverage
             host_truncated = any(value.get("truncated") for value in coverage.values()
                                  if isinstance(value, dict)) if isinstance(coverage, dict) else False
@@ -1046,6 +1051,9 @@ class WorkMemoryMixin:
                     else:
                         rows = [row] + others
                     break
+            rows, prepared = self._work_prefer_complete_ag_delivery(project, rows, workspace=workspace,
+                file_paths=[link["relative_path"] for link in links[:3]], query=query,
+                handoff_scopes=handoff_scopes)
             seen = {item["memory_id"] for item in result}
             public_messages = set()
             for row in rows:
@@ -1055,8 +1063,10 @@ class WorkMemoryMixin:
                     continue
                 handoff_scope = handoff_scopes.get(row["id"])
                 preview_query = None if handoff_scope else query
-                item = self._work_item(project, row, workspace=workspace,
-                                       file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
+                item = prepared.get(row["id"])
+                if item is None:
+                    item = self._work_item(project, row, workspace=workspace,
+                        file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
                 if item.get("file_projection_incomplete"):
                     continue
                 item["_preview_query"] = preview_query
@@ -1091,6 +1101,81 @@ class WorkMemoryMixin:
                 if len(result) >= limit:
                     break
             return result[:limit]
+
+    def _work_prefer_complete_ag_delivery(self, project, rows, *, workspace, file_paths, query, handoff_scopes):
+        """Deduplicate a proven short Post/Stop pair inside the existing recall pool.
+
+        Long or segmented records stay separate. No new recall, broad semantic
+        equivalence or persistent coverage is inferred, and risk notices are not
+        part of this optional candidate selection.
+        """
+        from .runtime import digest
+        if not any('"proven_public_response_event"' in row["body"] for row in rows):
+            return rows, {}
+        bodies = {row["id"]: json.loads(row["body"]) for row in rows}
+        prepared, replacements = {}, {}
+
+        def boundary(row, body):
+            return tuple(row[key] for key in ("project", "workspace_key", "conversation", "agent", "task_id", "task_revision")) + (body.get("assignment_id"),)
+
+        def single(body):
+            coverage = body.get("coverage", {})
+            return (isinstance(coverage, dict) and body.get("type") == "public_summary"
+                and isinstance(body.get("summary"), str)
+                and coverage.get("segments", 1) == 1 and not coverage.get("truncated")
+                and coverage.get("full_original_available") is True)
+
+        def usable(row):
+            if row["id"] not in prepared:
+                prepared[row["id"]] = self._work_item(project, row, workspace=workspace,
+                    file_paths=file_paths, preview_query=None if row["id"] in handoff_scopes else query)
+            item = prepared[row["id"]]
+            return ((item.get("completion") != "complete" or self._work_handoff_usable(item))
+                and item.get("state") == "reported" and not item.get("source_changed")
+                and item.get("automatic_eligible", True) and not item.get("candidate_reference_risk")
+                and item.get("files_count") == len(item.get("files", []))
+                and all(file.get("version_changed") is False for file in item.get("files", [])))
+
+        for complete in rows:
+            body = bodies[complete["id"]]
+            proof = body.get("proven_public_response_event")
+            if (not isinstance(proof, str) or not re.fullmatch(r"[0-9a-f]{64}", proof)
+                    or body.get("completion") != "complete" or not single(body)):
+                continue
+            parent = self.db.execute("SELECT type,payload,conversation,agent,task_id,task_revision,assignment_id FROM events WHERE project=? AND id=?",
+                (project, body.get("public_message_id"))).fetchone()
+            source = self.db.execute("SELECT type,payload,conversation,agent,task_id,task_revision,assignment_id FROM events WHERE project=? AND id=?", (project, proof)).fetchone()
+            if not parent or parent["type"] != "Stop" or not source or source["type"] != "AntigravityPublicResponse":
+                continue
+            scope = tuple(complete[key] for key in ("conversation", "agent", "task_id", "task_revision")) + (body.get("assignment_id"),)
+            if any(tuple(event[key] for key in ("conversation", "agent", "task_id", "task_revision", "assignment_id")) != scope
+                   for event in (parent, source)):
+                continue
+            final, post = json.loads(parent["payload"]), json.loads(source["payload"])
+            if (final.get("proven_public_response_event") != proof or final.get("completion") != "complete"
+                    or final.get("source") != "antigravity_public_hook"
+                    or final.get("last_assistant_message") != body["summary"]
+                    or post.get("public_response_digest") != digest(body["summary"])):
+                continue
+            for partial in rows:
+                previous = bodies[partial["id"]]
+                if (previous.get("public_message_id") != proof or previous.get("completion") != "partial"
+                        or not single(previous) or previous["summary"] != body["summary"]
+                        or boundary(partial, previous) != boundary(complete, body)):
+                    continue
+                if not usable(complete) or not usable(partial):
+                    continue
+                newer, older = prepared[complete["id"]], prepared[partial["id"]]
+                if newer["files"] != older["files"] or newer["file_state"] != older["file_state"]:
+                    continue
+                replacements[partial["id"]] = complete
+        result, seen = [], set()
+        for row in rows:
+            selected = replacements.get(row["id"], row)
+            if selected["id"] not in seen:
+                result.append(selected)
+                seen.add(selected["id"])
+        return result, prepared
 
     @staticmethod
     def _work_handoff_usable(item):

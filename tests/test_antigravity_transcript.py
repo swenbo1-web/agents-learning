@@ -357,7 +357,9 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.post()
         self.stop(0)
         self.assertEqual(len(self.events("PublicMessageSegment")), 2)
-        self.assertEqual(len(self.events("Stop")), 0)
+        self.assertEqual(len(self.events("Stop")), 1)
+        self.assertIn("bound resumed reply", self.events("Stop")[0]["payload"])
+        self.assertNotIn("fresh bound reply", self.events("Stop")[0]["payload"])
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM review_phases").fetchone()[0], 0)
 
@@ -694,7 +696,7 @@ class AntigravityTranscriptTests(unittest.TestCase):
         with patch("agent_learning.antigravity_transcript.MAX_RECORDS", 1):
             self.assertEqual(read_public(self.raw())["reason"], "transcript_scan_budget")
 
-    def test_missing_stop_body_keeps_input_and_response_without_completing_delivery(self):
+    def test_missing_stop_body_recovers_only_from_fresh_verified_terminal_window(self):
         from agent_learning.antigravity_health import capture_status
 
         self.normal()
@@ -702,9 +704,10 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.assertEqual(status["input_window"]["public_input"], "available")
         self.assertTrue(status["input_window"]["available"])
         self.assertEqual(status["public_response"], "available")
-        self.assertEqual(status["public_delivery"], "unavailable")
-        self.assertEqual(status["reason"], "public_output_missing")
-        self.assertEqual(len(self.events("Stop")), 0)
+        self.assertEqual(status["public_delivery"], "complete")
+        self.assertIsNone(status["reason"])
+        self.assertEqual(status["delivery_recovery_reason"], "stop_public_output_recovered")
+        self.assertEqual(len(self.events("Stop")), 1)
         self.assertEqual(json.loads(self.events("PublicMessageSegment")[0]["payload"])["completion"], "partial")
         for table in ("deliveries", "review_phases", "admin_calls"):
             self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], 0)
