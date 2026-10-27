@@ -122,7 +122,7 @@ for(const [locale,values] of Object.entries(input.labels)){
    useCallback:fn=>fn,useEffect(){}};
   const localeRef={current:{getSnapshot:()=>({active:locale})}};
   const Panel=plugin.buildControlPanel(react,localeRef);
-  const tree=Panel({initialSummary:{ok:true,installed:true,project_id:'p1',project_name:'project',diagnostic:{phase:'idle',reason}},cwd:'synthetic-project'});
+  const tree=Panel({initialSummary:{ok:true,installed:true,project_id:'p1',project_name:'project',diagnostic:{phase:'idle',reason}},initialScope:JSON.stringify(['synthetic-project','']),cwd:'synthetic-project'});
   const text=JSON.stringify(tree);assert(text.includes(expected));
   if(reason!=='future_reason_code')assert(!text.includes(reason));
  }
