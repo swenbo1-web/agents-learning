@@ -219,6 +219,58 @@ assert.throws(() => api.validateInput('bootstrap', {workspace_uris:base.workspac
 assert.throws(() => api.validateInput('action', {...base,capability:'x'.repeat(20000)}));
 """)
 
+    def test_bootstrap_identity_is_receipt_derived_and_not_forwarded_to_python(self):
+        self.run_node("""
+let checks=0, sent;
+const body={visible:true,capability:'capability',summary:{project_id:'p'},installation_fingerprint:'backend-forged'};
+const bridge={assertCurrent(){checks++;},async request(method,params){sent={method,params};return body;}};
+const handle=api.createController(installation,bridge);
+const input={workspace_uris:[pathToFileURL(installation.receipt.workspace).href],conversation_id:'current-chat'};
+const result=await handle('bootstrap',input);
+assert.equal(result.installation_fingerprint,installation.fingerprint);
+assert.match(result.installation_fingerprint,/^[a-f0-9]{64}$/);
+assert.equal(body.installation_fingerprint,'backend-forged','do not mutate a backend response');
+assert.equal(checks,2,'recheck the receipt after the awaited bootstrap');
+assert.equal(sent.method,'bootstrap');assert.equal(sent.params.installation_fingerprint,undefined);
+assert.equal(sent.params.workspace_uris,undefined);assert.equal(sent.params.workspace,installation.receipt.workspace);
+assert.throws(()=>api.validateInput('bootstrap',{...input,installation_fingerprint:installation.fingerprint}));
+""")
+
+    def test_invisible_or_incomplete_bootstrap_cannot_publish_an_installation_identity(self):
+        self.run_node("""
+let answer, calls=0;
+const bridge={assertCurrent(){},async request(){calls++;return answer;}};
+const handle=api.createController(installation,bridge);
+const input={workspace_uris:[pathToFileURL(installation.receipt.workspace).href],conversation_id:'current-chat'};
+for(const value of [
+ {visible:false,reason:'workspace_not_bound'},
+ {visible:true,summary:{project_id:'p'}},
+ {visible:true,capability:'capability'},
+ {visible:true,capability:'',summary:{}},
+ {visible:true,capability:'capability',summary:[]}
+]){
+ answer={...value,installation_fingerprint:'backend-forged'};
+ const result=await handle('bootstrap',input);
+ assert.equal(Object.hasOwn(result,'installation_fingerprint'),false);
+}
+const before=calls;
+const unbound=await handle('bootstrap',{...input,workspace_uris:[pathToFileURL(installation.directory).href]});
+assert.equal(unbound.visible,false);assert.equal(Object.hasOwn(unbound,'installation_fingerprint'),false);
+assert.equal(calls,before,'an unbound workspace must not reach Python');
+""")
+
+    def test_bootstrap_does_not_publish_identity_if_receipt_changes_while_awaiting(self):
+        self.run_node("""
+let finish;
+const guard=new api.PanelBridge(installation);
+const bridge={assertCurrent:()=>guard.assertCurrent(),request:()=>new Promise(resolve=>{finish=resolve;})};
+const handle=api.createController(installation,bridge);
+const pending=handle('bootstrap',{workspace_uris:[pathToFileURL(installation.receipt.workspace).href],conversation_id:'current-chat'});
+writeFileSync(join(installation.directory,'runtime-release.json'),JSON.stringify({...installation.receipt,release_id:'replaced-while-pending'}));
+finish({visible:true,capability:'stale-capability',summary:{project_id:'p'}});
+await assert.rejects(pending,/Installation changed/);
+""")
+
     def test_bridge_uses_fixed_entry_and_closes_pending_requests(self):
         self.run_node("""
 let spawned;
@@ -333,7 +385,7 @@ const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const document={documentElement:{},getElementById:id=>elements[id],createElement:()=>new Element(),querySelectorAll:()=>[]};
 let changed;const requests=[];
 const window={parent:{},addEventListener(){},confirm:()=>true,sidecar:{conversationId:'native-chat',getWorkspaceUris:async()=>[],onWorkspaceChange:fn=>{changed=fn;},fetch:(_url,opts)=>new Promise(resolve=>requests.push({body:JSON.parse(opts.body),resolve}))}};
-runInNewContext(script,{window,document,navigator:{language:'en'},crypto:globalThis.crypto,URL,console});
+runInNewContext(script,{window,document,navigator:{language:'en'},crypto:globalThis.crypto,URL,console,setTimeout,clearTimeout});
 await new Promise(resolve=>setImmediate(resolve));
 const uri=pathToFileURL(installation.receipt.workspace).href;
 changed([uri]);assert.equal(elements.panel.hidden,true);assert.equal(requests.length,1);
@@ -360,6 +412,7 @@ await new Promise(resolve=>setImmediate(resolve));
 assert.match(elements.result.textContent,/partially archived/);
 assert.match(elements.result.textContent,/no review or publication/);
 elements.debug.events.click();
+await new Promise(resolve=>setImmediate(resolve));
 assert.equal(requests[5].body.action,'debug');assert.equal(requests[5].body.request_id,undefined);assert.equal(requests[5].body.confirm,undefined);
 requests[5].resolve({ok:true,json:async()=>({visible:true,summary:{project_id:'p1',project_name:'current'},diagnostics:{version:1,project:{id:'p1',home:'/local/knowledge',storage_schema:18,index_version:4},connection:{ui_bridge:'responding',mcp:'unknown',hook:'unknown'},installation:{state:'verified',version:'1.0.0',protocol:'18',running_version:'1.0.0',running_protocol:'18'},administrator:{phase:'idle',reason:'disabled'},secret:'not-rendered'}})});
 await new Promise(resolve=>setImmediate(resolve));

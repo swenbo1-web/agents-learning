@@ -404,6 +404,8 @@ class CodexHostBackendTests(unittest.TestCase):
         shutil.copyfile(sys.executable, self.backend)
         (self.workspace / ".git").mkdir()
         result = self.root / "worker-result.json"
+        ownership = self.root / "worker-identity.json"
+        release = self.root / "release-worker"
         worker, hook, controller = (self.root / name for name in ("worker.py", "hook.py", "controller.py"))
         worker.write_text(
             "import json, os, sys, time\n"
@@ -418,14 +420,32 @@ class CodexHostBackendTests(unittest.TestCase):
             "assert _process_image(parent) is None, 'Hook did not exit'\n"
             "with patch('agent_learning.admin_providers.shutil.which', side_effect=AssertionError('PATH fallback')):\n"
             "    resolved = resolve_command(['codex'])\n"
-            f"Path({str(result)!r}).write_text(json.dumps(resolved), encoding='utf-8')\n", encoding="utf-8")
+            f"result = Path({str(result)!r})\n"
+            "temporary = result.with_suffix('.tmp')\n"
+            "temporary.write_text(json.dumps(resolved), encoding='utf-8')\n"
+            "temporary.replace(result)\n"
+            # A result is deliberately not an exit signal. Keep the native
+            # worker alive until the owning test explicitly releases it.
+            f"release = Path({str(release)!r})\n"
+            "deadline = time.monotonic() + 20\n"
+            "while not release.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "assert release.exists(), 'Worker release was not received'\n", encoding="utf-8")
         hook.write_text(
-            "import os, subprocess, sys\n"
+            "import json, os, subprocess, sys\n"
+            "from pathlib import Path\n"
             "from agent_learning.host_cli import codex_background_environment\n"
+            "from agent_learning.host_cli import _windows_api\n"
             "environment = codex_background_environment(os.environ)\n"
-            f"subprocess.Popen([{sys.executable!r}, '-X', 'utf8', '-B', {str(worker)!r}, str(os.getpid())],\n"
+            f"child = subprocess.Popen([{sys.executable!r}, '-X', 'utf8', '-B', {str(worker)!r}, str(os.getpid())],\n"
             "    env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
-            "    stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)\n", encoding="utf-8")
+            "    stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)\n"
+            "ctypes, wintypes, kernel, _, _ = _windows_api()\n"
+            "created, exited, system, user = (wintypes.FILETIME() for _ in range(4))\n"
+            "assert kernel.GetProcessTimes(int(child._handle), ctypes.byref(created), ctypes.byref(exited),\n"
+            "    ctypes.byref(system), ctypes.byref(user))\n"
+            "identity = {'pid': child.pid, 'created': (created.dwHighDateTime << 32) | created.dwLowDateTime}\n"
+            f"Path({str(ownership)!r}).write_text(json.dumps(identity), encoding='utf-8')\n", encoding="utf-8")
         controller.write_text(
             "import os, subprocess, time\n"
             "from pathlib import Path\n"
@@ -442,13 +462,53 @@ class CodexHostBackendTests(unittest.TestCase):
         # Windows loads Python's adjacent runtime DLL from this explicit PATH;
         # PYTHONHOME keeps the copied interpreter's standard library unchanged.
         environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", "")
-        completed = subprocess.run([str(self.backend), "-X", "utf8", "-B", str(controller)],
-                                   env=environment, cwd=self.workspace, capture_output=True,
-                                   timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
-        observed = json.loads(result.read_text(encoding="utf-8"))
-        self.assertEqual(observed["args"], [str(self.backend)])
-        self.assertEqual(observed["executable_source"], "host_ancestor")
+        import _winapi
+
+        def open_owned_worker():
+            if not ownership.exists():
+                return None
+            identity = json.loads(ownership.read_text(encoding="utf-8"))
+            handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE | 0x1000 | 0x0001, False, identity["pid"])
+            try:
+                ctypes, wintypes, kernel, _, _ = host_cli._windows_api()
+                created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+                self.assertTrue(kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                                     ctypes.byref(system), ctypes.byref(user)))
+                self.assertEqual((created.dwHighDateTime << 32) | created.dwLowDateTime, identity["created"],
+                                 "fixture worker PID was replaced")
+                return handle
+            except BaseException:
+                _winapi.CloseHandle(handle)
+                raise
+
+        handle = None
+        try:
+            completed = subprocess.run([str(self.backend), "-X", "utf8", "-B", str(controller)],
+                                       env=environment, cwd=self.workspace, capture_output=True,
+                                       timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+            handle = open_owned_worker()
+            self.assertIsNotNone(handle)
+            self.assertEqual(_winapi.WaitForSingleObject(handle, 0), _winapi.WAIT_TIMEOUT,
+                             "the result must be observed before the fixture worker exits")
+            observed = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(observed["args"], [str(self.backend)])
+            self.assertEqual(observed["executable_source"], "host_ancestor")
+        finally:
+            release.write_text("release", encoding="utf-8")
+            if handle is None:
+                handle = open_owned_worker()
+            if handle is not None:
+                try:
+                    wait = _winapi.WaitForSingleObject(handle, 10000)
+                    if wait != _winapi.WAIT_OBJECT_0:
+                        # Only this recorded process generation is owned here.
+                        _winapi.TerminateProcess(handle, 1)
+                        _winapi.WaitForSingleObject(handle, 5000)
+                    self.assertEqual(wait, _winapi.WAIT_OBJECT_0, "fixture worker did not exit after release")
+                    self.assertEqual(_winapi.GetExitCodeProcess(handle), 0)
+                finally:
+                    _winapi.CloseHandle(handle)
 
 
 class NativeProcessMetadataTests(unittest.TestCase):

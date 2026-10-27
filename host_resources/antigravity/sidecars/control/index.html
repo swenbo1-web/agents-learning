@@ -70,7 +70,10 @@
   let language = navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
   Object.assign(strings.en, {reconnect:"Reconnect",connectionLost:"The connection request did not finish. Reconnect to check the current project; the previous action will not be replayed.",actionUncertain:"The action result is unconfirmed. Reconnect and check the current state before deciding what to do next. The action is not retried automatically."});
   Object.assign(strings["zh-CN"], {reconnect:"重新连接",connectionLost:"本次连接请求未完成。可重新连接核对当前项目，不会重放刚才的操作。",actionUncertain:"刚才的操作结果尚未确认。请重新连接并核对当前状态，再决定后续操作；不会自动重试。"});
+  Object.assign(strings.en, {renewingRead:"Refreshing the local read connection…"});
+  Object.assign(strings["zh-CN"], {renewingRead:"正在刷新本地只读连接…"});
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
+  let leaseStartedAt = null, installationFingerprint = null;
   let recoveryAvailable = false, recoveryIntent = false, reconnectTurn = null, bindTurn = null, noticeKey = "waiting", resumeRecovery = false;
   Object.assign(strings["zh-CN"], {dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
   Object.assign(strings.en, {dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
@@ -93,6 +96,7 @@
 
   function hide(message = "unavailable", recoverable = false) {
     capability = null; summary = null; diagnostics = null; context = null; busy = false;
+    leaseStartedAt = null; installationFingerprint = null;
     noticeKey = message; recoveryAvailable = recoverable; recoveryIntent = recoverable;
     $("panel").hidden = true;
     $("reconnect").hidden = disposed || !recoveryAvailable;
@@ -211,10 +215,64 @@
     $("debugPanel").hidden = false;
   }
 
+  function monotonicNow() {
+    const value = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : null;
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  async function readDeadline(promise) {
+    let timer;
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("local_read_timeout")), 15000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
   async function post(method, data) {
-    const response = await window.sidecar.fetch("/api/" + method, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
-    if (!response.ok) throw new Error("unavailable");
-    return response.json();
+    const response = (async () => {
+      const result = await window.sidecar.fetch("/api/" + method, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+      if (!result.ok) throw new Error("unavailable");
+      return result.json();
+    })();
+    return method === "bootstrap" || method === "action" && ["status","debug"].includes(data.action)
+      ? readDeadline(response) : response;
+  }
+
+  function readIdentity(value) {
+    if (![value?.project_id,value?.workspace,value?.host_scope].every(key => typeof key === "string" && key.trim())
+        || ![value.expected?.expected_session_epoch,value.expected?.expected_governance_epoch]
+          .every(key => Number.isSafeInteger(key) && key >= 0)) return null;
+    return JSON.stringify([value.project_id,value.workspace,value.host_scope,
+      value.expected.expected_session_epoch,value.expected.expected_governance_epoch]);
+  }
+
+  const validFingerprint = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+  async function renewReadLease(turn) {
+    const now = monotonicNow(), identity = readIdentity(summary);
+    // Server leases last 300 seconds. Start at request dispatch, with a margin;
+    // renew only when a person asks for a read, never on a periodic timer.
+    if (leaseStartedAt === null || now === null || now < leaseStartedAt || now - leaseStartedAt < 240000) return true;
+    if (!identity || !validFingerprint(installationFingerprint)) { hide("connectionLost", true); return false; }
+    const boundContext = context, oldCapability = capability, fingerprint = installationFingerprint;
+    const current = () => !disposed && turn === generation && context === boundContext && capability === oldCapability
+      && installationFingerprint === fingerprint && window.sidecar?.conversationId === boundContext.conversation_id;
+    const abandon = () => { if (!disposed && turn === generation) { ++generation; hide(); } return false; };
+    $("notice").textContent = t("renewingRead");
+    const uris = await readDeadline(window.sidecar.getWorkspaceUris());
+    if (!current()) return abandon();
+    if (!Array.isArray(uris) || uris.length !== 1 || uris[0] !== boundContext.workspace_uris[0]) return abandon();
+    const started = monotonicNow();
+    if (started === null || started < now) return abandon();
+    const result = await post("bootstrap", {...boundContext,workspace_uris:uris.slice()});
+    if (!current()) return abandon();
+    if (result.visible !== true || typeof result.capability !== "string" || !result.capability
+        || !validFingerprint(result.installation_fingerprint) || result.installation_fingerprint !== fingerprint
+        || readIdentity(result.summary) !== identity) return abandon();
+    context = {...boundContext,workspace_uris:uris.slice()};
+    capability = result.capability; leaseStartedAt = started; summary = result.summary; diagnostics = null;
+    return true;
   }
 
   async function bind(uris, recoverable = false) {
@@ -227,6 +285,7 @@
     const conversation = window.sidecar?.conversationId;
     if (!Array.isArray(uris) || uris.length !== 1 || typeof conversation !== "string" || !conversation) { bindTurn = null; hide(); return; }
     const next = {workspace_uris:uris.slice(),conversation_id:conversation};
+    const started = monotonicNow();
     try {
       const result = await post("bootstrap", next);
       if (disposed || turn !== generation) return;
@@ -236,7 +295,9 @@
         hide(retryable ? "connectionLost" : "unavailable", retryable); return;
       }
       recoveryIntent = false;
-      context = next; capability = result.capability; summary = result.summary; render();
+      context = next; capability = result.capability; leaseStartedAt = started;
+      installationFingerprint = validFingerprint(result.installation_fingerprint) ? result.installation_fingerprint : null;
+      summary = result.summary; render();
     } catch { if (!disposed && turn === generation) hide("connectionLost", recoverable); }
     finally { if (bindTurn === turn) { bindTurn = null; render(); } }
   }
@@ -268,6 +329,9 @@
     const turn = generation;
     busy = true; render(); $("result").textContent = "";
     try {
+      if (["status","debug"].includes(name) && !await renewReadLease(turn)) return;
+      if (disposed || turn !== generation || !context || !capability) return;
+      if (window.sidecar?.conversationId !== context?.conversation_id) { ++generation; hide(); return; }
       const request = {...context,capability,action:name,...(["status","debug"].includes(name) ? {} : {request_id:crypto.randomUUID()}),...extra};
       const result = await post("action", request);
       if (disposed || turn !== generation) return;

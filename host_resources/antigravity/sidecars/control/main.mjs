@@ -169,7 +169,13 @@ export function createController(installation, bridge) {
     const workspace = resolveWorkspace(data.workspace_uris, installation);
     if (!workspace) return { visible: false, reason: "workspace_not_bound" };
     const { workspace_uris, ...params } = data;
-    return bridge.request(method, { ...params, workspace });
+    const result = await bridge.request(method, { ...params, workspace });
+    if (method !== "bootstrap") return result;
+    // The UI bridge owns this receipt identity; old Python cores need no change.
+    const { installation_fingerprint: _untrustedIdentity, ...bootstrap } = result;
+    if (bootstrap.visible !== true || !text(bootstrap.capability, 512) || !plain(bootstrap.summary)) return bootstrap;
+    bridge.assertCurrent();
+    return { ...bootstrap, installation_fingerprint: installation.fingerprint };
   };
 }
 
