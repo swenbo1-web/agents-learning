@@ -127,7 +127,7 @@ const plugin=factory(()=>({})),states=[];let cursor=0;
 const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),
  useState:value=>{const n=cursor++;if(!(n in states))states[n]=value;return[states[n],v=>{states[n]=v;}];},
  useCallback:fn=>fn,useEffect(){}};
-const Panel=plugin.buildControlPanel(react,null),render=()=>{cursor=0;return Panel({initialSummary:summary,cwd:'bound',sessionId:'session'});};
+const Panel=plugin.buildControlPanel(react,null),render=()=>{cursor=0;return Panel({initialSummary:summary,initialScope:JSON.stringify(['bound','session']),cwd:'bound',sessionId:'session'});};
 const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
 const button=tree=>nodes(tree).find(n=>n.type==='button'&&n.props.key==='balanced');
 const flush=()=>new Promise(resolve=>setTimeout(resolve,10));
@@ -162,7 +162,7 @@ const plugin=factory(()=>({})),states=[];let cursor=0;
 const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),
  useState:value=>{const n=cursor++;if(!(n in states))states[n]=value;return[states[n],v=>{states[n]=v;}];},
  useCallback:fn=>fn,useEffect(){}};
-const Panel=plugin.buildControlPanel(react,null),render=()=>{cursor=0;return Panel({initialSummary:summary,cwd:'bound',sessionId:'session'});};
+const Panel=plugin.buildControlPanel(react,null),render=()=>{cursor=0;return Panel({initialSummary:summary,initialScope:JSON.stringify(['bound','session']),cwd:'bound',sessionId:'session'});};
 const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
 const stop=tree=>nodes(tree).find(n=>n.type==='button'&&nodes(n).some(item=>item.type==='span'&&item.children.includes('Stop Background Browser Server')));
 const flush=()=>new Promise(resolve=>setTimeout(resolve,10));

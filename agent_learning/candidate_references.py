@@ -380,6 +380,7 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
             or any(not isinstance(ref, str) or not ref or len(ref) > 200 for ref in refs)):
         refs = []
         reason = reason or "source_reference_invalid"
+    from .source_evidence import hard_source_issue, tool_success, unresolved_failure
     events, successes, failed_sequence, succeeded_sequence = [], False, 0, 0
     for ref in dict.fromkeys(refs):
         if not evaluation.take("sources"):
@@ -397,16 +398,14 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
         if not problem or (event["conversation"], event["task_id"], event["task_revision"]) != (
                 problem["conversation"], problem["task_id"], problem["task_revision"]):
             reason = reason or "source_identity_mismatch"
-        if event["operation_conflict"] or event["operation_decision"] == "denied" or event["outcome"] == "conflict":
-            reason = reason or "source_operation_conflict"
+        issue = hard_source_issue(event)
+        if issue:
+            reason = reason or issue
         # A failed operation can provide a case clue, but an unresolved failure
         # cannot be automatically injected as a recommended pending solution.
-        if event["role"] in {"conflict", "feedback"}:
-            reason = reason or "source_unresolved_failure"
         if event["outcome"] == "failed":
             failed_sequence = max(failed_sequence, event["sequence"])
-        if event["type"] == "PostToolUse" and event["outcome"] == "succeeded" and not (
-                event["operation_conflict"] or event["operation_decision"] == "denied"):
+        if tool_success(event):
             successes = True
             succeeded_sequence = max(succeeded_sequence, event["sequence"])
         if candidate_id not in _ancestors and len(_ancestors) < MAX_ANCESTORS:
@@ -415,7 +414,7 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
             if risk and risk["blocked"]:
                 reason = reason or "source_candidate_lineage_blocked"
     snapshot["events"] = events
-    if failed_sequence >= succeeded_sequence and failed_sequence:
+    if unresolved_failure(failed_sequence, succeeded_sequence):
         reason = reason or "source_unresolved_failure"
     if body["validation_level"] == "tool_success" and not successes:
         reason = reason or "source_tool_success_missing"

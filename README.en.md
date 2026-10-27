@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.32 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.33 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. Update and reload all Codex, Antigravity and DSH installations sharing a database together to keep retrieval and provenance behavior consistent. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,14 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Recovered sources, panel scope and capture isolation (1.4.33)
+
+- **Publication preserves recovered source health:** when a source cites its failure followed by valid recovery success, downstream lineage keeps that recovery assessment after publication. Success from another source cannot repair its failure. Identity, denial, conflict, missing sources, counterexamples and revocation remain protected. A matching-policy update invalidates old empty caches and context plans without scanning all knowledge or replaying reviews.
+- **DSH isolates summaries during project switches:** the composer summary is bound to workspace and session, and a newly mounted panel validates its initial scope. Closing, switching, delayed reads or failed reopening cannot relabel A's summary as B's. Native host switching still needs separate acceptance.
+- **Derived cleanup stays isolated:** pending cleanup runs inside the projection savepoint. A failed cleanup statement rolls back derived work while retaining the original event, denial and retry record. Unusable storage still fails explicitly; this does not promise commits through every database failure.
+- **AG/Codex panels read on demand:** summary and debug reuse one database snapshot and common state, skipping unused full status, recovery and review activity. Installation, identity, account/governance epoch, capability and write-version checks remain; candidate counts and AG capture fields retain their host-specific meaning.
+- **Compatibility:** schema/protocol25 and indexes6/2/1 remain unchanged, with no extra model calls or changes to existing review/publication policies. This fixes a specific recovery inconsistency; candidate eligibility, publication authorization and execution permission remain separate. Offline tests and query measurements are not real-model benefit evidence.
 
 ## Lighter panel reads and launcher diagnostics (1.4.32)
 
@@ -999,7 +1007,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.32 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.33 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1327,7 +1335,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.32 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.33 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 

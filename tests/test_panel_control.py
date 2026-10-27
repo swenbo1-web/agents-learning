@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
+from agent_learning.admin_control import control_summary
 from agent_learning.install import install
 from agent_learning.panel_control import PanelControl, same_workspace
 from agent_learning.runtime import Runtime, ContractError
@@ -68,11 +69,11 @@ class PanelControlTests(unittest.TestCase):
 
     def test_debug_is_read_only_bound_and_uses_a_field_whitelist(self):
         opened = self.bootstrap()
-        state = self.runtime.status(self.project)
+        state = control_summary(self.runtime, self.project)
         state["secret_prompt"] = "private-project-task"
-        state["admin_dispatch_diagnostic"]["details"] = {"credentials": "private-access-code"}
+        state["diagnostic"]["details"] = {"credentials": "private-access-code"}
         before = self.runtime.db.total_changes
-        with patch.object(self.runtime, "status", return_value=state), patch.object(self.runtime, "_launch_admin") as launch:
+        with patch("agent_learning.admin_control.control_summary", return_value=state), patch.object(self.runtime, "_launch_admin") as launch:
             result = self.action(opened, "debug")
         self.assertEqual(self.runtime.db.total_changes, before)
         launch.assert_not_called()
@@ -101,7 +102,7 @@ class PanelControlTests(unittest.TestCase):
 
     def test_debug_rejects_expired_or_other_context_before_reading(self):
         opened = self.bootstrap()
-        with patch.object(self.runtime, "status", side_effect=AssertionError("Not authorized")):
+        with patch("agent_learning.admin_control.control_summary", side_effect=AssertionError("Not authorized")):
             with self.assertRaises(ContractError):
                 self.panel.action(opened["capability"], "debug", context_handle="other-handle")
             self.runtime.account_changed()
@@ -110,10 +111,10 @@ class PanelControlTests(unittest.TestCase):
 
     def test_debug_does_not_forward_untyped_failure_or_model_configuration(self):
         opened = self.bootstrap()
-        state = self.runtime.status(self.project)
-        state["admin_routing"]["executor"] = {"model": "model --token=private-access-code"}
-        state["admin_dispatch_diagnostic"] = {"reason": "Bearer private-access-code", "phase": "private unsafe text", "next_due": float("inf")}
-        with patch.object(self.runtime, "status", return_value=state):
+        state = control_summary(self.runtime, self.project)
+        state["routing"]["executor"] = {"model": "model --token=private-access-code"}
+        state["diagnostic"] = {"reason": "Bearer private-access-code", "phase": "private unsafe text", "next_due": float("inf")}
+        with patch("agent_learning.admin_control.control_summary", return_value=state):
             debug = self.action(opened, "debug")["diagnostics"]
         self.assertIsNone(debug["administrator"]["model"])
         self.assertIsNone(debug["administrator"]["phase"])

@@ -246,12 +246,14 @@ window.__ModuleLoader__.load({
         var sessionId = props && props.sessionId ? props.sessionId : "";
         var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
         var t = getLabels(activeLocale);
-        var statePair = react.useState(props && props.initialSummary ? props.initialSummary : null);
+        var scopeKey = JSON.stringify([cwd, sessionId]);
+        // A new mount must not relabel an outer component's cached summary.
+        var initialSummary = props && props.initialScope === scopeKey ? props.initialSummary : null;
+        var statePair = react.useState(initialSummary || null);
         var notePair = react.useState("");
         var busyPair = react.useState(false);
         var requestCell = react.useState({ current: null, busy: false })[0];
-        var scopeKey = JSON.stringify([cwd, sessionId]);
-        var statusCell = react.useState({ scope: scopeKey, summaryScope: scopeKey, request: 0, failed: false })[0];
+        var statusCell = react.useState({ scope: scopeKey, summaryScope: initialSummary ? scopeKey : null, request: 0, failed: false })[0];
         statusCell.scope = scopeKey;
         var summary = statusCell.summaryScope === scopeKey ? statePair[0] : null;
         var setSummary = statePair[1];
@@ -679,8 +681,11 @@ window.__ModuleLoader__.load({
             : "";
 
         var checkPair = react.useState(null);
-        var summary = checkPair[0];
-        var setSummary = checkPair[1];
+        var scopeKey = JSON.stringify([sessionCwd, sessionId]);
+        var checked = checkPair[0];
+        // Filtering during render also protects the interval before effects run.
+        var summary = checked && checked.scope === scopeKey ? checked.summary : null;
+        var setChecked = checkPair[1];
         var openPair = react.useState(false);
         var open = openPair[0];
         var setOpen = openPair[1];
@@ -688,21 +693,21 @@ window.__ModuleLoader__.load({
 
         react.useEffect(
           function () {
+            setChecked(null);
+            setOpen(false);
             if (!sessionCwd && !sessionId) {
-              setSummary(null);
-              setOpen(false);
               return;
             }
             var cancelled = false;
             fetchStatus(sessionCwd, sessionId)
               .then(function (data) {
                 if (!cancelled) {
-                  setSummary(data && data.installed ? data : null);
+                  setChecked({scope: scopeKey, summary: data && data.installed ? data : null});
                 }
               })
               .catch(function () {
                 if (!cancelled) {
-                  setSummary(null);
+                  setChecked(null);
                 }
               });
             return function () {
@@ -799,6 +804,7 @@ window.__ModuleLoader__.load({
                   cwd: sessionCwd,
                   sessionId: sessionId,
                   initialSummary: summary,
+                  initialScope: scopeKey,
                   onSendPrompt: handleSendPrompt,
                 })
               )

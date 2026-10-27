@@ -28,7 +28,7 @@ const summary=name=>({ok:true,installed:true,project_id:name,project_name:name,w
 const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
 const text=n=>!n?'':typeof n!=='object'?String(n):(n.children||[]).map(text).join(' ');
 function harness(language='en'){
- let factory,cursor=0,timerId=0,props={initialSummary:summary('confirmed'),cwd:'scope-a',sessionId:'chat-a'};
+ let factory,cursor=0,timerId=0,props={initialSummary:summary('confirmed'),initialScope:JSON.stringify(['scope-a','chat-a']),cwd:'scope-a',sessionId:'chat-a'};
  const states=[],pending=[],calls=[],timers=new Map();
  const context={window:{__ModuleLoader__:{load:item=>{factory=item.factory;}}},navigator:{language},
    fetch:(url,options)=>{calls.push({url,options});assert.equal(options,undefined,'status must stay GET');

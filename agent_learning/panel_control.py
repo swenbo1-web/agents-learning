@@ -170,10 +170,32 @@ class PanelControl:
             self.reason = "project_panel_not_installed"
             return False
 
-    def _summary(self):
-        from .admin_control import control_status
+    def _read_overview(self, context_handle=None, *, debug=False):
+        """Share one read snapshot within this response, never across requests."""
+        from .admin_control import control_summary
+        owned = not self.runtime.db.in_transaction
+        if owned:
+            self.runtime.db.execute("BEGIN")
+        try:
+            # Pin the snapshot to the already authorized host/account boundary.
+            self.runtime.assert_session_epoch(self.epoch)
+            if self.runtime.host_epoch() != self.governance_epoch:
+                raise ContractError("panel_context_expired")
+            state = control_summary(self.runtime, self.project)
+            summary = self._summary(state)
+            return {"summary": summary,
+                    **({"diagnostics": self._debug(context_handle, state=state,
+                         capture=summary.get("host_capture"))} if debug else {})}
+        finally:
+            if owned and self.runtime.db.in_transaction:
+                self.runtime.db.execute("ROLLBACK")
+
+    def _summary(self, state=None):
+        if state is None:
+            return self._read_overview()["summary"]
         from .antigravity_health import capture_status
-        state = control_status(self.runtime, self.project)
+        from .admin_workload import workload_summary
+        workload = workload_summary(self.runtime.db, self.project, history_stages=False)
         routing = state["routing"]
         usage = state.get("project_usage") or {}
         executor = routing.get("executor") or {}
@@ -213,10 +235,10 @@ class PanelControl:
                 "work_summary_enabled": state.get("work_summary", {}).get("enabled", False),
                 "counts": {"active": count("active"), "work_memory": count("work_memories"),
                            "pending_problems": count("problems", " AND status='pending'"),
-                           "pending_review_cases": state["queue"]["workload"]["stages"]["pending_review"],
-                           "awaiting_evidence_cases": state["queue"]["workload"]["stages"]["awaiting_evidence"] + state["queue"]["workload"]["stages"]["local_deferred"],
-                           "awaiting_approval_cases": state["queue"]["workload"]["stages"]["awaiting_approval"],
-                           "historical_pending_units": state["queue"]["workload"]["history_pending_units"],
+                           "pending_review_cases": workload["stages"]["pending_review"],
+                           "awaiting_evidence_cases": workload["stages"]["awaiting_evidence"] + workload["stages"]["local_deferred"],
+                           "awaiting_approval_cases": workload["stages"]["awaiting_approval"],
+                           "historical_pending_units": workload["history_pending_units"],
                            "candidates": count("candidates", " AND status IN ('candidate','deferred')")},
                 "expected": expected}
 
@@ -227,8 +249,10 @@ class PanelControl:
             return self.runtime.access_context(self.project, handle, expected_epoch=self.epoch)
         return None
 
-    def _debug(self, context_handle):
+    def _debug(self, context_handle, *, state=None, capture=None):
         """Read bounded observations, never infer Hook/MCP health from a UI pipe."""
+        if state is None:
+            return self._read_overview(context_handle, debug=True)["diagnostics"]
         from . import __version__
         from .release import PROTOCOL_VERSION
         from .install import _hook_commands
@@ -237,10 +261,9 @@ class PanelControl:
 
         installed = inspect_installation(self.installation, _hook_commands, target_host=self.runtime.host)
         receipt = installed["receipt"]
-        state = self.runtime.status(self.project)
-        routing = state.get("admin_routing") or {}
+        routing = state.get("routing") or {}
         executor = routing.get("executor") or {}
-        dispatch = state.get("admin_dispatch_diagnostic") or {}
+        dispatch = state.get("diagnostic") or {}
         admission = state.get("admission") or {}
 
         def code(value):
@@ -256,8 +279,10 @@ class PanelControl:
 
         bound = False
         if self.require_context:
-            # Do not return session_context's task, assignment or execution body.
-            bound = self.runtime.session_context(self.project, context_handle, expected_epoch=self.epoch)["context_bound"]
+            # Only binding is needed here. session_context also reads task and
+            # execution state and owns a separate transaction.
+            self.runtime.access_context(self.project, context_handle, expected_epoch=self.epoch)
+            bound = True
         model = executor.get("model")
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9_./:@+\-]{1,240}", model):
             model = None
@@ -275,7 +300,7 @@ class PanelControl:
             except (ValueError, TypeError):
                 pass
         return {"version": 1, "backups": panel_backup_preview(self.installation),
-                **({"capture": state["host_capture"]} if "host_capture" in state else {}),
+                **({"capture": capture} if capture is not None else {}),
                 "connection": {"ui_bridge": "responding",
                     "mcp": "responding" if self.require_context else "unknown",
                     "hook": "verified" if bound else "unknown", "context_bound": bound if self.require_context else None},
@@ -286,9 +311,10 @@ class PanelControl:
                     "running_runtime_matches_installation": Path(receipt["runtime_directory"]).resolve() == Path(__file__).resolve().parents[1],
                     "latest_release_checked": False},
                 "project": {"id": self.project, "workspace": self.binding["workspace"], "home": str(self.runtime.home),
-                    "host_scope": self.runtime._session_scope(), "storage_schema": number(state.get("storage_schema_version")),
-                    "index_version": number(state.get("index_version"))},
-                "administrator": {"enabled": bool(state.get("admin_admission_enabled")),
+                    "host_scope": self.runtime._session_scope(),
+                    "storage_schema": number(self.runtime.db.execute("PRAGMA user_version").fetchone()[0]),
+                    "index_version": number(self.runtime.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0])},
+                "administrator": {"enabled": bool(state.get("enabled")),
                     "model_mode": code((routing.get("policy") or {}).get("model_mode")), "model": model,
                     "phase": code(dispatch.get("phase")), "reason": code(dispatch.get("reason")) or code(routing.get("reason")),
                     "failure_reason": code(dispatch.get("failure_reason")), "next_due": number(dispatch.get("next_due")),
@@ -392,9 +418,8 @@ class PanelControl:
         if action not in ACTIONS:
             raise ContractError("unsupported panel action")
         if action in {"status", "debug"}:
-            return {"visible": True, "summary": self._summary(),
-                    **({"scope": "project"} if self.project_ui else {}),
-                    **({"diagnostics": self._debug(context_handle)} if action == "debug" else {})}
+            return {"visible": True, **self._read_overview(context_handle, debug=action == "debug"),
+                    **({"scope": "project"} if self.project_ui else {})}
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
             raise ContractError("panel request identity is required")
         fingerprint = hashlib.sha256(encode([action, expected, preset, confirm]).encode("utf-8")).hexdigest()

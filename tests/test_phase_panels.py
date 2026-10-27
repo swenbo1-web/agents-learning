@@ -136,7 +136,7 @@ for(const variant of ['count','phase_fallback','zero','old']){
  const summary={project_id:'p',counts:{},panel_snapshot:{host_scope:'dsh:default',phase_review:view}};
  const visible=['count','phase_fallback'].includes(variant);
  for(language of ['en','zh-CN']){
-  const text=nodes(Panel({initialSummary:summary})).flatMap(n=>(n.children||[]).filter(v=>typeof v==='string')).join('\n');
+  const text=nodes(Panel({initialSummary:summary,initialScope:JSON.stringify(['',''])})).flatMap(n=>(n.children||[]).filter(v=>typeof v==='string')).join('\n');
   assert.match(text,/0 \/ 2 \/ 1 \/ 1 \/ 4/,'deferred stages must not alter the five review counts');
   assert.equal(text.includes(language==='en'?'Pure status checks retained locally: 3':'纯状态检查本地暂存：3 个阶段'),visible,variant);
   if(visible){assert(text.includes(language==='en'?'some material remains unreviewed':'仍有未审核资料'));assert(text.includes(language==='en'?'Only the remaining material has not been submitted':'仅余下资料尚未送审，不算审核完成'));assert(!text.includes(language==='en'?'not model-reviewed':'尚未模型审核'));assert(text.includes(language==='en'?'Check and continue':'检查并继续整理'));}
@@ -209,7 +209,7 @@ vm.runInNewContext(script.replace('exports.apply = apply;', 'exports.buildContro
 const plugin=factory(()=>({}));
 const react={createElement:(type,props,...children)=>({type,props,children:children.flat(Infinity)}),useState:value=>[value,()=>{}],useCallback:fn=>fn,useEffect(){}};
 const summary={project_id:'p',admin_admission_enabled:true,project_name:'P',panel_snapshot:{host_scope:'dsh:default',phase_review:{host_scope:'dsh:default',policy:{mode:'phase',every_phases:3},phases:{sealed:2},recent_batches:[{coverage_complete:true}]}},project_usage:{scope:'project',project_id:'p',budget_mode:'tokens',reported_tokens:888,token_reservations:1000,remaining_reported_tokens:999,max_reported_tokens_per_day:1000000}};
-const Panel=plugin.buildControlPanel(react,null),tree=Panel({initialSummary:summary});
+const Panel=plugin.buildControlPanel(react,null),tree=Panel({initialSummary:summary,initialScope:JSON.stringify(['',''])});
 const nodes=n=>!n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(nodes)];
 const all=nodes(tree),text=all.flatMap(n=>(n.children||[]).filter(v=>typeof v==='string')).join('\n');
 const chips=all.filter(n=>n.type==='button'&&n.props.key);

@@ -62,13 +62,31 @@ def published_reference_state(view, project, redirect, evaluation, ancestors):
         return {"blocked": True, "reason": "published_reference_source_unavailable"}
     references = "json_each(CASE WHEN json_valid(s.evidence_refs) THEN s.evidence_refs ELSE '[]' END) ref "
     authority = ("FROM knowledge_sources s JOIN " + references +
+        "LEFT JOIN problems p ON p.project=s.project AND p.id=s.problem_id "
         "LEFT JOIN problem_events pe ON pe.problem=s.problem_id AND pe.event=ref.value "
         "LEFT JOIN events e ON e.project=s.project AND e.id=pe.event "
         "LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
         "WHERE s.project=? AND s.knowledge_id=? AND s.revision=?")
-    if view.db.execute("SELECT 1 " + authority + " AND (ref.type!='text' OR e.id IS NULL OR o.conflict "
-            "OR o.decision='denied' OR e.outcome IN ('failed','conflict','denied')) LIMIT 1", key).fetchone():
-        return {"blocked": True, "reason": "published_reference_source_unhealthy"}
+    from .source_evidence import hard_source_sql, tool_success_sql, unresolved_failure
+    hard_fault = ("ref.type!='text' OR e.id IS NULL OR e.conversation IS NOT p.conversation "
+                  "OR e.task_id IS NOT p.task_id OR e.task_revision IS NOT p.task_revision OR "
+                  + hard_source_sql())
+    # Historical failure is not itself a permanent fault. Match the pending
+    # assessment: recovery must be cited, later, healthy, and in this exact
+    # source case. Aggregate each source separately so an attached independent
+    # success cannot repair another source's failure. Normal sources never
+    # consume candidate-graph budget or require per-event Python reads.
+    recoveries = view.db.execute(
+        "SELECT MAX(CASE WHEN " + hard_fault + " THEN 1 ELSE 0 END) AS hard_fault,"
+        "MAX(CASE WHEN e.outcome='failed' THEN e.rowid ELSE 0 END) AS failed_sequence,"
+        "MAX(CASE WHEN " + tool_success_sql() + " THEN e.rowid ELSE 0 END) AS succeeded_sequence "
+        + authority + " GROUP BY s.candidate_id HAVING hard_fault=1 OR failed_sequence>0", key)
+    try:
+        if any(row["hard_fault"] or unresolved_failure(row["failed_sequence"], row["succeeded_sequence"])
+               for row in recoveries):
+            return {"blocked": True, "reason": "published_reference_source_unhealthy"}
+    finally:
+        recoveries.close()
     # The graph bound applies to linked observations, not the number of normal
     # source rows. DISTINCT also avoids charging repeated citations twice.
     from .candidate_references import MAX_EVIDENCE

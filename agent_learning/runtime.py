@@ -1294,6 +1294,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 projection = registered
             self._work_capture_event(project, event_id, workspace, raw=raw,
                                      native_context_hint=native_context_hint, _file_projection=projection)
+            # Cleanup is part of the optional projection: a failed DELETE must
+            # roll back only this savepoint, preserving the original Hook event.
+            complete(self, project, event_id)
         except (OSError, ValueError, TypeError, sqlite3.Error, ContractError) as exc:
             self.db.execute("ROLLBACK TO work_capture_extension")
             self.db.execute("RELEASE work_capture_extension")
@@ -1309,7 +1312,6 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 finally:
                     self.db.execute("RELEASE work_capture_retry_registration")
         else:
-            complete(self, project, event_id)
             self.db.execute("RELEASE work_capture_extension")
             captured = True
         if captured and summarize and conversation:
