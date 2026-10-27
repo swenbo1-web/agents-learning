@@ -1408,7 +1408,12 @@ export function apply(ctx, config = {}) {
                 send(200, { ok: true, installed: false, reason: "workspace_not_registered" });
                 return;
               }
-              if (!parsed?.ok || !parsed.result?.data) throw new Error(parsed?.error || "project status unavailable");
+              if (!parsed?.ok || !parsed.result?.data) {
+                const reason = new Set(["query_budget_exceeded", "database_read_unavailable",
+                  "host_scope_uninitialized"]).has(parsed?.reason) ? parsed.reason : "database_read_unavailable";
+                send(503, { ok: false, error: "project status unavailable", reason });
+                return;
+              }
               const data = parsed.result.data;
               const browserStat = await manageControlBrowser("status", {}, matchedWorkspace).catch(() => ({ running: false }));
               const projectName = workspace.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || workspace;
@@ -1447,7 +1452,7 @@ export function apply(ctx, config = {}) {
                 browser_running: Boolean(browserStat?.running),
               });
             } catch (err) {
-              send(500, { ok: false, error: String(err?.message || err) });
+              send(503, { ok: false, error: "project status unavailable", reason: "database_read_unavailable" });
             }
             return;
           }
@@ -1498,7 +1503,8 @@ export function apply(ctx, config = {}) {
               panel_project_id: body.project_id, panel_status: true,
             }), workspace, undefined, 15000);
             const checkedResult = checked.code === 0 && checked.stdout.trim() ? JSON.parse(checked.stdout.trim()) : null;
-            if (!checkedResult?.ok) {
+            if (!checkedResult?.ok || checkedResult.result?.registered === false
+              || checkedResult.result?.data?.project_id !== body.project_id) {
               send(409, { ok: false, error: "panel project changed or unavailable; refresh before continuing" });
               return;
             }

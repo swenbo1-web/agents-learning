@@ -309,7 +309,7 @@ class AdminRoutingIntegrationTests(unittest.TestCase):
         self.assertTrue(state["policy"]["enabled"])
         self.assertTrue(state["routing_ready"])
         self.assertFalse(state["ready"])
-        self.assertEqual(state["reason"], "cli_unavailable")
+        self.assertEqual(state["reason"], "configured_launcher_missing")
         self.assertEqual(state["availability"]["authentication"], "provider_cli_managed_not_checked")
         self.assertIsNone(claim_dispatch(native, self.p))
         self.assertEqual(native.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)

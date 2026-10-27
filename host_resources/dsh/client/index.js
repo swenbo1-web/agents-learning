@@ -115,10 +115,30 @@ window.__ModuleLoader__.load({
       return message.includes("stage review uses token budgets") ? labels.tokenEstimate : message;
     }
 
+    Object.assign(TEXT.zh, {
+      status_query_budget_exceeded: "状态读取超过本地查询预算，可刷新重试。这与模型额度无关。",
+      status_database_read_unavailable: "暂时无法读取本地状态，可刷新重试。",
+      status_host_scope_uninitialized: "当前宿主尚未初始化，请重新加载 Agent Learning 后刷新。",
+      status_timeout: "本地状态读取超时，可刷新重试。"
+    });
+    Object.assign(TEXT.en, {
+      status_query_budget_exceeded: "The local status query exceeded its read budget. Refresh to retry; this is unrelated to model quota.",
+      status_database_read_unavailable: "Local status is temporarily unavailable. Refresh to retry.",
+      status_host_scope_uninitialized: "This host is not initialized. Reload Agent Learning, then refresh.",
+      status_timeout: "The local status request timed out. Refresh to retry."
+    });
+
+    function statusError(error, labels) {
+      return labels["status_" + (error && error.reason)] || labels.status_database_read_unavailable;
+    }
+
     Object.assign(TEXT.zh, {reason:"当前原因",dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
     Object.assign(TEXT.en, {reason:"Current reason",dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
     Object.assign(TEXT.zh, {dispatch_protected_history_only:"现有调用保护仍保留，当前没有可直接送审的新工作；待处置阶段另列，旧调用不会自动重试。"});
     Object.assign(TEXT.en, {dispatch_protected_history_only:"Existing call protections remain; no new work is directly reviewable. Stages awaiting action are listed separately; old calls will not retry automatically."});
+
+    Object.assign(TEXT.zh, {dispatch_configured_launcher_missing:"已配置的管理员启动器文件不存在。请通过 admin-configure 明确更新启动命令；仅切换模型或开启审核仍保留旧命令，插件不会自动替换。",dispatch_cli_permission_denied:"管理员启动器访问被拒绝，请检查文件权限；插件没有替换启动器。"});
+    Object.assign(TEXT.en, {dispatch_configured_launcher_missing:"The configured administrator launcher no longer exists. Explicitly update its command with admin-configure; changing the model or enabling review keeps the old command. No launcher was substituted.",dispatch_cli_permission_denied:"Access to the administrator launcher was denied. Check its permissions; the launcher was not replaced."});
 
     function reasonText(value, labels) {
       return typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, "dispatch_" + value)
@@ -166,14 +186,26 @@ window.__ModuleLoader__.load({
       if (cwd) params.push("cwd=" + encodeURIComponent(cwd));
       if (sessionId) params.push("sessionId=" + encodeURIComponent(sessionId));
       var url = params.length ? ROUTE + "?" + params.join("&") : ROUTE;
-      return fetch(url).then(function (r) {
+      var read = fetch(url).then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok || !body.ok) {
-            throw new Error((body && body.error) || "status error");
+            var error = new Error("project status unavailable");
+            error.reason = body && body.reason;
+            throw error;
           }
           return body;
         });
       });
+      if (typeof setTimeout !== "function" || typeof clearTimeout !== "function") return read;
+      var timer;
+      var deadline = new Promise(function (_resolve, reject) {
+        timer = setTimeout(function () {
+          var error = new Error("project status timed out");
+          error.reason = "timeout";
+          reject(error);
+        }, 15000);
+      });
+      return Promise.race([read, deadline]).finally(function () { clearTimeout(timer); });
     }
 
     function postAction(action, cwd, sessionId, extra) {
@@ -218,7 +250,10 @@ window.__ModuleLoader__.load({
         var notePair = react.useState("");
         var busyPair = react.useState(false);
         var requestCell = react.useState({ current: null, busy: false })[0];
-        var summary = statePair[0];
+        var scopeKey = JSON.stringify([cwd, sessionId]);
+        var statusCell = react.useState({ scope: scopeKey, summaryScope: scopeKey, request: 0, failed: false })[0];
+        statusCell.scope = scopeKey;
+        var summary = statusCell.summaryScope === scopeKey ? statePair[0] : null;
         var setSummary = statePair[1];
         var note = notePair[0];
         var setNote = notePair[1];
@@ -227,12 +262,19 @@ window.__ModuleLoader__.load({
 
         var reload = react.useCallback(
           function () {
-            fetchStatus(cwd, sessionId)
+            var request = ++statusCell.request;
+            return fetchStatus(cwd, sessionId)
               .then(function (data) {
+                if (statusCell.scope !== scopeKey || statusCell.request !== request) return;
+                statusCell.summaryScope = scopeKey;
                 setSummary(data);
+                if (statusCell.failed) setNote("");
+                statusCell.failed = false;
               })
               .catch(function (err) {
-                setNote(actionError(err, t));
+                if (statusCell.scope !== scopeKey || statusCell.request !== request) return;
+                statusCell.failed = true;
+                setNote(statusError(err, t));
               });
           },
           [cwd, sessionId, t.failed]
@@ -241,6 +283,7 @@ window.__ModuleLoader__.load({
         react.useEffect(
           function () {
             reload();
+            return function () { ++statusCell.request; };
           },
           [reload]
         );

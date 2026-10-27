@@ -81,18 +81,17 @@ def _control_queue(runtime, project, *, include_history=True):
             "workload": workload_summary(runtime.db, project, history_stages=include_history)}
 
 
-def control_status(runtime, project, *, include_history=True, details=True):
-    """Settings can be read without a scan of cases, events or archived batches."""
+def control_summary(runtime, project, *, include_health=True):
+    """Common settings/health projection without queue, recovery or activity detail."""
     from .admin_queue import dispatch_diagnostic
     from .admin_usage import admin_admission_status
     from .admin_presets import PRESETS
-    from .admin_recovery import recovery_status
-    from .admin_review_flow import publication_policy, review_activity
+    from .admin_review_flow import publication_policy
     from .candidate_references import policy as reference_policy
     routing = runtime.admin_routing_status(project)
     policy, state = routing["policy"], control_state(runtime, project)
-    phase = phase_status(runtime, project, include_health=details)
-    diagnostic = dispatch_diagnostic(runtime, project, check_queue=details,
+    phase = phase_status(runtime, project, include_health=include_health)
+    diagnostic = dispatch_diagnostic(runtime, project, check_queue=include_health,
                                     _phase_backlog=phase.get("protected_backlog"))
     running = diagnostic["phase"] in {"worker_claimed", "model_reserved", "model_launching", "model_started"}
     enabled = bool(policy["enabled"] and state["enabled"])
@@ -113,7 +112,15 @@ def control_status(runtime, project, *, include_history=True, details=True):
         "runner": {"running": running, "state": "stopping" if not enabled and running else diagnostic["phase"],
                    "reason": diagnostic["reason"], "next_due": diagnostic.get("next_due")},
         "limitation": "Explicitly enabled, bounded local worker; a later supported event can resume pending daily work. Historical imports require their own approval."}
+    return result
+
+
+def control_status(runtime, project, *, include_history=True, details=True):
+    """Keep detailed administrator views separate from their common summary."""
+    result = control_summary(runtime, project, include_health=details)
     if details:
+        from .admin_recovery import recovery_status
+        from .admin_review_flow import review_activity
         result.update(queue=_control_queue(runtime, project, include_history=include_history),
                       recovery=recovery_status(runtime, project, include_history=include_history),
                       review_activity=review_activity(runtime, project))

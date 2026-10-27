@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import threading
 
@@ -79,7 +80,8 @@ def executor_availability(plan):
                 "executable_source": resolved.get("executable_source", "configured_or_path"), **capability}
     except (OSError, ValueError) as exc:
         return {"cli_available": False, "authentication": "provider_cli_managed_not_checked",
-                "reason": getattr(exc, "launch_reason", "cli_unavailable"),
+                "reason": getattr(exc, "launch_reason", None) or (
+                    "cli_permission_denied" if isinstance(exc, PermissionError) else "cli_unavailable"),
                 **{**capability, "readiness_scope": "unavailable"}}
 
 
@@ -130,8 +132,18 @@ def resolve_command(command, *, _windows=None):
     if executable is None:
         if standard_agy:
             executable, executable_source = _windows_agy(command)
+        elif candidate.is_absolute():
+            # An operator-pinned launcher must never fall through to PATH or a
+            # newly discovered host backend. Only confirmed absence gets this
+            # diagnosis; permission and other filesystem errors stay distinct.
+            try:
+                info = candidate.stat()
+            except FileNotFoundError as exc:
+                exc.launch_reason = "configured_launcher_missing"
+                raise
+            executable = str(candidate) if stat.S_ISREG(info.st_mode) else None
         else:
-            executable = str(candidate) if candidate.is_absolute() and candidate.is_file() else shutil.which(command[0])
+            executable = shutil.which(command[0])
     if not executable:
         raise FileNotFoundError("administrator executable unavailable")
     executable = Path(executable).resolve()

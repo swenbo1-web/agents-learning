@@ -107,6 +107,8 @@ recoveryReason:['Enter a reason for this explicit recovery decision:','请填写
 recoverySaved:['Recovery permission saved. No model was started or knowledge published.','恢复权限已保存；本次未启动模型、未发布知识。'],
 historical_failure_details_unavailable:['This historical attempt has no retained structured failure detail','该历史调用未保留结构化失败详情'],
 host_cli_unavailable:['The host-provided Codex backend is unavailable; check its installation','宿主提供的 Codex 后端不可用，请检查安装'],
+configured_launcher_missing:['The configured administrator launcher no longer exists. Explicitly update its command with admin-configure; changing only the model or enabling review keeps the old command. No launcher was substituted.','已配置的管理员启动器文件不存在。请通过 admin-configure 明确更新启动命令；仅切换模型或开启审核仍会保留旧命令，插件不会自动替换。'],
+cli_permission_denied:['Access to the administrator launcher was denied. Check its permissions; the launcher was not replaced.','管理员启动器访问被拒绝，请检查文件权限；插件没有替换启动器。'],
 model_unavailable:['The provider reported an unavailable model','提供方报告模型不可用'],
 model_request_failed:['The model request failed; the specific cause is unknown','模型请求失败；具体原因未知'],
 provider_quota_exceeded:['The provider reported a rate or quota limit','提供方报告频率或额度限制'],

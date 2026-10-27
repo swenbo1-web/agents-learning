@@ -222,7 +222,7 @@ class ProviderProtocolTests(unittest.TestCase):
         self.assertTrue(known["cli_available"])
         self.assertEqual(known["authentication"], "provider_cli_managed_not_checked")
         self.assertFalse(missing["cli_available"])
-        self.assertEqual(missing["reason"], "cli_unavailable")
+        self.assertEqual(missing["reason"], "configured_launcher_missing")
 
 
 class ProviderLifecycleTests(unittest.TestCase):
@@ -333,7 +333,7 @@ class ProviderLifecycleTests(unittest.TestCase):
         with patch("agent_learning.admin.subprocess.Popen") as model:
             result = admin_once(self.r, self.p)
         model.assert_not_called()
-        self.assertEqual(result["reason"], "cli_unavailable")
+        self.assertEqual(result["reason"], "configured_launcher_missing")
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
     def test_current_ready_case_is_found_beyond_ten_unobserved_cases(self):

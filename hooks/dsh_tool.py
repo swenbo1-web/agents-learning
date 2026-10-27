@@ -286,6 +286,29 @@ def main():
         if not isinstance(workspace, str) or not workspace.strip():
             _emit({"ok": False, "error": "workspace is required"})
             return 0
+        if payload.get("panel_status") is True:
+            if "panel_bound_workspace" not in payload:
+                raise ValueError("panel installation binding required")
+            from agent_learning.dsh_panel import read_status
+            from agent_learning.runtime import ContractError
+            import sqlite3
+            try:
+                result = read_status(payload.get("home"), workspace, payload["panel_bound_workspace"],
+                                     expected_project=payload.get("panel_project_id"))
+            except sqlite3.OperationalError as exc:
+                interrupted = (getattr(exc, "sqlite_errorcode", None) == getattr(sqlite3, "SQLITE_INTERRUPT", 9)
+                               or str(exc).lower() == "interrupted")
+                _emit({"ok": False, "error": "panel status read unavailable",
+                       "reason": "query_budget_exceeded" if interrupted else "database_read_unavailable"})
+                return 0
+            except ContractError as exc:
+                if str(exc) != "host_scope_uninitialized":
+                    raise
+                _emit({"ok": False, "error": "panel host scope has not been initialized",
+                       "reason": "host_scope_uninitialized"})
+                return 0
+            _emit({"ok": True, "result": result})
+            return 0
         if payload.get("check_registered_only") is True:
             import os
             from agent_learning.knowledge_browser import resolve_browser_project
@@ -309,13 +332,6 @@ def main():
                 raise ValueError("panel project changed; refresh before continuing")
         else:
             project = runtime.project(workspace)
-
-        if payload.get("panel_status") is True:
-            from agent_learning.dsh_panel import snapshot
-            data = runtime.status(project)
-            data["panel_snapshot"] = snapshot(runtime, project)
-            _emit({"ok": True, "result": {"data": data}})
-            return 0
 
         if payload.get("panel_receipt") is True:
             if "panel_bound_workspace" not in payload:
