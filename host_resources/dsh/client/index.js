@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
         stopBrowser: "停止后台知识库服务",
         refresh: "刷新",
         loading: "正在读取状态…",
+        projectRequired: "请从已安装项目的对话打开知识库",
         opening: "正在处理…",
         openedBrowser: "已在浏览器打开只读可视化知识库",
         openedReview: "已在浏览器打开知识审批与细致参数设置",
@@ -75,6 +76,7 @@ window.__ModuleLoader__.load({
         stopBrowser: "Stop Background Browser Server",
         refresh: "Refresh",
         loading: "Loading status...",
+        projectRequired: "Open the knowledge panel from a conversation in an installed project",
         opening: "Working...",
         openedBrowser: "Opened read-only knowledge browser",
         openedReview: "Opened review & advanced fine-tuning page",
@@ -238,6 +240,11 @@ window.__ModuleLoader__.load({
       return "custom";
     }
 
+    function installedProject(summary) {
+      return !!summary && summary.ok === true && summary.installed === true &&
+        typeof summary.project_id === "string" && summary.project_id.trim().length > 0;
+    }
+
     function buildControlPanel(react, localeRef) {
       var h = react.createElement;
 
@@ -253,12 +260,17 @@ window.__ModuleLoader__.load({
         var notePair = react.useState("");
         var busyPair = react.useState(false);
         var requestCell = react.useState({ current: null, busy: false })[0];
-        var statusCell = react.useState({ scope: scopeKey, summaryScope: initialSummary ? scopeKey : null, request: 0, failed: false })[0];
+        var statusCell = react.useState({ scope: scopeKey, summaryScope: initialSummary ? scopeKey : null, request: 0, failed: false, failedScope: null })[0];
+        var noteScopePair = react.useState(null);
         statusCell.scope = scopeKey;
         var summary = statusCell.summaryScope === scopeKey ? statePair[0] : null;
         var setSummary = statePair[1];
-        var note = notePair[0];
-        var setNote = notePair[1];
+        var note = noteScopePair[0] === scopeKey ? notePair[0] : "";
+        var setNote = function (value) {
+          if (statusCell.scope !== scopeKey) return;
+          noteScopePair[1](scopeKey);
+          notePair[1](value);
+        };
         var busy = busyPair[0];
         var setBusy = busyPair[1];
 
@@ -272,10 +284,12 @@ window.__ModuleLoader__.load({
                 setSummary(data);
                 if (statusCell.failed) setNote("");
                 statusCell.failed = false;
+                statusCell.failedScope = null;
               })
               .catch(function (err) {
                 if (statusCell.scope !== scopeKey || statusCell.request !== request) return;
                 statusCell.failed = true;
+                statusCell.failedScope = scopeKey;
                 setNote(statusError(err, t));
               });
           },
@@ -291,7 +305,7 @@ window.__ModuleLoader__.load({
         );
 
         function trigger(action, startMsg, doneFn, extra) {
-          if (requestCell.busy || !summary || !summary.project_id) return;
+          if (statusCell.scope !== scopeKey || requestCell.busy || !installedProject(summary)) return;
           extra = Object.assign({project_id: summary.project_id,
             installation_id: summary.panel_snapshot?.installation_id}, extra || {});
           if (action === "set_admin_preset") {
@@ -412,18 +426,14 @@ window.__ModuleLoader__.load({
         var captureNote = captureTransportLine(summary?.capture_transport, t);
         if (captureNote) phaseNote += (phaseNote ? '\n' : '') + captureNote;
 
-        return h(
-          "div",
-          {
-            style: {
+        var panelStyle = {
               display: "flex",
               flexDirection: "column",
               gap: "10px",
               fontSize: "13px",
               color: "var(--dsw-alias-label-primary, inherit)",
-            },
-          },
-          h(
+        };
+        var panelHeader = h(
             "div",
             { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
             h(
@@ -450,7 +460,18 @@ window.__ModuleLoader__.load({
               },
               t.refresh
             )
-          ),
+          );
+        if (!installedProject(summary)) {
+          var emptyText = statusCell.failed && statusCell.failedScope === scopeKey
+            ? note : summary ? t.projectRequired : t.loading;
+          return h("div", {style: panelStyle}, panelHeader,
+            h("div", {role: "status", style: {fontSize: "12px", color: "var(--dsw-alias-label-secondary, inherit)"}}, emptyText));
+        }
+
+        return h(
+          "div",
+          {style: panelStyle},
+          panelHeader,
           summary && summary.project_name
             ? h(
                 "div",
@@ -702,7 +723,7 @@ window.__ModuleLoader__.load({
             fetchStatus(sessionCwd, sessionId)
               .then(function (data) {
                 if (!cancelled) {
-                  setChecked({scope: scopeKey, summary: data && data.installed ? data : null});
+                  setChecked({scope: scopeKey, summary: installedProject(data) ? data : null});
                 }
               })
               .catch(function () {
