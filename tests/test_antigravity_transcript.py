@@ -305,11 +305,12 @@ class AntigravityTranscriptTests(unittest.TestCase):
         self.assertNotIn(memory, json.dumps(output))
 
     def test_same_native_prompt_in_another_chat_keeps_its_own_source(self):
-        self.invoke(lastUserInput="samechatfence")
+        text = "不对，samechatfence 应保留已发布应用签名。"
+        self.invoke(lastUserInput=text)
         first, = self.events("UserPromptSubmit")
         with patch.object(self.r, "_context", wraps=self.r._context) as context:
             output = self.adapter.handle("PreInvocation", self.raw(conversationId="another-chat",
-                invocationNum=0, initialNumSteps=0, lastUserInput="samechatfence"))
+                invocationNum=0, initialNumSteps=0, lastUserInput=text))
         first, current = self.events("UserPromptSubmit")
         self.assertNotEqual(first["conversation"], current["conversation"])
         self.assertEqual(context.call_args.kwargs["_source_event_id"], current["id"])
@@ -317,6 +318,18 @@ class AntigravityTranscriptTests(unittest.TestCase):
             "SELECT event_id,id FROM work_memories WHERE project=?", (self.p,))}
         self.assertIn(memories[first["id"]], json.dumps(output))
         self.assertNotIn(memories[current["id"]], json.dumps(output))
+
+    def test_same_unanswered_prompt_in_another_chat_stays_searchable_without_auto_recall(self):
+        self.invoke(lastUserInput="samechatfence")
+        output = self.adapter.handle("PreInvocation", self.raw(conversationId="another-chat",
+            invocationNum=0, initialNumSteps=0, lastUserInput="samechatfence"))
+        first, current = self.events("UserPromptSubmit")
+        self.assertNotEqual(first["conversation"], current["conversation"])
+        memories = {row["event_id"]: row["id"] for row in self.r.db.execute(
+            "SELECT event_id,id FROM work_memories WHERE project=?", (self.p,))}
+        self.assertNotIn(memories[first["id"]], json.dumps(output))
+        self.assertNotIn(memories[current["id"]], json.dumps(output))
+        self.assertIn(memories[first["id"]], json.dumps(self.r.work_search(self.p, "samechatfence")))
 
     def test_same_text_new_user_after_stop_preserved(self):
         self.normal()

@@ -49,20 +49,22 @@ const {runInNewContext}=require('node:vm'),assert=require('node:assert/strict');
 class Element{constructor(){this.dataset={};this.hidden=false;this.children=[];this.events={};this.value='';this.textContent='';}
  addEventListener(name,fn){this.events[name]=fn;}append(...children){this.children.push(...children);}replaceChildren(){this.children=[];}}
 const nodes=new Map(),get=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
-let changed;const requests=[],flush=()=>new Promise(resolve=>setImmediate(resolve));
+let changed;const requests=[],timers=new Set(),flush=()=>new Promise(resolve=>setImmediate(resolve));
 const window={parent:{},addEventListener(){},confirm:()=>{throw Error('preview must not ask for a mutation');},sidecar:{conversationId:'chat',
  getWorkspaceUris:async()=>[],onWorkspaceChange:fn=>{changed=fn;},fetch:(url,options)=>new Promise(resolve=>requests.push({url,body:JSON.parse(options.body),resolve}))}};
-runInNewContext(script,{window,document:{documentElement:{},getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[]},navigator:{language:'en'},crypto:globalThis.crypto,console});
+runInNewContext(script,{window,document:{documentElement:{},getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[]},navigator:{language:'en'},crypto:globalThis.crypto,console,
+ setTimeout(fn,delay){const id=setTimeout(()=>{timers.delete(id);fn();},delay);timers.add(id);return id;},
+ clearTimeout(id){timers.delete(id);clearTimeout(id);}});
 (async()=>{await flush();changed(['file:///project']);requests[0].resolve({ok:true,json:async()=>({visible:true,capability:'cap',summary:{project_id:'p1',counts:{}}})});await flush();
- get('debug').events.click();assert.equal(requests[1].body.action,'debug');assert.equal(requests[1].body.confirm,undefined);
+ get('debug').events.click();await flush();assert.equal(requests[1].body.action,'debug');assert.equal(requests[1].body.confirm,undefined);
  requests[1].resolve({ok:true,json:async()=>({visible:true,summary:{project_id:'p1',counts:{}},diagnostics:{version:1,project:{id:'p1'},backups:{status:'preview',verified:false,count:1,legacy_count:1,backup_root:'/external/backups',scan_limited:true,deletion_supported:false,
   entries:[{name:'legacy-one',version:'1.4.4',location:'legacy',needs_review:true,migration_allowed:false,retained:false}]}}})});await flush();
  for(const language of ['en','zh-CN']){get('language').value=language;get('language').events.change();const text=get('debugOutput').textContent;
   assert(text.includes('/external/backups'));assert(text.includes('legacy-one'));assert(text.includes(language==='en'?'Backups on this page: 1':'本页备份数量: 1'));
   assert(text.includes(language==='en'?'Preview only; no migration or deletion':'仅预览，不迁移或删除'));assert(text.includes(language==='en'?'Metadata preview only':'仅元数据预览'));
   assert(text.includes(language==='en'?'This list is incomplete':'列表未列全'));}
- assert.equal(requests.length,2);changed([]);assert.equal(get('debugPanel').hidden,true);assert.equal(get('debugOutput').textContent,'');console.log('ok');
-})().catch(error=>{console.error(error);process.exitCode=1;});
+ assert.equal(requests.length,2);assert.equal(timers.size,0);changed([]);assert.equal(get('debugPanel').hidden,true);assert.equal(get('debugOutput').textContent,'');console.log('ok');
+})().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>{for(const id of timers)clearTimeout(id);timers.clear();});
 '''
 
 

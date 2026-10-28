@@ -33,7 +33,7 @@ class KnowledgeFileStateTests(unittest.TestCase):
         self.path.write_text("changed and longer\n", encoding="utf-8")
 
     def test_identifier_card_keeps_file_change_flag_and_budget(self):
-        for budget in (2400, 550, 450, 350):
+        for budget in (2400, 550, 450, 400):
             with self.subTest(budget=budget):
                 conversation = f"read-{budget}"
                 handle = self.runtime.register_context(self.project, conversation)["context_handle"]
@@ -47,6 +47,28 @@ class KnowledgeFileStateTests(unittest.TestCase):
                 self.assertLessEqual(len(text), budget)
                 if budget <= 550:
                     self.assertTrue(cards[0]["read_required"])
+
+    def test_unfitting_identifier_card_is_not_recorded_as_exposed_and_can_return_later(self):
+        for budget in (350, 128):
+            with self.subTest(budget=budget):
+                conversation = f"unfitting-{budget}"
+                handle = self.runtime.register_context(self.project, conversation)["context_handle"]
+                self.runtime.config["injection_max_chars"] = budget
+                text = self.runtime._context(self.project, conversation, "service startup config",
+                    context_handle=handle, workspace=str(self.workspace))
+                self.assertLessEqual(len(text), budget)
+                self.assertNotIn(self.knowledge_id, text)
+                state = self.runtime.db.execute("SELECT shown,injected FROM contexts "
+                    "WHERE project=? AND conversation=?", (self.project, conversation)).fetchone()
+                self.assertEqual(json.loads(state["shown"]), [])
+                self.assertEqual(json.loads(state["injected"]), [])
+                self.runtime.config["injection_max_chars"] = 450
+                restored = self.runtime._context(self.project, conversation, "service startup config",
+                    context_handle=handle, workspace=str(self.workspace))
+                cards = [json.loads(line) for line in restored.splitlines() if line.startswith('{"')]
+                self.assertEqual(len(cards), 1, restored)
+                self.assertEqual(cards[0]["knowledge_id"], self.knowledge_id)
+                self.assertTrue(cards[0]["source_files_changed"])
 
     def test_mcp_read_and_search_report_same_drift(self):
         server = Server(self.runtime, self.project, workspace=str(self.workspace))
