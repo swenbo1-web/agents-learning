@@ -10,7 +10,7 @@ Yesterday's fix becomes today's fresh investigation. Agreed constraints need exp
 
 **Let the next chat build on earlier work and leave context for the current challenge.** agents-learning gives **Codex, Antigravity and DSH (DeepSeek Harness)** traceable, correctable project memory: capture public work results, select conclusions and conditions for the current question, then expand evidence on demand. Everyday tasks can reuse work history directly; long-running projects can also organize, review and publish knowledge by completed stage.
 
-**Local two-stage coding sample: all three conditions scored 97.5/100; the new run reported 0.82% more cumulative tokens than the historical no-plugin run, with one work-history card and zero exact card repeats.** [See the data and test limits](#a-real-sample-equal-quality-selective-memory)
+**Simplified coding-scenario test: all three conditions scored 97.5/100; the new run reported 0.82% more cumulative tokens than the historical no-plugin run, with one work-history card and zero exact card repeats.** [See the data and test limits](#a-real-sample-equal-quality-selective-memory)
 
 **Cross-session work history · Conclusion-first, progressive reads · Corrections and revocation · Stage review and tiered publication · Shared project memory across three hosts · Visual controls**
 
@@ -22,7 +22,9 @@ Python **3.10+** · Local SQLite · No additional model API key for the default 
 
 ## A real sample: equal quality, selective memory
 
-Quality, tokens and elapsed time all matter when adding memory. This is a maintainer's local observation using **the same task inputs and acceptance rules, GPT-6.1-Sol / High, two coding stages and one real explicit compaction per condition.** The new run started with an empty isolated memory store, used only work history accumulated during its own task and kept the administrator disabled.
+**This is a simple scenario relative to a large, long-running project, intended to observe task fit and overhead.** It is a short, self-contained coding task with two stages and real explicit compaction. It does not contain a mature project's accumulated knowledge, cross-task dependencies or ongoing collaboration history. The focus is retaining task quality while keeping context and reported usage under control after adding memory.
+
+This is a maintainer's local observation using **the same task inputs and acceptance rules, GPT-6.1-Sol / High, two coding stages and one real explicit compaction per condition.** The new run started with an empty isolated memory store, used only work history accumulated during its own task and kept the administrator disabled.
 
 | Condition | Quality score | Checks passed | Observed elapsed time | Host-reported cumulative tokens |
 |---|---:|---:|---:|---:|
@@ -43,7 +45,9 @@ How the new version used memory in this task:
 | Early-check preservation | **46/47** after stage one and after compaction plus stage-two delivery; **zero** previously passing checks lost |
 | Administrator generation-model calls | **Zero** |
 
-This sample shows **retained quality with restrained memory delivery in that coding task**. It does not establish long-term gains for a mature project. Working-history usefulness, formal-knowledge benefit and automated review are evaluated separately.
+**Simple scenarios should work well too.** This sample matched the historical no-plugin quality score, kept reported cumulative tokens close and delivered only a small amount of work history on demand. It provides a positive observation of task fit, delivery quality and restrained context use in this simplified setting. Integration compatibility across the three hosts is validated separately through their own health checks.
+
+**Large, long-running, complex projects are where we expect greater benefit potential.** More business constraints and frequent task handoffs create more opportunities to reuse experience across chats, avoid repeated investigations and track obsolete conclusions. Our design hypothesis is that these benefits can grow with continued use and useful knowledge accumulation. This expectation follows from the plugin's mechanisms and still needs controlled validation in long-term real projects. The present simple scenario demonstrates baseline task fit; it does not establish that large-project gains have already been realized.
 
 <details>
 <summary>Method, accounting and untested scope</summary>
