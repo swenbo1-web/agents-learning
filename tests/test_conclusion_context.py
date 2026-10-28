@@ -31,6 +31,34 @@ class ConclusionProjectionTests(unittest.TestCase):
         self.assertNotIn("trace", text)
         self.assertEqual(text, "…" + content[start:end] + "…")
 
+    def test_mixed_boundary_levels_use_the_complete_original_source(self):
+        samples = [
+            "## Conditions\nWindows 11; SQLite 3.45\nConclusion: dedupfocus rebuild the index.\n",
+            "## Version\nv1.4.35\nConclusion: dedupfocus use the old endpoint.\n",
+            "Conditions: Windows 11; SQLite 3.45\n## Conclusion\ndedupfocus rebuild the index.\n",
+            "版本：v1.4.35\n## 结论\ndedupfocus 使用旧接口。\n",
+            "Conclusion: dedupfocus rebuild the index.\n## Limitations\nOffline fixtures.\n",
+        ]
+        from agent_learning.work_memory import _work_preview
+        for prefix in samples:
+            content = prefix + "Details: " + "trace " * 150
+            item = {"content": content, "match": {"matched_terms": ["dedupfocus"]}}
+            with self.subTest(prefix=prefix):
+                self.assertEqual(conclusion_range(content), (0, len(content.rstrip())))
+                self.assertEqual(conclusion_projection(content, 500), ("", 0, 0, True))
+                self.assertEqual(_summary(item, 500), "")
+                self.assertEqual(_work_preview(content, "dedupfocus", 80), "")
+                full = content.rstrip()
+                self.assertEqual(conclusion_projection(content, len(content)),
+                                 (full + "…", 0, len(full), True))
+
+    def test_mixed_boundaries_do_not_promote_nested_old_examples(self):
+        for parent in ("# 旧方案", "# Background", "# Unrecognized parent"):
+            content = (parent + "\n## Conclusion\ndedupfocus sample decision.\n"
+                       "Conditions: Windows 11\nDetails: " + "trace " * 150)
+            with self.subTest(parent=parent):
+                self.assertIsNone(conclusion_range(content))
+
     def test_over_budget_block_is_not_split_or_rephrased(self):
         content = "结论：" + "仍需核对。" * 100 + "\n限制：绝不能覆盖原文件。"
         self.assertEqual(conclusion_projection(content, 100), ("", 0, 0, True))
@@ -55,6 +83,31 @@ class ConclusionProjectionTests(unittest.TestCase):
         self.assertEqual(_summary(item, 500), "")
         from agent_learning.work_memory import _work_preview
         self.assertEqual(_work_preview(content, "SQLite"), "")
+
+    def test_shrinking_short_content_keeps_the_same_topic_qualification(self):
+        body = ("背景：dedupfocus 需要检查事务。" + "调查记录。" * 25
+                + "\n结论：四宫格用于图像展示。\n限制：仅用于图像。")
+        item = {"content": body, "match": {"matched_terms": ["dedupfocus"]}}
+        self.assertLess(len(body), 500)
+        self.assertEqual(_summary(item, 500), body)
+        for limit in (len(body) // 2, 80, 40, 24):
+            with self.subTest(limit=limit):
+                self.assertEqual(_shrink_summary(item, body, limit), "")
+                self.assertEqual(_formal_ranges(item, {"content_summary": ""}), [])
+        unrelated = "…结论：四宫格用于图像展示。\n限制：仅用于图像。"
+        self.assertIsNone(_formal_ranges(item, {"content_summary": unrelated}))
+
+    def test_shrink_projection_and_coverage_keep_the_same_original_offsets(self):
+        body = ("背景：dedupfocus " + "调查记录。" * 25
+                + "\n结论：dedupfocus 使用独立事务。\n限制：失败不得提交。")
+        item = {"content": body, "match": {"matched_terms": ["dedupfocus"]}}
+        initial = _summary(item, 500)
+        narrowed = _shrink_summary(item, initial, len(initial) // 2)
+        start, end = conclusion_range(body)
+        self.assertEqual(narrowed, "…" + body[start:end])
+        self.assertEqual(_formal_ranges(item, {"content_summary": narrowed}), [[start, end]])
+        self.assertEqual(_shrink_summary(item, narrowed, 24), "")
+        self.assertEqual(_formal_ranges(item, {"content_summary": ""}), [])
 
     def test_code_quoted_list_nested_or_ambiguous_labels_do_not_promote(self):
         samples = ["```text\n结论：示例\n```", "> 结论：引用", "- 结论：列表",
@@ -130,6 +183,42 @@ class ConclusionRuntimeTests(unittest.TestCase):
         f.r.revoke(f.p, published["knowledge_id"], expected_revision=1)
         self.assertIn("已撤销", f.context())
         self.assertEqual(f.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_mixed_boundaries_fall_back_to_an_index_without_changing_evidence(self):
+        f = self.f
+        samples = ["## Conditions\nWindows 11; SQLite 3.45\nConclusion: dedupfocus rebuild the index.\n",
+                   "## Version\nv1.4.35\nConclusion: dedupfocus use the old endpoint.\n"]
+        for prefix in samples:
+            body = prefix + "Details: " + "trace " * 150
+            with self.subTest(prefix=prefix):
+                published, _ = f.published(content=body)
+                cards = f.formal_cards(f.context(compact=True))
+                card = next(card for card in cards if card["knowledge_id"] == published["knowledge_id"])
+                self.assertEqual(card["content_summary"], "")
+                self.assertTrue(card["read_required"])
+                self.assertEqual(card["applicability"], "Recorded ledger environment")
+                self.assertEqual(card["limitations"], "Reported; verify current evidence")
+                self.assertEqual(card["validation_level"], "reported")
+                self.assertEqual(f.r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
+
+    def test_narrow_budget_cannot_inject_an_unrelated_short_conclusion(self):
+        f = self.f
+        body = ("背景：dedupfocus 需要检查事务。" + "调查记录。" * 36
+                + "\n结论：四宫格用于图像展示。\n限制：仅用于图像。")
+        published, _ = f.published(content=body)
+        f.r.config["injection_max_chars"] = 825
+        text = f.context()
+        card = f.formal_cards(text)[0]
+        self.assertLessEqual(len(text), 825)
+        self.assertEqual(card["knowledge_id"], published["knowledge_id"])
+        self.assertEqual(card.get("content_summary", ""), "")
+        self.assertTrue(card["read_required"])
+        self.assertEqual(card["validation_level"], "reported")
+        self.assertEqual(f.formal_cards(f.context()), [])
+        f.r.config["injection_max_chars"] = 6000
+        card = f.formal_cards(f.context())[0]
+        self.assertEqual(card["content_summary"], body)
+        self.assertEqual(f.formal_cards(f.context()), [])
 
     def test_budget_never_emits_half_a_conclusion_or_loses_identity(self):
         f = self.f

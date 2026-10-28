@@ -354,11 +354,9 @@ def _request_has_context(text):
     return False
 
 
-def _work_preview(text, query, max_chars=80):
-    """Select a bounded original-text excerpt; never synthesize a conclusion."""
+def _work_conclusion_preview(text, query, max_chars):
+    """Return a whole relevant conclusion, empty if unsafe, or None if unlabelled."""
     from .knowledge_index import normalized_query_plan
-    if len(text) <= max_chars:
-        return text
     from .knowledge_excerpt import conclusion_projection
     projected = conclusion_projection(text, max_chars)
     if projected is not None:
@@ -366,6 +364,17 @@ def _work_preview(text, query, max_chars=80):
         if projected[0] and query_terms and not any(word.casefold() in projected[0].casefold() for word in query_terms):
             return ""
         return projected[0]
+    return None
+
+
+def _work_preview(text, query, max_chars=80):
+    """Select a bounded original-text excerpt; never synthesize a conclusion."""
+    from .knowledge_index import normalized_query_plan
+    if len(text) <= max_chars:
+        return text
+    projected = _work_conclusion_preview(text, query, max_chars)
+    if projected is not None:
+        return projected
     plan = normalized_query_plan(query)
     terms = [word for word in plan["terms"] if len(word) > 1]
     lowered = text.casefold()
@@ -1040,7 +1049,7 @@ class WorkMemoryMixin:
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
                            context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False,
-                           allow_unfocused_history=True):
+                           allow_unfocused_history=True, conclusion_max_chars=80):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
@@ -1158,7 +1167,18 @@ class WorkMemoryMixin:
                 if (previous and delivery == "persistent" and not compact and previous["source_version"] == item["source_version"]
                         and not file_changed and not file_unseen and previous["context_epoch"] == int(context_epoch or 0)
                         and _same_exposure_task(previous["task_key"], task_state)):
-                    continue
+                    # A past short index is not proof that a complete labelled
+                    # conclusion was delivered. Only the context renderer asks
+                    # for this upgrade; its actual-card fingerprints still
+                    # suppress already-covered content without resetting scope.
+                    expanded = (_work_conclusion_preview(body.get("summary", ""), preview_query, conclusion_max_chars)
+                                if type(conclusion_max_chars) is int and 80 < conclusion_max_chars <= 240
+                                and preview_query is not None and not handoff_scope
+                                and item.get("state") in {"reported", "model_reported", "succeeded"}
+                                and item.get("automatic_eligible", True)
+                                and not item.get("source_changed") and not item.get("file_state_changed") else None)
+                    if not expanded or len(expanded) <= 80:
+                        continue
                 result.append(item)
                 seen.add(item["memory_id"])
                 if parent:
@@ -1392,7 +1412,7 @@ class WorkMemoryMixin:
                     "coverage": {"observable_events_only": True, "history_backfill_automatic": False,
                                  "internal_thinking_captured": False, "project_permissions_restored": False}}
 
-    def work_validate_items(self, project, items, workspace=None):
+    def work_validate_items(self, project, items, workspace=None, *, conclusion_max_chars=80):
         """最终发送事务中刷新来源状态；不能用旧状态确认当前有效性。"""
         result = []
         for item in items[:20]:
@@ -1419,5 +1439,18 @@ class WorkMemoryMixin:
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):
                     current["file_state_changed"] = True
+                if (type(conclusion_max_chars) is int and 80 < conclusion_max_chars <= 240
+                        and current.get("reference_role") != "task_handoff"
+                        and item.get("_preview_query") is not None
+                        and current.get("state") in {"reported", "model_reported", "succeeded"}
+                        and current.get("automatic_eligible", True)
+                        and not current.get("source_changed") and not current.get("file_state_changed")):
+                    body = json.loads(row["body"])
+                    expanded = _work_conclusion_preview(body.get("summary", ""), item["_preview_query"],
+                                                        conclusion_max_chars)
+                    if expanded and len(expanded) > 80:
+                        # Internal proposal only. The renderer must still fit
+                        # the whole encoded card in its remaining shared pool.
+                        current["_conclusion_preview"] = expanded
                 result.append(current)
         return result

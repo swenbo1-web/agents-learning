@@ -38,7 +38,7 @@ def publication_lineage_state(runtime, project, body, knowledge_id=None, candida
     can only be reactivated through restore; a counterexample has its separate
     governance action. Return the exact comparison state for approval snapshots.
     """
-    from .runtime import knowledge_fingerprint
+    from .knowledge_equivalence import fingerprint_query
     from .candidate_references import feedback_state, held_equivalent
 
     concerns = feedback_state(runtime, project, candidate_id) if candidate_id else None
@@ -60,10 +60,11 @@ def publication_lineage_state(runtime, project, body, knowledge_id=None, candida
                        "message": "Candidate source lineage requires review; approval does not resolve upstream concerns"})
     if knowledge_id is not None:
         return result
+    marks, fingerprints = fingerprint_query(body)
     rows = runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision "
         "FROM knowledge_fingerprints f LEFT JOIN active a ON a.project=f.project AND a.id=f.id "
-        "WHERE f.project=? AND f.fingerprint=? ORDER BY f.id,f.revision LIMIT 65",
-        (project, knowledge_fingerprint(body))).fetchall()
+        f"WHERE f.project=? AND f.fingerprint IN ({marks}) ORDER BY f.id,f.revision LIMIT 65",
+        (project, *fingerprints)).fetchall()
     matches, feedback = [dict(row) for row in rows], []
     result.update(matches=matches, feedback=feedback)
     if len(rows) > 64:

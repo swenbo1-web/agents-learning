@@ -387,7 +387,8 @@ class KnowledgeContextMixin:
                         context_epoch=work_context_epoch, file_only=tool_only,
                         exclude_event_id=_source_event_id,
                         allow_unfocused_history=_query_available or bool(effective.strip()),
-                        handoff_only=bool(work_query and not effective_plan["automatic_safe"]))
+                        handoff_only=bool(work_query and not effective_plan["automatic_safe"]),
+                        conclusion_max_chars=240)
                 else:
                     # Safety/expiry notices stay independent of optional recall.
                     work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace)
@@ -638,7 +639,9 @@ class KnowledgeContextMixin:
                     # 剩余空间，并共享 injection_max_chars，不额外叠加一个注入预算。
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
-                    for work_item in self.work_validate_items(project, work_items, workspace=workspace):
+                    conclusion_used = False
+                    for work_item in self.work_validate_items(project, work_items, workspace=workspace,
+                                                              conclusion_max_chars=240):
                         from .candidate_reference_context import suppress_work
                         changed_work = bool(work_item.get("source_changed") or work_item.get("file_state_changed"))
                         if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
@@ -651,6 +654,10 @@ class KnowledgeContextMixin:
                                 "state": work_item.get("state", "reported"),
                                 "validation_level": work_item.get("validation_level", "reported"),
                                 "read_required": True}
+                        expanded = (work_item.get("_conclusion_preview")
+                                    if not conclusion_used and not handoff and not changed_work else None)
+                        if expanded:
+                            card["summary"] = expanded
                         if handoff:
                             card["reference_role"] = "task_handoff"
                         if work_item.get("completion", "complete") != "complete":
@@ -680,9 +687,26 @@ class KnowledgeContextMixin:
                         note = "[工作历史] " + encode(card)
                         prefix_cost = len(work_header) + 1 if not work_delivered else 0
                         cost = len(note) + 1 + prefix_cost
+                        if expanded:
+                            if dedup.repeated(dedup.prepare("work", work_item, card)):
+                                continue  # Do not downgrade an already-covered whole conclusion to an index.
+                            if "files" in card:
+                                without_files = {key: value for key, value in card.items() if key != "files"}
+                                if dedup.repeated(dedup.prepare("work", work_item, without_files)):
+                                    continue  # Extra room for unchanged files is not new conclusion content.
                         if cost > work_budget - work_used:
-                            # 保留准确身份及状态；不能把截断的卡记为已经展示。
+                            # Prefer a whole conclusion to optional file decoration.
                             card.pop("files", None)
+                            if not expanded:
+                                card.pop("summary", None)
+                                card["title"] = clip(card["title"], 40)
+                            note = "[工作历史] " + encode(card)
+                            cost = len(note) + 1 + prefix_cost
+                            if expanded and dedup.repeated(dedup.prepare("work", work_item, card)):
+                                continue
+                        if expanded and cost > work_budget - work_used:
+                            # A conclusion and its conditions stay indivisible.
+                            # Keep an index if they cannot fit; never slice to 80.
                             card.pop("summary", None)
                             card["title"] = clip(card["title"], 40)
                             note = "[工作历史] " + encode(card)
@@ -697,6 +721,8 @@ class KnowledgeContextMixin:
                         lines.append(note)
                         work_used += cost
                         work_delivered.append(work_item)
+                        if expanded and card.get("summary") == expanded:
+                            conclusion_used = True
                         dedup.record(delivery_entry)
                     if work_delivered:
                         self.work_record_exposure(

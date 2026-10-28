@@ -11,7 +11,7 @@ def knowledge_tier(body):
 
 def _conflict_gate(runtime, project, packet, body, proposal):
     """Never let deduplication or a fresh ID evade disputed/revoked knowledge."""
-    from .runtime import knowledge_fingerprint
+    from .knowledge_equivalence import same_presentation_claim
     from .candidate_references import lineage_risk, held_equivalent
     held = held_equivalent(runtime, project, body)
     if held:
@@ -20,7 +20,6 @@ def _conflict_gate(runtime, project, packet, body, proposal):
         risk = lineage_risk(runtime, project, ref)
         if risk and risk.get("blocked", True):
             return "candidate reference source requires review"
-    fingerprint = knowledge_fingerprint(body)
     targets = {value for value in (packet["problem"].get("knowledge_id"), proposal.get("knowledge_id")) if value}
     targets.update(item.get("knowledge_id", item.get("id")) for item in packet.get("related_knowledge", [])
                    if item.get("knowledge_id", item.get("id")))
@@ -51,7 +50,7 @@ def _conflict_gate(runtime, project, packet, body, proposal):
         for row in rows:
             if row["active_revision"] is None:
                 return "previous knowledge title requires review"
-            if row["revision"] == row["active_revision"] and knowledge_fingerprint(json.loads(row["body"])) != fingerprint:
+            if row["revision"] == row["active_revision"] and not same_presentation_claim(body, json.loads(row["body"])):
                 return "conflicting knowledge requires review"
         title = re.sub(r"\s+", " ", body["title"].strip()).casefold()
         for related in packet.get("related_knowledge", []):
@@ -61,7 +60,7 @@ def _conflict_gate(runtime, project, packet, body, proposal):
             if row:
                 existing = json.loads(row[0])
                 if (re.sub(r"\s+", " ", existing["title"].strip()).casefold() == title
-                        and knowledge_fingerprint(existing) != fingerprint):
+                        and not same_presentation_claim(body, existing)):
                     return "conflicting knowledge requires review"
     return None
 

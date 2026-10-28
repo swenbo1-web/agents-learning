@@ -98,10 +98,10 @@ class HandoffContextEfficiencyTests(unittest.TestCase):
         constraint = "Pending: do not publish ledger revision 37."
         _, source = self.record("Stage complete.\n\n" * 12 + constraint)
         validate = self.r.work_validate_items
-        def changed(project, items, workspace=None):
+        def changed(project, items, workspace=None, **kwargs):
             self.r.db.execute("UPDATE events SET capture_digest=? WHERE project=? AND id=?",
                               ("changed-capture", self.p, source))
-            return validate(project, items, workspace=workspace)
+            return validate(project, items, workspace=workspace, **kwargs)
         with patch.object(self.r, "work_validate_items", side_effect=changed):
             output = self.context(compact=True)
         self.assertNotIn(constraint, output)
@@ -124,9 +124,9 @@ class HandoffContextEfficiencyTests(unittest.TestCase):
             self.p, source, link["checkout_key"], link["relative_path"], link["path_key"],
             "read_target", encode(link["version"])))
         validate = self.r.work_validate_items
-        def changed(project, items, workspace=None):
+        def changed(project, items, workspace=None, **kwargs):
             path.write_text("revision = 38\nchanged_after_selection = True\n", encoding="utf-8")
-            return validate(project, items, workspace=workspace)
+            return validate(project, items, workspace=workspace, **kwargs)
         with patch.object(self.r, "work_validate_items", side_effect=changed):
             output = self.context(compact=True)
         self.assertNotIn(constraint, output)

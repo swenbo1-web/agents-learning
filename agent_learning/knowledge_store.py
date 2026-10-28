@@ -162,6 +162,7 @@ class KnowledgeStoreMixin:
                 expected_epoch=None, *, _review_approval=False):
         from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint, metadata
         from .knowledge_lifecycle import lifecycle_state, publication_lineage_state
+        from .knowledge_equivalence import fingerprint_query, same_presentation_claim
         with self._case_transaction():
             self.assert_host_epoch(expected_epoch)
             candidate = self.db.execute("SELECT * FROM candidates WHERE id=? AND project=?", (candidate_id, project)).fetchone()
@@ -212,10 +213,30 @@ class KnowledgeStoreMixin:
                 raise ContractError("publication manifest changed")
             requested_id = knowledge_id
             fingerprint = knowledge_fingerprint(body)
+            marks, fingerprints = fingerprint_query(body)
             duplicates = self.db.execute("SELECT a.id,a.revision,k.body FROM knowledge_fingerprints f JOIN active a "
                                          "ON a.project=f.project AND a.id=f.id AND a.revision=f.revision JOIN knowledge k "
                                          "ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-                                         "WHERE f.project=? AND f.fingerprint=? ORDER BY a.id", (project, fingerprint)).fetchall()
+                                         f"WHERE f.project=? AND f.fingerprint IN ({marks}) ORDER BY a.id LIMIT 65",
+                                         (project, *fingerprints)).fetchall()
+            if len(duplicates) > 64:
+                raise ContractError("too many equivalent active knowledge records; explicit comparison required")
+
+            def format_attachment_guard(target_body):
+                if knowledge_fingerprint(target_body) == fingerprint:
+                    return
+                from .candidate_references import held_equivalent
+                # Explicit visual approval may release a deferred candidate,
+                # exactly as for an unchanged body. Unresolved concerns and
+                # upstream lineage checks still apply in either path.
+                held = held_equivalent(self, project, body, include_held=not _review_approval)
+                if held:
+                    raise ContractError(held)
+                # Explicit attachment must not bypass the protections that a
+                # fresh publication would apply to this same stored claim.
+                state = publication_lineage_state(self, project, body, candidate_id=candidate_id)
+                if state["issues"]:
+                    raise ContractError(state["issues"][0]["message"])
             if knowledge_id is not None:
                 if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
                     raise ContractError("knowledge updates require the expected active revision")
@@ -226,16 +247,24 @@ class KnowledgeStoreMixin:
                     raise ContractError("knowledge revision changed or is revoked")
                 if any(row["id"] != knowledge_id for row in duplicates):
                     raise ContractError("equivalent knowledge already has another active ID")
-                if knowledge_fingerprint(json.loads(current["body"])) == fingerprint:
+                current_body = json.loads(current["body"])
+                if same_presentation_claim(body, current_body):
+                    format_attachment_guard(current_body)
                     revision = current["revision"]
                     response = {"knowledge_id": knowledge_id, "revision": revision, "status": "published", "deduplicated": True}
+                    if knowledge_fingerprint(current_body) != fingerprint:
+                        response["format_equivalent"] = True
                     return self._finish_publication(project, candidate, body, knowledge_id, revision, requested_id,
                                                     expected_revision, response, False, lifecycle_state(self, project, knowledge_id))
             elif expected_revision is not None:
                 raise ContractError("expected_revision requires a knowledge_id")
             elif duplicates:
                 duplicate = duplicates[0]
+                duplicate_body = json.loads(duplicate["body"])
+                format_attachment_guard(duplicate_body)
                 response = {"knowledge_id": duplicate["id"], "revision": duplicate["revision"], "status": "published", "deduplicated": True}
+                if knowledge_fingerprint(duplicate_body) != fingerprint:
+                    response["format_equivalent"] = True
                 return self._finish_publication(project, candidate, body, duplicate["id"], duplicate["revision"], None,
                                                 None, response, False, lifecycle_state(self, project, duplicate["id"]))
             else:
@@ -290,7 +319,8 @@ class KnowledgeStoreMixin:
 
     def restore(self, project, knowledge_id, expected_revision, expected_generation=None, *, request_id=None,
                 reason="explicit restore", actor="operator", expected_epoch=None, evidence_refs=None):
-        from .runtime import ContractError, knowledge_fingerprint
+        from .runtime import ContractError
+        from .knowledge_equivalence import fingerprint_query, same_presentation_claim
         from .knowledge_lifecycle import action_request, lifecycle_state, record_action, request_identity, validate_restore_support
 
         if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 1:
@@ -314,9 +344,10 @@ class KnowledgeStoreMixin:
             if not manifest or (expected_generation is not None and manifest[0] != expected_generation):
                 raise ContractError("publication manifest changed")
             body = json.loads(row["body"])
+            marks, fingerprints = fingerprint_query(body)
             equivalent = self.db.execute("SELECT a.id FROM knowledge_fingerprints f JOIN active a ON a.project=f.project "
-                                         "AND a.id=f.id AND a.revision=f.revision WHERE f.project=? AND f.fingerprint=? LIMIT 1",
-                                         (project, knowledge_fingerprint(body))).fetchone()
+                                         f"AND a.id=f.id AND a.revision=f.revision WHERE f.project=? AND f.fingerprint IN ({marks}) LIMIT 1",
+                                         (project, *fingerprints)).fetchone()
             if equivalent:
                 raise ContractError("equivalent knowledge already has another active ID")
             sources = self.db.execute("SELECT s.*,c.body FROM knowledge_sources s JOIN candidates c "
@@ -326,7 +357,7 @@ class KnowledgeStoreMixin:
             valid_source = None
             for source in sources:
                 source_body = json.loads(source["body"])
-                if knowledge_fingerprint(source_body) != knowledge_fingerprint(body):
+                if not same_presentation_claim(source_body, body):
                     continue
                 # 来源不能降低目标知识原先声明的证据级别。
                 source_body["validation_level"] = body["validation_level"]

@@ -46,15 +46,14 @@ def _refs(item):
 
 
 def _formal_ranges(item, card):
-    from .knowledge_output import _summary_projection
+    from .knowledge_output import _matched_conclusion_projection, _summary_projection
     from .runtime import clip, _clip_projection
     summary, start, end, truncated = _summary_projection(item, 500)
     rendered = card.get("content_summary")
     positions = ([None] if start > 0 else []) + list(range(start, end)) + ([None] if truncated else [])
     while summary != rendered and len(summary) > 24:
         limit = max(24, len(summary) // 2)
-        from .knowledge_excerpt import conclusion_projection
-        conclusion = conclusion_projection(item.get("content", ""), limit)
+        conclusion = _matched_conclusion_projection(item, limit)
         if conclusion is not None:
             summary, start, end, truncated = conclusion
             positions = ([None] if start > 0 else []) + list(range(start, end)) + ([None] if truncated else [])

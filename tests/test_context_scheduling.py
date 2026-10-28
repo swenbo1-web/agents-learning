@@ -331,9 +331,9 @@ class ContextSchedulingTests(unittest.TestCase):
     def test_source_change_after_selection_is_checked_before_rendering(self):
         ident, _ = self.record()
         original = self.r.work_validate_items
-        def changed(project, items, workspace=None):
+        def changed(project, items, workspace=None, **kwargs):
             self.r.db.execute("UPDATE work_memory_sources SET source_hash='racing-source' WHERE memory_id=?", (ident,))
-            return original(project, items, workspace=workspace)
+            return original(project, items, workspace=workspace, **kwargs)
         with patch.object(self.r, "work_validate_items", side_effect=changed):
             text = self.context(compact=True)
         self.assertNotIn(ident, text)

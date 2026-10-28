@@ -202,12 +202,13 @@ def _redirect(runtime, project, identity):
 
 
 def _conflict_state(runtime, project, body, problem):
-    from .runtime import knowledge_fingerprint
+    from .knowledge_equivalence import fingerprint_query
     snapshot = {}
-    fingerprint = knowledge_fingerprint(body)
+    marks, fingerprints = fingerprint_query(body)
     matches = [dict(row) for row in runtime.db.execute("SELECT f.id,f.revision,a.revision AS active_revision "
         "FROM knowledge_fingerprints f LEFT JOIN active a ON a.project=f.project AND a.id=f.id "
-        "WHERE f.project=? AND f.fingerprint=? LIMIT 17", (project, fingerprint))]
+        f"WHERE f.project=? AND f.fingerprint IN ({marks}) ORDER BY f.id,f.revision LIMIT 17",
+        (project, *fingerprints))]
     snapshot["equivalent"] = matches
     if matches:
         if any(row["active_revision"] is None for row in matches):
@@ -289,9 +290,12 @@ def held_equivalent(runtime, project, body, *, include_held=True, compare_varian
         "EXCEPT SELECT key,type,atom FROM json_each(t.body,'$.metadata')) "
         "AND NOT EXISTS (SELECT key,type,atom FROM json_each(t.body,'$.metadata') "
         "EXCEPT SELECT key,type,atom FROM json_each(c.body,'$.metadata'))")
-    source = ("WITH target(body) AS (VALUES (?)) SELECT 1 FROM candidates c,target t WHERE c.project=? "
+    from .knowledge_equivalence import format_variants, fingerprint_query
+    bodies = format_variants(body)
+    values = ",".join("(?)" for _ in bodies)
+    source = (f"WITH target(body) AS (VALUES {values}) SELECT 1 FROM candidates c,target t WHERE c.project=? "
         "AND lower(trim(json_extract(c.body,'$.title')))=lower(trim(?))")
-    args = (encode(body), project, body["title"])
+    args = (*(encode(value) for value in bodies), project, body["title"])
     if include_held and runtime.db.execute(source + " AND c.status IN ('deferred','rejected') AND " + equality + " LIMIT 1", args).fetchone():
         return "equivalent candidate is held"
     if runtime.db.execute(source + " AND EXISTS (SELECT 1 FROM candidate_reference_feedback f "
@@ -300,10 +304,10 @@ def held_equivalent(runtime, project, body, *, include_held=True, compare_varian
     # An explicit active-revision update has already selected its comparison
     # target. Exact attachment likewise has a fixed active claim. Neither needs
     # an unbounded generic title comparison; exact concerns above still apply.
-    from .runtime import knowledge_fingerprint
+    marks, fingerprints = fingerprint_query(body)
     if not compare_variants or runtime.db.execute("SELECT 1 FROM knowledge_fingerprints f JOIN active a "
             "ON a.project=f.project AND a.id=f.id AND a.revision=f.revision "
-            "WHERE f.project=? AND f.fingerprint=? LIMIT 1", (project, knowledge_fingerprint(body))).fetchone():
+            f"WHERE f.project=? AND f.fingerprint IN ({marks}) LIMIT 1", (project, *fingerprints)).fetchone():
         return None
     # Keep the comparison bound for genuinely different unresolved claims.
     # Rejecting an unrelated alternative is an explicit recovery path; rejected
@@ -460,11 +464,11 @@ def assess(runtime, project, candidate_id, *, _ancestors=(), _respect_policy=Tru
         "AND lower(trim(json_extract(body,'$.title')))=lower(trim(?)) ORDER BY created DESC,id LIMIT 17",
         (project, candidate_id, body["title"]))]
     snapshot["alternatives"] = alternatives
-    from .runtime import knowledge_fingerprint
+    from .knowledge_equivalence import same_presentation_claim
     for alternative in alternatives:
         if alternative["status"] == "published":
             continue
-        equal = knowledge_fingerprint(json.loads(alternative["body"])) == knowledge_fingerprint(body)
+        equal = same_presentation_claim(body, json.loads(alternative["body"]))
         if equal and alternative["status"] in {"deferred", "rejected"}:
             reason = reason or "equivalent_candidate_held"
         elif not equal and alternative["status"] == "candidate":

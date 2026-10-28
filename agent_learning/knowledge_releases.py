@@ -142,7 +142,7 @@ class KnowledgeReleaseMixin:
         return snapshot
 
     def knowledge_maturity(self, project, knowledge_id, expected_revision):
-        from .runtime import ContractError, knowledge_fingerprint
+        from .runtime import ContractError
 
         _positive(expected_revision, "expected_revision")
         with self._release_read_transaction():
@@ -171,7 +171,8 @@ class KnowledgeReleaseMixin:
                 source_body = json.loads(row["candidate_body"])
                 evidence = self._source_evidence(project, json.loads(row["evidence_refs"]), row["problem_id"])
                 try:
-                    if knowledge_fingerprint(source_body) != knowledge_fingerprint(body):
+                    from .knowledge_equivalence import same_presentation_claim
+                    if not same_presentation_claim(source_body, body):
                         raise ContractError("source body differs")
                     source_body["validation_level"] = "tool_success"
                     self._validate_sources(project, source_body)

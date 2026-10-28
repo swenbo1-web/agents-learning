@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 
-from .runtime import ContractError, clean, digest, encode, knowledge_fingerprint
+from .runtime import ContractError, clean, digest, encode
 
 
 FORMAT = "candidate-review-v1"
@@ -149,10 +149,12 @@ def _inspection(view, project, candidate, body, knowledge_id=None, expected_revi
         raise ContractError("expected_revision requires a knowledge_id")
     publication_lineage = publication_lineage_state(view, project, body, knowledge_id, candidate["id"])
     issues.extend(item for item in publication_lineage["issues"] if item["code"] not in {issue["code"] for issue in issues})
+    from .knowledge_equivalence import fingerprint_query
+    marks, fingerprints = fingerprint_query(body)
     duplicates = [dict(row) for row in view.db.execute(
         "SELECT a.id,a.revision FROM active a JOIN knowledge_fingerprints f ON "
         "f.project=a.project AND f.id=a.id AND f.revision=a.revision "
-        "WHERE a.project=? AND f.fingerprint=? ORDER BY a.id", (project, knowledge_fingerprint(body)))]
+        f"WHERE a.project=? AND f.fingerprint IN ({marks}) ORDER BY a.id", (project, *fingerprints))]
     if duplicates:
         warnings.append({"code": "equivalent_active", "message": "equivalent active knowledge will share its existing record"})
         if knowledge_id is not None and any(row["id"] != knowledge_id for row in duplicates):

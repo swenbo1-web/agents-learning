@@ -140,7 +140,7 @@ def propose_governance(runtime, project, problem_id, problem_revision, action, c
 
 def execute_governance(runtime, project, proposal_id, expected_epoch=None):
     """只由受信操作者入口调用；提议工具自身不能执行、发布或撤销。"""
-    from .runtime import ContractError, encode, knowledge_fingerprint
+    from .runtime import ContractError, encode
 
     with runtime._case_transaction():
         runtime.assert_host_epoch(expected_epoch)
@@ -174,7 +174,8 @@ def execute_governance(runtime, project, proposal_id, expected_epoch=None):
             body = json.loads(candidate["body"])
             runtime._validate_sources(project, body)
             if target is not None:
-                equivalent = knowledge_fingerprint(body) == knowledge_fingerprint(json.loads(target["body"]))
+                from .knowledge_equivalence import same_presentation_claim
+                equivalent = same_presentation_claim(body, json.loads(target["body"]))
                 if action == "attach" and not equivalent:
                     raise ContractError("attach requires equivalent knowledge; use an explicit update")
                 if action == "update" and equivalent:

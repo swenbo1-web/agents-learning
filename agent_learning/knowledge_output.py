@@ -37,17 +37,24 @@ def _state(item):
                 source.get("problem_changed", False) for source in item.get("sources", []))))}
 
 
-def _summary_projection(item, limit=700):
-    content = _text(item.get("content"))
-    if len(content) <= limit:
-        return content, 0, len(content), False
+def _matched_conclusion_projection(item, limit):
+    """One topic gate and original span for every conclusion rendering path."""
     from .knowledge_excerpt import conclusion_projection
-    conclusion = conclusion_projection(content, limit)
+    conclusion = conclusion_projection(_text(item.get("content")), limit)
     if conclusion is not None:
         matched = item.get("match", {}).get("matched_terms", [])
         if conclusion[0] and matched and not any(
                 term.casefold() in conclusion[0].casefold() for term in matched if isinstance(term, str) and term):
             return "", 0, 0, True  # The topic occurred only in omitted background.
+        return conclusion
+
+
+def _summary_projection(item, limit=700):
+    content = _text(item.get("content"))
+    if len(content) <= limit:
+        return content, 0, len(content), False
+    conclusion = _matched_conclusion_projection(item, limit)
+    if conclusion is not None:
         return conclusion
     matched = item.get("match", {}).get("matched_terms", [])
     lowered = content.lower()
@@ -64,9 +71,8 @@ def _summary(item, limit=700):
 
 
 def _shrink_summary(item, summary, limit):
-    from .knowledge_excerpt import conclusion_projection
     from .runtime import clip
-    conclusion = conclusion_projection(_text(item.get("content")), limit)
+    conclusion = _matched_conclusion_projection(item, limit)
     return conclusion[0] if conclusion is not None else clip(summary, limit)
 
 

@@ -62,15 +62,22 @@ def conclusion_range(text):
         return None
     index = conclusions[0]
     level = sections[index][1]
-    # Do not detach a conclusion from a parent condition, example or old attempt.
-    if any(section[1] < level for section in sections):
+    # Ordinary parent headings still make the decision's scope ambiguous.
+    # Explicit boundaries can use another heading style, but may never be
+    # discarded by falling back to a query window around their conclusion.
+    mixed_boundaries = any(section[2] in _BOUNDARY and section[1] != level for section in sections)
+    parents = sections[:index] if mixed_boundaries else sections
+    if any(section[1] < level and section[2] not in _BOUNDARY for section in parents):
         return None
-    peers = [i for i, section in enumerate(sections) if section[1] == level]
-    selected = [index, *(i for i in peers if sections[i][2] in _BOUNDARY)]
-    first, last = min(selected), max(selected)
-    start = sections[first][0]
-    next_peer = next((i for i in peers if i > last), None)
-    end = sections[next_peer][0] if next_peer is not None else len(text)
+    if mixed_boundaries:
+        start, end = 0, len(text)
+    else:
+        peers = [i for i, section in enumerate(sections) if section[1] == level]
+        selected = [index, *(i for i in peers if sections[i][2] in _BOUNDARY)]
+        first, last = min(selected), max(selected)
+        start = sections[first][0]
+        next_peer = next((i for i in peers if i > last), None)
+        end = sections[next_peer][0] if next_peer is not None else len(text)
     # A boundary outside the chosen labelled block is not safely separable.
     # Keep the complete source (usually an index-only preview), rather than
     # dropping a qualification merely because its author used another heading.

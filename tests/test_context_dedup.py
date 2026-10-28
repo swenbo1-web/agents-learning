@@ -340,9 +340,9 @@ class ContextDedupTests(unittest.TestCase):
         self.context()
         self.r.config["work_memory"]["automatic_context"] = True
         original = self.r.work_validate_items
-        def revoked(project, items, workspace=None):
+        def revoked(project, items, workspace=None, **kwargs):
             self.r.revoke(self.p, formal["knowledge_id"], expected_revision=formal["revision"])
-            return original(project, items, workspace=workspace)
+            return original(project, items, workspace=workspace, **kwargs)
         with patch.object(self.r, "work_validate_items", side_effect=revoked):
             text = self.context()
         self.assertIn(source["memory"]["memory_id"], text)
