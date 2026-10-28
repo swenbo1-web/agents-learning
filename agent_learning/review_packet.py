@@ -32,6 +32,11 @@ HISTORY_REVIEW_PREFIX = (
     "相关资料的展示不表示该资料已审核。历史陈述只能reported；若用户对本批授权，程序可发布带来源参考，不能宣称已验证。"
     "全部JSON输出UTF-8总量不超过40000字节；skip/needs_evidence时candidates=[]。\n"
 )
+# Presentation only: keep semantic review signatures and existing receipts reusable.
+# This guidance adds no fields, evidence requirements or model calls.
+CONTENT_LAYOUT_PREFIX = (
+    "candidate正文先写有据“结论：”，保留条件限制。\n"
+)
 PACKET_FORMAT = 8
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
@@ -44,7 +49,7 @@ def review_instruction(packet):
     visible = compact_packet(packet)
     transport = TRANSPORT_PREFIX if visible is not packet and TRANSPORT_KEY in visible else ""
     # 补充规则放在不可信资料块之前，保持原有公共资料包边界。
-    return history + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
+    return CONTENT_LAYOUT_PREFIX + history + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
 
 
 def _fits(packet, limit):

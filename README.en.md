@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.35 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. When core retrieval or provenance rules change, update and reload all Codex, Antigravity and DSH installations sharing a database together. This AG panel recovery fix can update the UI bridge alone and supports the 1.4.34 core. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.36 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. When core retrieval or provenance rules change, update and reload all Codex, Antigravity and DSH installations sharing a database together. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -31,6 +31,13 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Conclusion-first excerpts and less question noise (1.4.36)
+
+- **Organize supported conclusions during existing reviews**: administrator prompts use the existing `content` field for a reusable conclusion and necessary qualifications. Source statements remain `reported`; missing evidence is not filled in. Work summaries retain current status and uncertainty. No mandatory five-part template or extra model call is introduced.
+- **Keep qualifications attached**: local selection favors a single explicit Chinese or English conclusion and its labelled conditions, limitations, corrections, verification, version or date. A block that cannot fit becomes a read-on-demand index. Code examples, multiple conclusions and ambiguous structures receive no conclusion promotion. Unstructured legacy content keeps its original excerpt behavior; arbitrary semantic conditions cannot all be recognized.
+- **Reduce old-question noise**: automatic work history favors results, verification observations, user constraints and corrections. Unanswered questions and bare action requests no longer fill empty slots; bounded supplemental recall prevents question bursts from hiding older results. Explicit requests for past requirements or wording, manual searches, source/file notices and scoped compaction handoffs retain their contracts. A valid source is not proof of verified or currently applicable content.
+- **Preserve existing decisions**: precise delivered source ranges still govern deduplication. Omitted text is never counted as fully delivered. Existing review receipts, bodies, publication authority and model settings stay intact; old knowledge is not rewritten or re-reviewed. The matching-policy update invalidates old query plans without changing schema/protocol 25 or indexes 6/2/1. Reload all shared-database hosts after updating the core. Offline checks do not establish real latency, token or quality gains.
 
 ## On-demand AG panel read recovery (1.4.35)
 
@@ -1019,7 +1026,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.35 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.36 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1347,7 +1354,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.35 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.36 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 

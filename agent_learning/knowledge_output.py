@@ -41,6 +41,14 @@ def _summary_projection(item, limit=700):
     content = _text(item.get("content"))
     if len(content) <= limit:
         return content, 0, len(content), False
+    from .knowledge_excerpt import conclusion_projection
+    conclusion = conclusion_projection(content, limit)
+    if conclusion is not None:
+        matched = item.get("match", {}).get("matched_terms", [])
+        if conclusion[0] and matched and not any(
+                term.casefold() in conclusion[0].casefold() for term in matched if isinstance(term, str) and term):
+            return "", 0, 0, True  # The topic occurred only in omitted background.
+        return conclusion
     matched = item.get("match", {}).get("matched_terms", [])
     lowered = content.lower()
     positions = [position for term in matched if isinstance(term, str) and term
@@ -53,6 +61,13 @@ def _summary_projection(item, limit=700):
 
 def _summary(item, limit=700):
     return _summary_projection(item, limit)[0]
+
+
+def _shrink_summary(item, summary, limit):
+    from .knowledge_excerpt import conclusion_projection
+    from .runtime import clip
+    conclusion = conclusion_projection(_text(item.get("content")), limit)
+    return conclusion[0] if conclusion is not None else clip(summary, limit)
 
 
 def _card(item):
@@ -70,6 +85,8 @@ def _card(item):
     result["truncated"] = (result["content_summary"] != item.get("content", "") or any(
         result[key] != item.get(key, "") for key in ("title", "applicability", "limitations")))
     result["read_required"] = any(result[key] != item.get(key, "") for key in ("applicability", "limitations"))
+    if not result["content_summary"] and item.get("content"):
+        result["read_required"] = True
     if match.get("method") in {"lexical", "semantic", "hybrid"}:
         result["match"]["method"] = match["method"]
     for key in ("semantic_score", "semantic_rank"):
@@ -82,10 +99,18 @@ def _card(item):
     return result
 
 
-def _fit_card(card, maximum):
+def _fit_card(card, maximum, item=None):
     if _length(card) <= maximum:
         return card
     card["truncated"] = True
+    from .knowledge_excerpt import conclusion_range
+    if item and conclusion_range(_text(item.get("content"))) is not None:
+        # A complete conclusion and its boundaries are atomic. Manual search
+        # can fall back to a preview, but cannot cut away a negation/condition.
+        card["content_summary"] = ""
+        card["read_required"] = True
+        if _length(card) <= maximum:
+            return card
     # 先减少正文摘录，再减少条件；无完整条件的卡仍明确声明只是预览。
     for key, minimum in (("content_summary", 0), ("applicability", 64), ("limitations", 64), ("title", 40)):
         original = card[key]
@@ -151,7 +176,7 @@ def search_preview(result, max_chars=6000):
         # 平分剩余空间，避免首条长正文耗尽所有卡片的预算。
         remaining = max_chars - _length(output) - 2
         share = remaining // max(1, len(source_items) - index)
-        card = _fit_card(_card(item), share)
+        card = _fit_card(_card(item), share, item)
         if card is not None:
             output["items"].append(card)
             output["omitted_count"] -= 1

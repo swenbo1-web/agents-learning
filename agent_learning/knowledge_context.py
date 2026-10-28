@@ -267,7 +267,7 @@ class KnowledgeContextMixin:
         if _outcome is not None and not isinstance(_outcome, dict):
             raise ContractError("context outcome must be a dictionary")
         from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
-        from .knowledge_output import _summary
+        from .knowledge_output import _summary, _shrink_summary
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
         with self.transaction():
             epoch = self.assert_session_epoch(expected_epoch)
@@ -536,7 +536,11 @@ class KnowledgeContextMixin:
                         card["semantic_score"] = item["match"].get("semantic_score")
                 for field in ("content_summary", "title"):
                     while len(encode(card)) > available and len(card[field]) > 24:
-                        card[field] = clip(card[field], max(24, len(card[field]) // 2))
+                        limit = max(24, len(card[field]) // 2)
+                        card[field] = (_shrink_summary(item, card[field], limit)
+                                       if field == "content_summary" else clip(card[field], limit))
+                if not card["content_summary"] and item.get("content"):
+                    card["read_required"] = True
                 if len(encode(card)) > available:
                     # 不裁掉适用/限制后继续展示可执行摘要；退回仅标识卡。
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],

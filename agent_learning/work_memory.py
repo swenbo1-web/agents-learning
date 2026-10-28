@@ -310,11 +310,62 @@ def _work_priority(body):
             "file_change": 1}.get(kind, 0)
 
 
+def _request_history_topic(query):
+    """Recognize an explicit request for prior wording, not the history feature."""
+    if not re.search(r"(?:之前|以前|先前|上次|当时).{0,40}(?:提问|问题|要求|需求|原话|问过|说过)|"
+                     r"历史(?:用户)?(?:提问|问题|要求|需求|原话)|"
+                     r"(?:我|用户).{0,8}(?:提过|问过|说过)|(?:用户|提问|需求)(?:的)?原话|"
+                     r"\bwhat\s+(?:did|had)\s+(?:i|the user)\s+(?:ask|request|say)\b|"
+                     r"\b(?:previous|earlier|original|past|historical)\s+(?:user\s+)?(?:requests?|requirements?|questions?|prompts?|wording)\b|"
+                     r"\b(?:user|my)\s+(?:exact|original)\s+(?:words|wording)\b", query, re.I):
+        return None
+    # Remove only the now-explicit retrieval framing. The usual exact identity
+    # and topic gates still run against what remains; no broad recent-history
+    # fallback is inferred when that topic is empty.
+    topic = re.sub(r"查看|查询|查找|找出|检索|回顾|回看|之前|以前|先前|上次|当时|历史|"
+                   r"提问|问题|要求|需求|原话|问过|说过|提过|用户|是什么|说的|问的|我的|我|的", " ", query)
+    return re.sub(r"\b(?:what|did|had|i|the|user|my|ask|asked|request(?:s|ed)?|say|said|find|show|"
+                  r"look|up|about|previous|earlier|original|past|historical|requirements?|questions?|prompts?|"
+                  r"wording|words|exact)\b", " ", topic, flags=re.I).strip()
+
+
+def _request_has_context(text):
+    """Keep observable facts and directives, not unanswered questions as facts.
+
+    This only selects existing user records for automatic reference. It neither
+    judges the statement true nor changes its reported evidence level.
+    """
+    for part in re.split(r"(?<=[。！？?!;；])|(?<=\.)\s+|\n", text):
+        part = part.strip()
+        if not part:
+            continue
+        if ("?" in part or "？" in part or re.search(r"是否|能否|怎样|怎么|如何|为什么|是不是|有没有|可不可以|能不能|吗[。！!]?\Z", part)
+                or re.match(r"\W*(?:what|why|how|where|when|who|can|could|would|should|must|is|are|do|does|did)\b", part, re.I)):
+            continue
+        if _constraint_request(part) or _correction(part):
+            return True
+        if re.match(r"(?:请|帮我|帮忙|继续|接着|先|再|重新|检查|查看|分析|修复|优化|实现|完成|执行|"
+                    r"我想|我要|我们想|我们需要|对.{0,80}(?:分析|检查|修复|优化))|"
+                    r"(?:please|investigate|check|inspect|analy[sz]e|fix|repair|improve|implement|show|find)\b", part, re.I):
+            continue
+        if re.search(r"是|为|有|包含|采用|使用|默认|位于|返回|报错|失败|成功|支持|已|尚未|还没|只有|属于|导致|由于|发现|结论|结果|"
+                     r"\b(?:is|are|was|were|has|have|uses|used|runs|returns|failed|passed|because|supports|defaults|located)\b", part, re.I):
+            return True
+    return False
+
+
 def _work_preview(text, query, max_chars=80):
     """Select a bounded original-text excerpt; never synthesize a conclusion."""
     from .knowledge_index import normalized_query_plan
     if len(text) <= max_chars:
         return text
+    from .knowledge_excerpt import conclusion_projection
+    projected = conclusion_projection(text, max_chars)
+    if projected is not None:
+        query_terms = normalized_query_plan(query)["terms"]
+        if projected[0] and query_terms and not any(word.casefold() in projected[0].casefold() for word in query_terms):
+            return ""
+        return projected[0]
     plan = normalized_query_plan(query)
     terms = [word for word in plan["terms"] if len(word) > 1]
     lowered = text.casefold()
@@ -724,12 +775,21 @@ class WorkMemoryMixin:
         pool_limit = min(100 if automatic else 200, limit * 10)
         rows = self.db.execute(select + ordering + " LIMIT ?", (*params, pool_limit)).fetchall()
         plan = normalized_query_plan(query)
+        history_topic = _request_history_topic(query) if automatic and not handoff else None
+        if history_topic is not None:
+            topic_plan = normalized_query_plan(history_topic)
+            # Removing natural-language framing must not erase an error code,
+            # version or path containing words such as "original"/"问题".
+            if (plan["automatic_safe"] and set(plan["exact_anchors"]).issubset(topic_plan["exact_anchors"])):
+                plan = topic_plan
         receipt_query = _write_receipt_query(plan)
         if (not handoff and not receipt_query and len(rows) == pool_limit
-                and any(_metadata_only_write(json.loads(row["body"])) for row in rows)):
-            # A bounded second lane prevents a burst of write receipts from
-            # hiding older results. It retains the same scope and query gates.
-            other = self.db.execute(select + " AND json_extract(m.body,'$.type')!='file_change'" + ordering
+                and any(_metadata_only_write(json.loads(row["body"])) or automatic and history_topic is None
+                        and json.loads(row["body"]).get("type") == "user_request" for row in rows)):
+            # A bounded second lane prevents bursts of requests/receipts from
+            # hiding older evidence. Scope and the final match gates stay equal.
+            excluded = "('file_change','user_request')" if automatic and history_topic is None else "('file_change')"
+            other = self.db.execute(select + " AND json_extract(m.body,'$.type') NOT IN " + excluded + ordering
                                     + " LIMIT ?", (*params, pool_limit)).fetchall()
             found = {row["id"] for row in rows}
             rows.extend(row for row in other if row["id"] not in found)
@@ -747,14 +807,16 @@ class WorkMemoryMixin:
                 # normal lexical ordering; no source or authority is changed.
                 receipt = _metadata_only_write(body)
                 content_role = receipt if receipt_query else not receipt
-                return (exact, bool(matches), content_role, matches, _work_priority(body),
+                useful = _work_priority(body) if automatic else 0
+                if automatic and history_topic is not None:
+                    useful = 5 if body.get("type") in {"user_request", "user_correction"} else useful
+                return (exact, bool(matches), content_role, useful, matches, _work_priority(body),
                         row["created"], row["id"])
             rows = sorted(rows, key=score, reverse=True)
         selected_rows, counts, requests = [], {}, []
         query_gate = automatic and query.strip() and file_path is None
         if query_gate:
             from .knowledge_index import _match_info
-            plan = normalized_query_plan(query)
             if not plan["automatic_safe"]:
                 return []
             weights = {word: 2 if re.fullmatch(r"[\u3400-\u9fff]+", word) and len(word) > 1 else 1
@@ -763,6 +825,9 @@ class WorkMemoryMixin:
         for row in rows:
             body = json.loads(row["body"])
             if automatic and _metadata_only_write(body):
+                continue
+            if (automatic and body.get("type") == "user_request" and history_topic is None
+                    and not _request_has_context(body.get("summary", ""))):
                 continue
             if query_gate:
                 if (plan["automatic_intent"]["action_only"] and body.get("type") == "user_request"
@@ -779,8 +844,8 @@ class WorkMemoryMixin:
                     continue
                 # Prefer recorded results over a previous short question about
                 # the same subject. Keep explicit user constraints/corrections;
-                # requests remain the fallback when no useful result exists.
-                if body.get("type") == "user_request" and not _constraint_request(body["summary"]):
+                # source-reported user facts remain a fallback when no result exists.
+                if body.get("type") == "user_request" and history_topic is None and not _constraint_request(body["summary"]):
                     requests.append(row)
                     continue
             parent = body.get("public_message_id", row["id"])
@@ -1022,7 +1087,7 @@ class WorkMemoryMixin:
                 # 资料必须通过实际问题召回或明确文件关联，不能仅按新近程度。
                 rows = self._work_search_rows(project, query, limit=limit,
                     conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state,
-                    exclude_event_id=exclude_event_id, automatic=bool(query.strip()))
+                    exclude_event_id=exclude_event_id, automatic=True)
             # A query that cannot represent every identity is not a blank query.
             # Its compact-only lane never infers files or falls back to other
             # conversations. Reserve one healthy current-task handoff so ordinary

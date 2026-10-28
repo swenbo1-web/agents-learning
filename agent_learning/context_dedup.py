@@ -53,6 +53,12 @@ def _formal_ranges(item, card):
     positions = ([None] if start > 0 else []) + list(range(start, end)) + ([None] if truncated else [])
     while summary != rendered and len(summary) > 24:
         limit = max(24, len(summary) // 2)
+        from .knowledge_excerpt import conclusion_projection
+        conclusion = conclusion_projection(item.get("content", ""), limit)
+        if conclusion is not None:
+            summary, start, end, truncated = conclusion
+            positions = ([None] if start > 0 else []) + list(range(start, end)) + ([None] if truncated else [])
+            continue
         pieces, separator = _clip_projection(summary, limit)
         selected = []
         for index, (left, right) in enumerate(pieces):

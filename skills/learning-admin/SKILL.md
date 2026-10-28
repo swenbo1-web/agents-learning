@@ -26,6 +26,7 @@ description: "在 Agent Learning Runtime 的管理员身份下，依据新增案
 - Stable 由受信运行端检查独立任务、来源与反例，管理员不把单次工具成功视为成熟经验。恢复同版后原撤销反例仍待核实；专业知识及 Pattern 需要对应专门验证依据，不绕过晋升规则。
 - 审核包有遗漏时使用 `next_offset`、同一 `problem.revision` 的 `expected_revision` 继续读取；大任务原文用 `section=task` 分页。分页材料仍属于同一案例，不能把不完整或已截短证据晋升为完整验证。
 - 候选内容描述现象、适用条件、方法、证据和限制，绑定 `problem_id`、`problem_revision` 和 `evidence_refs`。来源改变后，应复核受影响内容。
+- 新生成的 `candidate.content` 有资料支持的可复用结论时，以“结论：”或“Conclusion: ”起首；后续按需简述影响结论的适用条件、限制、验证及版本或时间。不重复 `applicability`／`limitations`／`metadata`，不强制五段模板，缺项不编造；`reported` 保留来源陈述语气。工作摘要先写有依据的当前状态，再保留必要经过与未确认事项，不强迫结论标签。不重审或改写旧知识，不为调整表述追加模型调用。
 - `knowledge_kind` 区分 `fact`（事实）、`solution`（具体解法）、`pattern`（可复用方法）；省略时使用 `solution`。比较现有知识时同时核对当前 `source_health` 和 `current_tool_success`。
 - 有明确来源时填写 `metadata` 的工具、版本、错误码、环境和验证方式，未知时留空。`evidence_truncated` 表示原文被截短，结论仅限可见材料，不能写成完整根因验证。
 - `validation_level` 只使用 `reported` 或 `tool_success`。前者是有记录的陈述；后者限定具体工具成功，不表示专业结论或产品已经验收。
