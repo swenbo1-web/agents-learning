@@ -51,7 +51,10 @@ _TOOL_USAGE_WORDS = {"use", "usage", "using", "tool", "tools", "function", "func
 _ZH_TOOL_USAGE = re.compile(r"使用说明|使用方式|使用方法|使用|用法|工具|调用|函数")
 _TOOL_FAULT_WORDS = {"error", "failed", "failure", "timeout", "permission", "denied", "output", "input",
                      "invalid", "code", "status", "process", "exit", "signal", "terminated", "stderr", "stdout",
-                     "超时", "权限", "失败", "报错", "错误", "输出", "参数", "执行", "处理"}
+                     "config", "configuration", "setting", "settings", "argument", "arguments", "parameter",
+                     "parameters", "option", "options", "syntax", "terminal", "session", "console",
+                     "超时", "权限", "失败", "报错", "错误", "输出", "参数", "执行", "处理", "配置", "设置", "语法"}
+_TOOL_FAULT_ZH = re.compile("|".join(word for word in sorted(_TOOL_FAULT_WORDS) if _CHINESE.fullmatch(word)))
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
                         "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
                         "模型设置", "按钮样式", "主题颜色"}, key=lambda value: (-len(value), value))))
@@ -122,11 +125,12 @@ def _tool_background_terms(query, query_terms=None):
         return set()
     excluded = set(terms(" ".join(named))) | _TOOL_USAGE_WORDS | _EN_REQUEST_WORDS | _TOOL_FAULT_WORDS
     for segment in re.findall(r"[\u3400-\u9fff]+", query):
-        if not _ZH_TOOL_USAGE.sub("", segment):
+        if not _TOOL_FAULT_ZH.sub("", _ZH_TOOL_USAGE.sub("", segment)):
             excluded.update(match_terms(segment))
     business = {word for word in selected if len(word) > 1 and word not in excluded}
     # A lone generic timeout/permission question cannot establish another domain.
-    return business if len(business) >= 2 else set()
+    domain = any(re.fullmatch(r"[a-z]{4,}", word) for word in business)
+    return business if len(business) >= 2 or domain else set()
 
 
 def _query_terms(query, anchors=()):

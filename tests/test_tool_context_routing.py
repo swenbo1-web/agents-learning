@@ -59,3 +59,13 @@ class ToolContextRoutingTests(unittest.TestCase):
         query = "custom_sqlite.execute E_SQLITE_ROLLBACK"
         self.assertIn("custom_sqlite.execute", normalized_query_plan(query)["exact_anchors"])
         self.assertFalse(self.match(query, "E_SQLITE_ROLLBACK transaction recovery.")["auto_eligible"])
+
+    def test_single_named_domain_is_context_but_generic_tool_faults_are_not(self):
+        for domain in ("SQLite", "gridfocus"):
+            with self.subTest(domain=domain):
+                right = self.publish(domain + " transaction boundaries are preserved.")
+                self.assertIn(right, self.automatic_ids("exec_command " + domain))
+        for topic in ("configuration", "arguments", "permission denied", "权限配置错误", "超时处理"):
+            with self.subTest(topic=topic):
+                self.assertIn("exec_command", normalized_query_plan("exec_command " + topic)["exact_anchors"])
+                self.assertFalse(self.match("exec_command " + topic, "read_file " + topic)["auto_eligible"])
