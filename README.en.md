@@ -12,7 +12,7 @@ Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
 
 Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
 
-**These steps use the v1.4.39 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. When core retrieval or provenance rules change, update and reload all Codex, Antigravity and DSH installations sharing a database together. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+**These steps use the v1.4.40 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. When core retrieval or provenance rules change, update and reload all Codex, Antigravity and DSH installations sharing a database together. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
 
 ## Core capabilities
 
@@ -24,6 +24,7 @@ Keep experience across conversations: supported Hooks record tool results and pu
 | Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
 | Optional administrator and stage review | After explicit enablement, organize every 1–20 completed tasks/stages using project token budgets, per-case evidence and partial-coverage progress; explicit plugin status checks stay local to avoid standalone calls; existing case review and count presets remain compatible |
 | Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
+| Automatic upgrade health check | Check retained formal knowledge locally in small batches after first project connection; all hosts share progress and a visual report, without model calls or automatic knowledge changes |
 | Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
 | Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
 | Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
@@ -31,6 +32,18 @@ Keep experience across conversations: supported Hooks record tool results and pu
 No real-task net token, speed or quality gains have been established by paired evaluation.
 
 **Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
+
+## Shared knowledge health check after upgrade (1.4.40)
+
+After installation and reload, the new runtime automatically advances diagnostics on its first explicit project binding. The installer exports resources without guessing a database. Projects not opened remain pending; no resident scan service or administrator enablement is required.
+
+- **One shared run:** the SQLite database keys progress by project ID and health-rule version, excluding host, account and installation path. Different projects/databases remain independent. Patches with unchanged rules reuse results; older rules cannot overwrite a registered newer run.
+- **Bounded and resumable:** each project connection handles at most 12 records with a 75 ms execution budget. A short transaction commits observations and cursor together. Busy databases yield; later connections resume. Resource-limited checks are explicitly partial and cannot be interpreted as passing. An inactive project has no background completion guarantee.
+- **Maintenance suggestions:** inspect current active formal knowledge for missing/unknown classification, missing purpose/evidence grades, unspecified applicability/limitations, exact duplicates, existing counterexamples and bounded direct-source evidence risks. Missing fields are suggestions, not proof of false content. No semantic reclassification, age-only invalidation, historical import, raw-chat/source scan, candidate scan or work-history scan occurs.
+- **Visual, read-only observations:** expand Knowledge health check in the knowledge browser; `status` includes a cached summary. Reports retain checked revisions and timestamps. Manifest consistency does not prove unchanged source events; existing live read checks remain authoritative for retrieval.
+- **No automatic governance:** only derived reports are written. Content, classification, evidence grades, activation, candidates, administrator queues and publication policy stay unchanged. No model is called; corrections and reclassification use existing revision/approval paths.
+
+Schema/protocol25 and indexes6/2/1 remain compatible. Diagnostic storage is independent of the optional scheduler and adds no automatic model-context injection. A completed report describes bounded observations, not factual certification.
 
 ## Tool context, source caveats and budget choice (1.4.39)
 
@@ -1058,7 +1071,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.39 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.40 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 

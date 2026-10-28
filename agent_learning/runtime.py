@@ -346,6 +346,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             install_admin_responses(self)
             from .history_response_recovery import install as install_history_response_recovery
             install_history_response_recovery(self)
+            from .knowledge_health import install as install_knowledge_health
+            install_knowledge_health(self)
             if version and self.db.execute("PRAGMA user_version").fetchone()[0] < 25:
                 self._fence_runtime_upgrade()
             self.db.execute("PRAGMA user_version=25")
@@ -558,6 +560,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                             else registered["project"] if registered else digest(root_path)[:24])
         self.db.execute("INSERT OR IGNORE INTO projects(id) VALUES(?)", (project,))
         self.db.execute("INSERT OR IGNORE INTO project_paths VALUES(?,?)", (root_path if not alias else path, project))
+        from .knowledge_health import maybe_advance
+        maybe_advance(self, project)
         return project
 
     def bind_session(self, project, conversation_id):
@@ -774,6 +778,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         (project, name, value))
 
     def status(self, project):
+        from .knowledge_health import report as knowledge_health_report
         from .antigravity_health import capture_status
         from .candidate_references import policy as reference_policy
         from .phase_review import status as phase_status
@@ -812,6 +817,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 "host_scope": self.host_scope, "governance_epoch": self.host_epoch(),
                 "knowledge_scope": "shared_project", "account_detection": "host_notification_required", "counts": counts,
                 "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+                "knowledge_health": knowledge_health_report(self.db, project, limit=0),
                 "candidate_reference_policy": reference_policy(self, project),
                 "index_version": self.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0],
                 "observed_events": observed, "outbox_states": outbox_states,

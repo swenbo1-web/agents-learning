@@ -377,6 +377,7 @@ class _Handler(ReviewHandlerMixin, BaseHTTPRequestHandler):
 def _read_api(db, project, route, params):
     contracts = {
         "/api/stats": set(),
+        "/api/knowledge-health": {"offset", "limit"},
         "/api/knowledge-list": {"q", "state", "category", "kind", "offset", "limit"},
         "/api/knowledge": {"knowledge_id", "revision", "section", "offset", "limit"},
         "/api/revisions": {"knowledge_id", "offset", "limit"},
@@ -393,6 +394,10 @@ def _read_api(db, project, route, params):
     if set(params) - contracts[route]:
         raise ContractError("unsupported query parameter")
     model = _ReadModel(db)
+    if route == "/api/knowledge-health":
+        from .knowledge_health import report
+        return report(db, project, offset=_integer(params, "offset", 0, MAX_OFFSET),
+                      limit=_integer(params, "limit", 20, MAX_PAGE))
     if route == "/api/admin-groups":
         from .admin_workload import workload_page
         return workload_page(db, project, view=_text(params, "view", "groups"), stage=_text(params, "stage", "all"),

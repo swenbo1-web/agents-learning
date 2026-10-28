@@ -524,6 +524,10 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                                 "choices": ["history-prepare", "history-skip"],
                                 "workspace_required": True,
                                 "next_step": "首次接入项目可明确选择吸收或稍后；安装和升级均不会读取历史或调用模型。"}
+    from .knowledge_health import RULE_VERSION
+    result["knowledge_health"] = {"automatic": True, "trigger": "first_bound_project_open",
+        "rule_version": RULE_VERSION, "dedup_scope": "shared_database_project_rule",
+        "model_calls": False, "knowledge_mutation": False}
     if previous is not None:
         result.update({"previous_release_id": previous["release"]["release_id"],
                        "preserved_extra_files": [name for name in previous["extra_files"] if name not in adopted_extra_files],
