@@ -164,6 +164,27 @@ class ConclusionRuntimeTests(unittest.TestCase):
                 self.assertEqual(bool(repeated), delivery == "ephemeral")
                 self.assertEqual(r.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
+    def test_narrow_index_keeps_reported_grade_and_can_expand_without_compaction(self):
+        f = self.f
+        conclusion = ("结论：dedupfocus 使用独立事务。" + "保留原记录及稳定身份。" * 18
+                      + "\n适用条件：仅处理本机只读快照。\n限制：失败不得发布；不能覆盖原数据库。")
+        body = "背景：dedupfocus " + "trace " * 180 + "\n" + conclusion
+        published, _ = f.published(content=body)
+        f.r.config["injection_max_chars"] = 650
+        narrow = f.context()
+        card = f.formal_cards(narrow)[0]
+        self.assertLessEqual(len(narrow), 650)
+        self.assertEqual(card["knowledge_id"], published["knowledge_id"])
+        self.assertTrue(card["read_required"])
+        self.assertEqual(card.get("content_summary", ""), "")
+        self.assertEqual(card["validation_level"], "reported")
+        self.assertEqual(f.formal_cards(f.context()), [])
+        f.r.config["injection_max_chars"] = 6000
+        card = f.formal_cards(f.context())[0]
+        self.assertIn(conclusion, card["content_summary"])
+        self.assertEqual(card["validation_level"], "reported")
+        self.assertEqual(f.formal_cards(f.context()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

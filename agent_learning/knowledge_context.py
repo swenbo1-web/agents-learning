@@ -546,6 +546,7 @@ class KnowledgeContextMixin:
                     card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                             "title": clip(item["title"], 60), "summary_only": True,
                             "read_required": True, "source_health": item["source_health"],
+                            "validation_level": item.get("validation_level", "reported"),
                             "knowledge_tier": item.get("knowledge_tier", "source_reference"),
                             "maturity": item.get("maturity", "candidate")}
                     card.update(file_state)
