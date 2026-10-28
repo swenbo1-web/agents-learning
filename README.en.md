@@ -4,11 +4,13 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**Keep project experience available, traceable and ready to improve.**
+**Stop paying tokens to solve yesterday's problems again.**
 
-Yesterday's bug was solved. Today's fresh chat starts the investigation again. A long task gets compacted, and the constraints you just agreed on become hard to find. Switching AI tools means explaining the same project all over again.
+Yesterday's fix becomes today's fresh investigation. Agreed constraints need explaining again after compaction. Switching AI tools makes an established project feel brand new. You have already paid for that experience in time and tokens.
 
-**agents-learning brings project memory, evidence-based knowledge management and a visual knowledge browser to Codex, Antigravity and DSH (DeepSeek Harness).** It records observable work results and retrieves sourced experience for later tasks. Relevant conclusions and their conditions come first; details and evidence are available when needed. Keep delivering while earlier work becomes a reference for the next task.
+**Let the next chat build on earlier work and leave context for the current challenge.** agents-learning gives **Codex, Antigravity and DSH (DeepSeek Harness)** traceable, correctable project memory: capture public work results, select conclusions and conditions for the current question, then expand evidence on demand. Everyday tasks can reuse work history directly; long-running projects can also organize, review and publish knowledge by completed stage.
+
+**Local two-stage coding sample: all three conditions scored 97.5/100; the new run reported 0.82% more cumulative tokens than the historical no-plugin run, with one work-history card and zero exact card repeats.** [See the data and test limits](#a-real-sample-equal-quality-selective-memory)
 
 **Cross-session work history · Conclusion-first, progressive reads · Corrections and revocation · Stage review and tiered publication · Shared project memory across three hosts · Visual controls**
 
@@ -17,6 +19,44 @@ Yesterday's bug was solved. Today's fresh chat starts the investigation again. A
 Python **3.10+** · Local SQLite · No additional model API key for the default setup · [MIT](LICENSE)
 
 **These features and installation steps target v1.4.40 on `main`; the [original v1.0.0 distribution](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) lacks newer capabilities.** Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility). When core rules change, update and reload all three hosts sharing the database.
+
+## A real sample: equal quality, selective memory
+
+Quality, tokens and elapsed time all matter when adding memory. This is a maintainer's local observation using **the same task inputs and acceptance rules, GPT-6.1-Sol / High, two coding stages and one real explicit compaction per condition.** The new run started with an empty isolated memory store, used only work history accumulated during its own task and kept the administrator disabled.
+
+| Condition | Quality score | Checks passed | Observed elapsed time | Host-reported cumulative tokens |
+|---|---:|---:|---:|---:|
+| No plugin, October 27 historical sample | 97.5/100 | 73/74 | 15m 25.8s | 1,160,435 |
+| agents-learning 1.4.34, October 27 historical sample | 97.5/100 | 73/74 | 19m 01.3s | 1,190,744 |
+| **agents-learning 1.4.40, October 28 new sample** | **97.5/100** | **73/74** | **11m 02.2s** | **1,169,926** |
+
+**The new sample retained the same acceptance score, with reported cumulative tokens close to the historical no-plugin run (+0.82%) and 1.75% below the historical older-plugin run.** A and B were not rerun this round, and CLI versions differed. This is historical reference data: elapsed-time differences cannot be attributed to the plugin, and the sample does not guarantee unchanged overhead for every task.
+
+How the new version used memory in this task:
+
+| Observation | This 1.4.40 run |
+|---|---|
+| All plugin context submissions | **1,086 characters** across four submissions, including session-binding and task metadata; these are not four knowledge cards |
+| Actual work-history cards | **One**, with **zero** exact card repeats |
+| On-demand work-record reads | **One** `work_memory_read` |
+| Cumulative local Hook/MCP timing | About **3.50 seconds**; excludes model reading and attention effects and is not end-to-end additional latency |
+| Early-check preservation | **46/47** after stage one and after compaction plus stage-two delivery; **zero** previously passing checks lost |
+| Administrator generation-model calls | **Zero** |
+
+This sample shows **retained quality with restrained memory delivery in that coding task**. It does not establish long-term gains for a mature project. Working-history usefulness, formal-knowledge benefit and automated review are evaluated separately.
+
+<details>
+<summary>Method, accounting and untested scope</summary>
+
+- Runs took place locally on October 27–28, 2026, with one sample per condition. Only 1.4.40 ran this round. Stage prompts, the frozen task and grading rules matched the historical samples; model, effort and account consistency were checked. The new CLI was `0.165.0-alpha.1.2`; the historical CLI was `0.164.0-alpha.11.1`. This was not a same-environment, single-variable causal comparison or a comparison with other memory plugins.
+- The quality score follows a fixed rubric rather than a simple pass percentage. All three conditions retained the same multi-file rollback exception-type assertion failure, with zero critical failures. An offline diagnostic confirmed intact rollback state in the new artifact; its original 97.5 score was not changed. A result of 73/74 is not an all-pass result.
+- Tokens are host-reported cumulative input and output, including repeated input and cache hits. Cached input is a subset, not an additional total. Standalone compaction usage was not independently verified, and orchestration/review usage is excluded, so this is not a complete bill or full-workflow cost.
+- The 1,086 figure counts characters, not tokens. Zero exact card repeats proves neither model reading/adoption nor elimination of all semantic repetition. Hook/MCP timings may overlap tool time and must not be added again to explain total elapsed time.
+- The run began with no formal knowledge and does not measure years of accumulated project experience. One explicit compaction does not test every automatic compaction under natural context pressure. No general token savings, speedup, zero-distraction effect or superiority over all other plugins is claimed.
+
+These are public aggregate observations; raw local logs and account information are not shipped with the repository. See [real-task evaluation](#real-task-paired-evaluation) for evaluation entry points and how to organize new comparisons.
+
+</details>
 
 ## Built for projects that outlast a chat
 
@@ -27,6 +67,16 @@ Public requests, work notes, tool results and file associations become searchabl
 ### Start with the conclusion and leave room for the current problem
 
 Automatic retrieval selects material for the current question and prefers conclusions with their necessary conditions. When the complete passage will not fit, it offers a small index for on-demand reading. Within a persistent context, delivery tracking deduplicates previously shown material by revision and source state; compaction rechecks task and source eligibility. Persistent sessions and ephemeral host calls have separate delivery semantics so deduplication does not silently remove necessary context.
+
+| Injection step | Current behavior | Problem addressed |
+|---|---|---|
+| **Check relevance first** | Retrieve for the business question; a shared generic tool name alone does not qualify a reference. Check explicit version/environment conditions where recognized | Avoids bringing in a different business problem merely because it uses the same tool |
+| **Keep conclusions and conditions together** | Prefer clear conclusions with necessary applicability, limitations and corrections; use a read index when they will not fit | Avoids an apparently useful conclusion with its prerequisite missing |
+| **Start small and expand on demand** | A configurable 2,400-character default total budget; the Agent reads content and evidence when needed | Bounds automatic input and leaves context for the current task |
+| **Track delivery and recheck changes** | Deduplicate exposed material in persistent contexts; recheck revisions, sources, task changes and compaction recovery | Reduces repeated delivery while preserving necessary updates |
+| **Handle risk according to evidence** | Stop automatic excerpts for invalid or disputed material; turn some source risks into labeled read indexes; distinguish work records from formal solutions | Prevents old experience from being presented as a conclusion the current task must obey |
+
+These filters and default full-text retrieval run locally without another generation-model call for each injection. The model still reads delivered material and assesses applicability; relevance checks, character budgets and exposure tracking separately constrain selection, input size and repeated delivery.
 
 ### Keep experience open to correction
 
@@ -59,6 +109,8 @@ Install the entry point for your host, reload it and start a fresh conversation 
 | **DSH** | [Install into the profile you actually use](#install-in-dsh-deepseek-harness) | The **📖 Memory** composer button in a bound project |
 
 **For everyday work, describe your task as usual.** First verify the connection with **Check connection** or `$learning-debug`. Open the knowledge browser to inspect records; enable an administrator separately when you want model-assisted organization, choosing its model, stage frequency, budget and publication scope. For an existing project, use `$learning-history` to select historical material. [Full usage guide](#use-it-in-your-project)
+
+**Start with capture and retrieval, then decide whether to enable model-assisted organization.** Default capture and full-text retrieval add no generation-model call; installing does not start an administrator, AI summaries or historical organization. Inspect the connection, budgets and queues in the visual panel first. Supported native panels open directly without sending a chat message just to inspect settings. Injected material still consumes model input tokens; use the accounting above when assessing actual task usage.
 
 ## Core capabilities
 
