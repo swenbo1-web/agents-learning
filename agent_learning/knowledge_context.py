@@ -388,7 +388,7 @@ class KnowledgeContextMixin:
                         exclude_event_id=_source_event_id,
                         allow_unfocused_history=_query_available or bool(effective.strip()),
                         handoff_only=bool(work_query and not effective_plan["automatic_safe"]),
-                        conclusion_max_chars=240)
+                        conclusion_max_chars=240, applicability_query=effective)
                 else:
                     # Safety/expiry notices stay independent of optional recall.
                     work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace)
@@ -489,7 +489,8 @@ class KnowledgeContextMixin:
                     item = latest
                 if item["source_health"] != "valid" or item.get("pending_counterexample_count", 0):
                     continue
-                if automatic_applicability(item, environment)["status"] == "incompatible":
+                if any(automatic_applicability(item, environment, query=value)["status"] == "incompatible"
+                       for value in dict.fromkeys((effective, retrieval))):
                     continue
                 # 防线：若某条正式知识的来源案例正属于当前同一个会话且案例已发生新变化（正在继续修改/重修中），
                 # 暂停将其作为定型正式知识反哺注入当前会话，防止模型拿上一轮的半成品当佐证自我锚定。
@@ -594,7 +595,8 @@ class KnowledgeContextMixin:
                 candidate_pending = list(dedup.pending)
                 try:
                     for selected in candidate_items[:1]:
-                        item = revalidate(self, project, selected, context_handle=context_handle, workspace=workspace)
+                        item = revalidate(self, project, selected, context_handle=context_handle,
+                                          workspace=workspace, query=effective)
                         if not item:
                             continue
                         note = card(item, max_chars=min(400, optional_budget, max(0, remaining())))
@@ -641,7 +643,7 @@ class KnowledgeContextMixin:
                     work_used = 0
                     conclusion_used = False
                     for work_item in self.work_validate_items(project, work_items, workspace=workspace,
-                                                              conclusion_max_chars=240):
+                                                              conclusion_max_chars=240, applicability_query=effective):
                         from .candidate_reference_context import suppress_work
                         changed_work = bool(work_item.get("source_changed") or work_item.get("file_state_changed"))
                         if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])

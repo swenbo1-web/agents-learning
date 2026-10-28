@@ -354,6 +354,34 @@ def _request_has_context(text):
     return False
 
 
+def _work_version_applicable(body, query, workspace):
+    """Version conditions use complete original summaries, never short previews."""
+    if not query:
+        return True
+    from .knowledge_applicability import automatic_applicability, project_environment
+    coverage = body.get("coverage", {})
+    comparison = {"title": body.get("title", ""), "content": body.get("summary", ""), "category": "project",
+                  "content_complete": not coverage.get("truncated") and coverage.get("segments", 1) == 1}
+    return automatic_applicability(comparison, project_environment(workspace), query=query)["status"] != "incompatible"
+
+
+def _work_conclusion_upgrade_eligible(item, query, max_chars):
+    """Extra summary space requires healthy sources and fully observed files."""
+    # A delivered file reminder updates exposure state, not the source's
+    # captured file version. It cannot make an old conclusion healthy again.
+    files = item.get("files", [])
+    return (type(max_chars) is int and 80 < max_chars <= 240
+            and query is not None and item.get("reference_role") != "task_handoff"
+            and item.get("state") in {"reported", "model_reported", "succeeded"}
+            and item.get("automatic_eligible", True)
+            and not item.get("source_changed") and not item.get("file_state_changed")
+            and not item.get("candidate_reference_risk") and not item.get("file_projection_incomplete")
+            and item.get("files_count") == len(files)
+            and all(file.get("version_changed") is False
+                    and file.get("version", {}).get("status") == "stat_observed"
+                    and file.get("current_version", {}).get("status") == "stat_observed" for file in files))
+
+
 def _work_conclusion_preview(text, query, max_chars):
     """Return a whole relevant conclusion, empty if unsafe, or None if unlabelled."""
     from .knowledge_index import normalized_query_plan
@@ -1049,7 +1077,7 @@ class WorkMemoryMixin:
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
                            context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False,
-                           allow_unfocused_history=True, conclusion_max_chars=80):
+                           allow_unfocused_history=True, conclusion_max_chars=80, applicability_query=""):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
@@ -1137,6 +1165,8 @@ class WorkMemoryMixin:
                     continue
                 handoff_scope = handoff_scopes.get(row["id"])
                 preview_query = None if handoff_scope else query
+                if not _work_version_applicable(body, applicability_query or preview_query, workspace):
+                    continue
                 item = prepared.get(row["id"])
                 if item is None:
                     item = self._work_item(project, row, workspace=workspace,
@@ -1172,11 +1202,8 @@ class WorkMemoryMixin:
                     # for this upgrade; its actual-card fingerprints still
                     # suppress already-covered content without resetting scope.
                     expanded = (_work_conclusion_preview(body.get("summary", ""), preview_query, conclusion_max_chars)
-                                if type(conclusion_max_chars) is int and 80 < conclusion_max_chars <= 240
-                                and preview_query is not None and not handoff_scope
-                                and item.get("state") in {"reported", "model_reported", "succeeded"}
-                                and item.get("automatic_eligible", True)
-                                and not item.get("source_changed") and not item.get("file_state_changed") else None)
+                                if _work_conclusion_upgrade_eligible(item, preview_query, conclusion_max_chars)
+                                else None)
                     if not expanded or len(expanded) <= 80:
                         continue
                 result.append(item)
@@ -1412,7 +1439,7 @@ class WorkMemoryMixin:
                     "coverage": {"observable_events_only": True, "history_backfill_automatic": False,
                                  "internal_thinking_captured": False, "project_permissions_restored": False}}
 
-    def work_validate_items(self, project, items, workspace=None, *, conclusion_max_chars=80):
+    def work_validate_items(self, project, items, workspace=None, *, conclusion_max_chars=80, applicability_query=""):
         """最终发送事务中刷新来源状态；不能用旧状态确认当前有效性。"""
         result = []
         for item in items[:20]:
@@ -1422,9 +1449,9 @@ class WorkMemoryMixin:
                                           preview_query=item.get("_preview_query"))
                 if current.get("file_projection_incomplete"):
                     continue
+                body = json.loads(row["body"])
                 if item.get("reference_role") == "task_handoff":
                     scope = item.get("_handoff_scope")
-                    body = json.loads(row["body"])
                     if (not isinstance(scope, dict) or not self._work_handoff_usable(current)
                             or any(row[field] != scope.get(field) for field in (
                                 "workspace_key", "conversation", "agent", "task_id", "task_revision"))
@@ -1439,13 +1466,10 @@ class WorkMemoryMixin:
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):
                     current["file_state_changed"] = True
-                if (type(conclusion_max_chars) is int and 80 < conclusion_max_chars <= 240
-                        and current.get("reference_role") != "task_handoff"
-                        and item.get("_preview_query") is not None
-                        and current.get("state") in {"reported", "model_reported", "succeeded"}
-                        and current.get("automatic_eligible", True)
-                        and not current.get("source_changed") and not current.get("file_state_changed")):
-                    body = json.loads(row["body"])
+                if (not current.get("source_changed") and not current.get("file_state_changed")
+                        and not _work_version_applicable(body, applicability_query or item.get("_preview_query"), workspace)):
+                    continue
+                if _work_conclusion_upgrade_eligible(current, item.get("_preview_query"), conclusion_max_chars):
                     expanded = _work_conclusion_preview(body.get("summary", ""), item["_preview_query"],
                                                         conclusion_max_chars)
                     if expanded and len(expanded) > 80:

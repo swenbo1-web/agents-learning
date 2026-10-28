@@ -36,10 +36,19 @@ _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
-_MATCH_POLICY_VERSION = 8
+_MATCH_POLICY_VERSION = 9
 _RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
+# These transport/tool names describe how an operation was performed. Unlike a
+# path or error code, sharing one does not identify the business problem.
+_GENERIC_TOOL_NAMES = {"exec", "command", "exec_command", "run_command", "execute_command",
+                       "run_terminal_command", "bash", "shell", "powershell", "read_file",
+                       "write_file", "edit_file", "apply_patch", "write_stdin"}
+_GENERIC_TOOL_NAMES |= {"functions." + name for name in _GENERIC_TOOL_NAMES}
+_TOOL_USAGE_WORDS = {"use", "usage", "using", "tool", "tools", "function", "functions", "call", "calls",
+                     "invoke", "invocation", "works"}
+_ZH_TOOL_USAGE = re.compile(r"使用说明|使用方式|使用方法|使用|用法|工具|调用|函数")
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
                         "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
                         "模型设置", "按钮样式", "主题颜色"}, key=lambda value: (-len(value), value))))
@@ -58,14 +67,16 @@ def _exact_anchors(query):
     result = list(dict.fromkeys(result))
     # Counts and language/version background must not veto an exact issue or
     # file identity. Explicit environment compatibility is checked separately.
-    specific = [anchor for anchor in result if _specific_anchor(anchor)]
+    # An explicitly named tool still has to match in full; it merely cannot
+    # grant the sparse-query business-identity shortcut on its own.
+    specific = [anchor for anchor in result if _specific_anchor(anchor) or anchor in _GENERIC_TOOL_NAMES]
     return specific or result
 
 
 def _specific_anchor(anchor):
     # A full path, file or error/setting identifier can locate one concrete issue.
     # Language names, a bare number or a version alone still need normal coverage.
-    return ("_" in anchor or "/" in anchor or ":" in anchor
+    return anchor not in _GENERIC_TOOL_NAMES and ("_" in anchor or "/" in anchor or ":" in anchor
             or "." in anchor and not re.fullmatch(r"v?\d+(?:\.\d+)+", anchor)
             or re.fullmatch(r"(?:e|err|error)\d+[a-z0-9]*|0x[0-9a-f]+|[a-z][a-z0-9]*-\d[a-z0-9_-]*",
                             anchor) is not None)
@@ -202,13 +213,16 @@ def _rank(body_json, query_weights, denominator):
     return _match_values(body_json, query_weights, denominator)[0]
 
 
+def _positive_match_terms(body):
+    fields = [body.get(field, "") for field in ("title", "content", "applicability")]
+    fields.extend(body.get("metadata", {}).values())
+    return set(match_terms(" ".join(value for value in fields if isinstance(value, str))))
+
+
 def _positive_anchors_allowed(body_json, anchors):
     if not anchors:
         return True
-    body = json.loads(body_json)
-    fields = [body.get(field, "") for field in ("title", "content", "applicability")]
-    fields.extend(body.get("metadata", {}).values())
-    positive = set(match_terms(" ".join(value for value in fields if isinstance(value, str))))
+    positive = _positive_match_terms(json.loads(body_json))
     # A restriction saying "not applicable to E_IMPORT" is not a positive
     # identity match and must not grant the sparse-query or semantic shortcut.
     return all(anchor in positive for anchor in anchors)
@@ -239,6 +253,22 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
     result = {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
+    tool_names = _GENERIC_TOOL_NAMES.intersection(query_weights)
+    if tool_names:
+        # A split tool name can account for most of a short query's coverage.
+        # Keep the existing thresholds and exact issue/Chinese phrase lanes,
+        # but require positive overlap beyond the tool when a business topic is
+        # present. This also remains a hard gate after semantic fusion.
+        tool_terms = set(terms(" ".join(tool_names))) | _TOOL_USAGE_WORDS
+        for segment in re.findall(r"[\u3400-\u9fff]+", query):
+            if not _ZH_TOOL_USAGE.sub("", segment):
+                tool_terms.update(match_terms(segment))
+        business = {word for word in query_weights if len(word) > 1 and word not in tool_terms}
+        positive = _positive_match_terms(json.loads(body_json))
+        if not business:
+            result["auto_eligible"] = exact and bool(tool_names.intersection(positive))
+        elif not business.intersection(positive):
+            result.update(auto_eligible=False, auto_exclusion_reason="tool_business_mismatch")
     # Consumers opt into the original-query rule. Review-packet comparison
     # still needs old records for deduplication; concrete questions add no
     # extra full-body JSON parse just to test this optional material gate.
@@ -504,9 +534,9 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                         unreadable.add(identity)
                         item = None
                         explanation["auto_eligible"] = False
-                    if item is not None and _automatic and _environment:
+                    if item is not None and _automatic:
                         from .knowledge_applicability import automatic_applicability
-                        if automatic_applicability(item, _environment)["status"] == "incompatible":
+                        if automatic_applicability(item, _environment, query=meaningful)["status"] == "incompatible":
                             explanation["auto_eligible"] = False
                     if item is not None and (item.get("source_health") in {"conflicted", "denied", "missing"}
                             or item.get("pending_counterexample_count", 0)):

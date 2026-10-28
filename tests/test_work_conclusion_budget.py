@@ -32,8 +32,14 @@ class WorkConclusionBudgetTests(unittest.TestCase):
         text = "背景：\n" + "budgetfocus 早期排查记录。" * 12 + "\n" + block + "\n细节：\n" + "具体过程仍可展开。" * 12
         payload = {"last_assistant_message": text}
         if file:
-            (self.workspace / "memory.py").write_text("old = True\n", encoding="utf-8")
-            payload.update(tool_name="read_file", tool_input={"path": "memory.py"})
+            paths = ("memory.py",) if file is True else file
+            for path in paths:
+                (self.workspace / path).write_text("old = True\n", encoding="utf-8")
+            if len(paths) == 1:
+                payload.update(tool_name="read_file", tool_input={"path": paths[0]})
+            else:
+                payload.update(tool_name="apply_patch", tool_input={"patch": "*** Begin Patch\n" + "".join(
+                    "*** Update File: %s\n" % path for path in paths) + "*** End Patch"})
         with self.r.transaction():
             event, _ = self.r._event(self.p, "past-%d" % self.sequence, "Stop", payload, outcome="reported")
             memory = self.r._work_capture_event(self.p, event["id"], self.workspace, raw=payload)
@@ -128,6 +134,109 @@ class WorkConclusionBudgetTests(unittest.TestCase):
         self.assertNotIn("summary", card)
         self.assertLessEqual(len(output[output.index(self.HEADER):]), 600)
 
+    def assert_changed_file_stops_conclusion_replay(self, initial_budget):
+        ident, _ = self.record(file=True)
+        self.r.config["work_memory"]["max_context_chars"] = initial_budget
+        first = next(card for card in self.cards(self.context()) if card["memory_id"] == ident)
+        self.assertGreater(len(first.get("summary", "")), 80)
+        if initial_budget == 360:
+            self.assertNotIn("files", first)
+        self.r.config["work_memory"]["max_context_chars"] = 600
+        self.assertNotIn(ident, self.context())
+        original_cache = [tuple(row) for row in self.r.db.execute(
+            "SELECT * FROM context_delivery_cache WHERE project=? AND item_id=?", (self.p, ident))]
+        (self.workspace / "memory.py").write_text("external_change = True\n", encoding="utf-8")
+        changed = next(card for card in self.cards(self.context()) if card["memory_id"] == ident)
+        self.assertEqual(changed["reference_role"], "source_update")
+        self.assertTrue(changed["file_state_changed"])
+        self.assertNotIn("summary", changed)
+        current = self.r.work_search(self.p, "budgetfocus", workspace=self.workspace, max_chars=10000)["items"][0]
+        shown = self.r.db.execute("SELECT file_state FROM work_exposures WHERE project=? "
+            "AND conversation='reader' AND memory_id=?", (self.p, ident)).fetchone()[0]
+        self.assertEqual(json.loads(shown), current["file_state"])
+        self.assertTrue(current["files"][0]["version_changed"])
+        self.assertEqual(self.r.work_exposure_updates(self.p, "reader", workspace=self.workspace), [])
+        for turn in range(5):
+            with self.subTest(turn=turn, initial_budget=initial_budget):
+                output = self.context()
+                self.assertNotIn(ident, output)
+                self.assertNotIn("不能从本地结果推定远端已经验证", output)
+        self.assertEqual([tuple(row) for row in self.r.db.execute(
+            "SELECT * FROM context_delivery_cache WHERE project=? AND item_id=?", (self.p, ident))], original_cache)
+
+    def test_file_change_at_600_notifies_once_without_five_stale_replays(self):
+        self.assert_changed_file_stops_conclusion_replay(600)
+
+    def test_file_change_after_360_to_600_notifies_once_without_five_stale_replays(self):
+        self.assert_changed_file_stops_conclusion_replay(360)
+
+    def test_final_validation_does_not_expand_after_file_changes(self):
+        ident, _ = self.record(file=True)
+        items = self.r.work_context_items(self.p, "reader", "budgetfocus", workspace=self.workspace,
+            conclusion_max_chars=240)
+        healthy = self.r.work_validate_items(self.p, items, workspace=self.workspace, conclusion_max_chars=240)
+        self.assertGreater(len(healthy[0]["_conclusion_preview"]), 80)
+        (self.workspace / "memory.py").write_text("changed_before_final_validation = True\n", encoding="utf-8")
+        checked = self.r.work_validate_items(self.p, items, workspace=self.workspace, conclusion_max_chars=240)
+        self.assertEqual(checked[0]["memory_id"], ident)
+        self.assertTrue(checked[0]["files"][0]["version_changed"])
+        self.assertNotIn("_conclusion_preview", checked[0])
+        self.assertEqual(checked[0]["state"], "reported")
+
+    def test_unknown_workspace_file_state_stays_an_ordinary_index(self):
+        ident, _ = self.record(file=True)
+        items = self.r.work_context_items(self.p, "unlocated", "budgetfocus", conclusion_max_chars=240)
+        self.assertEqual(items[0]["memory_id"], ident)
+        self.assertNotIn("version_changed", items[0]["files"][0])
+        checked = self.r.work_validate_items(self.p, items, conclusion_max_chars=240)
+        self.assertNotIn("_conclusion_preview", checked[0])
+        with self.r.transaction():
+            self.r.work_record_exposure(self.p, "unlocated", items)
+        self.assertEqual(self.r.work_context_items(self.p, "unlocated", "budgetfocus",
+            conclusion_max_chars=240), [])
+
+    def test_partial_three_file_preview_cannot_qualify_a_full_conclusion(self):
+        ident, _ = self.record(file=("memory.py", "one.py", "two.py", "three.py"))
+        items = self.r.work_context_items(self.p, "reader", "budgetfocus", workspace=self.workspace,
+            conclusion_max_chars=240)
+        self.assertEqual(items[0]["memory_id"], ident)
+        self.assertEqual(items[0]["files_count"], 4)
+        self.assertEqual(len(items[0]["files"]), 3)
+        self.assertTrue(all(file["version_changed"] is False for file in items[0]["files"]))
+        checked = self.r.work_validate_items(self.p, items, workspace=self.workspace, conclusion_max_chars=240)
+        self.assertNotIn("_conclusion_preview", checked[0])
+        self.context()
+        self.assertNotIn(ident, self.context())
+
+    def test_matching_unavailable_file_metadata_is_not_a_healthy_upgrade(self):
+        ident, _ = self.record(file=True)
+        (self.workspace / "memory.py").unlink()
+        with self.r.transaction():
+            self.r.db.execute("UPDATE work_file_links SET version=? WHERE project=?",
+                (json.dumps({"status": "unavailable", "content_hash": None}), self.p))
+        items = self.r.work_context_items(self.p, "reader", "budgetfocus", workspace=self.workspace,
+            conclusion_max_chars=240)
+        self.assertEqual(items[0]["memory_id"], ident)
+        self.assertFalse(items[0]["files"][0]["version_changed"])
+        checked = self.r.work_validate_items(self.p, items, workspace=self.workspace, conclusion_max_chars=240)
+        self.assertNotIn("_conclusion_preview", checked[0])
+        self.context()
+        self.assertNotIn(ident, self.context())
+
+    def test_incomplete_original_file_projection_still_stops_automatic_context(self):
+        ident, _ = self.record(file=True)
+        with self.r.transaction():
+            row = self.r.db.execute("SELECT body FROM work_memories WHERE id=?", (ident,)).fetchone()
+            body = json.loads(row[0])
+            body["coverage"]["file_projection_complete"] = False
+            self.r.db.execute("UPDATE work_memories SET body=? WHERE id=?", (json.dumps(body), ident))
+        manual = self.r.work_search(self.p, "budgetfocus", workspace=self.workspace, max_chars=10000)["items"]
+        self.assertTrue(manual[0]["file_projection_incomplete"])
+        self.assertEqual(self.r.work_context_items(self.p, "reader", "budgetfocus", workspace=self.workspace,
+            conclusion_max_chars=240), [])
+        self.assertEqual(self.r.work_validate_items(self.p, manual, workspace=self.workspace,
+            conclusion_max_chars=240), [])
+
     def test_deduped_first_item_does_not_spend_the_only_expansion_slot(self):
         old, _ = self.record()
         old_item = self.r.work_context_items(self.p, "reader", "budgetfocus", workspace=self.workspace)[0]
@@ -186,6 +295,20 @@ class WorkConclusionBudgetTests(unittest.TestCase):
         self.assertGreater(len(expanded["summary"]), 80)
         self.assertNotIn(ident, self.context())
 
+    def test_healthy_file_old_index_can_upgrade_once(self):
+        ident, _ = self.record(file=True)
+        original = self.r.work_validate_items
+        def legacy(project, items, workspace=None, **kwargs):
+            return original(project, items, workspace=workspace)
+        with patch.object(self.r, "work_validate_items", side_effect=legacy):
+            old = next(card for card in self.cards(self.context()) if card["memory_id"] == ident)
+        self.assertFalse(old.get("summary"))
+        expanded = next(card for card in self.cards(self.context()) if card["memory_id"] == ident)
+        self.assertGreater(len(expanded["summary"]), 80)
+        self.assertFalse(expanded["files"][0]["version_changed"])
+        for _ in range(5):
+            self.assertNotIn(ident, self.context())
+
     def test_narrow_then_wide_pool_upgrades_once_and_never_downgrades(self):
         ident, _ = self.record()
         self.r.config["work_memory"]["max_context_chars"] = 300
@@ -235,6 +358,9 @@ class WorkConclusionBudgetTests(unittest.TestCase):
                     items = self.r.work_context_items(self.p, conversation, "budgetfocus",
                         workspace=self.workspace, conclusion_max_chars=240)
                     self.assertIn(ident, [item["memory_id"] for item in items])
+                    checked = self.r.work_validate_items(self.p, items, workspace=self.workspace,
+                        conclusion_max_chars=240)
+                    self.assertFalse(any("_conclusion_preview" in item for item in checked))
                     with self.r.transaction():
                         self.r.work_record_exposure(self.p, conversation, items)
                     self.assertEqual(self.r.work_context_items(self.p, conversation, "budgetfocus",

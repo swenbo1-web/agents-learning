@@ -578,7 +578,7 @@ def search(runtime, project, query, limit=1, context_handle=None, *, delivery=No
         if evaluation.exhausted:
             break
         if item["eligible"]:
-            item = _environment_check(runtime, project, item, workspace)
+            item = _environment_check(runtime, project, item, workspace, query=plan["meaningful"])
             if not item:
                 continue
             origin = runtime.db.execute("SELECT conversation FROM problems WHERE project=? AND id=?", (project, item["problem_id"])).fetchone()
@@ -599,11 +599,11 @@ def _environment_state(runtime, project, item, workspace):
     """Bounded observable applicability/file metadata, never a content hash."""
     if workspace is None:
         return None
-    from .knowledge_applicability import project_environment, automatic_applicability
+    from .knowledge_applicability import project_environment, _manifest_applicability
     from .work_files import checkout_key, current_file_version
     environment = project_environment(workspace)
     state = {"checkout": checkout_key(workspace), "environment": environment,
-             "applicability": automatic_applicability(item, environment), "files": []}
+             "applicability": _manifest_applicability(item, environment), "files": []}
     refs = list(dict.fromkeys(item.get("source_event_refs", ())))[:20]
     if refs:
         marks = ",".join("?" for _ in refs)
@@ -629,26 +629,38 @@ def _environment_blocked(state):
         any(item["recorded"] != item["current"] for item in state["files"])))
 
 
-def _environment_check(runtime, project, item, workspace):
+def _environment_check(runtime, project, item, workspace, *, query=""):
+    from .knowledge_applicability import project_environment, automatic_applicability, _manifest_applicability
+    from .work_files import knowledge_file_state
+    comparison = item
+    if query:
+        # Assessment previews are intentionally short. A condition beyond that
+        # preview must still govern the full candidate before automatic display.
+        row = runtime.db.execute("SELECT body FROM candidates WHERE project=? AND id=? AND status='candidate'",
+                                 (project, item["candidate_id"])).fetchone()
+        if row is None:
+            return None
+        comparison = json.loads(row["body"])
+    environment = project_environment(workspace)
+    applicability = (automatic_applicability(comparison, environment, query=query) if query
+                     else _manifest_applicability(comparison, environment))
+    if applicability["status"] == "incompatible":
+        return None
     if workspace is None:
         return item
-    from .knowledge_applicability import project_environment, automatic_applicability
-    from .work_files import knowledge_file_state
-    if automatic_applicability(item, project_environment(workspace))["status"] == "incompatible":
-        return None
     evidence = {"evidence": [{"event_id": ref} for ref in item.get("source_event_refs", ())]}
     if knowledge_file_state(runtime, project, evidence, workspace).get("source_files_changed"):
         return None
     return item
 
 
-def revalidate(runtime, project, item, context_handle=None, *, workspace=None):
+def revalidate(runtime, project, item, context_handle=None, *, workspace=None, query=""):
     if context_handle is not None:
         _access(runtime, project, context_handle)
     current = assess(runtime, project, item["candidate_id"])
     if not current["eligible"] or current["reference_version"] != item.get("reference_version"):
         return None
-    if not _environment_check(runtime, project, current, workspace):
+    if not _environment_check(runtime, project, current, workspace, query=query):
         return None
     for key in ("matched_terms", "match_score"):
         if key in item:
