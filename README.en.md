@@ -4,418 +4,79 @@
 
 [![Offline plugin checks](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/swenbo1-web/agents-learning/actions/workflows/ci.yml)
 
-**Project memory and a visual knowledge browser for Codex, Antigravity and DSH (DeepSeek Harness).**
+**Keep project experience available, traceable and ready to improve.**
 
-Python **3.10+** · SQLite · [MIT](LICENSE) · First stable release **1.0.0**
+Yesterday's bug was solved. Today's fresh chat starts the investigation again. A long task gets compacted, and the constraints you just agreed on become hard to find. Switching AI tools means explaining the same project all over again.
 
-[Core capabilities](#core-capabilities) · [Visual control](#visual-control-and-the-knowledge-button) · [84-second demo](#84-second-demo) · [Codex installation](#install-in-codex-desktop-and-cli) · [Antigravity installation](#install-in-antigravity-native-plugin) · [DSH installation](#install-in-dsh-deepseek-harness) · [Architecture](#complete-architecture) · [Detailed reference](#installation-and-maintenance-reference)
+**agents-learning brings project memory, evidence-based knowledge management and a visual knowledge browser to Codex, Antigravity and DSH (DeepSeek Harness).** It records observable work results and retrieves sourced experience for later tasks. Relevant conclusions and their conditions come first; details and evidence are available when needed. Keep delivering while earlier work becomes a reference for the next task.
 
-Keep experience across conversations: supported Hooks record tool results and public work notes, then retrieve relevant project knowledge and file history for later tasks. Read a small index first, expand useful evidence on demand, and optionally enable an administrator to organize knowledge.
+**Cross-session work history · Conclusion-first, progressive reads · Corrections and revocation · Stage review and tiered publication · Shared project memory across three hosts · Visual controls**
 
-**These steps use the v1.4.40 source version on `main`; the original v1.0.0 distribution lacks newer capabilities. When core retrieval or provenance rules change, update and reload all Codex, Antigravity and DSH installations sharing a database together. Read [compatibility and shared-database upgrades](#current-version-and-compatibility) first.**
+[Install for Codex](#install-in-codex-desktop-and-cli) · [Install for Antigravity](#install-in-antigravity-native-plugin) · [Install for DSH](#install-in-dsh-deepseek-harness) · [Start using it](#use-it-in-your-project) · [Core capabilities](#core-capabilities) · [84-second demo](#84-second-demo) · [Architecture](#complete-architecture)
+
+Python **3.10+** · Local SQLite · No additional model API key for the default setup · [MIT](LICENSE)
+
+**These features and installation steps target v1.4.40 on `main`; the [original v1.0.0 distribution](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) lacks newer capabilities.** Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility). When core rules change, update and reload all three hosts sharing the database.
+
+## Built for projects that outlast a chat
+
+### Find a lead from the work you just finished
+
+Public requests, work notes, tool results and file associations become searchable work history without waiting for formal publication. Later chats can look up earlier constraints, attempts and deliveries, then read the original record. Evidence labels such as `reported` remain visible for the Agent to assess. References to unpublished candidates are a separate opt-in feature.
+
+### Start with the conclusion and leave room for the current problem
+
+Automatic retrieval selects material for the current question and prefers conclusions with their necessary conditions. When the complete passage will not fit, it offers a small index for on-demand reading. Within a persistent context, delivery tracking deduplicates previously shown material by revision and source state; compaction rechecks task and source eligibility. Persistent sessions and ephemeral host calls have separate delivery semantics so deduplication does not silently remove necessary context.
+
+### Keep experience open to correction
+
+Knowledge retains its conditions, limitations, sources and revisions. Source changes, counterexamples, disputes and revocation affect later automatic references: invalid material stops receiving automatic excerpts, while some source risks become labeled read indexes. Supported events can notify conversations previously shown affected knowledge; the plugin cannot erase text already in model context.
+
+### Organize completed stages and reduce item-by-item approval
+
+After you enable an administrator, review every 1–20 explicitly delivered tasks or stages, pack work into project token budgets and track coverage per item. The administrator proposes candidates; tiered publication checks evidence and your selected scope before publishing eligible material automatically. Conflicts and missing evidence remain visible for follow-up. The working Agent does not need to write a separate retrospective for every operation.
+
+### Bring an existing project's experience with you
+
+Select project documents, source, Agent-written notes and available conversation history, then archive and organize them as a frozen batch. Sources, budgets and coverage remain inspectable. Installation does not scan the entire project or ingest every chat automatically. See [historical ingestion](#absorb-history-from-an-existing-project) to bring an established project into the knowledge base.
+
+### Continue with the same project memory across three tools
+
+On one machine, Codex, Antigravity and DSH share knowledge when they use the same data directory and matching project identity. Sessions, administrator switches and model routing remain host-specific. Changing login accounts preserves stored project knowledge. Once the host adapter or user reports the account boundary, old connections become invalid and must rebind. Cross-device synchronization is not yet implemented.
+
+### See where knowledge came from and what the administrator is doing
+
+Native visual entry points open project controls for connection checks, administrator state and budgets. The local knowledge browser supports search, evidence inspection, revision history and batch approval. After an upgrade, bounded health checks inspect missing fields, exact duplicates and source risks. All three hosts share a project's check progress and report; checks make no extra model call and do not rewrite knowledge automatically.
+
+## Start here
+
+Install the entry point for your host, reload it and start a fresh conversation in the target project:
+
+| Your tool | Installation | Visual entry point |
+|---|---|---|
+| **Codex** | [Install and connect the project](#install-in-codex-desktop-and-cli) | Supported desktop versions: side-panel new tab → More tools… → Agent Learning; local console and skill fallbacks are also available |
+| **Antigravity** | [Install the project core and App UI bridge](#install-in-antigravity-native-plugin) | After enabling the App UI component: Extensions → Agent Learning |
+| **DSH** | [Install into the profile you actually use](#install-in-dsh-deepseek-harness) | The **📖 Memory** composer button in a bound project |
+
+**For everyday work, describe your task as usual.** First verify the connection with **Check connection** or `$learning-debug`. Open the knowledge browser to inspect records; enable an administrator separately when you want model-assisted organization, choosing its model, stage frequency, budget and publication scope. For an existing project, use `$learning-history` to select historical material. [Full usage guide](#use-it-in-your-project)
 
 ## Core capabilities
 
-| Capability | What you get |
+| Capability | What it does |
 |---|---|
-| Project memory and working history | Reuse public requirements, analysis, work observations and file history without publication approval; long public replies retain searchable segments, sources and partial/truncation markers |
-| Search, injection and progressive reading | Local full-text search, optional semantic matching, bounded automatic context, and index → details → evidence reading; the working Agent checks applicability |
-| Direct visual control and knowledge browser | A DSH composer button, Codex conversation card and Antigravity App side panel offer installation-scoped status, administrator presets and history archival; detailed knowledge and batch approval use the shared local WebUI |
-| Explicit historical ingestion | Absorb selected documents, source and exported conversations from an existing project, with source versions retained |
-| Optional administrator and stage review | After explicit enablement, organize every 1–20 completed tasks/stages using project token budgets, per-case evidence and partial-coverage progress; explicit plugin status checks stay local to avoid standalone calls; existing case review and count presets remain compatible |
-| Evidence and governance | Track conditions, limitations, sources and revisions; compare counterexamples and explicitly publish, replace or withdraw knowledge |
-| Automatic upgrade health check | Check retained formal knowledge locally in small batches after first project connection; all hosts share progress and a visual report, without model calls or automatic knowledge changes |
-| Budgets and evaluation | Bound context, review calls and reported usage; compare task acceptance, time and full-workflow usage with paired evaluation tools |
-| Upgrades and update notices | Preserve external data/configuration during validated upgrades; optionally check GitHub Releases and ask about updates |
-| Task and account boundaries | Check task scope and session identity, invalidate old handles after account changes, and share mapped project knowledge between hosts on one machine |
-
-No real-task net token, speed or quality gains have been established by paired evaluation.
-
-**Local capture and full-text retrieval make no extra generative-model call by default. Knowledge included in the host model input still uses context and input tokens.** Administrator calls, AI summaries, semantic models, background scheduling, update checks and remote services are off initially. The first confirmed visual enable for an unconfigured project defaults to stage review and tiered publication; existing choices and legacy case review remain unchanged. Stage frequency, token budgets and publication scope are configurable. Installation and upgrades do not enable administrators. A new knowledge base starts empty; working history is searchable before review and publication. Historical ingestion needs separate explicit consent.
-
-## Shared knowledge health check after upgrade (1.4.40)
-
-After installation and reload, the new runtime automatically advances diagnostics on its first explicit project binding. The installer exports resources without guessing a database. Projects not opened remain pending; no resident scan service or administrator enablement is required.
-
-- **One shared run:** the SQLite database keys progress by project ID and health-rule version, excluding host, account and installation path. Different projects/databases remain independent. Patches with unchanged rules reuse results; older rules cannot overwrite a registered newer run.
-- **Bounded and resumable:** each project connection handles at most 12 records with a 75 ms execution budget. A short transaction commits observations and cursor together. Busy databases yield; later connections resume. Resource-limited checks are explicitly partial and cannot be interpreted as passing. An inactive project has no background completion guarantee.
-- **Maintenance suggestions:** inspect current active formal knowledge for missing/unknown classification, missing purpose/evidence grades, unspecified applicability/limitations, exact duplicates, existing counterexamples and bounded direct-source evidence risks. Missing fields are suggestions, not proof of false content. No semantic reclassification, age-only invalidation, historical import, raw-chat/source scan, candidate scan or work-history scan occurs.
-- **Visual, read-only observations:** expand Knowledge health check in the knowledge browser; `status` includes a cached summary. Reports retain checked revisions and timestamps. Manifest consistency does not prove unchanged source events; existing live read checks remain authoritative for retrieval.
-- **No automatic governance:** only derived reports are written. Content, classification, evidence grades, activation, candidates, administrator queues and publication policy stay unchanged. No model is called; corrections and reclassification use existing revision/approval paths.
-
-Schema/protocol25 and indexes6/2/1 remain compatible. Diagnostic storage is independent of the optional scheduler and adds no automatic model-context injection. A completed report describes bounded observations, not factual certification.
-
-## Tool context, source caveats and budget choice (1.4.39)
-
-- **Domain knowledge need not repeat a generic tool name:** queries with a clear business topic may treat exec_command/read_file as execution context. Material must independently meet the business relevance gate. Error codes, paths and custom tool namespaces retain complete identity checks. Tool-only overlap, business words appearing only in limitations, or a semantic score cannot bypass the gate. Tool-specific timeouts, permissions and standalone usage keep their named-tool checks.
-- **Expose mixed-source caveats:** reads add source_caveat, evaluating unresolved failures separately for each publication source. Success in another source cannot repair them; these counts are not independent validations. Automatic delivery uses a risk-marked read index while manual content and evidence remain available. Notices and indexes are deduplicated; recovered sources do not raise stale warnings. Evidence grades, maturity and publication authority are unchanged.
-- **Choose a workload budget:** defaults remain 2400 total / 600 shared characters. For competing formal and work records, merge the following fields into existing configuration to try 3600/600. Installation does not enable it automatically and delivery respects the configured hard cap. A larger cap does not add unrelated material to short requests. Long indivisible conclusions retain progressive reading rather than losing their conditions.
-
-```json
-{
-  "injection_max_chars": 3600,
-  "work_memory": { "max_context_chars": 600 }
-}
-```
-
-- **Keep change-driven delivery:** new questions, source/revision changes and compression use existing checks. Persistent deduplication and ephemeral re-presentation remain distinct; no every-N-turn bulk injection or model call is added.
-- **Compatibility:** schema/internal protocol 25 and indexes 6/2/1 remain. Matching-policy changes recheck cached query plans. Update and reload shared-database hosts together; existing model, administrator, publication and history policies are preserved. The budget candidate comes from synthetic experiments, not a real-task token or quality guarantee.
-
-## Stale work summaries and automatic applicability (1.4.38)
-
-- **Stop replaying stale work conclusions:** selection and final validation share the complete-summary health gate. Changed or unobservable files and incomplete file projections cannot expand an old statement. Acknowledging a notice does not validate the captured source again. Risk notices, ordinary indexes and healthy index upgrades remain; stale material is not cached as healthy.
-- **A tool name is not the business topic:** an explicitly named generic tool still requires its full identity, but a shared tool alone cannot grant sparse recall or a semantic shortcut when the request has separate business terms. Tool-specific failures, standalone usage, exact error codes and paths retain their existing gates. Manual recall remains available.
-- **Check explicit version conditions:** a bounded declaration grammar checks unambiguous only-applicable/excluded versions against a matching project manifest or an explicitly queried subject/version. Quotations, code, history, multiple components, ranges, contradictions and truncated text remain unknown; general prose negation is not guessed.
-- **Revalidate all automatic lanes:** formal knowledge, enabled candidate references and work history share the check. Candidates use their complete original body rather than a short preview and are checked again before delivery. The new automatic filter does not widen existing manual-read restrictions; environment, file and concern protections remain.
-- **Compatibility:** version 1.4.38 keeps schema/internal protocol 25, indexes 6/2/1 and the 2400-character total budget. The matching-policy change rechecks cached query plans; update and reload shared-database hosts together. No administrator/publication policy is enabled and no model call is added. Sandbox checks do not establish real-task token savings or quality gains.
-
-## Conclusion boundaries, complete work cards and label equivalence (1.4.37)
-
-- **Keep mixed-heading boundaries**: explicit conditions or versions at a different heading level from the conclusion retain the entire original document as an indivisible block. If it cannot fit, return an index. Ordinary parent headings, old attempts, code and multiple conclusions keep their ambiguity protections.
-- **One topic gate for budget changes**: normal excerpts, smaller presentations and source-range coverage share the same conclusion selection rule. A smaller budget cannot replace a background-only match with an unrelated conclusion.
-- **Fit one useful work conclusion**: ordinary work previews retain their 80-character default. The current context may offer up to 240 characters to one relevant, complete, healthy conclusion, only if its entire encoded card fits the existing 600-character optional pool and 2400-character total budget. Conditions are never cut. Candidates and risk notices retain priority; compaction handoffs remain at 160 characters, with manual search and pagination unchanged. Old short indexes can upgrade without repeated downgrade/upgrade delivery.
-- **Compare only lossless labels**: one explicit leading `结论：` or `Conclusion:` label and a finite set of spacing forms may differ; all remaining text, title, scope, limits, evidence grade and metadata must match exactly. Reuse the existing knowledge ID/revision and append provenance. Original bodies, precise fingerprints and indexes remain unchanged. No semantic merging occurs; changes to numbers, negation, versions or conditions retain normal governance. Revocations, superseded revisions, counterexamples, candidate concerns and publication authority remain checked. Explicit visual approval retains its existing contract.
-- **Upgrade shared installations together**: schema/protocol 25 and indexes 6/2/1 stay unchanged. The matching-policy update refreshes old query plans. Reload shared-database hosts after updating their cores; no administrator, publication or history option is enabled, no knowledge is rewritten, and no model calls are added. Sandbox acceptance is separate from real-task benefit evaluation.
-
-## Conclusion-first excerpts and less question noise (1.4.36)
-
-- **Organize supported conclusions during existing reviews**: administrator prompts use the existing `content` field for a reusable conclusion and necessary qualifications. Source statements remain `reported`; missing evidence is not filled in. Work summaries retain current status and uncertainty. No mandatory five-part template or extra model call is introduced.
-- **Keep qualifications attached**: local selection favors a single explicit Chinese or English conclusion and its labelled conditions, limitations, corrections, verification, version or date. A block that cannot fit becomes a read-on-demand index. Code examples, multiple conclusions and ambiguous structures receive no conclusion promotion. Unstructured legacy content keeps its original excerpt behavior; arbitrary semantic conditions cannot all be recognized.
-- **Reduce old-question noise**: automatic work history favors results, verification observations, user constraints and corrections. Unanswered questions and bare action requests no longer fill empty slots; bounded supplemental recall prevents question bursts from hiding older results. Explicit requests for past requirements or wording, manual searches, source/file notices and scoped compaction handoffs retain their contracts. A valid source is not proof of verified or currently applicable content.
-- **Preserve existing decisions**: precise delivered source ranges still govern deduplication. Omitted text is never counted as fully delivered. Existing review receipts, bodies, publication authority and model settings stay intact; old knowledge is not rewritten or re-reviewed. The matching-policy update invalidates old query plans without changing schema/protocol 25 or indexes 6/2/1. Reload all shared-database hosts after updating the core. Offline checks do not establish real latency, token or quality gains.
-
-## On-demand AG panel read recovery (1.4.35)
-
-For status and diagnostics in a confirmed project, the AG panel uses a conservative refresh window to recheck its connection before reading. Workspace, conversation, account or governance identity changes stop reuse of the old state. Connection and read responses have bounded waits; late replies cannot replace a new project. Unknown network failures retain a manual reconnect option. Settings, archival and page-opening actions are never replayed automatically.
-
-This change can update the standalone AG UI bridge while retaining the installed 1.4.34 core and existing Codex Hook definitions. Protocol25, indexes6/2/1, models, budgets and publication policies remain unchanged. It covers reproducible capability-expiry and wait boundaries; it does not establish that every previous connection failure was caused by expiry.
-
-## DSH panels without a project (1.4.34)
-
-An unbound DSH settings panel asks you to open the knowledge browser from an installed project conversation and keeps Refresh available. It no longer labels unknown state as zero knowledge or a disabled administrator, or shows project actions it cannot execute. Loading, read failure and unbound states have distinct English and Chinese messages. Temporary read failures preserve the last confirmed summary for the same scope.
-
-This version includes the source recovery, project isolation and derived cleanup fixes from 1.4.33. Schema/protocol25 and indexes6/2/1 remain unchanged. Upgrades preserve model, administrator, budget and publication settings and make no additional model review calls.
-
-## Recovered sources, panel scope and capture isolation (1.4.33)
-
-- **Publication preserves recovered source health:** when a source cites its failure followed by valid recovery success, downstream lineage keeps that recovery assessment after publication. Success from another source cannot repair its failure. Identity, denial, conflict, missing sources, counterexamples and revocation remain protected. A matching-policy update invalidates old empty caches and context plans without scanning all knowledge or replaying reviews.
-- **DSH isolates summaries during project switches:** the composer summary is bound to workspace and session, and a newly mounted panel validates its initial scope. Closing, switching, delayed reads or failed reopening cannot relabel A's summary as B's. Native host switching still needs separate acceptance.
-- **Derived cleanup stays isolated:** pending cleanup runs inside the projection savepoint. A failed cleanup statement rolls back derived work while retaining the original event, denial and retry record. Unusable storage still fails explicitly; this does not promise commits through every database failure.
-- **AG/Codex panels read on demand:** summary and debug reuse one database snapshot and common state, skipping unused full status, recovery and review activity. Installation, identity, account/governance epoch, capability and write-version checks remain; candidate counts and AG capture fields retain their host-specific meaning.
-- **Compatibility:** schema/protocol25 and indexes6/2/1 remain unchanged, with no extra model calls or changes to existing review/publication policies. This fixes a specific recovery inconsistency; candidate eligibility, publication authorization and execution permission remain separate. Offline tests and query measurements are not real-model benefit evidence.
-
-## Lighter panel reads and launcher diagnostics (1.4.32)
-
-- **Dedicated DSH read path:** one database snapshot reuses administrator and phase status and queries only counters consumed by the panel. It skips duplicate full status, review activity and recovery details. Opening the panel does not create storage, register a project or resume reviews; detailed views remain available in Approval & settings.
-- **Recoverable read failures:** local reads have time and query limits. The DSH UI explains failures in its selected language, preserves the last confirmed state for the same project and allows refresh. A status GET stops waiting after 15 seconds, including response decoding; late responses or responses from another project cannot replace the current display. Settings and model requests are never replayed by this timeout.
-- **Pinned launcher diagnostics:** a missing configured file reports `configured_launcher_missing`; access denial has a separate reason. Explicitly update the command through `admin-configure`. Changing only the model or enabling review preserves the command; no alternate CLI is substituted.
-- **Acceptance scope:** schema/protocol25, indexes6/2/1 and existing policies remain. This removes confirmed duplicate reads. The complete cause of the earlier native 10–13 second latency still needs a running-host retest; isolated improvements are not end-to-end savings.
-
-## Routine checks, capture acknowledgements and phase backlogs (1.4.31)
-
-- **Avoid routine-status reviews**: in an explicitly read-only status task, a complete, conflict-free and correctly paired `call_completed` result from a known Agent Learning status tool may be deferred locally. Its recorded outcome stays protocol completion. Unknown tools, truncation, running results, missing pre-events and uncertain attribution retain normal review.
-- **Separate DSH turn completion from capture acknowledgement**: terminal and tool-result envelopes have stable capture identities. Unconfirmed persistence or responses retain a bounded envelope in the current bridge instance for limited redelivery. The receiver checks the original task, host and trajectory boundaries and returns confirmed receipts idempotently. Redelivery does not rerun business tools or old reviews. This memory queue does not survive host restarts or guarantee recovery of every lost event.
-- **Explain phase backlogs**: eligible work and protected failed batches/phases in the current host boundary are shown separately. Recent complete public replies explain a missing task, missing explicit delivery or pending capture seal. Reading a page creates no phase, unlocks no call and starts no review.
-- **Preserve policy**: schema/internal protocol 25 and indexes 6/2/1 stay unchanged, as do models, budgets, administrator and publication switches. AG long-trajectory and oversized-public-text limits remain; new complete delivery still requires separate real-task acceptance. Offline regressions do not establish token savings.
-
-## Administrator wait attribution and AG delivery adaptation (1.4.30)
-
-- **Historical protection is not a global stop:** distinguish calls affecting the current review policy, host, problem revision and phase from retained historical attempts. When no new work is ready, show historical protection separately. New tasks retain normal admission; old calls and unknown usage are not reset or retried.
-- **One explanation for scheduling and UI:** administrator settings, scheduler summaries and all three host panels share the scope decision. Other hosts, old per-case work and stale “model started” observations no longer imply current execution. `queue_blocked_by_protected_calls` explains the current queue and grants no retry permission.
-- **Use the actual AG Hook contract:** App 2.23 does not promise `finalModelOutput` on Stop. For subsequent new invocations, a clear, fully idle termination can trigger a fresh read of the explicitly supplied trusted public transcript instead of relying on that optional field.
-- **Strict recovery boundaries:** require the same conversation, host generation, task, input window, final invocation and stable file, a complete public response matching the associated Post record, and no later user or pending tool. Missing proof retains partial public history with an explanation. Old Post responses are not simply promoted; completed old receipts are not rewritten.
-- **Keep audits, reduce repeated presentation:** automatic context prefers a complete delivery over its explicitly linked partial response only when short text is identical and source/file checks are healthy. Manual access keeps both records. Long segments, truncated material and different boundaries are not merged by this rule.
-- **Preserve authorization:** no extra model call, schema/protocol 25 and indexes 6/2/1 remain. Administrator and publication policy, old failure locks and usage stay intact. Old calls lacking the new window proof are not backfilled; acceptance of a new native delivery is separate.
-
-## Automatic-context noise and follow-up focus (1.4.29)
-
-- **Fewer old delivery claims for generic actions:** inspect the original prompt before scoring removes request words. A definite delivery-status snapshot with only `reported`/`model_reported` support cannot qualify merely through generic install, push or test words. Guides, constraints and ambiguous material retain the existing gates; history is not declared incorrect or expired.
-- **One rule across channels:** formal knowledge, work history and enabled candidate references share the automatic gate. High semantic similarity cannot bypass it. `match.auto_exclusion_reason` explains exclusions; manual search and reading remain available.
-- **Keep the current focus:** whole action-only follow-ups such as “continue optimizing” reuse a valid current query. Requests naming SQLite, a path, a version or another subject still start a new query. Without a valid focus, generic old requests do not fill context. Search continuity grants no task or execution permission.
-- **Preserve independent recovery:** explicit historical versions, delivery history, errors and files retain their existing recall gates. Strict current-task compaction handoffs, source updates and file notices continue through their own boundaries.
-- **No extra model or migration:** concrete questions skip the new status classifier. The match-policy change invalidates old query caches without rebuilding FTS. Schema/protocol 25, indexes 6/2/1 and model, administrator and publication policies remain. Offline noise reduction establishes no real token return.
-
-## AG panel reconnection and page restoration (1.4.28)
-
-- **Recovery stays reachable**: after a previously connected panel fails, a separate Reconnect button and localized notice remain available. Business controls stay hidden until the connection is verified again.
-- **Use current host context**: reconnect reads the current conversation and sole workspace from the host, then applies the existing installation and fingerprint checks. Stale responses cannot replace a newer project.
-- **No action replay**: reconnect reads state; it does not replay debug, settings, archival or model work. An uncertain write requires checking the current state before any further user decision.
-- **Restore the page lifecycle**: hiding clears the connection; restoring rechecks host context. Hidden pages do not initiate workspace queries.
-- **Update the global UI bridge separately**: only AG sidebar frontend resources changed. Existing 1.4.27 cores can use `install-ui --upgrade` for the registered global UI without replacing Codex/DSH cores or reviewing unchanged Hooks. Project-local Sidecars update with the core. Complete public delivery still requires host evidence.
-
-## Exclude current AG input and bound native DSH summaries (1.4.27)
-
-- **Do not recall the current request as history:** after capturing or reusing a public AG request, pass its canonical source ID to retrieval and exclude its work index and long-message segments. The request remains stored and relevant earlier history stays available. No text-based history deletion or completed-receipt rewrite occurs; the fix applies to subsequent fresh calls.
-- **Keep native output compact:** DSH uses compact JSON for `learning_status(view="summary")` on both normal execution and syntax recovery. Omitted view, full status and other tools retain their formatting; programmatic results stay available to the UI.
-- **Count escaping and non-BMP characters:** the summary `{content,isError}` envelope is capped at 3000 UTF-16 units. Host-generated call IDs and transport fields are outside this budget; units are not tokens. Only rendered content enters the model message, without a duplicate programmatic value.
-- **Compatibility and acceptance:** schema/internal protocol 25 and indexes 6/2/1 are unchanged. Administrator, model, publication and failed-call permissions remain. Partial AG responses are not complete delivery; isolated regressions and model-free entry checks do not establish real-task acceptance.
-
-## Compact DSH diagnostics and AG public records (1.4.26)
-
-- **Expand diagnostics when needed:** `learning-debug` prefers `learning_status(view="summary")`. The MCP summary result, including escaping, is capped at 3000 characters without a duplicate structured body. Project/global usage, effective administrator admission, routing and unknown usage remain distinct. No arguments or `view="full"` retain the complete status; private UI snapshots remain intact. Characters are not platform tokens.
-- **Accept both native AG record paths:** only an explicitly supplied `transcript.jsonl` or `transcript_full.jsonl` in the same trusted conversation directory is accepted. No sibling-file scan is performed. Only recognized public input/response fields are retained; file identity, invocation window, scope and read budgets still apply.
-- **Separate records from delivery:** a matched Post response can become partial work reference. Without a complete public Stop and reliable delivery attribution, an earlier Post is never promoted to complete delivery or used to start phase review. The UI separates input, response and delivery coverage; upgrades do not backfill completed old receipts.
-- **Do not invent a missing focus:** missing, truncated or unattributed AG input cannot act as a continuation of the old query. Automatic context no longer selects another conversation's recent history by time alone when the current question is absent. Real faults, explicit task goals, current-conversation file hints and invalidation notices remain available; manual search is unchanged.
-- **Compatibility:** schema/internal protocol 25 and indexes 6/2/1 are unchanged. Installation changes no administrator, model, publication or failed-call retry policy. Offline checks do not establish native-host acceptance or task gains.
-
-## Review recovery, retrieval noise and card summaries (1.4.25)
-
-- **Distinguish pending work from selectable batches:** administrator settings explain selectable batches, previous failures and blocked stages for the current project/host. Historical review keeps its separate batch authority. Failed and unknown-result calls are displayed separately while preserving unknown usage and old locks. Saved replies can be locally rechecked; a new model attempt still needs explicit confirmation, never an upgrade-triggered retry.
-- **Prefer substantive topic matches:** formal ranking considers title/body topic coverage; working history downranks recognized patch-success acknowledgements and adds bounded recall for earlier public explanations. Explicit patch, path and error queries remain supported. Version strings do not establish staleness or expand automatic injection authority.
-- **Keep card output small for the model:** text and structured results share a summary capped at 3000 characters, excluding repeated budgets, full policies and batch lists. The UI retains full state, button capabilities and version snapshots in its private channel; native menu results still carry no model-visible body. Characters are not platform token usage and establish no savings percentage.
-- **Compatibility:** schema/protocol 25 and indexes 6/2/1 remain. Models, accounts, publication policy and real failed records are preserved. Ranking cannot supply knowledge that has not been organized, and offline checks do not establish a successful real administrator review.
-
-## Administrator launchers and protocol checks (1.4.24)
-
-- **Follow the current Codex desktop backend:** on Windows, the default bare `codex` command and the plugin's exact HTTP preset use bounded current-process ancestry when `CODEX_CLI_PATH` is absent. This avoids an older PATH CLI lacking the desktop's model. Background dispatch carries a bounded backend identity snapshot, rechecking the original backend process and file after the Hook exits. Explicit paths, custom arguments and host hints remain authoritative. No version-directory scan or newest-file selection occurs. An identified backend that becomes invalid stops the launch; without an identified host, PATH behavior remains. Independent terminals may need an explicit launcher.
-- **Read CLI help from either output stream:** standard help probes accept stdout or stderr only after a successful exit, within the size limit and with all required flags. DSH SDK probes still validate stdout JSON separately, keeping diagnostics out of the protocol.
-- **Separate installation from model readiness:** ordinary Antigravity Hooks, MCP and the App panel do not require a separate CLI; automatic review requires official `agy`. Version/help checks launch no model and do not verify authentication or a real review. Upgrades do not change models, unlock old failures or enable administrators/publication.
-
-## Follow-up retrieval and review failure diagnostics (1.4.23)
-
-- **Keep the business focus**: action-only follow-ups such as “continue testing” reuse a valid business query, then the current task goal. Without a business focus, unrelated recent history is not injected. Prompts containing a subject remain new queries.
-- **Bounded, private diagnostics**: recognized machine fields and narrow known error templates produce fixed authentication, quota, model, schema or argument categories before temporary output is removed. Unknown errors stay unknown; raw errors, credentials, paths and private reasoning are not retained. Text does not establish an HTTP status or authorize retries.
-- **Separate terminal events from replies**: recovery and debug views distinguish completed, failed, cancelled or conflicting protocol events, collected review replies and process exit codes. A terminal event does not mean a reply was accepted. Missing fields in older attempts remain unknown; usage, locks and local recheck authority are preserved.
-- **Compatibility is unchanged**: schema/protocol 25 and indexes 6/2/1; no administrator, history or publication policy is enabled. Offline simulations do not establish that earlier real model failures have recovered.
-
-## Review frequency, context coverage and boundary protection (1.4.22)
-
-- **Review actual work:** local reuse of old evidence-wait receipts does not bypass stage frequency. Real continuation items still progress. Bounded pending-batch scans use actual request reservations so an oversized batch does not pin a smaller admissible batch. Project/global budgets, unknown-call locks and concurrency safeguards remain. Merged usage is validated again; conflicting usage retains its reservation.
-- **Separate index and body coverage:** an index card cannot suppress a later excerpt. Coverage follows actual original-text intervals, including query windows and head/tail clipping. Equal lengths do not imply equal content. The cache stores fingerprints and intervals, not evidence text.
-- **Keep file notices independent:** exposed formal knowledge retains bounded, rotating source-file notices even when optional work-history context is disabled. A new file version is acknowledged only after a complete notice fits. Optional storage failures do not roll back other knowledge or source notices. Checks observe size/mtime metadata, not content equality.
-- **Recover confirmed checkout identity:** use original jobs, checkout records or trusted original working directories. Unknown identity remains pending instead of being assigned to another checkout, without pinning recoverable requests behind it.
-- **Align host and invalid-input boundaries:** fixed DSH installations validate native-tool calls against the trusted session workspace; dynamic installations keep their existing contract. Native reread is declared. Invalid Unicode evaluation results retain executed attempts as invalid observations and unreported usage stays unknown.
-- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Installation does not enable administrators, historical review or publication. Update shared-database hosts together and reload. Offline checks do not establish live-host coverage or task benefit.
-
-## Recovery state, review progress and consistent receipts (1.4.21)
-
-- **Seal after recovery:** distinguish completed, not applicable and deferred capture. Disabling work history retains pending long public messages and failed captures for later recovery. Complete short public replies can use their original event without making the optional index a stage dependency.
-- **Preserve file identity:** explicit rebuilds reuse confirmed original file links. Missing original working directories do not become paths guessed from the rebuild directory.
-- **Keep scans and admission consistent:** comparison changes preserve a bounded scan's cursor and trigger a recheck after its tail; source and configuration changes restart immediately. Stage admission, dispatch and claim check the actual request reservation against both project and global token budgets. Legacy fixed reservations, unknown-usage accounting and concurrency safeguards remain.
-- **Retain receipt limitations:** short read receipts preserve incomplete observations, partial coverage and automatic-use restrictions. A completely returned section does not prove a complete original observation. Invalid evaluation fields retain the attempt as an invalid observation, with unreported usage unknown.
-- **Align DSH project panels:** after validating the actual working directory against the installation, root and subdirectory operations share one project panel identity. Stop feedback reflects the actual result.
-- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Installation does not enable administrators, historical review or publication. Live host coverage, token costs and task benefits require separate acceptance.
-
-## Read-only isolation, conditional handoffs and faithful recovery (1.4.20)
-
-- **Separate DSH lanes:** model tools and read-only commands manage only read-only instances. Human status returns no capability links; operator panels retain approval and project-instance controls.
-- **Preserve conditions after compaction:** isolated segments of a long public message cannot become a complete task handoff. Ordinary segment search/read and complete short handoffs remain available.
-- **Retain original observations:** freeze at most 16 file targets and metadata at the original callback. Automatic recovery, stage sealing and explicit work rebuild share the snapshot and success confirmation. Legacy retries without original metadata remain unknown/incomplete; affected work records are not automatically injected.
-- **Keep review scans progressing:** unrelated new chats do not reset old case scans. Actual source-model, account, executor, profile and backoff changes still invalidate affected checks.
-- **Finite evaluation output:** isolate invalid extreme inputs; overflowing aggregates retain original observations, return null with a reason and disable only the affected comparison. Normal report formatting remains compatible.
-- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Update shared-database hosts together. Installation does not enable administrator, historical review or publication policies; no real token or task-benefit improvement is inferred.
-
-## Retrieval, capture recovery and review scheduling (1.4.19)
-
-- **File identity and handoffs:** retain complete Unicode paths and dotfiles; fenced code inside lists cannot become a handoff constraint. Incomplete long-query identity still blocks automatic injection.
-- **Recover captured observations:** retain the original event and trusted working directory when a derived projection fails. Later writer callbacks retry bounded local work with backoff, without scanning old chats or calling models. Lexical migration rebuilds at most 16 queued work records per callback; `index_rebuild_pending` and `capture_repair_pending` expose separate queues.
-- **Avoid repeated work:** completed section reads return short receipts after live source, file and context checks; use `reread=true` for the text. Read-only menu discovery shares installation inspection within one request; subsequent requests and writes check again.
-- **Consistent review progress:** resume bounded legacy scans, rotate all three hosts fairly, and admit stages using their actual reserved request budget. Single-case and historical review keep their own admission checks. Current-equivalent revisions may merge sources; revocations, counterexamples and outdated content remain protected.
-- **Recoverable UI reads:** DSH separates read-only, review and administrator browsers and case-sensitive project identities, with tracked concurrent startup. Knowledge-page reads have a 15-second total deadline; uncertain writes are never replayed automatically.
-- **Compatibility:** schema/internal protocol remain 25; formal/work/semantic indexes are 6/2/1. Update every shared-database host together. Installation preserves administrator and publication policies and adds no model calls. Offline timing and response characters do not establish real token savings or task benefit.
-- **Separate artifact measurements:** optional `artifact_metrics` freeze performance, memory or quality metrics, units, methods and acceptance criteria, requiring artifact and measurement evidence fingerprints. Each arm is reported separately; unknown or mismatched conditions do not pass, and model wall time/tokens are not artifact performance.
-
-## Current-task handoff excerpts and work-history pages (1.4.18)
-
-- **Prioritize useful background:** After real compaction, the current-task handoff selects complete original constraints, pending work and corrections, with an excerpt of at most 160 characters inside the existing 600-character optional pool and 2,400-character total budget. Conditions travel with their paragraphs or list items; if a complete group cannot fit, only the identity index is returned. Existing task, assignment, checkout and source checks remain in force.
-- **Keep excerpts separate from complete reads:** Omission markers and `read_required` remain. Selection creates no new facts or model summary and establishes neither complete original output, model reading, verified conclusions nor execution permission. Original records and full paginated reads remain available.
-- **Use small pages for more content:** Paginated responses shorten repeated preview metadata and mark omissions. Every page still checks live sources and file state, measuring the actual JSON-body character budget for Chinese and escaped characters. A complete large page retains its original response shape when it fits; section completeness and `reread=true` rules are unchanged.
-- **Preserve compatibility and validation limits:** No model call, administrator, history processing or installation switch is added or enabled. Schema/protocol remain 25 and indexes 5/1/1. Offline pagination and selection checks establish neither live-host latency nor net token gains, and do not establish the cause of differences in earlier version comparisons.
-
-Isolated 1.4.18 validation: 497 checks on Python 3.14.7, with 496 passing and one Windows symlink-permission skip; no failures or errors. All three exports and their actual MCP entries passed. The same synthetic evidence and harness, repeated in both version orders, reduced a 1,024-character budget from 40 pages / 40,850 response characters to 15 pages / 15,200 characters with identical reconstructed content; a complete large page retained its shape and size. The handoff fixture now includes the previously obscured constraint while total card output changed from 569 to 561 characters. These offline results use no real model and do not explain the full latency difference in the earlier experiment.
-
-## Antigravity routine-stage classification compatibility (1.4.17)
-
-- **Check the same-turn public request:** Only complete Antigravity input-coverage diagnostic metadata that can be checked against an already stored public request from the same turn participates in local routine-stage classification. A new diagnostic event alone should not send a pure connection check to AI review.
-- **Keep routine classification narrow:** Missing, truncated, ambiguous or mixed business-task material follows normal review. Diagnostic metadata is not new knowledge and establishes neither a complete reply nor task delivery.
-- **Preserve existing boundaries:** Local classification adds no model call. Version 1.4.16 automatic-context coverage, budgets and permissions remain unchanged; schema/protocol stay at 25 and indexes at 5/1/1. The live Antigravity stage workflow still needs host acceptance.
-
-## Automatic-context coverage and stable deduplication (1.4.16)
-
-- **Record complete output only:** A disposable, bounded automatic-context fingerprint cache (policy 1) records only cards actually rendered in full. Existing exposure audits do not backfill coverage, and manual pages do not imply complete coverage. Neither exposure nor coverage proves model reading.
-- **Avoid resending after progress-only updates:** Published knowledge, candidates and working history can reuse coverage across turns in the same trusted context. A progress-only task `write_version` change no longer invalidates stable deduplication. Execution checks, CAS and file hints retain their original `write_version`; deduplication never extends permissions.
-- **Suppress strict duplicates only:** Within one channel, coverage reuse requires identical sources, exact material, applicability, evidence level, publication tier and file state. This is not paraphrase merging: changed negation, numbers or conditions remain distinct. Source-risk notices operate independently of the cache.
-- **Limit cross-channel coverage to complete source statements:** Only a `reported source_reference fact` whose body, conditions and metadata were actually sent in full can cover a complete `reported public_summary` with the same source, source version and identical full text. Additional facts, truncation, different evidence levels and verified solutions remain distinct. A candidate title card is not a sent body.
-- **Track complete on-demand reads separately:** After every page of one work-history section has been returned, progress-only updates can reuse a short receipt. `reread=true` still requests explicit rereading. File, source, task-revision or context-boundary changes require fresh checks; complete output is not proof of model reading.
-- **Recheck changed boundaries:** Actual compaction, task revisions, assignments, host or checkout scope changes recheck and restore eligible context. Antigravity ephemeral contexts do not reuse coverage across invocations. Missing or expired cache entries may render again; audit records never become proof of model memory.
-- **Keep budgets and permissions:** The default 2,400-character total and 600-character optional pool remain unchanged, with no extra generative-model calls. Schema/protocol stay at 25 and indexes at 5/1/1; coverage is not authoritative knowledge. Administrator, candidate-reference and publication defaults remain unchanged. No real-task savings ratio is claimed.
-
-## Separate problem retrieval from compaction handoffs (1.4.15)
-
-- **Keep problem-identity checks for long input:** If a prompt or its key identifiers exceed the complete-scan limits, automatic formal-knowledge and candidate problem recall remains blocked. Selecting a few keywords cannot bypass this protection; explicit searches remain available.
-- **Recover background after actual compaction:** When problem recall is unsafe, actual compaction can still examine at most 20 handoff candidates and select at most one healthy, complete public handoff from the same project, checkout, conversation, agent, explicit task revision and assignment. These boundaries are never widened. No explicit task means no guessed handoff. Ordinary Antigravity ephemeral invocations do not count as compaction.
-- **Prioritize within the existing budget:** Risk notices and formal knowledge come first; candidates retain their existing optional pool. A safe query with a clear work match keeps the most relevant record first. When more than one work slot is available, reserve at most one for the current handoff before adding ordinary records. A single slot favors the relevant match; without a match, try the handoff. An unsafe query attempts only the handoff, with no problem matches. Published knowledge or candidates may exhaust the budget, so handoff delivery is not guaranteed. Its card uses `task_handoff` for current-task background, not a verified solution or execution permission; public claims remain `reported`.
-- **No extra model call:** The existing 600-character optional pool, default 2,400-character total budget, deduplication, final source rechecks and file-state checks remain in force. Administrator, candidate-reference and publication defaults stay unchanged. This change alone establishes neither live host acceptance nor token savings.
-
-## Automatic work-history selection and phase recovery (1.4.14)
-
-- **Less low-information context:** Known metadata-only successful write receipts remain searchable but are omitted from new automatic references. Among equally relevant matches, public constraints, phase reports and verification observations take priority. A bounded second lane avoids receipt congestion.
-- **Current-phase recovery:** After actual compaction, a complete public handoff from the same checkout, conversation, agent, task revision and assignment can supplement current matches and risk notices. Ordinary Antigravity ephemeral invocations are not compaction. Public claims retain their reported evidence level.
-- **Preserved change notices:** Previously exposed receipts still notify when their sources or exposed files change. Exposure is recorded only for complete rendered cards. Exact acknowledgements reuse the current query; polluted old acknowledgements fall back to the task goal. Domain-bearing prompts remain new queries.
-- **Bounded original excerpts:** Query-aware previews select existing text and mark truncated tool projections. Progressive reads, source governance and the existing 600/2,400-character budgets remain in force. This adds no generative-model call.
-
-## Candidate references and saved-response recovery (1.3.0)
-
-- **Opt in per project:** Open Administrator settings → Unpublished candidate references. This default-off setting is independent of model review and publication. Each frozen historical batch has a separate reference permission; enabling it does not scan or review new sources.
-- **Small indexes, progressive reads:** At most one 400-character candidate card shares the existing 600-character optional pool with work history, inside the default 2,400-character total context budget. Cards state that they are unpublished and include an evidence level and read requirement. `candidate_reference_read` pages through an exact content/source version. Local retrieval adds no generation-model call; material included in model input still uses tokens.
-- **Source checks and feedback:** Rejected or deferred candidates, changed case revisions, conflicted/missing sources, linked revocation or disputes, changed file metadata and known incompatible environments are excluded. Published candidates redirect to formal knowledge and cannot revive a revoked entry. File checks use recorded size/mtime, not complete content verification. `candidate_reference_feedback` records reported concerns against a displayed version; operators can resolve concerns with an explicit reason in candidate details. Later supported events notify exposed conversations; an exposure does not prove the model read it or erase earlier context.
-- **No circular verification:** Public replies may carry a same-task possible-influence link to displayed references. This is not proof of adoption. Restatements alone cannot provide independent evidence for automatic publication. New tool observations must still support the actual target conclusion; repeated sources do not become independent validation.
-- **Recover a saved review locally:** New runs retain a bounded, sanitized public structured reply before acceptance, with machine-readable rejection reasons. No private reasoning or full execution logs are retained. Eligible daily/stage reviews use the local-revalidation action; historical replies use a separate explicit saved-batch-response action described below. Eligible results may publish under existing, currently valid permission. Original call state, usage and retry locks remain intact. “Allow one retry” remains a separate operation that may use model quota. Deleted replies or old outputs lacking the required frozen snapshot cannot be recovered this way.
-
-Codex/DSH persistent delivery and Antigravity ephemeral delivery keep their own deduplication semantics. Compression rechecks current eligibility. Candidate-index failures omit this optional channel while formal knowledge remains available; identity and task failures still reject. Installation and upgrades never enable references or rerun old reviews automatically.
-
-### Flow corrections and efficiency (1.3.1)
-
-- Successful local revalidation reconciles scheduler and UI state through acceptance receipts. Original failed attempts, tokens and execution time remain intact, with local recoveries counted separately. Accepted calls cannot regain model-retry permission.
-- Evidence-incomplete stages rotate through a bounded scan; each member's comparison packet is read once per pass. Candidate derivation checks reuse visited nodes and limit total work, omitting a reference when its limit is reached.
-- File/environment changes for displayed candidates queue durable warnings until the output budget can carry them. Disabling work history does not disable provenance. Dismissing a counterexample needs an additional healthy observation; failed, unfinished or denied tools cannot provide its sole support.
-- New equivalent publications cannot evade revocation, superseded knowledge or unresolved concerns. Manual approval and automatic publication share the underlying governance barrier; explicit revision, restoration and counterexample handling retain their separate entry points.
-
-These checks enforce known workflow boundaries, not the truth of arbitrary natural-language claims. Actual model latency, token savings and task benefit still need real-task comparisons; offline regression does not replace host acceptance.
-
-### Historical saved-response recovery (1.4.0)
-
-Open **Approval & settings → Administrator settings → Failed reviews**, select an available **Accept this batch’s saved response (no model call)** action, enter a reason and confirm:
-
-1. **One exact output:** Check the call, frozen batch, source versions and public-response digest under a separate short lease. This scans no material, starts no model and does not resume historical organization.
-2. **Confirm boundary changes:** User pause, cancellation, deferral or account/governance changes need additional acknowledgement. Active workers cannot be displaced. Changed evidence or comparisons reject the saved response; confirmation cannot replace new evidence.
-3. **Separate result access:** Exact recovered candidates can be inspected and approved in smaller groups. Access is bound to their bodies and sources and grants no access to unrelated candidates or model execution. A later pause, cancellation or boundary change invalidates it; explicitly reconfirming access from recent reviews reopens only those results, without extracting them again.
-4. **Keep publication separate:** The default saves accepted results only. Publication additionally requires original batch-reference publication permission, a matching current policy and a separate confirmation in this request. Otherwise use candidate approval. Historical statements remain `reported`; candidate injection references have a separate switch.
-5. **Preserve receipts and accounting:** Repeated requests replay the original receipt; rejected acceptance rolls back. Original attempts, reported tokens, batch budgets and retry locks are retained. Missing output or frozen snapshots produce an explicit reason, never an automatic model rerun.
-
-Version 1.4.0 offline flow regression on Python 3.10: 2,050 checks, 2,047 passed and 3 platform-dependent skips, with no failures or errors, in 574.443 seconds. Another 51 focused checks passed on Python 3.14. Three-host isolated exports passed installation-integrity, simulated Hook, MCP and visual-resource checks. Tests enabled no real host or paid model and do not establish real-task speed or quality gains.
-
-### Keep pure status checks local (1.4.1)
-
-- In stage mode, narrow local rules recognize explicit Agent Learning connection/status requests whose public replies contain routine status only. Original evidence stays available as **retained locally; some material remains unreviewed**, without a standalone administrator call. After partial coalescing, only the remaining material is held; the whole stage is not counted as reviewed. Existing evidence-wait receipts keep their evidence-wait status.
-- Normal work takes priority. Deferred material from the same executor may fill remaining batch capacity, subject to existing frequency and token limits. Unready normal work cannot justify a routine-only call.
-- Administrator settings and all three host panels show a separate retained-stage count. Use **Check and continue** on the administrator page to request review, still subject to identity, unknown-call locks and budgets. Reading status never schedules work or calls a model.
-- Fixes, professional conclusions, project facts, independent cases, counterexamples, abnormal or unknown tools and partial sources keep normal review. New cases and source changes trigger reassessment. A bare “continue checking” cannot establish routine intent; mixed installation and upgrade stages remain eligible for review.
-
-Local classification uses no generative model. Later batches or explicit review may use platform tokens. Actual savings depend on the workload; isolated simulation cannot establish a real-task savings percentage.
-
-Version acceptance in isolation: 888 review/publication/recovery checks passed on Python 3.10 (235.854 seconds), and 140 compatibility checks passed on Python 3.14 (39.119 seconds): 1,028 total, with no failures or errors, including 21 local-deferral flow checks. Three-host export checks passed installation, simulated Hooks, MCP and visual resources (14.875 seconds). Tests did not update active installations, enable real hosts or call paid models, and do not establish actual model latency or savings.
-
-### Review, publication and recovery fixes (1.4.2)
-
-- **Separate public statements from tool results:** Observable public text from all three hosts is recorded as `reported`. Source checks can read complete legacy native messages without rewriting historical records or treating statements as verified conclusions. Partial, truncated or ambiguously attributed sources gain no automatic-publication permission.
-- **Carry source risk through publication and injection:** When an upstream candidate is rejected, deferred, disputed or invalidated, downstream candidates relying only on its retelling require review. Manual approval cannot bypass that check. Published dependents keep their bodies and audit records but receive conflicted source health, leave automatic injection and queue warnings for exposed conversations. Independent new evidence is assessed on its own sources.
-- **Recover stage sealing locally:** A bounded queue pins the original Stop and delivered task version. Recovery cannot borrow a later task boundary. New evidence for completed stages and cases arriving during model execution enter incremental review; the original batch is accepted against its frozen evidence, without resubmitting already handled revisions.
-- **Keep scheduling and status explicit:** Scheduler writes prepare bounded new material. Unstarted batches waiting for an executor do not block other available model groups. Unknown-call locks, budgets and historical permissions remain in force. The UI separates local sealing recovery, executor waits and single-candidate counts; read-only refresh never starts review.
-- **Isolate old DSH callbacks after reset:** Native bridge instances use trajectory-generation handshakes, allowing safe reuse of turn and tool IDs. After an explicit reset, reload the native bridge so a new instance completes `SessionStart`. Legacy producers without generations are compatible only with the initial trajectory; late old callbacks cannot enter a new one.
-
-These local recovery, governance and deduplication steps add no model calls. Migration preserves calls, usage and publication records; it does not enable administrators, rerun old reviews or grant historical-publication permission. Update all shared-database hosts to a schema-25-compatible runtime together.
-
-Version 1.4.2 isolated acceptance: 146 flow-test modules on Python 3.10 ran 2,133 checks, with 2,130 passing and 3 platform-related skips in 623.060 seconds. Another 75 focused checks passed on Python 3.14. Three-host exports passed installation integrity, simulated Hooks, MCP and local visual-resource checks in 14.339 seconds; these cover installation delivery rather than the complete installation/packaging suites. Tests did not update active installations, enable real hosts or call paid models, and do not establish actual model latency or task benefits.
-
-### Related stage tool evidence (1.4.3)
-
-At stage sealing, local code selects stored tool output sharing specific identifiers with public notes, within the original task and Stop window, and attaches it to existing public cases. Technical identifiers, path fragments and consecutive four-character Chinese fragments are selection clues, not proof that a conclusion is correct.
-
-- At most three complete observations and 6,000 payload characters per stage, further limited by current character and token admission. At most 128 recent tool records are scanned. Budget omissions, partial sources and scan caps retain selection diagnostics; cropped logs never masquerade as complete evidence.
-- Operations already covered by independent failure, recovery or counterexample cases are not duplicated. Links only to delivery/work-summary projections do not exclude a source. Other tasks, conversations, children, assignments, host generations and records outside the original window are excluded. Only the latest observation per operation is considered, using existing business-digest deduplication.
-- Tools join existing cases without a case or separate model request for each call. Additional evidence may increase input tokens or affect existing batch splitting; lower total usage is not guaranteed. Optional selection failure does not block the original public case. Original working history remains available.
-- Outcomes and source health remain unchanged, including `unknown`, `call_completed` and explicit success. The administrator can cite only actual case events. Selection receipts are not candidate evidence; command input is not output, completion is not success, and publication gates remain in force.
-- Batch details show selected tool observations and scope limits. Complete coverage of selected cases does not mean every tool log was reviewed. The delivered stage binding and the tool's historical task status remain distinct.
-
-Codex and DSH can match observable tool output when supplied by the host. The current Antigravity adapter primarily supplies completion/error status and does not invent missing output. This applies only to newly sealed stages: no old-case backfill, paid-review rerun or historical-batch continuation occurs automatically. Database schema and publication protocol remain 25; review-packet format is now 7.
-
-Isolated flow regression: all 807 checks across 60 relevant review, publication, provenance and scheduling modules passed on Python 3.10 in 204.027 seconds. After adding protection for the twenty-stage narrow-budget boundary, all 26 tool-evidence checks passed on Python 3.10, and all 75 focused stage, budget, packet and UI checks passed on Python 3.14. Final three-host exports passed installation integrity, simulated Hooks, MCP and local visual-resource checks in 12.507 seconds. In a small six-tool comparison, at most three observations joined one existing case; local selection averaged about 9.6 milliseconds. Estimated input increased by about 777 tokens with the additional evidence. This is a local estimate, not provider-reported usage or evidence of savings. Acceptance did not update active installations or call real models; knowledge quality and review benefit still need real-task comparisons on the new version.
-
-### Retrieval, deduplication and review compatibility (1.4.4)
-
-- **Active SQLite cursor compatibility:** Knowledge search and administrator comparisons use bounded local full-text recall and query-specific scoring, without replacing SQLite functions on each query. Exact technical identifiers have a separate recall lane; at most 128 candidates are read, with limited source expansion.
-- **Balanced automatic references:** Exact error codes and file identifiers are not diluted by long prose. Generic interface phrases cannot replace a requested technical identifier. Background counts and parallel versions do not automatically become mandatory conditions. Local, optional semantic and administrator retrieval share the local relevance checks; cache identities distinguish the new policy.
-- **Recheck after compaction:** Rebuild context from the current effective query instead of restoring knowledge merely because it was displayed earlier. No eligible match remains an empty result. Exposure and source-invalidation tracking are retained.
-- **Long-term exact deduplication:** More than 32 same-title candidates no longer prevent a healthy merge. Full business fields and metadata identify actual equivalent risks while preserving every source. Later normal records cannot hide deferrals, rejections or unresolved concerns. Different content with the same title still requires comparison; this is not automatic semantic merging.
-- **Ordered stage boundaries:** New windows retain local ordering markers alongside original task write versions and Stop boundaries. Equal timestamps cannot pull evidence from before a pause or from a later stage. Older windows use original task history without rewriting events.
-
-Database schema and publication protocol remain 25. Evidence levels, project switches, historical permissions and host trust remain in force. Upgrading does not enable candidate references, backfill reviews or add model calls.
-
-The initial complete offline run covered 2,326 checks and exposed coupling issues that were then repaired. The final source passed 179 affected-flow checks on each of Python 3.10 and 3.14, including every initially failing case. Three-host isolated installation, simulated Hooks, MCP and visual-resource acceptance passed in 13.188 seconds. See the CI badge for the complete cross-platform result. Tests called no real models and do not establish arbitrary-task retrieval completeness or net token savings.
-
-### Growing provenance and extreme queries (1.4.5)
-
-- **Source count is not a fault:** Ordinary published sources no longer invalidate dependent knowledge merely by exceeding 64 records. Local queries check actual missing, conflicted, denied and changed sources. Only candidate-dependent branches consume the lineage graph budget. Sources and evidence levels remain intact; historical claims do not become verified facts.
-- **Continue past unsuitable records:** Automatic retrieval checks later candidates within a bounded scan after rejecting irrelevant or unhealthy entries. An individual malformed body or source JSON is skipped and counted, while its record remains available for explicit inspection. Database interruption remains a separate error. Scan limits return diagnostics rather than a model-quota error. Actual provenance risks continue to block automatic references.
-- **Preserve query identity:** Character and token limits cannot silently discard required error codes or paths. Incomplete checks disable automatic injection while retaining manual search. Continuations, compaction and candidate references follow the same rule. Windows paths use normalized slashes; the derived full-text index advances to 5 and rebuilds automatically.
-- **Recoverable approval:** Many same-title variants do not prevent healthy exact duplicates from merging into current knowledge. Explicit update targets and rejection of unrelated variants permit rechecking. Existing dispute, counterexample, source, revision and historical-authorization boundaries remain in force.
-- **Total semantic timeout:** Optional local embedding requests have an overall deadline, including slowly streamed replies. Timeout falls back to local retrieval without background requests or extra generation-model calls.
-
-Database schema and publication protocol remain 25; work and optional semantic indexes remain 1. Update shared-database runtimes together to avoid alternating full-text projection rebuilds. Upgrading does not rerun administrators, delete knowledge or alter project publication policies.
-
-Final isolated verification covered 791 Python 3.10 checks: 790 passed and one Windows symlink-privilege check was skipped. One old assertion still allowed automatic injection for 160 identifiers; after updating it to the explicit manual-only overflow contract, all eight checks in that module passed again without production-code changes. Another 168 combined checks passed on Python 3.14. Three-host installation integrity, simulated Hooks, MCP and visual resources passed in 13.877 seconds. The simulated database passed quick_check with zero foreign-key errors. Acceptance called no real models and did not update active installations; these results do not establish real-task benefits or constant latency at every provenance scale.
-
-### Antigravity invocation diagnostics and limited compatibility (1.4.13)
-
-- **Explicit Pre coverage gaps:** Failed public capture at `PreInvocation` retains bounded diagnostic reasons. A newer Pre without a valid window remains unknown instead of borrowing an older complete Stop to claim current coverage. Refreshing neither rereads transcripts nor calls models.
-- **Only recognized temporary system steps:** Around the current invocation boundary after user input, the exception accepts only steps with `source=SYSTEM_SDK`, `type=EPHEMERAL_MESSAGE` and `status=DONE`. New user, model or tool steps do not qualify. Project, task, trajectory and invocation pairing checks remain in force. Public responses do not establish task delivery or administrator dispatch.
-- **Live recovery remains unverified:** The preceding live check had working tool/MCP receipts but no established public Pre window. This update adds diagnostics and limited compatibility without claiming an unproven cause or restored capture. Check the next natural work turn rather than making another model call for this diagnosis.
-- **Fewer panel-related upgrade locks:** The panel subprocess uses the validated project directory as its working directory, avoiding a long-lived handle on the replaceable plugin directory on Windows. Installation changes still require a fresh panel connection and never replay earlier actions.
-
-Database schema/publication protocol remain 25 and indexes remain 5/1/1. Old Stops are not backfilled and administrator/publication policies do not change.
-
-### Antigravity public records and health diagnostics (1.4.12)
-
-- **Bounded public capture:** Read recognized public `prompt/content` fields only from the native Hook's `transcriptPath`, checking the matching `PreInvocation`/`PostInvocation`, project, conversation, trajectory and task boundaries. No account-wide history scan, thinking, tool payloads or unknown text is retained. Multiple roots, unknown formats or mismatched identity leave coverage unknown.
-- **Responses and deliveries remain separate:** Public responses become searchable `reported`/partial working history. `PostInvocation` does not manufacture a `Stop`, task delivery, stage or administrator dispatch, and never backfills or replays an old Stop. Stage completion still needs valid task delivery and supported native stopping evidence.
-- **Scoped health observations:** `project_recent_capture` describes recent project capture, not complete coverage of the current chat or one turn. Refreshing reads saved receipts without rereading transcripts or calling models. The complete Antigravity automatic stage-review chain still requires live acceptance.
-- **Independent administrator entry:** Only the independent `agy` CLI provides this review protocol. On Windows, the default command checks PATH, then the official `%LOCALAPPDATA%\agy\bin\agy.exe` location. Explicit commands stay authoritative; App, IDE and `agentapi` are not substitutes. Launcher availability, cached protocol checks and unverified authentication/model capability are distinct. No automatic installation, login or administrator enablement occurs.
-
-Database schema/publication protocol remain 25 and indexes remain 5/1/1; knowledge, permissions and usage are preserved. See the [official Hooks contract](https://antigravity.google/docs/hooks) and [Headless reference](https://antigravity.google/docs/cli/headless/).
-
-### DSH tool contracts and observation consistency (1.4.11)
-
-- The native bridge and Python entry add a context handle only when the actual tool contract accepts it. Project-level tools such as `learning_status` retain empty arguments. Explicit invalid handles and unknown arguments remain errors.
-- Pre-checks, execution and completion observations reuse the context field verified for that call, avoiding artificial input conflicts when the bridge added it only before execution. Real argument changes still register as conflicts; successful compatibility recovery records completion too.
-- Database schema/protocol and existing settings are unchanged. Reload the DSH host bridge after upgrading. Tool connectivity, original-chat binding, actual file reads and administrator execution are verified separately.
-
-### DSH trajectory handshake recovery (1.4.10)
-
-- If the initial response is lost, an old chat resumes, or a tool arrives before startup, the same bridge instance retrieves its trajectory token. Concurrent requests share one recovery; normal calls with a token do not repeat it.
-- Recovery only checks workspace, agent identity, host epoch and trajectory. It performs no retrieval, stage delivery or administrator scheduling. Subsequent ordinary events still capture work and inject context; failed prompt delivery remains retryable.
-- Existing tokens are never cleared to bypass account changes or explicit session resets. Cross-project and parent/child boundaries remain enforced. Failed recovery still blocks tools whose identity cannot be verified; shell and plugin tools receive no broader exemption.
-- Upgrade and reload the DSH plugin/host bridge. Database schema, indexes and internal protocol are unchanged and remain compatible with other schema-25 host installations sharing the database. Upgrades do not rerun historical reviews or change administrator/publication settings.
-
-### Conversation event isolation and anchored retrieval (1.4.9)
-
-- Antigravity native events and public records are scoped to their conversation, preventing collisions when separate chats use the same execution counter or public text. Existing complete receipts retain their identity without replaying completed effects. Pending records recover only when a cross-conversation collision and an uncommitted Stop transaction can be established within the original task boundary; uncertain tool results are not treated as unexecuted. Recovery captures the public content supplied by the host now; it cannot reconstruct a lost original response.
-- Automatic queries with required technical identifiers refill through the complete identifier lane, avoiding scans of entries matching only generic prose. Later healthy matches behind unhealthy sources remain eligible, with finite scan limits and provenance checks. Manual broad retrieval and optional semantic fusion remain available; the result cache uses a distinct policy identity.
-- Platform and version checks use explicit task filters and recognizable project metadata. The local OS does not define the task's target environment. References still require checking applicability when the target is unknown; this does not establish zero irrelevant injection for arbitrary natural-language tasks.
-
-Database schema, indexes and internal protocol remain unchanged. Upgrades do not clear failed or unknown call locks, rerun historical reviews or expand publication permissions. Net token benefits and task quality still require a separate controlled task comparison.
-
-### Read invalidation and replay pagination fixes (1.4.8)
-
-- `work_memory_read` independently checks up to 64 recorded file associations and binds `file_check.complete/version` to its delivery receipt. Changes to the fourth and later undisplayed files require fresh content. Over-limit, cross-checkout, missing-workspace or unavailable metadata checks return content without reusing a receipt. Known absence differs from unreadable state; this observes size/mtime metadata, not file contents.
-- `reread=true` starts a new round for the selected section. Continue with its `section`, `expected_revision` and `next_offset` without repeating the flag. Sending it on continuation pages remains compatible. A round started in the middle cannot inherit the old round's coverage, and missing pages do not count as complete. Worker skills for all three hosts describe this behavior.
-- With a 1024-character budget, multi-file records retain identity, source state, risk warnings and the complete file-check fingerprint. File/source previews may shrink with explicit omission counts; shortened previews do not alter the read fingerprint. Character budgets are not exact token limits.
-- The association check applies only to explicit reads; normal retrieval and injection do not scan additional files. Receipts prove neither model reading nor task permission. Database schema, indexes and publication protocol are unchanged.
-- Deadline tests use separate healthy-request and slow-response budgets, plus deterministic clocks for the shared absolute deadline and connection release. Production timeout configuration is unchanged.
-
-Synthetic administrator-input analysis found no duplicate Codex instruction/output-schema delivery; existing lossless sharing of task and comparison data remains in place. Observed input of roughly 13,000 tokens per single-case call cannot be attributed to one field. This update removes no review evidence and changes no model, frequency or publication policy, and claims no measured token reduction. Bounded batching comparisons still require real task data.
-
-Final isolated validation: 285 Python 3.10 checks, 284 passed and one skipped for Windows symlink permissions; all 188 Python 3.14 checks passed. All three hosts passed installation, MCP, simulated Hook and UI-resource acceptance in 16.047 seconds. No real models, live-install updates or historical batch reruns were used. Remote CI still requires confirmation after a subsequent push.
-
-### Installation maintenance and work-history reuse (1.4.7)
-
-- **Identical installations stay unchanged.** If export content, interpreter, bindings and preserved extras match, installation returns `unchanged` without another backup or reload request. Real upgrades still follow host Hook trust requirements.
-- **Backups stay outside discovery.** Same-volume switching retains complete old exports outside plugin discovery directories. Legacy backups require an explicit, snapshot-bound relocation plan; no files are deleted. Codex and Antigravity connection diagnostics show a lightweight inventory of at most 20 entries, not a recovery or deletion guarantee.
-- **Expand working history when needed.** A complete, unchanged section already returned in the same trusted context gets a short receipt; use `reread=true` to present it again. Missing pages, source/file changes, compaction, task changes and new connections require fresh output. Antigravity reuse is limited to a verified invocation. Returned content does not prove model reading or retention.
-- **Balanced summary policy.** `summary_strategy=balanced` keeps ordinary user requests and public notes searchable without another model summary. Edits, failures, verification observations and user corrections retain their organization path. Choose `all_windows` explicitly for the previous window policy. AI summaries remain off by default; installation does not enable administrators or change model/publication settings. Stage mode prioritizes stage review.
-
-Database schema, indexes and publication protocol remain unchanged. External installation archives are excluded from historical ingestion. Local selection and reduced duplicate output do not establish real-world token savings or task quality.
-
-Isolated joint regression: 404 Python 3.10 checks, 402 passed and two skipped for Windows symlink permissions; all 87 Python 3.14 checks passed. Installation checks passed with 98 of 100 and 18 of 19 in the latest follow-up; remaining cases were permission skips. All three hosts passed installation, MCP, simulated Hook and UI-resource acceptance in 15.547 seconds without real model calls. A synthetic 12,540-character public delivery produced six summary requests under the old window policy and zero under balanced policy; adding a file change produced one, preserving all raw records. This compares fake-model request counts, not measured token savings.
-
-### Review input and adaptive budgets (1.4.6)
-
-- **Admit complete requests:** Stage batches measure the actual envelope, cases, diagnostics and output schema, replacing fixed deductions and imaginary padding. Small cases can fit smaller character caps; long Unicode, escaped text and multi-stage inputs remain subject to complete-request checks without raising user budgets.
-- **Reduce repeated input:** Exactly identical tasks and comparison records use a lossless shared representation only when it saves space. Reserved-key collisions or insufficient savings retain the original text. Frozen packets, events, counterexamples, sources and revisions remain intact; acceptance checks the original snapshots.
-- **Shorter output specification:** The stage envelope accepts only null candidates and governance proposals. Per-case results keep the full schema and acceptance rules across Codex, Antigravity and DSH.
-- **Preserve deferred material:** Cases removed by the final budget check, and duplicates that lose their representative, are not registered as submitted. They remain available to later scans; empty batches call no model. Reuse, unknown-call reservations, historical batch authorization and publication policies retain their own checks.
-
-User character caps, daily limits, output reservations and the conservative host reserve remain in force; legacy case review keeps its fixed reservation. Estimates now include actual schema bytes and remain distinct from platform-reported usage. A synthetic short case reduced visible instruction plus schema from approximately 10.3KB to 8.5KB. This measures input size, not actual tokens, review latency or real-task benefit. Upgrading does not rerun historical paid reviews or enable administrators or publication.
+| **Project memory and file history** | Records public requests, analysis, work results and file associations; segments long public replies and preserves complete, partial and truncated states for later lookup |
+| **Automatic capture and error follow-up** | Records tool results and public notes through supported host events; performs bounded experience lookup after tool failures |
+| **Layered references** | Searchable work history, formal knowledge with evidence, and optional unpublished candidate indexes; historical batches have independent authorization |
+| **Relevant retrieval and progressive reads** | Local full-text search and optional semantic matching; question, applicability and source checks guide conclusion/index → content → evidence reads |
+| **Context scheduling and deduplication** | Bounded injection, exposure tracking, source-change checks and compaction recovery; current-task handoffs are scheduled separately from ordinary problem retrieval |
+| **Visual knowledge and approval** | Project controls across three hosts and a shared local WebUI; offline Chinese/English UI, sources, revisions, queues, budgets and batch approve/reject/defer |
+| **Historical ingestion** | Explicitly archives selected existing material into independent review batches, retaining source versions, deduplication, incremental processing and coverage receipts |
+| **Optional administrator and tiered publication** | Reviews by stage frequency and project token budget; publishes within evidence and scope checks; preserves legacy case review, count presets and local revalidation of saved responses |
+| **Corrections and maintenance** | Counterexamples, disputes, revisions, replacement and revocation; upgrade checks provide maintenance leads without changing original knowledge or publication permissions |
+| **Task protection and evaluation** | Optional execution-scope checks and evaluation tools for task quality, elapsed time, reported usage and memory benefit |
+| **Sharing and installation maintenance** | Same-machine project memory with session isolation and account continuity; per-host upgrades preserve configuration, with optional GitHub update notices |
+
+**Default capture and full-text retrieval run locally without an extra generative-model call. Material included in model input still consumes context and input tokens.** The default total injection budget is 2,400 characters and is configurable; characters are not exact token counts. Administrators, AI summaries, semantic models, background scheduling, remote services and update checks start disabled. The first confirmed administrator enablement for an unconfigured project selects stage review and tiered publication; existing settings stay intact. Historical organization requires separate authorization. Assess quality, latency and usage through [task evaluation](#real-task-paired-evaluation); no fixed savings are promised.
 
 ## Visual control and the knowledge button
 
@@ -432,7 +93,7 @@ You can inspect and control project memory visually without memorizing CLI flags
 
 Codex side-panel and project Actions launches run the UI locally, without a model turn, automatic chat messages or model-context updates; direct UI results stay in UI metadata. Skill launches still use a model tool call. Project controls grant no task execution permissions and show the Hook binding as unknown unless verified. Enabling the administrator uses platform allowance. **Codex, Antigravity and DSH share a project's token ledger; stage frequency, models and enable switches remain project/host scoped.** Enabling Codex does not enable another host. Use the stage/token fields in detailed settings for stage review; count presets apply to legacy case review. Refresh shows saved settings, and changes require confirmation. Existing `ALP_HOME` safeguards still limit new calls. **History buttons only archive default project sources: they make no model calls and neither generate nor publish knowledge.** Detailed approval uses the shared local WebUI.
 
-The panels passed isolated regressions, fixed-runtime checks and Edge checks with simulated host bridges. Real Codex App Server checks also cover host-catalog discovery, routing to two projects and cross-project rejection without model turns. Desktop menus and rendering still require Codex / Antigravity host acceptance. Reload connections after upgrading and reopen old pages.
+The panels passed isolated regressions, fixed-runtime checks and Edge checks with simulated host bridges. Real Codex App Server checks also cover host-catalog discovery, routing to two projects and cross-project rejection without model turns. Verify menus and rendering against the current host version and installation wiring; configuration checks do not replace visual confirmation. Reload connections after upgrading and reopen old pages.
 
 ### 1. Composer “📖 Memory” Button & Quick Control Popover (DSH)
 
@@ -820,7 +481,7 @@ Continuous learning here works through accumulated and reused project knowledge.
 | Organization and context consumption keep growing | Review increments, bound retrieval, paginate on demand, and manage call count, concurrency and reported usage separately |
 | Automation exceeds the current task scope | With execution protection enabled, check task identity, state and explicit execution authorization for integrated calls; knowledge remains reference material |
 
-The goal is to reduce repeated work and irrelevant context so Agents can use existing experience more effectively. Knowledge exposure, declared adoption and tool observations are recorded separately; user acceptance requires independent confirmation. Task evaluation accepts usage and costs reported by an external runner. No real-task paired results have been collected for this project, so it claims no net savings ratio or percentage improvement in quality.
+The goal is to reduce repeated work and irrelevant context so Agents can use existing experience more effectively. Knowledge exposure, declared adoption and tool observations are recorded separately; user acceptance requires independent confirmation. Task evaluation accepts usage and costs reported by an external runner. Small-sample live checks help assess quality and overhead; net benefit in long, complex projects still needs continued controlled evaluation. No fixed savings ratio or percentage improvement in quality is promised.
 
 ## Where it fits
 
@@ -2060,6 +1721,397 @@ Example configuration matches runtime defaults. Static checks of original skill 
 Persistent semantic clustering, dedicated professional/pattern validation, all-day wakeups and automatic ordinary task usage/billing integration are not yet implemented. Paired evaluation in 0.12.0 collects task usage and cost observations through an explicit adapter. Stable maturity, publication, scheduling and effect observations follow the rules above.
 
 Live desktop Hook trust, automatic account event wiring, parent/child MCP connection lifecycle and project workflows still require host acceptance. Current tests do not modify the FPS project, perform login switches, enable live models or change the current user's plugin configuration.
+
+</details>
+
+## Release notes
+
+<details>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.40</summary>
+
+## Shared knowledge health check after upgrade (1.4.40)
+
+After installation and reload, the new runtime automatically advances diagnostics on its first explicit project binding. The installer exports resources without guessing a database. Projects not opened remain pending; no resident scan service or administrator enablement is required.
+
+- **One shared run:** the SQLite database keys progress by project ID and health-rule version, excluding host, account and installation path. Different projects/databases remain independent. Patches with unchanged rules reuse results; older rules cannot overwrite a registered newer run.
+- **Bounded and resumable:** each project connection handles at most 12 records with a 75 ms execution budget. A short transaction commits observations and cursor together. Busy databases yield; later connections resume. Resource-limited checks are explicitly partial and cannot be interpreted as passing. An inactive project has no background completion guarantee.
+- **Maintenance suggestions:** inspect current active formal knowledge for missing/unknown classification, missing purpose/evidence grades, unspecified applicability/limitations, exact duplicates, existing counterexamples and bounded direct-source evidence risks. Missing fields are suggestions, not proof of false content. No semantic reclassification, age-only invalidation, historical import, raw-chat/source scan, candidate scan or work-history scan occurs.
+- **Visual, read-only observations:** expand Knowledge health check in the knowledge browser; `status` includes a cached summary. Reports retain checked revisions and timestamps. Manifest consistency does not prove unchanged source events; existing live read checks remain authoritative for retrieval.
+- **No automatic governance:** only derived reports are written. Content, classification, evidence grades, activation, candidates, administrator queues and publication policy stay unchanged. No model is called; corrections and reclassification use existing revision/approval paths.
+
+Schema/protocol25 and indexes6/2/1 remain compatible. Diagnostic storage is independent of the optional scheduler and adds no automatic model-context injection. A completed report describes bounded observations, not factual certification.
+
+## Tool context, source caveats and budget choice (1.4.39)
+
+- **Domain knowledge need not repeat a generic tool name:** queries with a clear business topic may treat exec_command/read_file as execution context. Material must independently meet the business relevance gate. Error codes, paths and custom tool namespaces retain complete identity checks. Tool-only overlap, business words appearing only in limitations, or a semantic score cannot bypass the gate. Tool-specific timeouts, permissions and standalone usage keep their named-tool checks.
+- **Expose mixed-source caveats:** reads add source_caveat, evaluating unresolved failures separately for each publication source. Success in another source cannot repair them; these counts are not independent validations. Automatic delivery uses a risk-marked read index while manual content and evidence remain available. Notices and indexes are deduplicated; recovered sources do not raise stale warnings. Evidence grades, maturity and publication authority are unchanged.
+- **Choose a workload budget:** defaults remain 2400 total / 600 shared characters. For competing formal and work records, merge the following fields into existing configuration to try 3600/600. Installation does not enable it automatically and delivery respects the configured hard cap. A larger cap does not add unrelated material to short requests. Long indivisible conclusions retain progressive reading rather than losing their conditions.
+
+```json
+{
+  "injection_max_chars": 3600,
+  "work_memory": { "max_context_chars": 600 }
+}
+```
+
+- **Keep change-driven delivery:** new questions, source/revision changes and compression use existing checks. Persistent deduplication and ephemeral re-presentation remain distinct; no every-N-turn bulk injection or model call is added.
+- **Compatibility:** schema/internal protocol 25 and indexes 6/2/1 remain. Matching-policy changes recheck cached query plans. Update and reload shared-database hosts together; existing model, administrator, publication and history policies are preserved. The budget candidate comes from synthetic experiments, not a real-task token or quality guarantee.
+
+## Stale work summaries and automatic applicability (1.4.38)
+
+- **Stop replaying stale work conclusions:** selection and final validation share the complete-summary health gate. Changed or unobservable files and incomplete file projections cannot expand an old statement. Acknowledging a notice does not validate the captured source again. Risk notices, ordinary indexes and healthy index upgrades remain; stale material is not cached as healthy.
+- **A tool name is not the business topic:** an explicitly named generic tool still requires its full identity, but a shared tool alone cannot grant sparse recall or a semantic shortcut when the request has separate business terms. Tool-specific failures, standalone usage, exact error codes and paths retain their existing gates. Manual recall remains available.
+- **Check explicit version conditions:** a bounded declaration grammar checks unambiguous only-applicable/excluded versions against a matching project manifest or an explicitly queried subject/version. Quotations, code, history, multiple components, ranges, contradictions and truncated text remain unknown; general prose negation is not guessed.
+- **Revalidate all automatic lanes:** formal knowledge, enabled candidate references and work history share the check. Candidates use their complete original body rather than a short preview and are checked again before delivery. The new automatic filter does not widen existing manual-read restrictions; environment, file and concern protections remain.
+- **Compatibility:** version 1.4.38 keeps schema/internal protocol 25, indexes 6/2/1 and the 2400-character total budget. The matching-policy change rechecks cached query plans; update and reload shared-database hosts together. No administrator/publication policy is enabled and no model call is added. Sandbox checks do not establish real-task token savings or quality gains.
+
+## Conclusion boundaries, complete work cards and label equivalence (1.4.37)
+
+- **Keep mixed-heading boundaries**: explicit conditions or versions at a different heading level from the conclusion retain the entire original document as an indivisible block. If it cannot fit, return an index. Ordinary parent headings, old attempts, code and multiple conclusions keep their ambiguity protections.
+- **One topic gate for budget changes**: normal excerpts, smaller presentations and source-range coverage share the same conclusion selection rule. A smaller budget cannot replace a background-only match with an unrelated conclusion.
+- **Fit one useful work conclusion**: ordinary work previews retain their 80-character default. The current context may offer up to 240 characters to one relevant, complete, healthy conclusion, only if its entire encoded card fits the existing 600-character optional pool and 2400-character total budget. Conditions are never cut. Candidates and risk notices retain priority; compaction handoffs remain at 160 characters, with manual search and pagination unchanged. Old short indexes can upgrade without repeated downgrade/upgrade delivery.
+- **Compare only lossless labels**: one explicit leading `结论：` or `Conclusion:` label and a finite set of spacing forms may differ; all remaining text, title, scope, limits, evidence grade and metadata must match exactly. Reuse the existing knowledge ID/revision and append provenance. Original bodies, precise fingerprints and indexes remain unchanged. No semantic merging occurs; changes to numbers, negation, versions or conditions retain normal governance. Revocations, superseded revisions, counterexamples, candidate concerns and publication authority remain checked. Explicit visual approval retains its existing contract.
+- **Upgrade shared installations together**: schema/protocol 25 and indexes 6/2/1 stay unchanged. The matching-policy update refreshes old query plans. Reload shared-database hosts after updating their cores; no administrator, publication or history option is enabled, no knowledge is rewritten, and no model calls are added. Sandbox acceptance is separate from real-task benefit evaluation.
+
+## Conclusion-first excerpts and less question noise (1.4.36)
+
+- **Organize supported conclusions during existing reviews**: administrator prompts use the existing `content` field for a reusable conclusion and necessary qualifications. Source statements remain `reported`; missing evidence is not filled in. Work summaries retain current status and uncertainty. No mandatory five-part template or extra model call is introduced.
+- **Keep qualifications attached**: local selection favors a single explicit Chinese or English conclusion and its labelled conditions, limitations, corrections, verification, version or date. A block that cannot fit becomes a read-on-demand index. Code examples, multiple conclusions and ambiguous structures receive no conclusion promotion. Unstructured legacy content keeps its original excerpt behavior; arbitrary semantic conditions cannot all be recognized.
+- **Reduce old-question noise**: automatic work history favors results, verification observations, user constraints and corrections. Unanswered questions and bare action requests no longer fill empty slots; bounded supplemental recall prevents question bursts from hiding older results. Explicit requests for past requirements or wording, manual searches, source/file notices and scoped compaction handoffs retain their contracts. A valid source is not proof of verified or currently applicable content.
+- **Preserve existing decisions**: precise delivered source ranges still govern deduplication. Omitted text is never counted as fully delivered. Existing review receipts, bodies, publication authority and model settings stay intact; old knowledge is not rewritten or re-reviewed. The matching-policy update invalidates old query plans without changing schema/protocol 25 or indexes 6/2/1. Reload all shared-database hosts after updating the core. Offline checks do not establish real latency, token or quality gains.
+
+## On-demand AG panel read recovery (1.4.35)
+
+For status and diagnostics in a confirmed project, the AG panel uses a conservative refresh window to recheck its connection before reading. Workspace, conversation, account or governance identity changes stop reuse of the old state. Connection and read responses have bounded waits; late replies cannot replace a new project. Unknown network failures retain a manual reconnect option. Settings, archival and page-opening actions are never replayed automatically.
+
+This change can update the standalone AG UI bridge while retaining the installed 1.4.34 core and existing Codex Hook definitions. Protocol25, indexes6/2/1, models, budgets and publication policies remain unchanged. It covers reproducible capability-expiry and wait boundaries; it does not establish that every previous connection failure was caused by expiry.
+
+## DSH panels without a project (1.4.34)
+
+An unbound DSH settings panel asks you to open the knowledge browser from an installed project conversation and keeps Refresh available. It no longer labels unknown state as zero knowledge or a disabled administrator, or shows project actions it cannot execute. Loading, read failure and unbound states have distinct English and Chinese messages. Temporary read failures preserve the last confirmed summary for the same scope.
+
+This version includes the source recovery, project isolation and derived cleanup fixes from 1.4.33. Schema/protocol25 and indexes6/2/1 remain unchanged. Upgrades preserve model, administrator, budget and publication settings and make no additional model review calls.
+
+## Recovered sources, panel scope and capture isolation (1.4.33)
+
+- **Publication preserves recovered source health:** when a source cites its failure followed by valid recovery success, downstream lineage keeps that recovery assessment after publication. Success from another source cannot repair its failure. Identity, denial, conflict, missing sources, counterexamples and revocation remain protected. A matching-policy update invalidates old empty caches and context plans without scanning all knowledge or replaying reviews.
+- **DSH isolates summaries during project switches:** the composer summary is bound to workspace and session, and a newly mounted panel validates its initial scope. Closing, switching, delayed reads or failed reopening cannot relabel A's summary as B's. Native host switching still needs separate acceptance.
+- **Derived cleanup stays isolated:** pending cleanup runs inside the projection savepoint. A failed cleanup statement rolls back derived work while retaining the original event, denial and retry record. Unusable storage still fails explicitly; this does not promise commits through every database failure.
+- **AG/Codex panels read on demand:** summary and debug reuse one database snapshot and common state, skipping unused full status, recovery and review activity. Installation, identity, account/governance epoch, capability and write-version checks remain; candidate counts and AG capture fields retain their host-specific meaning.
+- **Compatibility:** schema/protocol25 and indexes6/2/1 remain unchanged, with no extra model calls or changes to existing review/publication policies. This fixes a specific recovery inconsistency; candidate eligibility, publication authorization and execution permission remain separate. Offline tests and query measurements are not real-model benefit evidence.
+
+## Lighter panel reads and launcher diagnostics (1.4.32)
+
+- **Dedicated DSH read path:** one database snapshot reuses administrator and phase status and queries only counters consumed by the panel. It skips duplicate full status, review activity and recovery details. Opening the panel does not create storage, register a project or resume reviews; detailed views remain available in Approval & settings.
+- **Recoverable read failures:** local reads have time and query limits. The DSH UI explains failures in its selected language, preserves the last confirmed state for the same project and allows refresh. A status GET stops waiting after 15 seconds, including response decoding; late responses or responses from another project cannot replace the current display. Settings and model requests are never replayed by this timeout.
+- **Pinned launcher diagnostics:** a missing configured file reports `configured_launcher_missing`; access denial has a separate reason. Explicitly update the command through `admin-configure`. Changing only the model or enabling review preserves the command; no alternate CLI is substituted.
+- **Acceptance scope:** schema/protocol25, indexes6/2/1 and existing policies remain. This removes confirmed duplicate reads. The complete cause of the earlier native 10–13 second latency still needs a running-host retest; isolated improvements are not end-to-end savings.
+
+## Routine checks, capture acknowledgements and phase backlogs (1.4.31)
+
+- **Avoid routine-status reviews**: in an explicitly read-only status task, a complete, conflict-free and correctly paired `call_completed` result from a known Agent Learning status tool may be deferred locally. Its recorded outcome stays protocol completion. Unknown tools, truncation, running results, missing pre-events and uncertain attribution retain normal review.
+- **Separate DSH turn completion from capture acknowledgement**: terminal and tool-result envelopes have stable capture identities. Unconfirmed persistence or responses retain a bounded envelope in the current bridge instance for limited redelivery. The receiver checks the original task, host and trajectory boundaries and returns confirmed receipts idempotently. Redelivery does not rerun business tools or old reviews. This memory queue does not survive host restarts or guarantee recovery of every lost event.
+- **Explain phase backlogs**: eligible work and protected failed batches/phases in the current host boundary are shown separately. Recent complete public replies explain a missing task, missing explicit delivery or pending capture seal. Reading a page creates no phase, unlocks no call and starts no review.
+- **Preserve policy**: schema/internal protocol 25 and indexes 6/2/1 stay unchanged, as do models, budgets, administrator and publication switches. AG long-trajectory and oversized-public-text limits remain; new complete delivery still requires separate real-task acceptance. Offline regressions do not establish token savings.
+
+## Administrator wait attribution and AG delivery adaptation (1.4.30)
+
+- **Historical protection is not a global stop:** distinguish calls affecting the current review policy, host, problem revision and phase from retained historical attempts. When no new work is ready, show historical protection separately. New tasks retain normal admission; old calls and unknown usage are not reset or retried.
+- **One explanation for scheduling and UI:** administrator settings, scheduler summaries and all three host panels share the scope decision. Other hosts, old per-case work and stale “model started” observations no longer imply current execution. `queue_blocked_by_protected_calls` explains the current queue and grants no retry permission.
+- **Use the actual AG Hook contract:** App 2.23 does not promise `finalModelOutput` on Stop. For subsequent new invocations, a clear, fully idle termination can trigger a fresh read of the explicitly supplied trusted public transcript instead of relying on that optional field.
+- **Strict recovery boundaries:** require the same conversation, host generation, task, input window, final invocation and stable file, a complete public response matching the associated Post record, and no later user or pending tool. Missing proof retains partial public history with an explanation. Old Post responses are not simply promoted; completed old receipts are not rewritten.
+- **Keep audits, reduce repeated presentation:** automatic context prefers a complete delivery over its explicitly linked partial response only when short text is identical and source/file checks are healthy. Manual access keeps both records. Long segments, truncated material and different boundaries are not merged by this rule.
+- **Preserve authorization:** no extra model call, schema/protocol 25 and indexes 6/2/1 remain. Administrator and publication policy, old failure locks and usage stay intact. Old calls lacking the new window proof are not backfilled; acceptance of a new native delivery is separate.
+
+## Automatic-context noise and follow-up focus (1.4.29)
+
+- **Fewer old delivery claims for generic actions:** inspect the original prompt before scoring removes request words. A definite delivery-status snapshot with only `reported`/`model_reported` support cannot qualify merely through generic install, push or test words. Guides, constraints and ambiguous material retain the existing gates; history is not declared incorrect or expired.
+- **One rule across channels:** formal knowledge, work history and enabled candidate references share the automatic gate. High semantic similarity cannot bypass it. `match.auto_exclusion_reason` explains exclusions; manual search and reading remain available.
+- **Keep the current focus:** whole action-only follow-ups such as “continue optimizing” reuse a valid current query. Requests naming SQLite, a path, a version or another subject still start a new query. Without a valid focus, generic old requests do not fill context. Search continuity grants no task or execution permission.
+- **Preserve independent recovery:** explicit historical versions, delivery history, errors and files retain their existing recall gates. Strict current-task compaction handoffs, source updates and file notices continue through their own boundaries.
+- **No extra model or migration:** concrete questions skip the new status classifier. The match-policy change invalidates old query caches without rebuilding FTS. Schema/protocol 25, indexes 6/2/1 and model, administrator and publication policies remain. Offline noise reduction establishes no real token return.
+
+## AG panel reconnection and page restoration (1.4.28)
+
+- **Recovery stays reachable**: after a previously connected panel fails, a separate Reconnect button and localized notice remain available. Business controls stay hidden until the connection is verified again.
+- **Use current host context**: reconnect reads the current conversation and sole workspace from the host, then applies the existing installation and fingerprint checks. Stale responses cannot replace a newer project.
+- **No action replay**: reconnect reads state; it does not replay debug, settings, archival or model work. An uncertain write requires checking the current state before any further user decision.
+- **Restore the page lifecycle**: hiding clears the connection; restoring rechecks host context. Hidden pages do not initiate workspace queries.
+- **Update the global UI bridge separately**: only AG sidebar frontend resources changed. Existing 1.4.27 cores can use `install-ui --upgrade` for the registered global UI without replacing Codex/DSH cores or reviewing unchanged Hooks. Project-local Sidecars update with the core. Complete public delivery still requires host evidence.
+
+## Exclude current AG input and bound native DSH summaries (1.4.27)
+
+- **Do not recall the current request as history:** after capturing or reusing a public AG request, pass its canonical source ID to retrieval and exclude its work index and long-message segments. The request remains stored and relevant earlier history stays available. No text-based history deletion or completed-receipt rewrite occurs; the fix applies to subsequent fresh calls.
+- **Keep native output compact:** DSH uses compact JSON for `learning_status(view="summary")` on both normal execution and syntax recovery. Omitted view, full status and other tools retain their formatting; programmatic results stay available to the UI.
+- **Count escaping and non-BMP characters:** the summary `{content,isError}` envelope is capped at 3000 UTF-16 units. Host-generated call IDs and transport fields are outside this budget; units are not tokens. Only rendered content enters the model message, without a duplicate programmatic value.
+- **Compatibility and acceptance:** schema/internal protocol 25 and indexes 6/2/1 are unchanged. Administrator, model, publication and failed-call permissions remain. Partial AG responses are not complete delivery; isolated regressions and model-free entry checks do not establish real-task acceptance.
+
+## Compact DSH diagnostics and AG public records (1.4.26)
+
+- **Expand diagnostics when needed:** `learning-debug` prefers `learning_status(view="summary")`. The MCP summary result, including escaping, is capped at 3000 characters without a duplicate structured body. Project/global usage, effective administrator admission, routing and unknown usage remain distinct. No arguments or `view="full"` retain the complete status; private UI snapshots remain intact. Characters are not platform tokens.
+- **Accept both native AG record paths:** only an explicitly supplied `transcript.jsonl` or `transcript_full.jsonl` in the same trusted conversation directory is accepted. No sibling-file scan is performed. Only recognized public input/response fields are retained; file identity, invocation window, scope and read budgets still apply.
+- **Separate records from delivery:** a matched Post response can become partial work reference. Without a complete public Stop and reliable delivery attribution, an earlier Post is never promoted to complete delivery or used to start phase review. The UI separates input, response and delivery coverage; upgrades do not backfill completed old receipts.
+- **Do not invent a missing focus:** missing, truncated or unattributed AG input cannot act as a continuation of the old query. Automatic context no longer selects another conversation's recent history by time alone when the current question is absent. Real faults, explicit task goals, current-conversation file hints and invalidation notices remain available; manual search is unchanged.
+- **Compatibility:** schema/internal protocol 25 and indexes 6/2/1 are unchanged. Installation changes no administrator, model, publication or failed-call retry policy. Offline checks do not establish native-host acceptance or task gains.
+
+## Review recovery, retrieval noise and card summaries (1.4.25)
+
+- **Distinguish pending work from selectable batches:** administrator settings explain selectable batches, previous failures and blocked stages for the current project/host. Historical review keeps its separate batch authority. Failed and unknown-result calls are displayed separately while preserving unknown usage and old locks. Saved replies can be locally rechecked; a new model attempt still needs explicit confirmation, never an upgrade-triggered retry.
+- **Prefer substantive topic matches:** formal ranking considers title/body topic coverage; working history downranks recognized patch-success acknowledgements and adds bounded recall for earlier public explanations. Explicit patch, path and error queries remain supported. Version strings do not establish staleness or expand automatic injection authority.
+- **Keep card output small for the model:** text and structured results share a summary capped at 3000 characters, excluding repeated budgets, full policies and batch lists. The UI retains full state, button capabilities and version snapshots in its private channel; native menu results still carry no model-visible body. Characters are not platform token usage and establish no savings percentage.
+- **Compatibility:** schema/protocol 25 and indexes 6/2/1 remain. Models, accounts, publication policy and real failed records are preserved. Ranking cannot supply knowledge that has not been organized, and offline checks do not establish a successful real administrator review.
+
+## Administrator launchers and protocol checks (1.4.24)
+
+- **Follow the current Codex desktop backend:** on Windows, the default bare `codex` command and the plugin's exact HTTP preset use bounded current-process ancestry when `CODEX_CLI_PATH` is absent. This avoids an older PATH CLI lacking the desktop's model. Background dispatch carries a bounded backend identity snapshot, rechecking the original backend process and file after the Hook exits. Explicit paths, custom arguments and host hints remain authoritative. No version-directory scan or newest-file selection occurs. An identified backend that becomes invalid stops the launch; without an identified host, PATH behavior remains. Independent terminals may need an explicit launcher.
+- **Read CLI help from either output stream:** standard help probes accept stdout or stderr only after a successful exit, within the size limit and with all required flags. DSH SDK probes still validate stdout JSON separately, keeping diagnostics out of the protocol.
+- **Separate installation from model readiness:** ordinary Antigravity Hooks, MCP and the App panel do not require a separate CLI; automatic review requires official `agy`. Version/help checks launch no model and do not verify authentication or a real review. Upgrades do not change models, unlock old failures or enable administrators/publication.
+
+## Follow-up retrieval and review failure diagnostics (1.4.23)
+
+- **Keep the business focus**: action-only follow-ups such as “continue testing” reuse a valid business query, then the current task goal. Without a business focus, unrelated recent history is not injected. Prompts containing a subject remain new queries.
+- **Bounded, private diagnostics**: recognized machine fields and narrow known error templates produce fixed authentication, quota, model, schema or argument categories before temporary output is removed. Unknown errors stay unknown; raw errors, credentials, paths and private reasoning are not retained. Text does not establish an HTTP status or authorize retries.
+- **Separate terminal events from replies**: recovery and debug views distinguish completed, failed, cancelled or conflicting protocol events, collected review replies and process exit codes. A terminal event does not mean a reply was accepted. Missing fields in older attempts remain unknown; usage, locks and local recheck authority are preserved.
+- **Compatibility is unchanged**: schema/protocol 25 and indexes 6/2/1; no administrator, history or publication policy is enabled. Offline simulations do not establish that earlier real model failures have recovered.
+
+## Review frequency, context coverage and boundary protection (1.4.22)
+
+- **Review actual work:** local reuse of old evidence-wait receipts does not bypass stage frequency. Real continuation items still progress. Bounded pending-batch scans use actual request reservations so an oversized batch does not pin a smaller admissible batch. Project/global budgets, unknown-call locks and concurrency safeguards remain. Merged usage is validated again; conflicting usage retains its reservation.
+- **Separate index and body coverage:** an index card cannot suppress a later excerpt. Coverage follows actual original-text intervals, including query windows and head/tail clipping. Equal lengths do not imply equal content. The cache stores fingerprints and intervals, not evidence text.
+- **Keep file notices independent:** exposed formal knowledge retains bounded, rotating source-file notices even when optional work-history context is disabled. A new file version is acknowledged only after a complete notice fits. Optional storage failures do not roll back other knowledge or source notices. Checks observe size/mtime metadata, not content equality.
+- **Recover confirmed checkout identity:** use original jobs, checkout records or trusted original working directories. Unknown identity remains pending instead of being assigned to another checkout, without pinning recoverable requests behind it.
+- **Align host and invalid-input boundaries:** fixed DSH installations validate native-tool calls against the trusted session workspace; dynamic installations keep their existing contract. Native reread is declared. Invalid Unicode evaluation results retain executed attempts as invalid observations and unreported usage stays unknown.
+- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Installation does not enable administrators, historical review or publication. Update shared-database hosts together and reload. Offline checks do not establish live-host coverage or task benefit.
+
+## Recovery state, review progress and consistent receipts (1.4.21)
+
+- **Seal after recovery:** distinguish completed, not applicable and deferred capture. Disabling work history retains pending long public messages and failed captures for later recovery. Complete short public replies can use their original event without making the optional index a stage dependency.
+- **Preserve file identity:** explicit rebuilds reuse confirmed original file links. Missing original working directories do not become paths guessed from the rebuild directory.
+- **Keep scans and admission consistent:** comparison changes preserve a bounded scan's cursor and trigger a recheck after its tail; source and configuration changes restart immediately. Stage admission, dispatch and claim check the actual request reservation against both project and global token budgets. Legacy fixed reservations, unknown-usage accounting and concurrency safeguards remain.
+- **Retain receipt limitations:** short read receipts preserve incomplete observations, partial coverage and automatic-use restrictions. A completely returned section does not prove a complete original observation. Invalid evaluation fields retain the attempt as an invalid observation, with unreported usage unknown.
+- **Align DSH project panels:** after validating the actual working directory against the installation, root and subdirectory operations share one project panel identity. Stop feedback reflects the actual result.
+- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Installation does not enable administrators, historical review or publication. Live host coverage, token costs and task benefits require separate acceptance.
+
+## Read-only isolation, conditional handoffs and faithful recovery (1.4.20)
+
+- **Separate DSH lanes:** model tools and read-only commands manage only read-only instances. Human status returns no capability links; operator panels retain approval and project-instance controls.
+- **Preserve conditions after compaction:** isolated segments of a long public message cannot become a complete task handoff. Ordinary segment search/read and complete short handoffs remain available.
+- **Retain original observations:** freeze at most 16 file targets and metadata at the original callback. Automatic recovery, stage sealing and explicit work rebuild share the snapshot and success confirmation. Legacy retries without original metadata remain unknown/incomplete; affected work records are not automatically injected.
+- **Keep review scans progressing:** unrelated new chats do not reset old case scans. Actual source-model, account, executor, profile and backoff changes still invalidate affected checks.
+- **Finite evaluation output:** isolate invalid extreme inputs; overflowing aggregates retain original observations, return null with a reason and disable only the affected comparison. Normal report formatting remains compatible.
+- **Compatibility:** schema/internal protocol 25 and formal/work/semantic indexes 6/2/1 remain unchanged. Update shared-database hosts together. Installation does not enable administrator, historical review or publication policies; no real token or task-benefit improvement is inferred.
+
+## Retrieval, capture recovery and review scheduling (1.4.19)
+
+- **File identity and handoffs:** retain complete Unicode paths and dotfiles; fenced code inside lists cannot become a handoff constraint. Incomplete long-query identity still blocks automatic injection.
+- **Recover captured observations:** retain the original event and trusted working directory when a derived projection fails. Later writer callbacks retry bounded local work with backoff, without scanning old chats or calling models. Lexical migration rebuilds at most 16 queued work records per callback; `index_rebuild_pending` and `capture_repair_pending` expose separate queues.
+- **Avoid repeated work:** completed section reads return short receipts after live source, file and context checks; use `reread=true` for the text. Read-only menu discovery shares installation inspection within one request; subsequent requests and writes check again.
+- **Consistent review progress:** resume bounded legacy scans, rotate all three hosts fairly, and admit stages using their actual reserved request budget. Single-case and historical review keep their own admission checks. Current-equivalent revisions may merge sources; revocations, counterexamples and outdated content remain protected.
+- **Recoverable UI reads:** DSH separates read-only, review and administrator browsers and case-sensitive project identities, with tracked concurrent startup. Knowledge-page reads have a 15-second total deadline; uncertain writes are never replayed automatically.
+- **Compatibility:** schema/internal protocol remain 25; formal/work/semantic indexes are 6/2/1. Update every shared-database host together. Installation preserves administrator and publication policies and adds no model calls. Offline timing and response characters do not establish real token savings or task benefit.
+- **Separate artifact measurements:** optional `artifact_metrics` freeze performance, memory or quality metrics, units, methods and acceptance criteria, requiring artifact and measurement evidence fingerprints. Each arm is reported separately; unknown or mismatched conditions do not pass, and model wall time/tokens are not artifact performance.
+
+## Current-task handoff excerpts and work-history pages (1.4.18)
+
+- **Prioritize useful background:** After real compaction, the current-task handoff selects complete original constraints, pending work and corrections, with an excerpt of at most 160 characters inside the existing 600-character optional pool and 2,400-character total budget. Conditions travel with their paragraphs or list items; if a complete group cannot fit, only the identity index is returned. Existing task, assignment, checkout and source checks remain in force.
+- **Keep excerpts separate from complete reads:** Omission markers and `read_required` remain. Selection creates no new facts or model summary and establishes neither complete original output, model reading, verified conclusions nor execution permission. Original records and full paginated reads remain available.
+- **Use small pages for more content:** Paginated responses shorten repeated preview metadata and mark omissions. Every page still checks live sources and file state, measuring the actual JSON-body character budget for Chinese and escaped characters. A complete large page retains its original response shape when it fits; section completeness and `reread=true` rules are unchanged.
+- **Preserve compatibility and validation limits:** No model call, administrator, history processing or installation switch is added or enabled. Schema/protocol remain 25 and indexes 5/1/1. Offline pagination and selection checks establish neither live-host latency nor net token gains, and do not establish the cause of differences in earlier version comparisons.
+
+Isolated 1.4.18 validation: 497 checks on Python 3.14.7, with 496 passing and one Windows symlink-permission skip; no failures or errors. All three exports and their actual MCP entries passed. The same synthetic evidence and harness, repeated in both version orders, reduced a 1,024-character budget from 40 pages / 40,850 response characters to 15 pages / 15,200 characters with identical reconstructed content; a complete large page retained its shape and size. The handoff fixture now includes the previously obscured constraint while total card output changed from 569 to 561 characters. These offline results use no real model and do not explain the full latency difference in the earlier experiment.
+
+## Antigravity routine-stage classification compatibility (1.4.17)
+
+- **Check the same-turn public request:** Only complete Antigravity input-coverage diagnostic metadata that can be checked against an already stored public request from the same turn participates in local routine-stage classification. A new diagnostic event alone should not send a pure connection check to AI review.
+- **Keep routine classification narrow:** Missing, truncated, ambiguous or mixed business-task material follows normal review. Diagnostic metadata is not new knowledge and establishes neither a complete reply nor task delivery.
+- **Preserve existing boundaries:** Local classification adds no model call. Version 1.4.16 automatic-context coverage, budgets and permissions remain unchanged; schema/protocol stay at 25 and indexes at 5/1/1. The live Antigravity stage workflow still needs host acceptance.
+
+## Automatic-context coverage and stable deduplication (1.4.16)
+
+- **Record complete output only:** A disposable, bounded automatic-context fingerprint cache (policy 1) records only cards actually rendered in full. Existing exposure audits do not backfill coverage, and manual pages do not imply complete coverage. Neither exposure nor coverage proves model reading.
+- **Avoid resending after progress-only updates:** Published knowledge, candidates and working history can reuse coverage across turns in the same trusted context. A progress-only task `write_version` change no longer invalidates stable deduplication. Execution checks, CAS and file hints retain their original `write_version`; deduplication never extends permissions.
+- **Suppress strict duplicates only:** Within one channel, coverage reuse requires identical sources, exact material, applicability, evidence level, publication tier and file state. This is not paraphrase merging: changed negation, numbers or conditions remain distinct. Source-risk notices operate independently of the cache.
+- **Limit cross-channel coverage to complete source statements:** Only a `reported source_reference fact` whose body, conditions and metadata were actually sent in full can cover a complete `reported public_summary` with the same source, source version and identical full text. Additional facts, truncation, different evidence levels and verified solutions remain distinct. A candidate title card is not a sent body.
+- **Track complete on-demand reads separately:** After every page of one work-history section has been returned, progress-only updates can reuse a short receipt. `reread=true` still requests explicit rereading. File, source, task-revision or context-boundary changes require fresh checks; complete output is not proof of model reading.
+- **Recheck changed boundaries:** Actual compaction, task revisions, assignments, host or checkout scope changes recheck and restore eligible context. Antigravity ephemeral contexts do not reuse coverage across invocations. Missing or expired cache entries may render again; audit records never become proof of model memory.
+- **Keep budgets and permissions:** The default 2,400-character total and 600-character optional pool remain unchanged, with no extra generative-model calls. Schema/protocol stay at 25 and indexes at 5/1/1; coverage is not authoritative knowledge. Administrator, candidate-reference and publication defaults remain unchanged. No real-task savings ratio is claimed.
+
+## Separate problem retrieval from compaction handoffs (1.4.15)
+
+- **Keep problem-identity checks for long input:** If a prompt or its key identifiers exceed the complete-scan limits, automatic formal-knowledge and candidate problem recall remains blocked. Selecting a few keywords cannot bypass this protection; explicit searches remain available.
+- **Recover background after actual compaction:** When problem recall is unsafe, actual compaction can still examine at most 20 handoff candidates and select at most one healthy, complete public handoff from the same project, checkout, conversation, agent, explicit task revision and assignment. These boundaries are never widened. No explicit task means no guessed handoff. Ordinary Antigravity ephemeral invocations do not count as compaction.
+- **Prioritize within the existing budget:** Risk notices and formal knowledge come first; candidates retain their existing optional pool. A safe query with a clear work match keeps the most relevant record first. When more than one work slot is available, reserve at most one for the current handoff before adding ordinary records. A single slot favors the relevant match; without a match, try the handoff. An unsafe query attempts only the handoff, with no problem matches. Published knowledge or candidates may exhaust the budget, so handoff delivery is not guaranteed. Its card uses `task_handoff` for current-task background, not a verified solution or execution permission; public claims remain `reported`.
+- **No extra model call:** The existing 600-character optional pool, default 2,400-character total budget, deduplication, final source rechecks and file-state checks remain in force. Administrator, candidate-reference and publication defaults stay unchanged. This change alone establishes neither live host acceptance nor token savings.
+
+## Automatic work-history selection and phase recovery (1.4.14)
+
+- **Less low-information context:** Known metadata-only successful write receipts remain searchable but are omitted from new automatic references. Among equally relevant matches, public constraints, phase reports and verification observations take priority. A bounded second lane avoids receipt congestion.
+- **Current-phase recovery:** After actual compaction, a complete public handoff from the same checkout, conversation, agent, task revision and assignment can supplement current matches and risk notices. Ordinary Antigravity ephemeral invocations are not compaction. Public claims retain their reported evidence level.
+- **Preserved change notices:** Previously exposed receipts still notify when their sources or exposed files change. Exposure is recorded only for complete rendered cards. Exact acknowledgements reuse the current query; polluted old acknowledgements fall back to the task goal. Domain-bearing prompts remain new queries.
+- **Bounded original excerpts:** Query-aware previews select existing text and mark truncated tool projections. Progressive reads, source governance and the existing 600/2,400-character budgets remain in force. This adds no generative-model call.
+
+## Candidate references and saved-response recovery (1.3.0)
+
+- **Opt in per project:** Open Administrator settings → Unpublished candidate references. This default-off setting is independent of model review and publication. Each frozen historical batch has a separate reference permission; enabling it does not scan or review new sources.
+- **Small indexes, progressive reads:** At most one 400-character candidate card shares the existing 600-character optional pool with work history, inside the default 2,400-character total context budget. Cards state that they are unpublished and include an evidence level and read requirement. `candidate_reference_read` pages through an exact content/source version. Local retrieval adds no generation-model call; material included in model input still uses tokens.
+- **Source checks and feedback:** Rejected or deferred candidates, changed case revisions, conflicted/missing sources, linked revocation or disputes, changed file metadata and known incompatible environments are excluded. Published candidates redirect to formal knowledge and cannot revive a revoked entry. File checks use recorded size/mtime, not complete content verification. `candidate_reference_feedback` records reported concerns against a displayed version; operators can resolve concerns with an explicit reason in candidate details. Later supported events notify exposed conversations; an exposure does not prove the model read it or erase earlier context.
+- **No circular verification:** Public replies may carry a same-task possible-influence link to displayed references. This is not proof of adoption. Restatements alone cannot provide independent evidence for automatic publication. New tool observations must still support the actual target conclusion; repeated sources do not become independent validation.
+- **Recover a saved review locally:** New runs retain a bounded, sanitized public structured reply before acceptance, with machine-readable rejection reasons. No private reasoning or full execution logs are retained. Eligible daily/stage reviews use the local-revalidation action; historical replies use a separate explicit saved-batch-response action described below. Eligible results may publish under existing, currently valid permission. Original call state, usage and retry locks remain intact. “Allow one retry” remains a separate operation that may use model quota. Deleted replies or old outputs lacking the required frozen snapshot cannot be recovered this way.
+
+Codex/DSH persistent delivery and Antigravity ephemeral delivery keep their own deduplication semantics. Compression rechecks current eligibility. Candidate-index failures omit this optional channel while formal knowledge remains available; identity and task failures still reject. Installation and upgrades never enable references or rerun old reviews automatically.
+
+### Flow corrections and efficiency (1.3.1)
+
+- Successful local revalidation reconciles scheduler and UI state through acceptance receipts. Original failed attempts, tokens and execution time remain intact, with local recoveries counted separately. Accepted calls cannot regain model-retry permission.
+- Evidence-incomplete stages rotate through a bounded scan; each member's comparison packet is read once per pass. Candidate derivation checks reuse visited nodes and limit total work, omitting a reference when its limit is reached.
+- File/environment changes for displayed candidates queue durable warnings until the output budget can carry them. Disabling work history does not disable provenance. Dismissing a counterexample needs an additional healthy observation; failed, unfinished or denied tools cannot provide its sole support.
+- New equivalent publications cannot evade revocation, superseded knowledge or unresolved concerns. Manual approval and automatic publication share the underlying governance barrier; explicit revision, restoration and counterexample handling retain their separate entry points.
+
+These checks enforce known workflow boundaries, not the truth of arbitrary natural-language claims. Actual model latency, token savings and task benefit still need real-task comparisons; offline regression does not replace host acceptance.
+
+### Historical saved-response recovery (1.4.0)
+
+Open **Approval & settings → Administrator settings → Failed reviews**, select an available **Accept this batch’s saved response (no model call)** action, enter a reason and confirm:
+
+1. **One exact output:** Check the call, frozen batch, source versions and public-response digest under a separate short lease. This scans no material, starts no model and does not resume historical organization.
+2. **Confirm boundary changes:** User pause, cancellation, deferral or account/governance changes need additional acknowledgement. Active workers cannot be displaced. Changed evidence or comparisons reject the saved response; confirmation cannot replace new evidence.
+3. **Separate result access:** Exact recovered candidates can be inspected and approved in smaller groups. Access is bound to their bodies and sources and grants no access to unrelated candidates or model execution. A later pause, cancellation or boundary change invalidates it; explicitly reconfirming access from recent reviews reopens only those results, without extracting them again.
+4. **Keep publication separate:** The default saves accepted results only. Publication additionally requires original batch-reference publication permission, a matching current policy and a separate confirmation in this request. Otherwise use candidate approval. Historical statements remain `reported`; candidate injection references have a separate switch.
+5. **Preserve receipts and accounting:** Repeated requests replay the original receipt; rejected acceptance rolls back. Original attempts, reported tokens, batch budgets and retry locks are retained. Missing output or frozen snapshots produce an explicit reason, never an automatic model rerun.
+
+Version 1.4.0 offline flow regression on Python 3.10: 2,050 checks, 2,047 passed and 3 platform-dependent skips, with no failures or errors, in 574.443 seconds. Another 51 focused checks passed on Python 3.14. Three-host isolated exports passed installation-integrity, simulated Hook, MCP and visual-resource checks. Tests enabled no real host or paid model and do not establish real-task speed or quality gains.
+
+### Keep pure status checks local (1.4.1)
+
+- In stage mode, narrow local rules recognize explicit Agent Learning connection/status requests whose public replies contain routine status only. Original evidence stays available as **retained locally; some material remains unreviewed**, without a standalone administrator call. After partial coalescing, only the remaining material is held; the whole stage is not counted as reviewed. Existing evidence-wait receipts keep their evidence-wait status.
+- Normal work takes priority. Deferred material from the same executor may fill remaining batch capacity, subject to existing frequency and token limits. Unready normal work cannot justify a routine-only call.
+- Administrator settings and all three host panels show a separate retained-stage count. Use **Check and continue** on the administrator page to request review, still subject to identity, unknown-call locks and budgets. Reading status never schedules work or calls a model.
+- Fixes, professional conclusions, project facts, independent cases, counterexamples, abnormal or unknown tools and partial sources keep normal review. New cases and source changes trigger reassessment. A bare “continue checking” cannot establish routine intent; mixed installation and upgrade stages remain eligible for review.
+
+Local classification uses no generative model. Later batches or explicit review may use platform tokens. Actual savings depend on the workload; isolated simulation cannot establish a real-task savings percentage.
+
+Version acceptance in isolation: 888 review/publication/recovery checks passed on Python 3.10 (235.854 seconds), and 140 compatibility checks passed on Python 3.14 (39.119 seconds): 1,028 total, with no failures or errors, including 21 local-deferral flow checks. Three-host export checks passed installation, simulated Hooks, MCP and visual resources (14.875 seconds). Tests did not update active installations, enable real hosts or call paid models, and do not establish actual model latency or savings.
+
+### Review, publication and recovery fixes (1.4.2)
+
+- **Separate public statements from tool results:** Observable public text from all three hosts is recorded as `reported`. Source checks can read complete legacy native messages without rewriting historical records or treating statements as verified conclusions. Partial, truncated or ambiguously attributed sources gain no automatic-publication permission.
+- **Carry source risk through publication and injection:** When an upstream candidate is rejected, deferred, disputed or invalidated, downstream candidates relying only on its retelling require review. Manual approval cannot bypass that check. Published dependents keep their bodies and audit records but receive conflicted source health, leave automatic injection and queue warnings for exposed conversations. Independent new evidence is assessed on its own sources.
+- **Recover stage sealing locally:** A bounded queue pins the original Stop and delivered task version. Recovery cannot borrow a later task boundary. New evidence for completed stages and cases arriving during model execution enter incremental review; the original batch is accepted against its frozen evidence, without resubmitting already handled revisions.
+- **Keep scheduling and status explicit:** Scheduler writes prepare bounded new material. Unstarted batches waiting for an executor do not block other available model groups. Unknown-call locks, budgets and historical permissions remain in force. The UI separates local sealing recovery, executor waits and single-candidate counts; read-only refresh never starts review.
+- **Isolate old DSH callbacks after reset:** Native bridge instances use trajectory-generation handshakes, allowing safe reuse of turn and tool IDs. After an explicit reset, reload the native bridge so a new instance completes `SessionStart`. Legacy producers without generations are compatible only with the initial trajectory; late old callbacks cannot enter a new one.
+
+These local recovery, governance and deduplication steps add no model calls. Migration preserves calls, usage and publication records; it does not enable administrators, rerun old reviews or grant historical-publication permission. Update all shared-database hosts to a schema-25-compatible runtime together.
+
+Version 1.4.2 isolated acceptance: 146 flow-test modules on Python 3.10 ran 2,133 checks, with 2,130 passing and 3 platform-related skips in 623.060 seconds. Another 75 focused checks passed on Python 3.14. Three-host exports passed installation integrity, simulated Hooks, MCP and local visual-resource checks in 14.339 seconds; these cover installation delivery rather than the complete installation/packaging suites. Tests did not update active installations, enable real hosts or call paid models, and do not establish actual model latency or task benefits.
+
+### Related stage tool evidence (1.4.3)
+
+At stage sealing, local code selects stored tool output sharing specific identifiers with public notes, within the original task and Stop window, and attaches it to existing public cases. Technical identifiers, path fragments and consecutive four-character Chinese fragments are selection clues, not proof that a conclusion is correct.
+
+- At most three complete observations and 6,000 payload characters per stage, further limited by current character and token admission. At most 128 recent tool records are scanned. Budget omissions, partial sources and scan caps retain selection diagnostics; cropped logs never masquerade as complete evidence.
+- Operations already covered by independent failure, recovery or counterexample cases are not duplicated. Links only to delivery/work-summary projections do not exclude a source. Other tasks, conversations, children, assignments, host generations and records outside the original window are excluded. Only the latest observation per operation is considered, using existing business-digest deduplication.
+- Tools join existing cases without a case or separate model request for each call. Additional evidence may increase input tokens or affect existing batch splitting; lower total usage is not guaranteed. Optional selection failure does not block the original public case. Original working history remains available.
+- Outcomes and source health remain unchanged, including `unknown`, `call_completed` and explicit success. The administrator can cite only actual case events. Selection receipts are not candidate evidence; command input is not output, completion is not success, and publication gates remain in force.
+- Batch details show selected tool observations and scope limits. Complete coverage of selected cases does not mean every tool log was reviewed. The delivered stage binding and the tool's historical task status remain distinct.
+
+Codex and DSH can match observable tool output when supplied by the host. The current Antigravity adapter primarily supplies completion/error status and does not invent missing output. This applies only to newly sealed stages: no old-case backfill, paid-review rerun or historical-batch continuation occurs automatically. Database schema and publication protocol remain 25; review-packet format is now 7.
+
+Isolated flow regression: all 807 checks across 60 relevant review, publication, provenance and scheduling modules passed on Python 3.10 in 204.027 seconds. After adding protection for the twenty-stage narrow-budget boundary, all 26 tool-evidence checks passed on Python 3.10, and all 75 focused stage, budget, packet and UI checks passed on Python 3.14. Final three-host exports passed installation integrity, simulated Hooks, MCP and local visual-resource checks in 12.507 seconds. In a small six-tool comparison, at most three observations joined one existing case; local selection averaged about 9.6 milliseconds. Estimated input increased by about 777 tokens with the additional evidence. This is a local estimate, not provider-reported usage or evidence of savings. Acceptance did not update active installations or call real models; knowledge quality and review benefit still need real-task comparisons on the new version.
+
+### Retrieval, deduplication and review compatibility (1.4.4)
+
+- **Active SQLite cursor compatibility:** Knowledge search and administrator comparisons use bounded local full-text recall and query-specific scoring, without replacing SQLite functions on each query. Exact technical identifiers have a separate recall lane; at most 128 candidates are read, with limited source expansion.
+- **Balanced automatic references:** Exact error codes and file identifiers are not diluted by long prose. Generic interface phrases cannot replace a requested technical identifier. Background counts and parallel versions do not automatically become mandatory conditions. Local, optional semantic and administrator retrieval share the local relevance checks; cache identities distinguish the new policy.
+- **Recheck after compaction:** Rebuild context from the current effective query instead of restoring knowledge merely because it was displayed earlier. No eligible match remains an empty result. Exposure and source-invalidation tracking are retained.
+- **Long-term exact deduplication:** More than 32 same-title candidates no longer prevent a healthy merge. Full business fields and metadata identify actual equivalent risks while preserving every source. Later normal records cannot hide deferrals, rejections or unresolved concerns. Different content with the same title still requires comparison; this is not automatic semantic merging.
+- **Ordered stage boundaries:** New windows retain local ordering markers alongside original task write versions and Stop boundaries. Equal timestamps cannot pull evidence from before a pause or from a later stage. Older windows use original task history without rewriting events.
+
+Database schema and publication protocol remain 25. Evidence levels, project switches, historical permissions and host trust remain in force. Upgrading does not enable candidate references, backfill reviews or add model calls.
+
+The initial complete offline run covered 2,326 checks and exposed coupling issues that were then repaired. The final source passed 179 affected-flow checks on each of Python 3.10 and 3.14, including every initially failing case. Three-host isolated installation, simulated Hooks, MCP and visual-resource acceptance passed in 13.188 seconds. See the CI badge for the complete cross-platform result. Tests called no real models and do not establish arbitrary-task retrieval completeness or net token savings.
+
+### Growing provenance and extreme queries (1.4.5)
+
+- **Source count is not a fault:** Ordinary published sources no longer invalidate dependent knowledge merely by exceeding 64 records. Local queries check actual missing, conflicted, denied and changed sources. Only candidate-dependent branches consume the lineage graph budget. Sources and evidence levels remain intact; historical claims do not become verified facts.
+- **Continue past unsuitable records:** Automatic retrieval checks later candidates within a bounded scan after rejecting irrelevant or unhealthy entries. An individual malformed body or source JSON is skipped and counted, while its record remains available for explicit inspection. Database interruption remains a separate error. Scan limits return diagnostics rather than a model-quota error. Actual provenance risks continue to block automatic references.
+- **Preserve query identity:** Character and token limits cannot silently discard required error codes or paths. Incomplete checks disable automatic injection while retaining manual search. Continuations, compaction and candidate references follow the same rule. Windows paths use normalized slashes; the derived full-text index advances to 5 and rebuilds automatically.
+- **Recoverable approval:** Many same-title variants do not prevent healthy exact duplicates from merging into current knowledge. Explicit update targets and rejection of unrelated variants permit rechecking. Existing dispute, counterexample, source, revision and historical-authorization boundaries remain in force.
+- **Total semantic timeout:** Optional local embedding requests have an overall deadline, including slowly streamed replies. Timeout falls back to local retrieval without background requests or extra generation-model calls.
+
+Database schema and publication protocol remain 25; work and optional semantic indexes remain 1. Update shared-database runtimes together to avoid alternating full-text projection rebuilds. Upgrading does not rerun administrators, delete knowledge or alter project publication policies.
+
+Final isolated verification covered 791 Python 3.10 checks: 790 passed and one Windows symlink-privilege check was skipped. One old assertion still allowed automatic injection for 160 identifiers; after updating it to the explicit manual-only overflow contract, all eight checks in that module passed again without production-code changes. Another 168 combined checks passed on Python 3.14. Three-host installation integrity, simulated Hooks, MCP and visual resources passed in 13.877 seconds. The simulated database passed quick_check with zero foreign-key errors. Acceptance called no real models and did not update active installations; these results do not establish real-task benefits or constant latency at every provenance scale.
+
+### Antigravity invocation diagnostics and limited compatibility (1.4.13)
+
+- **Explicit Pre coverage gaps:** Failed public capture at `PreInvocation` retains bounded diagnostic reasons. A newer Pre without a valid window remains unknown instead of borrowing an older complete Stop to claim current coverage. Refreshing neither rereads transcripts nor calls models.
+- **Only recognized temporary system steps:** Around the current invocation boundary after user input, the exception accepts only steps with `source=SYSTEM_SDK`, `type=EPHEMERAL_MESSAGE` and `status=DONE`. New user, model or tool steps do not qualify. Project, task, trajectory and invocation pairing checks remain in force. Public responses do not establish task delivery or administrator dispatch.
+- **Live recovery remains unverified:** The preceding live check had working tool/MCP receipts but no established public Pre window. This update adds diagnostics and limited compatibility without claiming an unproven cause or restored capture. Check the next natural work turn rather than making another model call for this diagnosis.
+- **Fewer panel-related upgrade locks:** The panel subprocess uses the validated project directory as its working directory, avoiding a long-lived handle on the replaceable plugin directory on Windows. Installation changes still require a fresh panel connection and never replay earlier actions.
+
+Database schema/publication protocol remain 25 and indexes remain 5/1/1. Old Stops are not backfilled and administrator/publication policies do not change.
+
+### Antigravity public records and health diagnostics (1.4.12)
+
+- **Bounded public capture:** Read recognized public `prompt/content` fields only from the native Hook's `transcriptPath`, checking the matching `PreInvocation`/`PostInvocation`, project, conversation, trajectory and task boundaries. No account-wide history scan, thinking, tool payloads or unknown text is retained. Multiple roots, unknown formats or mismatched identity leave coverage unknown.
+- **Responses and deliveries remain separate:** Public responses become searchable `reported`/partial working history. `PostInvocation` does not manufacture a `Stop`, task delivery, stage or administrator dispatch, and never backfills or replays an old Stop. Stage completion still needs valid task delivery and supported native stopping evidence.
+- **Scoped health observations:** `project_recent_capture` describes recent project capture, not complete coverage of the current chat or one turn. Refreshing reads saved receipts without rereading transcripts or calling models. The complete Antigravity automatic stage-review chain still requires live acceptance.
+- **Independent administrator entry:** Only the independent `agy` CLI provides this review protocol. On Windows, the default command checks PATH, then the official `%LOCALAPPDATA%\agy\bin\agy.exe` location. Explicit commands stay authoritative; App, IDE and `agentapi` are not substitutes. Launcher availability, cached protocol checks and unverified authentication/model capability are distinct. No automatic installation, login or administrator enablement occurs.
+
+Database schema/publication protocol remain 25 and indexes remain 5/1/1; knowledge, permissions and usage are preserved. See the [official Hooks contract](https://antigravity.google/docs/hooks) and [Headless reference](https://antigravity.google/docs/cli/headless/).
+
+### DSH tool contracts and observation consistency (1.4.11)
+
+- The native bridge and Python entry add a context handle only when the actual tool contract accepts it. Project-level tools such as `learning_status` retain empty arguments. Explicit invalid handles and unknown arguments remain errors.
+- Pre-checks, execution and completion observations reuse the context field verified for that call, avoiding artificial input conflicts when the bridge added it only before execution. Real argument changes still register as conflicts; successful compatibility recovery records completion too.
+- Database schema/protocol and existing settings are unchanged. Reload the DSH host bridge after upgrading. Tool connectivity, original-chat binding, actual file reads and administrator execution are verified separately.
+
+### DSH trajectory handshake recovery (1.4.10)
+
+- If the initial response is lost, an old chat resumes, or a tool arrives before startup, the same bridge instance retrieves its trajectory token. Concurrent requests share one recovery; normal calls with a token do not repeat it.
+- Recovery only checks workspace, agent identity, host epoch and trajectory. It performs no retrieval, stage delivery or administrator scheduling. Subsequent ordinary events still capture work and inject context; failed prompt delivery remains retryable.
+- Existing tokens are never cleared to bypass account changes or explicit session resets. Cross-project and parent/child boundaries remain enforced. Failed recovery still blocks tools whose identity cannot be verified; shell and plugin tools receive no broader exemption.
+- Upgrade and reload the DSH plugin/host bridge. Database schema, indexes and internal protocol are unchanged and remain compatible with other schema-25 host installations sharing the database. Upgrades do not rerun historical reviews or change administrator/publication settings.
+
+### Conversation event isolation and anchored retrieval (1.4.9)
+
+- Antigravity native events and public records are scoped to their conversation, preventing collisions when separate chats use the same execution counter or public text. Existing complete receipts retain their identity without replaying completed effects. Pending records recover only when a cross-conversation collision and an uncommitted Stop transaction can be established within the original task boundary; uncertain tool results are not treated as unexecuted. Recovery captures the public content supplied by the host now; it cannot reconstruct a lost original response.
+- Automatic queries with required technical identifiers refill through the complete identifier lane, avoiding scans of entries matching only generic prose. Later healthy matches behind unhealthy sources remain eligible, with finite scan limits and provenance checks. Manual broad retrieval and optional semantic fusion remain available; the result cache uses a distinct policy identity.
+- Platform and version checks use explicit task filters and recognizable project metadata. The local OS does not define the task's target environment. References still require checking applicability when the target is unknown; this does not establish zero irrelevant injection for arbitrary natural-language tasks.
+
+Database schema, indexes and internal protocol remain unchanged. Upgrades do not clear failed or unknown call locks, rerun historical reviews or expand publication permissions. Net token benefits and task quality still require a separate controlled task comparison.
+
+### Read invalidation and replay pagination fixes (1.4.8)
+
+- `work_memory_read` independently checks up to 64 recorded file associations and binds `file_check.complete/version` to its delivery receipt. Changes to the fourth and later undisplayed files require fresh content. Over-limit, cross-checkout, missing-workspace or unavailable metadata checks return content without reusing a receipt. Known absence differs from unreadable state; this observes size/mtime metadata, not file contents.
+- `reread=true` starts a new round for the selected section. Continue with its `section`, `expected_revision` and `next_offset` without repeating the flag. Sending it on continuation pages remains compatible. A round started in the middle cannot inherit the old round's coverage, and missing pages do not count as complete. Worker skills for all three hosts describe this behavior.
+- With a 1024-character budget, multi-file records retain identity, source state, risk warnings and the complete file-check fingerprint. File/source previews may shrink with explicit omission counts; shortened previews do not alter the read fingerprint. Character budgets are not exact token limits.
+- The association check applies only to explicit reads; normal retrieval and injection do not scan additional files. Receipts prove neither model reading nor task permission. Database schema, indexes and publication protocol are unchanged.
+- Deadline tests use separate healthy-request and slow-response budgets, plus deterministic clocks for the shared absolute deadline and connection release. Production timeout configuration is unchanged.
+
+Synthetic administrator-input analysis found no duplicate Codex instruction/output-schema delivery; existing lossless sharing of task and comparison data remains in place. Observed input of roughly 13,000 tokens per single-case call cannot be attributed to one field. This update removes no review evidence and changes no model, frequency or publication policy, and claims no measured token reduction. Bounded batching comparisons still require real task data.
+
+Final isolated validation: 285 Python 3.10 checks, 284 passed and one skipped for Windows symlink permissions; all 188 Python 3.14 checks passed. All three hosts passed installation, MCP, simulated Hook and UI-resource acceptance in 16.047 seconds. No real models, live-install updates or historical batch reruns were used. Remote CI still requires confirmation after a subsequent push.
+
+### Installation maintenance and work-history reuse (1.4.7)
+
+- **Identical installations stay unchanged.** If export content, interpreter, bindings and preserved extras match, installation returns `unchanged` without another backup or reload request. Real upgrades still follow host Hook trust requirements.
+- **Backups stay outside discovery.** Same-volume switching retains complete old exports outside plugin discovery directories. Legacy backups require an explicit, snapshot-bound relocation plan; no files are deleted. Codex and Antigravity connection diagnostics show a lightweight inventory of at most 20 entries, not a recovery or deletion guarantee.
+- **Expand working history when needed.** A complete, unchanged section already returned in the same trusted context gets a short receipt; use `reread=true` to present it again. Missing pages, source/file changes, compaction, task changes and new connections require fresh output. Antigravity reuse is limited to a verified invocation. Returned content does not prove model reading or retention.
+- **Balanced summary policy.** `summary_strategy=balanced` keeps ordinary user requests and public notes searchable without another model summary. Edits, failures, verification observations and user corrections retain their organization path. Choose `all_windows` explicitly for the previous window policy. AI summaries remain off by default; installation does not enable administrators or change model/publication settings. Stage mode prioritizes stage review.
+
+Database schema, indexes and publication protocol remain unchanged. External installation archives are excluded from historical ingestion. Local selection and reduced duplicate output do not establish real-world token savings or task quality.
+
+Isolated joint regression: 404 Python 3.10 checks, 402 passed and two skipped for Windows symlink permissions; all 87 Python 3.14 checks passed. Installation checks passed with 98 of 100 and 18 of 19 in the latest follow-up; remaining cases were permission skips. All three hosts passed installation, MCP, simulated Hook and UI-resource acceptance in 15.547 seconds without real model calls. A synthetic 12,540-character public delivery produced six summary requests under the old window policy and zero under balanced policy; adding a file change produced one, preserving all raw records. This compares fake-model request counts, not measured token savings.
+
+### Review input and adaptive budgets (1.4.6)
+
+- **Admit complete requests:** Stage batches measure the actual envelope, cases, diagnostics and output schema, replacing fixed deductions and imaginary padding. Small cases can fit smaller character caps; long Unicode, escaped text and multi-stage inputs remain subject to complete-request checks without raising user budgets.
+- **Reduce repeated input:** Exactly identical tasks and comparison records use a lossless shared representation only when it saves space. Reserved-key collisions or insufficient savings retain the original text. Frozen packets, events, counterexamples, sources and revisions remain intact; acceptance checks the original snapshots.
+- **Shorter output specification:** The stage envelope accepts only null candidates and governance proposals. Per-case results keep the full schema and acceptance rules across Codex, Antigravity and DSH.
+- **Preserve deferred material:** Cases removed by the final budget check, and duplicates that lose their representative, are not registered as submitted. They remain available to later scans; empty batches call no model. Reuse, unknown-call reservations, historical batch authorization and publication policies retain their own checks.
+
+User character caps, daily limits, output reservations and the conservative host reserve remain in force; legacy case review keeps its fixed reservation. Estimates now include actual schema bytes and remain distinct from platform-reported usage. A synthetic short case reduced visible instruction plus schema from approximately 10.3KB to 8.5KB. This measures input size, not actual tokens, review latency or real-task benefit. Upgrading does not rerun historical paid reviews or enable administrators or publication.
 
 </details>
 
