@@ -187,6 +187,9 @@ class ContextDedup:
                 "title", "applicability", "limitations", "metadata", "category", "knowledge_kind",
                 "validation_level", "knowledge_tier", "maturity", "current_tool_success", "problem_changed")}
             material["source_health"] = item.get("source_health")
+            from .source_caveats import context_caveat
+            if context_caveat(item):
+                material["source_caveat"] = context_caveat(item)
             material["source_problems"] = [(source.get("problem_id"), source.get("problem_revision"))
                                            for source in item.get("sources", ())]
             identity = item["knowledge_id"] if channel == "formal" else item["candidate_id"]

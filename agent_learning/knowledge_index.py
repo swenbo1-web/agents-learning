@@ -36,7 +36,7 @@ _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
-_MATCH_POLICY_VERSION = 9
+_MATCH_POLICY_VERSION = 10
 _RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
@@ -49,6 +49,9 @@ _GENERIC_TOOL_NAMES |= {"functions." + name for name in _GENERIC_TOOL_NAMES}
 _TOOL_USAGE_WORDS = {"use", "usage", "using", "tool", "tools", "function", "functions", "call", "calls",
                      "invoke", "invocation", "works"}
 _ZH_TOOL_USAGE = re.compile(r"使用说明|使用方式|使用方法|使用|用法|工具|调用|函数")
+_TOOL_FAULT_WORDS = {"error", "failed", "failure", "timeout", "permission", "denied", "output", "input",
+                     "invalid", "code", "status", "process", "exit", "signal", "terminated", "stderr", "stdout",
+                     "超时", "权限", "失败", "报错", "错误", "输出", "参数", "执行", "处理"}
 _ZH_CONTEXT = re.compile("|".join(sorted({"管理员设置", "设置页面", "页面设置", "管理页面", "项目设置",
                         "当前项目", "本地项目", "项目内容", "工作流程", "执行流程", "切换模型",
                         "模型设置", "按钮样式", "主题颜色"}, key=lambda value: (-len(value), value))))
@@ -67,8 +70,10 @@ def _exact_anchors(query):
     result = list(dict.fromkeys(result))
     # Counts and language/version background must not veto an exact issue or
     # file identity. Explicit environment compatibility is checked separately.
-    # An explicitly named tool still has to match in full; it merely cannot
-    # grant the sparse-query business-identity shortcut on its own.
+    # A generic tool can be execution context for a concrete domain. Tool-only
+    # questions and custom namespaces retain their complete identity gate.
+    if any(anchor in _GENERIC_TOOL_NAMES for anchor in result) and _tool_background_terms(query):
+        result = [anchor for anchor in result if anchor not in _GENERIC_TOOL_NAMES]
     specific = [anchor for anchor in result if _specific_anchor(anchor) or anchor in _GENERIC_TOOL_NAMES]
     return specific or result
 
@@ -108,6 +113,20 @@ def terms(text):
 
 
 tokenize = terms
+
+
+def _tool_background_terms(query, query_terms=None):
+    selected = set(query_terms if query_terms is not None else _query_terms(query)[0])
+    named = _GENERIC_TOOL_NAMES.intersection(selected)
+    if not named:
+        return set()
+    excluded = set(terms(" ".join(named))) | _TOOL_USAGE_WORDS | _EN_REQUEST_WORDS | _TOOL_FAULT_WORDS
+    for segment in re.findall(r"[\u3400-\u9fff]+", query):
+        if not _ZH_TOOL_USAGE.sub("", segment):
+            excluded.update(match_terms(segment))
+    business = {word for word in selected if len(word) > 1 and word not in excluded}
+    # A lone generic timeout/permission question cannot establish another domain.
+    return business if len(business) >= 2 else set()
 
 
 def _query_terms(query, anchors=()):
@@ -269,6 +288,16 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
             result["auto_eligible"] = exact and bool(tool_names.intersection(positive))
         elif not business.intersection(positive):
             result.update(auto_eligible=False, auto_exclusion_reason="tool_business_mismatch")
+        background = _tool_background_terms(query, query_weights)
+        if background:
+            weights = {word: query_weights[word] for word in background}
+            positive_body = json.loads(body_json)
+            positive_body["limitations"] = ""
+            domain = _match_info(json.dumps(positive_body), weights, sum(weights.values()), query,
+                                 _anchors=anchors, _intent=_intent)
+            result["auto_eligible"] = domain["auto_eligible"]
+            if not domain["auto_eligible"]:
+                result["auto_exclusion_reason"] = "tool_context_business_mismatch"
     # Consumers opt into the original-query rule. Review-packet comparison
     # still needs old records for deduplication; concrete questions add no
     # extra full-body JSON parse just to test this optional material gate.

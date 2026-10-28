@@ -23,8 +23,11 @@ def _text(value):
 
 
 def _state(item):
+    from .source_caveats import context_caveat
+    caveat = context_caveat(item)
     # 展示的来源版本与展示状态必须一起传给登记入口，不能另读一次猜基线。
     return {**({"source_files_changed": True} if item.get("source_files_changed") else {}),
+            **({"source_caveat": caveat} if caveat else {}),
             "source_health": item.get("source_health", "missing"),
             "maturity": item.get("maturity", "candidate"),
             "current_tool_success": bool(item.get("current_tool_success", False)),

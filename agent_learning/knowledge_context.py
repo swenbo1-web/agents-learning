@@ -69,7 +69,10 @@ class KnowledgeContextMixin:
 
     @staticmethod
     def _source_state(item):
+        from .source_caveats import context_caveat
+        caveat = context_caveat(item)
         return {"health": item.get("source_health", "missing"),
+                **({"source_caveat": caveat} if caveat else {}),
                 "maturity": item.get("maturity", "candidate"),
                 "current_tool_success": item.get("current_tool_success", False),
                 "problem_changed": item.get("problem_changed", any(s.get("problem_changed", False) for s in item.get("sources", []))),
@@ -162,6 +165,8 @@ class KnowledgeContextMixin:
                         f"待核实反例={state['pending_counterexample_count']}；请用 knowledge_read 核对。")
                 if state["pending_counterexample_count"]:
                     note += "存在未解决反例，已暂停自动注入；不能继续依赖旧结论，需治理确认。"
+                if state.get("source_caveat"):
+                    note += "来源包含未恢复失败，旧正文须先复核；自动仅提供风险索引。"
                 if state["maturity"] != json.loads(row["state"]).get("maturity", "candidate"):
                     note = note.replace("；请用", f"，成熟度={state['maturity']}；请用")
                 cost = len(note) + int(bool(notes))
@@ -171,6 +176,8 @@ class KnowledgeContextMixin:
                             f"反例{state['pending_counterexample_count']}）；执行前用 knowledge_read 核对。")
                     if state["pending_counterexample_count"]:
                         note = f"知识 {identity} 有未解决反例；暂停依赖旧结论，knowledge_read 复核。"
+                    elif state.get("source_caveat"):
+                        note = f"知识 {identity} 含未恢复失败来源；旧正文需 knowledge_read 复核。"
                     cost = len(note) + int(bool(notes))
                     if cost > remaining:
                         continue
@@ -516,6 +523,8 @@ class KnowledgeContextMixin:
                     continue
                 eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
+                from .source_caveats import context_caveat
+                caveat = context_caveat(item)
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                         "title": clip(item["title"], 100), "content_summary": _summary(item, 500),
                         "applicability": item["applicability"], "limitations": item["limitations"],
@@ -525,6 +534,8 @@ class KnowledgeContextMixin:
                         "maturity": item.get("maturity", "candidate"),
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
+                if caveat:
+                    card.update(source_caveat=caveat, content_summary="", read_required=True)
                 card.update(file_state)
                 if item.get("pending_counterexample_count", 0):
                     card["pending_counterexample_count"] = item["pending_counterexample_count"]
@@ -552,6 +563,8 @@ class KnowledgeContextMixin:
                             "knowledge_tier": item.get("knowledge_tier", "source_reference"),
                             "maturity": item.get("maturity", "candidate")}
                     card.update(file_state)
+                    if caveat:
+                        card["source_caveat"] = caveat
                     if item.get("pending_counterexample_count", 0):
                         card["pending_counterexample_count"] = item["pending_counterexample_count"]
                     # Tiny budgets retain identity, source risk and the evidence

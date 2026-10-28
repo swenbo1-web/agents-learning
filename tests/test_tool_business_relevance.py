@@ -144,8 +144,8 @@ class ToolBusinessRelevanceTests(unittest.TestCase):
 
     def test_complete_tool_identity_remains_required_alongside_business_identity(self):
         query = "exec_command E_SQLITE_ROLLBACK"
-        self.assertEqual(normalized_query_plan(query)["exact_anchors"], ["exec_command", "e_sqlite_rollback"])
-        self.assertFalse(self.match(query, "E_SQLITE_ROLLBACK transaction recovery.")["auto_eligible"])
+        self.assertEqual(normalized_query_plan(query)["exact_anchors"], ["e_sqlite_rollback"])
+        self.assertTrue(self.match(query, "E_SQLITE_ROLLBACK transaction recovery.")["auto_eligible"])
         self.assertTrue(self.match(query, "exec_command E_SQLITE_ROLLBACK transaction recovery.")["auto_eligible"])
 
     def test_chinese_issue_phrase_and_long_identified_question_stay_eligible(self):

@@ -390,7 +390,7 @@ class KnowledgeStoreMixin:
         from .knowledge_lineage import source_state
         evidence = []
         for ref in dict.fromkeys(refs):
-            row = self.db.execute("SELECT e.type,e.outcome,e.created,e.operation,o.conflict,o.decision "
+            row = self.db.execute("SELECT e.type,e.outcome,e.created,e.rowid AS sequence,e.operation,o.conflict,o.decision "
                                   "FROM events e LEFT JOIN operations o ON o.project=e.project AND o.id=e.operation "
                                   "WHERE e.project=? AND e.id=?", (project, ref)).fetchone()
             linked = (problem_id is None or self.db.execute("SELECT 1 FROM problem_events WHERE problem=? AND event=?",
@@ -402,7 +402,7 @@ class KnowledgeStoreMixin:
             lineage = source_state(self, project, [ref], evaluation=_lineage_evaluation)
             if lineage["blocked"]:
                 health = "conflicted"
-            evidence.append({"event_id": ref, "type": row["type"], "outcome": row["outcome"], "created": row["created"],
+            evidence.append({"event_id": ref, "type": row["type"], "outcome": row["outcome"], "created": row["created"], "sequence": row["sequence"],
                              "health": health, "current_tool_success": health == "valid" and row["type"] == "PostToolUse"
                              and row["outcome"] == "succeeded"})
             if lineage["sources"] or lineage["blocked"]:
@@ -450,6 +450,8 @@ class KnowledgeStoreMixin:
                 "source_version": source_version[0] if source_version else 0,
                 "problem_changed": any(source["problem_changed"] for source in sources),
                 **self._knowledge_feedback_state(project, row["id"], row["revision"])}
+        from .source_caveats import summarize_sources
+        result["source_caveat"] = summarize_sources(sources or [{"health": result["source_health"], "evidence": evidence}])
         if include_maturity:
             state = self.knowledge_state_snapshot(project, row["id"], row["revision"], _public_data=result)
             result.update(maturity=state["maturity"], lifecycle_version=state["lifecycle_version"])
