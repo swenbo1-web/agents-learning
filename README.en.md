@@ -8,29 +8,29 @@
 
 **You are paying frontier-model token prices for an engineer that wakes up with amnesia every single session.**
 
-Yesterday's two-hour debugging breakthrough becomes today's fresh wild-goose chase. Hard-won architectural constraints vanish the moment context compacts. Switch from Codex to Antigravity or DSH, and your battle-tested repository feels like a stranger's codebase again. Worse yet, most "memory plugins" simply dump raw chat logs back into your prompt—**burning through your token budget while poisoning the model's attention with stale noise.**
+Yesterday's two-hour debugging breakthrough becomes today's fresh investigation. Hard-won constraints become hard to find after compaction. Switch from Codex to Antigravity or DSH, and the project needs explaining again. A memory layer that simply replays raw transcripts can **increase token use and let stale noise compete with the current task.**
 
 **`agents-learning` is the local-first Governed Memory Engine built for serious AI software engineering.** It turns real debugging wins, architectural constraints, tool outcomes, and file evolution into **traceable, self-correcting, on-demand engineering assets**—giving **Codex, Antigravity, and DSH (DeepSeek Harness)** one shared, compounding project brain.
 
-| Capability (Where Other Memory Plugins Fall Short) | Stateless Coding Agent | Naive RAG / Chat-Dump Plugins | **agents-learning (Exclusive Advantages)** |
+| Capability (Design Comparison, Not a Competitor Ranking) | Agent Without Project Memory | Raw Transcript Replay Only | **agents-learning (Core Capability Combination)** |
 |---|---|---|---|
-| **Retrieval & Attention Protection** | Wakes up blank in every new chat | Dumps noisy chat transcripts; buries conclusions | **Exclusive `Conclusion + Prerequisites → Body → Evidence` progressive disclosure keeps AI attention razor-sharp** |
-| **Everyday Simple-Task Speed & Cost** | Wastes time and tokens re-debugging | **Slows down simple tasks with retrieval lag & prompt bloat** | **Cold-start simple benchmark finished in 11m 02s with only 1,086 chars injected & 0 repeats—fast across all scenarios** |
-| **Instant Tool-Error Rescue** | Blindly guesses and loops on failures | ❌ **Missing** (retrieves only once before the prompt) | **✅ Exclusive Automatic Bounded Error Follow-up: looks up proven fixes the instant a tool fails** |
-| **Compaction Survival (`/compact`)** | Loses early constraints and regresses | ❌ **Missing** (hopes summary luck keeps key rules) | **✅ Exclusive Compaction Handoff Re-verification: 46/47 early checks preserved (0 lost) in live test** |
-| **Wrong / Stale Memory Self-Healing** | Requires repetitive manual scolding | ❌ **Missing** (bad memories permanently poison prompts) | **✅ Exclusive Counterexample Circuit-Breaker + Revocation + Active Session Alerts** |
-| **Evidence Grading & Stage Publishing** | Zero institutional memory | ❌ **Missing** (mixes casual chat guesses with verified fixes) | **✅ Exclusive `reported` vs. `tool_success` Grading + Budgeted Stage Auto-Publication** |
-| **Legacy Repo Import & 3-Host Shared Brain** | Switching tools resets project IQ to zero | ❌ **Missing** (single-host silos, no zero-turn native UI) | **✅ Exclusive Shared SQLite Brain (Codex + Antigravity + DSH) + Zero-Turn Native UI + Frozen-Batch History Import** |
+| **Retrieval & Attention Protection** | Project background needs finding again | Conclusions must be selected from raw records | **`Conclusion + Necessary Conditions → Body → Evidence` progressive reads leave context for the current problem** |
+| **Everyday Simple-Task Speed & Cost** | Earlier debugging experience may need reconstructing | Long records can add input and reading cost | **Cold-start sample: 11m 02s observed, 1,086 injected characters, zero exact card repeats and equal quality to the historical no-plugin sample** |
+| **Automatic Tool-Error Follow-up** | Relies on current reasoning or manual lookup | Replay alone does not react to failures | **✅ Records a failure and performs bounded experience lookup at a subsequent supported event** |
+| **Compaction Recovery** | Relies on host summaries and current material | Replay alone does not recheck task/source eligibility | **✅ Recovery rechecks: this sample retained 46/47 early checks, with zero previously passing checks lost** |
+| **Wrong / Stale Memory Corrections** | Relies on current material and manual feedback | Replay alone does not track source changes or revocation | **✅ Counterexamples, revocation and source checks stop later excerpts for invalid knowledge; supported events notify affected conversations** |
+| **Evidence Grading & Stage Publishing** | Requires a separate knowledge process | Replay alone does not separate validation and publication rights | **✅ `reported` vs. `tool_success` grading, budgeted stage curation and publication within your selected scope** |
+| **Legacy Import & 3-Host Shared Brain** | Experience needs a separate sharing mechanism | Replay alone does not provide three-host project governance | **✅ Same-machine project memory across Codex, Antigravity and DSH, native panels/WebUI and frozen-batch history import** |
 
-> 🔥 **Real-Machine Benchmark (GPT-6.1-Sol / High, 2-Stage Coding + Explicit Compaction)**: Tested on the hardest scenario for any memory plugin to justify—a **cold-start simple task** where ordinary plugins only add overhead. Result: **97.5/100** top-tier quality, **11m 02.2s** observed completion time (vs. 15m 25.8s bare and 19m 01.3s on v1.4.34), only **1,086 characters** injected (**1** card, **0** repeats), and **0** early checks lost after compaction! [Jump to the full benchmark 👇](#a-real-sample-equal-quality-selective-memory)
+> 🔥 **Real-Machine Benchmark (GPT-6.1-Sol / High, 2-Stage Coding + Explicit Compaction)**: A **cold-start simple task** with no preloaded knowledge scored **97.5/100**, with **11m 02.2s** observed completion time (historical samples: 15m 25.8s without the plugin and 19m 01.3s on v1.4.34), **1,086 characters** injected (**1** work-history card, **0** exact card repeats) and **0** early passing checks lost after compaction and later delivery. Historical timing differences are not attributed to plugin speedup. [Jump to the full benchmark 👇](#a-real-sample-equal-quality-selective-memory)
 
-**Cross-session work history · Conclusion-first progressive reads · Instant error rescue · Counterexample circuit-breakers · Stage review & tiered publication · Shared 3-host memory · Native visual consoles**
+**Cross-session work history · Conclusion-first progressive reads · Automatic error follow-up · Counterexample circuit-breakers · Stage review & tiered publication · Shared 3-host memory · Native visual consoles**
 
 [Install for Codex](#install-in-codex-desktop-and-cli) · [Install for Antigravity](#install-in-antigravity-native-plugin) · [Install for DSH](#install-in-dsh-deepseek-harness) · [Start using it](#use-it-in-your-project) · [Core capabilities](#core-capabilities) · [84-second demo](#84-second-demo) · [Architecture](#complete-architecture)
 
 Python **3.10+** · Authoritative Local SQLite · Zero extra model API keys required by default · [MIT](LICENSE)
 
-**These features and installation steps target v1.4.40 on `main`; the [original v1.0.0 distribution](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) lacks newer capabilities.** Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility). When core rules change, update and reload all three hosts sharing the database.
+**Latest stable release: [v1.4.40](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40), with three-host source, a Python wheel and SHA-256 checksums.** These steps target v1.4.40; `main` tracks subsequent development. Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility), and update/reload shared-database hosts together.
 
 ## A real sample: equal quality, selective memory
 
@@ -38,7 +38,7 @@ Python **3.10+** · Authoritative Local SQLite · Zero extra model API keys requ
 
 The #1 reason developers hesitate to keep a memory plugin enabled 24/7 is simple: ***"Sure, memory helps on a massive legacy repo, but on my everyday quick tasks, won't a memory plugin just burn extra tokens, slow down execution, and distract the AI with irrelevant noise?"***
 
-In fact, **a cold-start simple task is the worst nightmare for ordinary memory plugins**—with no pre-populated knowledge base to lean on, every hook call, search, and prompt injection is pure overhead that usually bloats tokens, drags out runtime, and scatters model attention.
+**A cold-start simple task helps inspect baseline integration cost.** Without a pre-populated knowledge base, we can observe Hook, retrieval and context-delivery size/timing, and whether the task's own work history is read on demand. Here, "simple" is relative to a large, long-running project; it still includes stage dependencies and compaction.
 
 To put that exact fear to the test, we ran a live benchmark on a **zero-prior-knowledge, simple two-stage coding task with explicit compaction** (**identical task inputs and grading rubric, GPT-6.1-Sol / High**, administrator disabled, relying strictly on live work history generated during the task itself):
 
@@ -48,22 +48,23 @@ To put that exact fear to the test, we ran a live benchmark on a **zero-prior-kn
 | agents-learning 1.4.34, October 27 historical sample | 97.5/100 | 73/74 | 19m 01.3s | 1,190,744 |
 | **agents-learning 1.4.40, October 28 new sample** | **97.5/100** | **73/74** | **11m 02.2s** | **1,169,926** |
 
-**Fear demolished: Even in the cold-start simple scenario most prone to net overhead, `1.4.40` finished in an observed 11m 02.2s, locked in the 97.5/100 top score, kept cumulative reported tokens virtually flat (+0.82% vs. bare), and cut tokens by 1.75% compared to v1.4.34!**
+**Start with the measured results: this `1.4.40` run scored 97.5/100, matching both historical samples, with reported cumulative tokens close to the historical no-plugin sample (+0.82%) and 1.75% below the historical older-plugin sample. Observed completion time was 11m 02.2s.** A/B were not rerun, and CLI versions differed; timing differences cannot be attributed to the plugin alone, and the sample does not promise zero overhead for every task.
 
-Why did it finish faster and cleaner instead of dragging the model down? Look at how `1.4.40` protected the AI's attention under the hood:
+Memory input and local execution costs in this run also have inspectable observations:
 
-| Metric | 1.4.40 Live Result | How It Sharpens AI Attention & Speed |
+| Metric | 1.4.40 Live Result | Mechanism Observation |
 |---|---|---|
-| **Total plugin context submissions** | **1,086 characters** total across 4 submissions (including session binding & task metadata) | **Zero prompt pollution**—100% of the model's attention stays on your active code |
-| **Actual work-history cards injected** | **1 card**; **0** exact card repeats | **Exposure deduplication works**—never derails reasoning by repeating the same card |
+| **Total plugin context submissions** | **1,086 characters** total across 4 submissions (including session binding & task metadata) | **Bounded automatic input volume**: these are not four knowledge cards; model attention share was not measured |
+| **Actual work-history cards injected** | **1 card**; **0** exact card repeats | **No exact card repeats in this run**: this does not establish zero semantic repetition or irrelevant material |
 | **On-demand record expansion** | **1** `work_memory_read` call | **Conclusion-first**: the Agent pulled full details only once during the stage handoff, skipping blind exploration |
-| **Early-check survival (post-compaction)** | **46/47** after Stage 1 and **46/47** after compaction + Stage 2 (**0 checks lost**) | **Compaction-proof continuity**—zero time wasted re-fixing broken Stage-1 requirements |
-| **Cumulative local Hook/MCP timing** | ~**3.50 seconds** | **Sub-second local SQLite hits** that never bottleneck your coding loop |
-| **Administrator generation-model calls** | **0 calls** | **$0 extra generative API tax** for everyday capture and retrieval |
+| **Early-check survival (post-compaction)** | **46/47** after Stage 1 and **46/47** after compaction + Stage 2 (**0 checks lost**) | **Earlier passing checks remained intact**: scores alone do not establish how memory was adopted |
+| **Cumulative local Hook/MCP timing** | ~**3.50 seconds** | **Local execution timing**: excludes model reading and attention effects; not end-to-end additional latency |
+| **Administrator generation-model calls** | **0 calls** | **No administrator model call in this run**: default capture/retrieval make no extra generation call; injected input still uses tokens |
 
-**Built to dominate every scenario—from 10-minute sprints to 10-month monoliths:**
-- **On everyday simple tasks**: It acts like an invisible, zero-bloat HUD—keeping AI attention laser-focused across stage transitions and context compactions without adding token bloat or latency;
-- **On massive, long-running projects**: As domain invariants, debugging wins, and multi-host history compound, automatic error follow-up and conclusion-first retrieval save hours of repeated investigation and huge token bills.
+**Restrained memory for simple tasks; long-term reuse as the goal for complex projects.**
+
+- **On self-contained tasks**: this sample retained equal quality with a small amount of work history, while reported cumulative tokens stayed close to the historical no-plugin sample;
+- **On large, long-running projects**: we expect accumulated constraints, debugging experience and multi-host history to create greater opportunities for reuse and savings. Long-term net benefit and its magnitude still need continued controlled validation on real projects.
 
 <details>
 <summary>Expand: rigorous methodology, accounting rules & sample scope</summary>
@@ -71,7 +72,7 @@ Why did it finish faster and cleaner instead of dragging the model down? Look at
 - This benchmark intentionally tests a simplified two-stage coding scenario (with real explicit compaction and an empty initial formal knowledge store) to verify baseline task fit, attention preservation, and overhead control on everyday work. Compounding gains on large, long-running repositories build on the same governed memory engine and can be quantified on your own codebase via [real-task paired evaluation](#real-task-paired-evaluation).
 - Runs took place locally on October 27–28, 2026 (one sample per condition). Only 1.4.40 was executed this round, using identical stage prompts, frozen task inputs, grading rubric, model, effort level, and account checks as the historical samples. The new CLI was `0.165.0-alpha.1.2` vs. historical `0.164.0-alpha.11.1`; because A/B were historical references rather than a same-environment single-variable multi-run trial, observed elapsed time reflects this run's performance and is not a blanket guarantee of a fixed speedup percentage across every task.
 - The 97.5/100 score follows a fixed rubric (all three runs shared the same single non-critical multi-file rollback exception-type assertion failure; offline diagnostics confirmed intact rollback state).
-- Tokens reflect host-reported cumulative input and output (including repeated input and cached input as a subset; standalone compaction and external orchestration/review are outside this table). The 1,086 figure counts characters, not tokens; local Hook/MCP timing excludes model reading/attention effects and may overlap tool execution. Multi-host integration is validated separately via host health checks.
+- Tokens reflect host-reported cumulative input and output, including repeated input and cached input as a subset. Standalone compaction usage could not be allocated separately and remains unknown; orchestration/review usage is excluded. The 1,086 figure counts characters, not tokens; local Hook/MCP timing excludes model reading/attention effects and may overlap tool execution. Multi-host integration is validated separately via host health checks.
 
 </details>
 
@@ -80,7 +81,7 @@ Why did it finish faster and cleaner instead of dragging the model down? Look at
 ### 1. Instant Cross-Session Continuity—Right After You Finish a Task
 No waiting for manual curation or approval queues. Public requests, analysis notes, tool outcomes, and modified file links become **searchable work history immediately**. Open a new chat or move to the next phase, and your Agent can instantly query prior constraints, failed attempts, and deliveries—complete with provenance labels like `reported` so it never confuses an unverified note with a battle-tested fix.
 
-### 2. Conclusion-First, Progressive Retrieval: Keep 99% of Context for the Hard Problem
+### 2. Conclusion-First, Progressive Retrieval: Leave More Context for the Hard Problem
 Stop stuffing thousands of words of raw logs into every prompt. Retrieval filters strictly around the **active business problem** and prioritizes **conclusions paired with their exact applicability boundaries**. When full details won't fit, it injects a tiny read index so the Agent can expand content and evidence on demand. Persistent sessions track exposed cards to eliminate repeats, while compaction recovery actively re-verifies task and source eligibility.
 
 | Injection Guardrail | How It Works | Pain Point Eliminated |
@@ -93,8 +94,8 @@ Stop stuffing thousands of words of raw logs into every prompt. Retrieval filter
 
 > 💡 **Zero Extra LLM Tax**: Every relevance filter, full-text query, budget trim, and deduplication check runs **100% locally in SQLite**—never firing a hidden generative-model call on prompt submission.
 
-### 3. Instant Circuit Breakers for Wrong or Obsolete Knowledge
-Refactored a module or proved an old workaround wrong? Every knowledge entry is cryptographically tied to its conditions, source files, and revision history. When a source file changes, a counterexample is logged, or an entry is disputed or revoked, **automatic excerpt injection stops immediately**, risky items downgrade to warning-labeled indexes, and active sessions that saw the old version receive change notifications.
+### 3. Circuit Breakers and Corrections for Wrong or Obsolete Knowledge
+Refactored a module or proved an old workaround wrong? Knowledge is tracked with conditions, source references and revision history; file-linked records can recheck observed file state. Subsequent supported events recheck source changes, counterexamples, disputes and revocation: **invalid knowledge stops receiving later automatic excerpts**, some source risks become labeled read indexes, and affected conversations receive event-driven, budgeted change notices.
 
 ### 4. Stage-Based AI Curation & Tiered Auto-Publication
 Want long-term knowledge distilled without micromanaging every note? Enable the optional Administrator to review work every **1–20 completed tasks or stages** within a strict project token budget. The Administrator extracts structured candidates while **Tiered Publication** automatically publishes verified operational fixes and sourced project facts within your chosen scope—surfacing only genuine conflicts or evidence gaps for your review.
@@ -286,11 +287,11 @@ git clone --branch main --depth 1 https://github.com/swenbo1-web/agents-learning
 cd agents-learning
 ```
 
-Already cloned it? Use that directory, check its version and skip `git clone`. Run the commands below from the repository, installing each host into its own export directory. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below. To pin the stable distribution, replace `main` with `v1.0.0` and use only the Codex or Antigravity instructions.
+Already cloned it? Use that directory, check its version and skip `git clone`. Run the commands below from the repository, installing each host into its own export directory. These are **Windows PowerShell** examples; [macOS / Linux commands](#macos--linux) are below. To pin the stable distribution, replace `main` with `v1.4.40`; all three host instructions are supported.
 
 **All three hosts share one codebase and project knowledge database.** Keep the same `ALP_HOME`, configuration and project path, but install separate `--host codex|antigravity|dsh` entry points into separate directories. Three host integrations do not require three knowledge databases.
 
-The [1.0.0 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) also includes source, wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
+The [v1.4.40 stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40) includes three-host source, a wheel and checksums. **Export the plugin before installing it:** export binds interpreter and runtime paths to this machine. For an existing shared database, [update all its runtimes together](#shared-knowledge-upgrades-and-administrators).
 
 ## Install in Codex (desktop and CLI)
 
@@ -508,7 +509,7 @@ codex plugin marketplace add "$learning_plugin"
 codex plugin add agent-learning@agent-learning-local
 ```
 
-DSH (`main` source):
+DSH (v1.4.40 and later source):
 
 ```sh
 learning_profile="web" # Change to the DSH profile you use.
@@ -549,7 +550,7 @@ The goal is to reduce repeated work and irrelevant context so Agents can use exi
 
 The plugin suits projects that require long-term maintenance, frequent tool use and work handed between conversations or Agents, including software development, troubleshooting, testing, data processing and experimental workflows. Project context, domain experience and tool operation knowledge can be maintained together; each domain still needs its own evidence and acceptance methods.
 
-The source provides **Codex, Antigravity and DSH** profiles using rules, skills, MCP, Hooks and the same runtime core. The v1.0.0 distribution includes the first two; DSH requires `main`. Check event capabilities and acceptance for each host separately. Antigravity differences are documented below; other Agent environments still require their own adapters.
+The v1.4.40 stable release provides **Codex, Antigravity and DSH** profiles using rules, skills, MCP, Hooks and the same runtime core. Check event capabilities and acceptance for each host separately. Antigravity differences are documented below; other Agent environments still require their own adapters.
 
 Storage is local by default, and knowledge is managed by project. Installation does not enable administrator execution, background scheduling, automatic publication or remote services. The first confirmed visual administrator enable recommends tiered publication; existing project settings remain unchanged.
 
@@ -792,7 +793,7 @@ The same ALP_HOME/--home and project mapping share knowledge, candidates, source
 
 Default installations can share the same default directory. For a custom directory, export Antigravity or DSH with explicit `--home PATH` and follow the [Codex wiring](#custom-knowledge-directory-in-codex) for both its host and MCP process. Browser, administrator and trusted CLI commands must use that directory too. If using `ALP_CONFIG`, all relevant processes must select the same configuration file. Exports currently bind the default host instance; other instance identities are available only through trusted Runtime commands.
 
-Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH requires the `main` source. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
+Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
 Current `main` v1.4.40 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
@@ -1010,7 +1011,7 @@ python -B scripts/learning.py --home build/local/demo-data --workspace . status
 python -B scripts/learning.py --home build/local/demo-data --workspace . browser --open
 ```
 
-The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. Follow your host's installation steps above: Codex and Antigravity can use the v1.0.0 source or wheel; DSH requires `main`. See [work history](#working-observations-file-context-and-progressive-reading), [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
+The first `status` registers the project and creates a separate database with an empty knowledge base. The browser reads existing projects only. All three hosts can use v1.4.40 source or wheel; follow your host's installation steps above. See [work history](#working-observations-file-context-and-progressive-reading), [hybrid retrieval](#semantic-hybrid-retrieval), [the knowledge browser](#knowledge-browser), [paired task evaluation](#real-task-paired-evaluation) or [the complete architecture](#complete-architecture).
 
 ## Working observations, file context and progressive reading
 
@@ -1122,7 +1123,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.39 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.40 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -2181,7 +2182,7 @@ User character caps, daily limits, output reservations and the conservative host
 
 The project uses the [MIT license](LICENSE). Source, wheel, exported plugin and fixed runtime copies retain the same license file.
 
-Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The [1.0.0 first stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) provides source, wheel and checksums. [0.13.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v0.13.0) and the initial 0.11.1 remain historical prereleases. An exported local plugin contains absolute interpreter and fixed-runtime paths; each machine should export using its own paths. CI runs isolated offline checks and enables no live Hooks, models, background services or Hindsight.
+Public repository: [swenbo1-web/agents-learning](https://github.com/swenbo1-web/agents-learning). The [latest stable v1.4.40 release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40) provides three-host source, a wheel and checksums. [v1.0.0](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0) and earlier versions remain historical releases. An exported local plugin contains absolute interpreter and fixed-runtime paths; each machine should export using its own paths. CI runs isolated offline checks and enables no live Hooks, models, background services or Hindsight.
 
 Subsequent documentation updates are published on repository `main`; the Chinese version is [README.md](README.md) and the English version is this file. The prerelease tag and assets correspond to their original release commit. Use the repository documentation for language navigation and the latest architecture description.
 
@@ -2191,4 +2192,4 @@ Use [Issues](https://github.com/swenbo1-web/agents-learning/issues/new/choose) f
 
 Contributions can improve the Chinese/English documentation, reproduce installation or platform issues, add retrieval cases or provide real paired task evaluations. Read [AGENTS.md](AGENTS.md) before changing code, run relevant offline checks with temporary data directories, and describe the changes, verification and compatibility impact in your pull request. Real evaluations should report task acceptance and full usage across workers, administrator and retrieval. Token, latency and quality improvements have not yet been established by sufficient data.
 
-If the project is useful to you, Star it or share the [English introduction](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md) and [first stable release](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.0.0).
+If the project is useful to you, Star it or share the [English introduction](https://github.com/swenbo1-web/agents-learning/blob/main/README.en.md) and [latest stable release](https://github.com/swenbo1-web/agents-learning/releases/latest).
