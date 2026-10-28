@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -110,6 +111,68 @@ class BuildResourceTests(unittest.TestCase):
 
 
 class PackageTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("setuptools") and importlib.util.find_spec("wheel")
+                         and importlib.machinery.PathFinder.find_spec("pip"), "Offline build tools are optional")
+    def test_sdist_retains_host_resources_and_rebuilds_complete_wheel(self):
+        """An sdist consumer must get the same host resources as a Git checkout."""
+        source_root = Path(__file__).resolve().parents[1]
+        resource_directories = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
+        resource_files = ("README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json")
+        expected = {name: (source_root / name).read_bytes() for name in resource_files}
+        for directory in resource_directories:
+            for path in (source_root / directory).rglob("*"):
+                if path.is_file() and path.suffix != ".pyc" and "__pycache__" not in path.parts:
+                    expected[path.relative_to(source_root).as_posix()] = path.read_bytes()
+        self.assertIn("host_resources/antigravity/sidecars/control/index.html", expected)
+        with tempfile.TemporaryDirectory(prefix="alp-sdist-package-") as temp:
+            base = Path(temp)
+            source = base / "build source"
+            source.mkdir()
+            for name in ("agent_learning", *resource_directories):
+                shutil.copytree(source_root / name, source / name,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            for name in (*resource_files, "pyproject.toml", "build_support.py", "MANIFEST.in"):
+                shutil.copy2(source_root / name, source / name)
+            output = base / "dist"
+            output.mkdir()
+            environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", ALP_DISABLED="1")
+            build = subprocess.run(
+                [sys.executable, "-B", "-c",
+                 "import sys; from setuptools.build_meta import build_sdist; build_sdist(sys.argv[1])",
+                 str(output)], cwd=source, env=environment, capture_output=True, timeout=30)
+            self.assertEqual(build.returncode, 0, (build.stdout + build.stderr).decode("utf-8", "replace"))
+            sdists = list(output.glob("*.tar.gz"))
+            self.assertEqual(len(sdists), 1)
+            extracted = base / "sdist source"
+            extracted.mkdir()
+            with tarfile.open(sdists[0], "r:gz") as archive:
+                members = [member for member in archive.getmembers() if member.isfile()]
+                roots = {Path(member.name).parts[0] for member in members}
+                self.assertEqual(len(roots), 1)
+                prefix = next(iter(roots)) + "/"
+                contents = {member.name[len(prefix):]: archive.extractfile(member).read() for member in members}
+                for relative, data in expected.items():
+                    self.assertEqual(contents.get(relative), data, "sdist omitted or changed " + relative)
+                # Materialize only the generated archive's plain files. No link,
+                # traversal or platform-specific tar extraction is needed.
+                for relative, data in contents.items():
+                    target = (extracted / relative).resolve()
+                    self.assertIn(extracted.resolve(), target.parents)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+            rebuild = subprocess.run(
+                [sys.executable, "-B", "-c",
+                 "import sys; from setuptools.build_meta import build_wheel; build_wheel(sys.argv[1])",
+                 str(output)], cwd=extracted, env=environment, capture_output=True, timeout=30)
+            self.assertEqual(rebuild.returncode, 0, (rebuild.stdout + rebuild.stderr).decode("utf-8", "replace"))
+            wheels = list(output.glob("*.whl"))
+            self.assertEqual(len(wheels), 1)
+            with zipfile.ZipFile(wheels[0]) as wheel:
+                for relative, data in expected.items():
+                    path = "agent_learning/_plugin_resources/" + relative
+                    self.assertIn(path, wheel.namelist(), "sdist-built wheel omitted " + relative)
+                    self.assertEqual(wheel.read(path), data, "sdist-built wheel changed " + relative)
+
     @unittest.skipUnless(importlib.util.find_spec("setuptools") and importlib.util.find_spec("wheel")
                          # Python 3.10's setuptools hook changes distutils even
                          # on find_spec('pip'). Check the path without that hook.

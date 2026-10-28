@@ -92,7 +92,7 @@ Stop stuffing thousands of words of raw logs into every prompt. Retrieval filter
 | **Exposure Tracking & Compaction Recheck** | Deduplicates already-shown cards in persistent sessions; re-evaluates when revisions, sources, tasks, or compaction states change | Ends repetitive card spam while guaranteeing critical updates break through |
 | **Evidence-Graded Risk Circuit Breakers** | Immediately halts automatic excerpts for disputed or invalidated entries; downgrades risky sources to labeled read indexes | Prevents obsolete or broken advice from being injected as marching orders |
 
-> 💡 **Zero Extra LLM Tax**: Every relevance filter, full-text query, budget trim, and deduplication check runs **100% locally in SQLite**—never firing a hidden generative-model call on prompt submission.
+> 💡 **Zero Extra LLM Tax**: Every relevance filter, full-text query, budget trim, and deduplication check runs **locally in the runtime, with SQLite retrieval**—without another generative-model call for these default operations.
 
 ### 3. Circuit Breakers and Corrections for Wrong or Obsolete Knowledge
 Refactored a module or proved an old workaround wrong? Knowledge is tracked with conditions, source references and revision history; file-linked records can recheck observed file state. Subsequent supported events recheck source changes, counterexamples, disputes and revocation: **invalid knowledge stops receiving later automatic excerpts**, some source risks become labeled read indexes, and affected conversations receive event-driven, budgeted change notices.

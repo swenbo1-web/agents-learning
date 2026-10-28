@@ -3,4 +3,4 @@ recursive-include scripts *.py
 recursive-include hooks *.py *.json
 recursive-include skills SKILL.md *.yaml
 include .codex-plugin/plugin.json .agents/plugins/marketplace.json
-recursive-include host_resources *.json *.md *.yaml *.yml *.mjs *.js
+recursive-include host_resources *.json *.md *.yaml *.yml *.mjs *.js *.html
