@@ -50,6 +50,7 @@ _TOOL_USAGE_WORDS = {"use", "usage", "using", "tool", "tools", "function", "func
                      "invoke", "invocation", "works"}
 _ZH_TOOL_USAGE = re.compile(r"使用说明|使用方式|使用方法|使用|用法|工具|调用|函数")
 _TOOL_FAULT_WORDS = {"error", "failed", "failure", "timeout", "permission", "denied", "output", "input",
+                     "permissiondenied", "accessdenied", "timedout", "commandnotfound", "not", "found", "unavailable", "unsupported",
                      "invalid", "code", "status", "process", "exit", "signal", "terminated", "stderr", "stdout",
                      "config", "configuration", "setting", "settings", "argument", "arguments", "parameter",
                      "parameters", "option", "options", "syntax", "terminal", "session", "console",

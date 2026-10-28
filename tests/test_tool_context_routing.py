@@ -65,7 +65,7 @@ class ToolContextRoutingTests(unittest.TestCase):
             with self.subTest(domain=domain):
                 right = self.publish(domain + " transaction boundaries are preserved.")
                 self.assertIn(right, self.automatic_ids("exec_command " + domain))
-        for topic in ("configuration", "arguments", "permission denied", "权限配置错误", "超时处理"):
+        for topic in ("configuration", "arguments", "permission denied", "not found", "权限不足", "权限配置错误", "超时处理"):
             with self.subTest(topic=topic):
                 self.assertIn("exec_command", normalized_query_plan("exec_command " + topic)["exact_anchors"])
                 self.assertFalse(self.match("exec_command " + topic, "read_file " + topic)["auto_eligible"])
