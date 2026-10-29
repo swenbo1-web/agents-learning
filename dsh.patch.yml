@@ -1,0 +1,12 @@
+# Repository installation starts with an explicit, profile-local initializer.
+- insert:
+    - id: agent-learning
+      name: 'agent-learning'
+      config:
+        extensions:
+          googleThinking: false
+          messagesCompat: false
+          netTune: false
+          thinkingLanguage: 'off'
+          delegation:
+            enabled: false

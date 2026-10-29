@@ -30,7 +30,7 @@ Yesterday's two-hour debugging breakthrough becomes today's fresh investigation.
 
 Python **3.10+** · Authoritative Local SQLite · Zero extra model API keys required by default · [MIT](LICENSE)
 
-**Latest stable release: [v1.4.40](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40), with three-host source, a Python wheel and SHA-256 checksums.** These steps target v1.4.40; `main` tracks subsequent development. Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility), and update/reload shared-database hosts together.
+**Latest stable release: [v1.4.40](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40), with three-host source, a Python wheel and SHA-256 checksums.** Codex, Antigravity and local export workflows support this release; direct DSH GitHub installation and initialization require1.4.43 or later on `main`. Existing users: see [compatibility and shared-database upgrades](#current-version-and-compatibility), and update/reload shared-database hosts together.
 
 ## A real sample: equal quality, selective memory
 
@@ -387,7 +387,32 @@ Restart the CLI and use the same bound project. The CLI copies the plugin into i
 
 ## Install in DSH (DeepSeek Harness)
 
-Use DSH with plugin Bundle support and **pnpm** available on PATH. Export, then install into the profile you actually use. This example selects Web; change the first line for another profile such as TUI:
+Requires Bundle-capable DSH, **pnpm**, Git and an independent **Python 3.10+**. Install from `main` (1.4.43 onward); this example uses the Web profile:
+
+```powershell
+dsh plugin --profile web add github:swenbo1-web/agents-learning
+```
+
+Reopen the same profile and run this native command once, using your project's absolute path (quote the whole path if needed):
+
+```text
+/learning-init D:\Projects\my-project
+```
+
+**Reload the plugin or restart that profile when initialization succeeds, then open the target project.** Initialization creates this machine's runtime copy and receipt using local Python; the GitHub source contains no developer-machine paths or receipts. Initialize each profile separately. Repeating the command upgrades its export and can bind another project; the local project knowledge directory remains shared. Before initialization, the package only provides setup commands and does not attach tool guards or collect events.
+
+If Python is not on PATH, specify its executable in a terminal. The default DSH_HOME is `~/.dsh`; adjust the profile directory if you use a custom home:
+
+```powershell
+pnpm --dir "$env:USERPROFILE/.dsh/profiles/web" exec agent-learning-dsh-init --profile-directory "$env:USERPROFILE/.dsh/profiles/web" --workspace "D:\Projects\my-project" --python "C:\Python312\python.exe"
+```
+
+Initialization enables no administrator, history import or automatic publication. After a GitHub package update, rerun `/learning-init` and reload. Existing local exports can keep the workflow below; **do not mount two Agent Learning instances**.
+
+<details>
+<summary>Local source / wheel export installation (also supported by v1.4.40)</summary>
+
+Run from the complete source checkout, or replace the source entry with `python -m agent_learning.cli`:
 
 ```powershell
 $learningProfile = "web"
@@ -397,7 +422,11 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 dsh plugin --profile "$learningProfile" add "$learningPlugin"
 ```
 
-**Restart that DSH profile → open a conversation in the target project.** The full Bundle loads the host bridge, the project-scoped **📖 Memory / 知识库** button in the composer toolbar, skills, commands, Hooks and MCP. Attaching only MCP/Hooks does not load all native components. To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
+To upgrade, update the export with matching-host `install --upgrade`, then update the plugin in that profile.
+
+</details>
+
+Once initialized, the target project has the composer **📖 Memory / 知识库** button, event bridge, skills and native tools. Attaching only MCP/Hooks does not load the full native integration. [DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
 <details>
 <summary>Optional DSH compatibility and delegation settings (off by default)</summary>
@@ -795,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.42 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.43 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1123,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.42 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.43 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1790,7 +1819,13 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.42</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.43</summary>
+
+## DSH GitHub installation and first-time setup (1.4.43)
+
+- The repository root now exports a discoverable DSH Bundle and complete Python sources. Installing from GitHub requires no developer-generated receipt or fixed machine paths.
+- `/learning-init <absolute project path>` explicitly creates a profile-local export and immutable runtime. First load only provides setup; after reload, integrity checks precede the existing native bridge. The terminal initializer also accepts an independent Python executable.
+- Reinitialization uses the installer's existing upgrade checks and preserves knowledge, models, review and publication policies. Cancellation, failure or invalid receipts do not attach tool guards. Database and index protocols retain the1.4.42 baseline.
 
 ## Retrieval stability and sensitive-output hardening (1.4.42)
 

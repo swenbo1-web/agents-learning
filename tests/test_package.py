@@ -76,7 +76,8 @@ class BuildResourceTests(unittest.TestCase):
             self.assertEqual(sibling.read_text(encoding="utf-8"), "preserve")
             for relative in (".codex-plugin/plugin.json", "skills/learning-worker/SKILL.md",
                              "host_resources/antigravity/sidecars/control/main.mjs",
-                             "host_resources/dsh/reviewer/runner.mjs", "README.en.md"):
+                             "host_resources/dsh/reviewer/runner.mjs", "README.en.md",
+                             "scripts/dsh-init.mjs", "package.json", "dsh.patch.yml"):
                 self.assertEqual((resources / relative).read_bytes(), (source / relative).read_bytes())
             self.assertFalse(any(resources.rglob("*.pyc")))
 
@@ -117,7 +118,7 @@ class PackageTests(unittest.TestCase):
         """An sdist consumer must get the same host resources as a Git checkout."""
         source_root = Path(__file__).resolve().parents[1]
         resource_directories = ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources")
-        resource_files = ("README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json")
+        resource_files = ("README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json", "package.json", "dsh.patch.yml")
         expected = {name: (source_root / name).read_bytes() for name in resource_files}
         for directory in resource_directories:
             for path in (source_root / directory).rglob("*"):
@@ -186,7 +187,7 @@ class PackageTests(unittest.TestCase):
             for name in ("agent_learning", "scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources"):
                 shutil.copytree(source_root / name, source / name,
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-            for name in ("pyproject.toml", "README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in"):
+            for name in ("pyproject.toml", "README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json", "build_support.py", "MANIFEST.in", "package.json", "dsh.patch.yml"):
                 shutil.copy2(source_root / name, source / name)
             wheel_directory = base / "wheels"
             wheel_directory.mkdir()
@@ -208,6 +209,8 @@ class PackageTests(unittest.TestCase):
                     self.assertIn(f"agent_learning/{module}.py", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/.codex-plugin/plugin.json", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/README.en.md", wheel.namelist())
+                for relative in ("package.json", "dsh.patch.yml", "scripts/dsh-init.mjs", "host_resources/dsh/bootstrap.mjs"):
+                    self.assertEqual(wheel.read("agent_learning/_plugin_resources/" + relative), (source_root / relative).read_bytes())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-admin/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/SKILL.md", wheel.namelist())
                 self.assertIn("agent_learning/_plugin_resources/skills/learning-history/agents/openai.yaml", wheel.namelist())

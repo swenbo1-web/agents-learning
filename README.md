@@ -30,7 +30,7 @@
 
 Python **3.10+** · 纯本地 SQLite 权威存储 · 默认零额外模型 API Key 开销 · [MIT](LICENSE)
 
-**最新正式版：[v1.4.40](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40)，提供三宿主源码、Python wheel 和 SHA-256 校验文件。** 下方步骤适用于 v1.4.40；`main` 跟随后续开发。已有安装请看[版本与共库升级](#当前版本与兼容)，共库宿主应一起升级、重新加载。
+**最新正式版：[v1.4.40](https://github.com/swenbo1-web/agents-learning/releases/tag/v1.4.40)，提供三宿主源码、Python wheel 和 SHA-256 校验文件。** Codex、Antigravity 和本地导出流程可用该正式版；DSH 直接 GitHub 安装与初始化使用 `main` 的1.4.43及后续版本。已有安装请看[版本与共库升级](#当前版本与兼容)，共库宿主应一起升级、重新加载。
 
 ## 真实样本：质量持平，记忆按需进入上下文
 
@@ -381,7 +381,32 @@ CLI 会复制插件；安装后重新启动 CLI。以后更新导出目录时，
 
 ## 在 DSH 中安装（DeepSeek Harness）
 
-需要支持插件 Bundle 的 DSH 和可用的 **pnpm**。导出后安装到实际使用的 profile；下面以 Web profile 为例，使用 TUI 等其他 profile 时修改第一行：
+需要支持 Bundle 的 DSH、**pnpm**、Git 和独立 **Python 3.10+**。从 `main` 安装（1.4.43 起），下面以 Web profile 为例：
+
+```powershell
+dsh plugin --profile web add github:swenbo1-web/agents-learning
+```
+
+重新打开同一个 DSH profile，在命令菜单执行一次（替换为实际项目的绝对路径，含空格可整体加引号）：
+
+```text
+/learning-init D:\Projects\my-project
+```
+
+**按成功提示重载插件或重启该 profile，再打开目标项目对话。** 初始化使用本机 Python 生成独立运行副本和安装回执；GitHub 仓库不包含开发者机器的路径或回执。不同 profile 分别初始化，重复执行可升级并登记另一个项目；知识目录仍按同机项目共用。首次加载只提供初始化命令，尚未初始化时不会加载工具保护或自动采集。
+
+Python 不在 PATH 时，可在终端指定解释器；默认 DSH_HOME 为 `~/.dsh`，自定义时替换 profile 目录：
+
+```powershell
+pnpm --dir "$env:USERPROFILE/.dsh/profiles/web" exec agent-learning-dsh-init --profile-directory "$env:USERPROFILE/.dsh/profiles/web" --workspace "D:\Projects\my-project" --python "C:\Python312\python.exe"
+```
+
+初始化不会开启管理员、历史吸收或自动发布。更新 GitHub 安装后，再运行 `/learning-init` 并重载。已有本地导出安装继续使用下列方式，**不要同时挂载两套 Agent Learning**。
+
+<details>
+<summary>本地源码／wheel 导出安装（也适用于 v1.4.40）</summary>
+
+先进入完整源码目录，或以 `python -m agent_learning.cli` 替换下面的源码入口：
 
 ```powershell
 $learningProfile = "web"
@@ -391,7 +416,11 @@ python -B scripts/learning.py --workspace "$learningProject" install "$learningP
 dsh plugin --profile "$learningProfile" add "$learningPlugin"
 ```
 
-**重新启动同一个 DSH profile → 在目标项目开启新对话。** 完整 Bundle 会加载宿主事件桥接、聊天框左下角的「📖 知识库」实体按键（仅在已绑定的目标项目中显示）、技能、命令、Hooks 与 MCP；仅手动挂接 MCP／Hooks 不包含完整原生接入。升级先使用同宿主 `install --upgrade`，再更新该 profile 中的插件。[DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
+升级先使用同宿主 `install --upgrade`，再更新该 profile 中的插件。
+
+</details>
+
+完整接入后，目标项目聊天框左下角显示「📖 知识库」按键，并提供事件桥接、技能与原生工具。仅手动挂接 MCP／Hooks 不包含完整原生接入。[DSH CLI](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/cli)
 
 <details>
 <summary>DSH 可选宿主兼容与委派设置（默认关闭）</summary>
@@ -478,7 +507,7 @@ extensions:
 | 问题 | 处理方法 |
 |---|---|
 | `python` 或 `codex` 找不到 | 配置 PATH；Python 需 3.10+。PowerShell 可用 `& "C:\你的Python目录\python.exe"` 替换命令开头的 `python` |
-| 能直接安装 GitHub 仓库吗？ | 先运行本机导出命令；源码里的入口是模板，导出会绑定本机解释器与固定运行路径 |
+| 能直接安装 GitHub 仓库吗？ | DSH 从1.4.43起支持仓库根 Bundle，安装后执行 `/learning-init`；Codex／Antigravity 先本机导出，绑定解释器与固定运行路径 |
 | 已有导出目录，再安装时报错 | 使用对应宿主的 `--upgrade`；不要删除知识目录或跨宿主覆盖 |
 | 有知识工具，没有本轮句柄 | 检查插件启用与 Hook 信任，重新加载并开新对话；仅能查询知识不代表 Hook 已连接 |
 | 自定义目录后知识查不到或句柄绑定失败 | 核对 Hooks 与 MCP 的 `ALP_HOME`，以及自定义 `ALP_CONFIG`；完成[Codex 自定义目录接线](#codex-自定义知识目录)后重启并开新对话 |
@@ -784,7 +813,7 @@ python -B scripts/learning.py --workspace "D:\Projects\my-project" --host antigr
 
 可用单独的管理员接口人工整理案例，或按对应宿主配置 CLI 自动知识审核；DSH 使用 v1.4.40 或后续版本。native admin skill 只是操作说明，默认 MCP 仍是 worker；具体开启方法见[管理员执行器](#可选管理员执行器)。自动审核、后台调度、发布和远端服务继续默认关闭；本地 SQLite 共享限于同一台机器，跨设备共享仍需独立同步设计。
 
-当前 `main` v1.4.42 使用数据库 schema **25**、内部发布协议 **25**，正式／工作／语义索引为 **7／3／1**。状态流水暂存、终态采集与阶段待办分别验收；手动历史查询、指南、风险通知及严格任务交接仍可用。部分公开回复仍不等于完整阶段交付。共库宿主一起更新再重载，安装不启用管理员、历史吸收或发布策略；真实任务验收需独立进行。
+当前 `main` v1.4.43 使用数据库 schema **25**、内部发布协议 **25**，正式／工作／语义索引为 **7／3／1**。状态流水暂存、终态采集与阶段待办分别验收；手动历史查询、指南、风险通知及严格任务交接仍可用。部分公开回复仍不等于完整阶段交付。共库宿主一起更新再重载，安装不启用管理员、历史吸收或发布策略；真实任务验收需独立进行。
 
 Antigravity／DSH 升级使用各自的 `--host` 与 `--upgrade`；省略工作区和数据路径会保留原绑定，显式修改会同时更新 Hook／MCP。Codex 自定义 MCP 入口需按下节同步新运行路径。升级保留旧导出和固定副本，不覆盖外部知识与配置；宿主有缓存时需要重新加载／安装并审阅新入口。多个宿主可复用同一固定运行 release，但需分别更新各自的安装目录。
 
@@ -1071,7 +1100,7 @@ python -B scripts/learning.py --workspace "D:\Projects\your-project" history-ski
 
 ## 当前版本与兼容
 
-**当前源码版本为1.4.42，数据库 schema／内部发布协议为25，正式／工作／可选语义索引为7／3／1。** 区分协议完成与业务成功、采集确认与任务交付、当前可执行队列与受保护阶段待办。旧调用锁、未知用量和原发布策略保留，不重试旧模型请求或补写已完成回执。共库宿主一起更新再重载；源码更新不等于已更新现用安装或发布新下载包。
+**当前源码版本为1.4.43，数据库 schema／内部发布协议为25，正式／工作／可选语义索引为7／3／1。** 区分协议完成与业务成功、采集确认与任务交付、当前可执行队列与受保护阶段待办。旧调用锁、未知用量和原发布策略保留，不重试旧模型请求或补写已完成回执。共库宿主一起更新再重载；源码更新不等于已更新现用安装或发布新下载包。
 
 以下为历次版本变更，描述各版本发布时的状态：
 
@@ -1743,7 +1772,13 @@ Windows、Python 3.12.14 下 **736 项离线回归全套通过**，零失败、�
 ## 版本更新记录
 
 <details>
-<summary>展开 1.3.0～1.4.42 的功能变更与兼容说明</summary>
+<summary>展开 1.3.0～1.4.43 的功能变更与兼容说明</summary>
+
+## DSH GitHub 安装与首次初始化（1.4.43）
+
+- 仓库根提供可发现的 DSH Bundle 和完整 Python 源码，直接安装 GitHub 包不再依赖开发者生成的回执或固定路径。
+- `/learning-init <项目绝对路径>` 显式生成按 profile 隔离的本机导出与固定副本；首次加载仅提供初始化命令，重载后校验完整性并接入原有宿主桥。终端初始化器支持指定独立 Python。
+- 重复初始化沿安装器原有升级检查，保留知识、模型、审核和发布设置；取消、失败或回执异常不自动启动工具保护。数据库与索引协议沿用1.4.42。
 
 ## 检索稳定性与敏感输出补强（1.4.42）
 

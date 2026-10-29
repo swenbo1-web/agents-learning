@@ -1,0 +1,29 @@
+{
+  "name": "agent-learning",
+  "version": "1.4.43",
+  "description": "Local-first governed project memory for DeepSeek Harness, Codex and Antigravity",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/swenbo1-web/agents-learning.git" },
+  "homepage": "https://github.com/swenbo1-web/agents-learning#readme",
+  "type": "module",
+  "bin": {
+    "agent-learning-dsh-init": "./scripts/dsh-init.mjs"
+  },
+  "exports": {
+    ".": "./host_resources/dsh/bootstrap.mjs",
+    "./host": "./host_resources/dsh/bootstrap.mjs",
+    "./client": "./host_resources/dsh/client/index.js",
+    "./*": "./host_resources/dsh/host/*.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "agent_learning/", "scripts/", "hooks/", "skills/", "host_resources/",
+    ".codex-plugin/", ".agents/", ".mcp.json", "config.example.json",
+    "pyproject.toml", "build_support.py", "MANIFEST.in", "dsh.patch.yml",
+    "README.md", "README.en.md", "LICENSE"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./dsh.patch.yml" },
+    "client": { "inject": [], "platform": "web", "immediately": true }
+  }
+}

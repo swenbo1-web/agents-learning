@@ -37,5 +37,5 @@ class PluginBuildPy(build_py):
         for name in ("scripts", "hooks", "skills", ".codex-plugin", ".agents", "host_resources"):
             shutil.copytree(source / name, target / name, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        for name in ("README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json"):
+        for name in ("README.md", "README.en.md", "LICENSE", "config.example.json", ".mcp.json", "package.json", "dsh.patch.yml"):
             shutil.copy2(source / name, target / name)

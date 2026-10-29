@@ -1,5 +1,5 @@
-include build_support.py README.md README.en.md LICENSE config.example.json .mcp.json
-recursive-include scripts *.py
+include build_support.py README.md README.en.md LICENSE config.example.json .mcp.json package.json dsh.patch.yml
+recursive-include scripts *.py *.mjs
 recursive-include hooks *.py *.json
 recursive-include skills SKILL.md *.yaml
 include .codex-plugin/plugin.json .agents/plugins/marketplace.json
