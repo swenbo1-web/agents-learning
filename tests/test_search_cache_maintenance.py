@@ -57,7 +57,7 @@ class SearchCacheMaintenanceTests(unittest.TestCase):
                                   (self.p,)).fetchone()[0]
         self.assertEqual(after - before, 20)
 
-    def test_older_hit_refreshes_recency_and_survives_batch_eviction(self):
+    def test_older_hit_survives_overflow_without_evicting_unrelated_hot_entries(self):
         for index in range(256):
             self.store(str(index))
         old_rowid = self.cached('0')['rowid']
@@ -66,7 +66,39 @@ class SearchCacheMaintenanceTests(unittest.TestCase):
         self.store('new')
         self.assertIsNotNone(self.cached('0'))
         self.assertIsNone(self.cached('1'))
-        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 224)
+        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 256)
+        self.assertEqual({row[0] for row in self.r.db.execute('SELECT key FROM cache')},
+                         {'0', 'new'} | {str(index) for index in range(2, 256)})
+
+    def test_near_capacity_refreshes_recent_hot_entries_before_eviction(self):
+        for index in range(224):
+            self.store(str(index))
+        # Eight positions old would be ignored by the low-pressure policy.
+        old_rowid = self.cached('215')['rowid']
+        self.store('215')
+        self.assertGreater(self.cached('215')['rowid'], old_rowid)
+        # Without that refresh, 248 unrelated inserts evict the original row.
+        for index in range(248):
+            self.store('cold-' + str(index))
+        self.assertIsNotNone(self.cached('215'))
+        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 256)
+
+    def test_recent_hits_still_avoid_writes_under_pressure(self):
+        for index in range(256):
+            self.store(str(index))
+        before = self.cached('250')['rowid']
+        changes = self.r.db.total_changes
+        for _ in range(20):
+            self.store('250')
+        self.assertEqual(self.cached('250')['rowid'], before)
+        self.assertEqual(self.r.db.total_changes, changes)
+
+    def test_low_pressure_keeps_wider_no_write_window(self):
+        for index in range(100):
+            self.store(str(index))
+        before = self.cached('80')['rowid']
+        self.store('80')
+        self.assertEqual(self.cached('80')['rowid'], before)
 
     def test_separate_runtime_each_insert_still_has_hard_capacity(self):
         for index in range(290):
@@ -81,7 +113,7 @@ class SearchCacheMaintenanceTests(unittest.TestCase):
     def test_existing_oversize_cache_is_repaired_even_on_a_recent_hit(self):
         self.r.db.executemany('INSERT INTO cache VALUES(?,?)', [(str(i), '[]') for i in range(400)])
         self.store('399')
-        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 224)
+        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 256)
         self.assertIsNotNone(self.cached('399'))
 
     def test_sparse_rowids_clear_and_rebuild_do_not_disable_maintenance(self):
@@ -93,7 +125,7 @@ class SearchCacheMaintenanceTests(unittest.TestCase):
         self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 0)
         for index in range(257):
             self.store('after-' + str(index))
-        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 224)
+        self.assertEqual(self.r.db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 256)
 
     def test_corrupt_recent_cached_body_is_recomputed_and_replaced(self):
         published = self.publish()

@@ -26,7 +26,7 @@ SEMANTIC_DEFAULTS = {
 }
 SEMANTIC_INDEX_VERSION = 1
 # Selection changes invalidate query/context caches without rebuilding vectors.
-SEMANTIC_SCAN_POLICY_VERSION = 2
+SEMANTIC_SCAN_POLICY_VERSION = 3
 _MAX_DIMENSIONS = 4096
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _FAILURE_COOLDOWN_SECONDS = 5
@@ -399,7 +399,8 @@ class SemanticRetrievalMixin:
             return prepared
         key = _hash([_vector_identity(config), state["dimensions"], state["generation"], text])
         # Internal selection inputs only: diagnostics never disclose the query.
-        prepared.update(query_text=text, query_key=key)
+        prepared.update(query_text=text, query_key=key,
+                        scan_key=_hash([_vector_identity(config), text])[:32])
         cache = getattr(self, "_semantic_query_vectors", None)
         if cache is None:
             self._semantic_query_vectors = cache = OrderedDict()
@@ -437,20 +438,24 @@ class SemanticRetrievalMixin:
         return prepared
 
     def _semantic_scan_rows(self, project, prepared, filters):
-        """Bound body/vector work while avoiding a permanent ID-prefix sample.
+        """Select a stable, budget-monotone prefix of three candidate streams.
 
-        A small collection keeps its original complete scan. Large collections
-        combine lexical seeds, recent revisions and a query-stable historical
-        window. SQL population counts/order/offset can still scale with the
-        collection; this is not an ANN index or a full-coverage guarantee.
+        The historical cursor depends on the query, never population size or
+        index generation. ID range scans avoid COUNT/OFFSET; the recent stream
+        can use the knowledge_recent index. Filters and sparse active vectors
+        may still require examining more metadata than returned identities.
+        This bounded selection is not ANN or a complete-nearest-neighbor claim.
         """
         from .knowledge_index import _filter_sql, lexical_rows, normalized_query_plan
         config = prepared["config"]
         limit = config["scan_limit"]
         identity = _vector_identity(config)
-        source = (" FROM semantic_vectors v JOIN active a ON a.project=v.project AND a.id=v.knowledge_id "
-            "AND a.revision=v.revision JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-            "WHERE v.project=? AND v.identity=?" + _filter_sql(filters))
+        # Keep knowledge as the driving range/order cursor. A planner that
+        # starts from every vector defeats both the ID seek and recent index.
+        source = (" FROM knowledge k CROSS JOIN active a ON a.project=k.project AND a.id=k.id "
+            "AND a.revision=k.revision CROSS JOIN semantic_vectors v ON v.project=k.project "
+            "AND v.knowledge_id=k.id AND v.revision=k.revision "
+            "WHERE k.project=? AND v.identity=?" + _filter_sql(filters))
         parameters = (project, identity, *filters.values())
         columns = "SELECT k.*,v.content_hash,v.dimensions,v.vector,v.input_truncated"
         # The probe reads identities, not every authoritative body/vector.
@@ -461,51 +466,52 @@ class SemanticRetrievalMixin:
                 scan_truncated=False, scan_lanes={"complete": len(probe)})
             return self.db.execute(columns + source + " ORDER BY k.id LIMIT ?", (*parameters, limit)).fetchall()
 
-        population = self.db.execute("SELECT COUNT(*)" + source, parameters).fetchone()[0]
-        seed_key = prepared.get("query_key") or _hash(prepared["vector"])
-        offset = int(seed_key[:16], 16) % population
-        selected = {}
-        lanes = {"lexical": 0, "recent": 0, "historical": 0}
-        lexical_quota = min(128, limit // 4)
+        scan_key = prepared.get("scan_key") or _hash(
+            [identity, prepared.get("query_text") or prepared["vector"]])[:32]
+        streams = {"lexical": [], "recent": [], "historical": []}
         query = prepared.get("query_text", "")
-        if lexical_quota and query:
+        if query:
             plan = normalized_query_plan(query)
             if plan["terms"]:
-                lexical = lexical_rows(self.db, project, plan, filters, max_candidates=lexical_quota)
+                # A fixed seed prefix preserves lane ordering when scan_limit
+                # changes, including lexical_rows' multiple recall lanes.
+                lexical = lexical_rows(self.db, project, plan, filters, max_candidates=128)
                 if lexical:
                     placeholders = ",".join("?" for _ in lexical)
                     eligible = {row[0] for row in self.db.execute("SELECT k.id" + source +
                         " AND k.id IN (" + placeholders + ")", (*parameters, *(row["id"] for row in lexical)))}
                     for row in lexical:
                         if row["id"] in eligible:
-                            selected[row["id"]] = None
-                    lanes["lexical"] = len(selected)
+                            streams["lexical"].append(row["id"])
 
-        # A single-slot custom budget cannot guarantee recent and historical
-        # coverage together. Preserve the historical window in that case.
-        recent_quota = max(1, limit // 4) if limit > 1 else 0
-        recent = self.db.execute("SELECT k.id" + source + " ORDER BY k.created DESC,k.id LIMIT ?",
-                                 (*parameters, recent_quota)).fetchall()
-        for row in recent:
-            if row[0] not in selected:
-                selected[row[0]] = None
-                lanes["recent"] += 1
-
-        # At most limit historical identities suffice even if all already
-        # selected IDs overlap this window. Wrap once; never rotate on time or
-        # mutable cursor state, which would invalidate cached query semantics.
-        first = min(limit, population - offset)
-        history = self.db.execute("SELECT k.id" + source + " ORDER BY k.id LIMIT ? OFFSET ?",
-                                 (*parameters, first, offset)).fetchall()
-        if first < limit:
-            history += self.db.execute("SELECT k.id" + source + " ORDER BY k.id LIMIT ?",
-                                       (*parameters, limit - first)).fetchall()
-        for row in history:
-            if len(selected) == limit:
+        streams["recent"] = [row[0] for row in self.db.execute(
+            "SELECT k.id" + source + " ORDER BY k.created DESC,k.id LIMIT ?", (*parameters, limit))]
+        history = self.db.execute("SELECT k.id" + source + " AND k.id>=? ORDER BY k.id LIMIT ?",
+                                 (*parameters, scan_key, limit)).fetchall()
+        if len(history) < limit:
+            history += self.db.execute("SELECT k.id" + source + " AND k.id<? ORDER BY k.id LIMIT ?",
+                                       (*parameters, scan_key, limit - len(history))).fetchall()
+        streams["historical"] = [row[0] for row in history]
+        # Each variable-sized stream has at least `limit` unique IDs when the
+        # collection is truncated. Its fetched prefix therefore cannot run out
+        # before `limit` distinct selections. Fixed interleaving makes a larger
+        # budget extend the existing set rather than rebalance away old hits.
+        cursors = {name: iter(values) for name, values in streams.items()}
+        selected = {}
+        lanes = {name: 0 for name in streams}
+        cycle = ("historical", "lexical", "recent", "historical")
+        while len(selected) < limit:
+            before = len(selected)
+            for name in cycle:
+                for identifier in cursors[name]:
+                    if identifier not in selected:
+                        selected[identifier] = None
+                        lanes[name] += 1
+                        break
+                if len(selected) == limit:
+                    break
+            if len(selected) == before:
                 break
-            if row[0] not in selected:
-                selected[row[0]] = None
-                lanes["historical"] += 1
 
         # Chunk parameters for SQLite builds with a 999-variable limit.
         identities = list(selected)
@@ -515,8 +521,9 @@ class SemanticRetrievalMixin:
             placeholders = ",".join("?" for _ in batch)
             rows.extend(self.db.execute(columns + source + " AND k.id IN (" + placeholders + ")",
                                        (*parameters, *batch)).fetchall())
-        prepared["diagnostics"].update(scan_policy="lexical_recent_history", eligible_vectors=population,
-            scan_truncated=True, scan_lanes=lanes, metadata_selection="count_and_offset")
+        prepared["diagnostics"].update(scan_policy="stable_interleaved_keyset",
+            eligible_vectors=None, eligible_vectors_lower_bound=len(probe),
+            scan_truncated=True, scan_lanes=lanes, metadata_selection="indexed_ranges")
         return rows
 
     def _semantic_candidates(self, project, prepared, filters):

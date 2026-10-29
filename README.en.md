@@ -795,7 +795,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.41 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.42 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1123,7 +1123,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.41 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.42 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1173,7 +1173,7 @@ python -B scripts/learning.py --workspace . search "How did we investigate simil
 
 Queries use RRF to combine bounded lexical and cosine candidates. Match information includes `method`, `semantic_score`, `semantic_rank` and `fusion_method`. Similarity does not prove correctness. Automatic injection retains exact filters, active revision checks, source health and match thresholds. With semantic retrieval enabled, automatic results must cover exact error codes, versions, paths and C++/C# identifiers; provider fallback retains this check. Knowledge cannot issue execution permission. Existing condition and summary budgets apply.
 
-Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates. Small corpora are scanned in full; larger corpora combine bounded lexical seeds, recent knowledge and a query-stable historical window, with `scan_policy` coverage diagnostics and `scan_truncated`. Body/vector processing is bounded, while metadata counting and positioning still scale with corpus size. This is not full-corpus ANN retrieval: unselected knowledge may not participate in that query. Embeddings add local computation and initial latency; speed improvements require measurement.
+Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates. Small corpora are scanned in full; larger corpora use a stable interleaving of historical, lexical and recent candidates, then take the budgeted prefix. Increasing the budget retains previously selected candidates; final ranking may change. An indexed ID-range cursor avoids population-dependent rotation, full counts and deep offsets. Diagnostics include `scan_policy`, `scan_truncated` and a population lower bound rather than an invented exact total. Body/vector processing is bounded; sparse vectors, old revisions and filters can still increase metadata work. This is not full-corpus ANN retrieval: unselected knowledge may not participate in that query. Embeddings add local computation and initial latency; speed improvements require measurement.
 
 ## Knowledge browser
 
@@ -1790,7 +1790,17 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.41</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.42</summary>
+
+## Retrieval stability and sensitive-output hardening (1.4.42)
+
+- **Monotone scan budgets:** interleave stable historical, lexical and recent candidate streams, then take a prefix. Raising the budget no longer rebalances away prior candidates. A query-stable indexed ID cursor removes population-dependent rotation and per-query COUNT/OFFSET; bounded selection still does not guarantee full-corpus nearest neighbors.
+- **Keep hot-set capacity:** retain up to256 cache entries and evict only the overflow. Refresh recency sooner near capacity while preserving recent-hit write suppression at lower occupancy. This remains approximate LRU; results, provenance checks and metrics do not depend on retaining a cache entry.
+- **Format-aware masking:** cover serialized JSON credential fields, quoted multiword credentials, standalone credential lines and explicit Basic authentication. Preserve public text and already-masked URL parameters. Unquoted free-form tails inside mixed commands remain ambiguous; masking is not a replacement for secret management.
+- **Legacy output compatibility:** reapply masking before formal/work-history output, summary and evidence pagination, without bulk rewriting authority, source hashes or evidence grades. Affected old vectors fail their current document-hash check until explicitly refreshed; upgrading calls no embedding or administrator model.
+- **Capture identity across upgrades:** verify full observations against the previous masking digest for calls recorded before upgrading, avoiding false input conflicts caused by changed masking. Retained evidence is unchanged; new capture and output use current masking. Actual input, permission and execution-phase changes still undergo the existing checks.
+- **Pagination across upgrades:** restart unfinished work-history reads at `offset=0` after reloading. Masking can change displayed lengths, so old offsets cannot safely continue across versions. The current interface checks the record revision, not a caller's previous display cursor.
+- **Shared upgrade:** schema/publication protocol remain25; formal/work/semantic indexes are7/3/1. Formal FTS rebuilds for the new projection, work FTS uses the existing bounded repair queue, and a recent-knowledge helper index is added. First open can perform local index maintenance. Update and reload all shared-database hosts together; model, publication, budget and retry settings remain unchanged.
 
 ## Retrieval coverage and lighter local maintenance (1.4.41)
 

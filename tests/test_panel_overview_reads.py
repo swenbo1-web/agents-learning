@@ -14,6 +14,7 @@ from agent_learning import admin_control
 from agent_learning.install import install
 from agent_learning.panel_control import PanelControl
 from agent_learning.runtime import ContractError, Runtime
+from agent_learning.knowledge_index import INDEX_VERSION
 from tests.test_panel_control import PanelControlTests as Fixtures
 
 
@@ -44,7 +45,7 @@ class PanelOverviewReadTests(unittest.TestCase):
         read.assert_called_once_with(self.runtime, self.project)
         routing.assert_called_once_with(self.project)
         self.assertEqual(result["diagnostics"]["project"]["storage_schema"], 25)
-        self.assertEqual(result["diagnostics"]["project"]["index_version"], 6)
+        self.assertEqual(result["diagnostics"]["project"]["index_version"], INDEX_VERSION)
         self.assertFalse(result["summary"]["administrator_readiness"]["authentication_checked"])
 
     def test_common_versions_and_counts_share_one_read_snapshot(self):

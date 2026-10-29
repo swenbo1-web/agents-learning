@@ -110,7 +110,7 @@ class AntigravityCaptureTests(unittest.TestCase):
         self.assertEqual(json.loads(self.events("Stop")[0]["payload"])["completion"], "partial")
 
     def test_public_fields_redacted_then_bounded_with_explicit_coverage(self):
-        text = "password=fixture-private " + "设计说明" * PUBLIC_TEXT_MAX_CHARS + " 最终尾部"
+        text = "password=fixture-private\n" + "设计说明" * PUBLIC_TEXT_MAX_CHARS + " 最终尾部"
         self.invocation(lastUserInput=text)
         self.stop(finalModelOutput=text)
         for kind, field, native in (("UserPromptSubmit", "prompt", "lastUserInput"),

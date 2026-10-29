@@ -10,7 +10,7 @@ from .automatic_relevance import automatic_action_plan, automatic_state_exclusio
 from .semantic_retrieval import SemanticRetrievalMixin
 
 
-INDEX_VERSION = 6
+INDEX_VERSION = 7
 _WORD_PART = r"[\w\u0300-\u036f]+"
 _WORD_TAIL = r"(?:(?:[./:-]|:/)\.?" + _WORD_PART + r")"
 # Keep the complete technical identity before emitting searchable components.
@@ -37,8 +37,8 @@ _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
 _CACHE_LIMIT = 256
-_CACHE_RETAIN = 224
 _CACHE_TOUCH_DISTANCE = 32
+_CACHE_PRESSURE_TOUCH_DISTANCE = 8
 _MATCH_POLICY_VERSION = 10
 _RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
@@ -378,20 +378,24 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
     def _store_search_cache(self, key, body, cached=None):
         """Bound cross-process cache growth and coarsen recency-only rewrites.
 
-        The caller owns a short write transaction. Hits within 32 insert/touch
-        positions keep their row; older hits refresh approximate LRU recency.
-        Overflow trims a batch to 224, always leaving at most 256 entries.
+        The caller owns a short write transaction. Recent hits avoid rewrites;
+        within 32 slots of capacity their recency tolerance narrows from 32 to
+        eight insert/touch positions. Overflow evicts only the excess oldest
+        rows, preserving the hot set while always leaving at most 256 entries.
         Metrics, authority validation and query results remain independent.
         """
+        touch_distance = (_CACHE_PRESSURE_TOUCH_DISTANCE
+                          if cached is not None and cached["cache_size"] >= _CACHE_LIMIT - _CACHE_TOUCH_DISTANCE
+                          else _CACHE_TOUCH_DISTANCE)
         changed = (cached is None or cached["body"] != body
-                   or cached["newest_rowid"] - cached["rowid"] >= _CACHE_TOUCH_DISTANCE)
+                   or cached["newest_rowid"] - cached["rowid"] >= touch_distance)
         if changed:
             self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, body))
         if changed or cached["cache_size"] > _CACHE_LIMIT:
             size = self.db.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
             if size > _CACHE_LIMIT:
-                self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
-                                "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT ?)", (_CACHE_RETAIN,))
+                self.db.execute("DELETE FROM cache WHERE rowid IN "
+                                "(SELECT rowid FROM cache ORDER BY rowid LIMIT ?)", (size - _CACHE_LIMIT,))
 
     def _index_knowledge(self, project, knowledge_id, revision, body):
         from .runtime import clean

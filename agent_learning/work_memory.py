@@ -13,8 +13,14 @@ from .work_files import checkout_key, checkout_root, file_links_from_payload, no
 WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context_chars": 600,
                         "max_items": 3, "summary_enabled": False, "summary_strategy": "balanced", "summary_min_events": 2,
                         "summary_max_events": 12}
-WORK_INDEX_VERSION = 2
+WORK_INDEX_VERSION = 3
 WORK_READ_FILE_CHECK_LIMIT = 64
+
+
+def _body_projection(row):
+    """Reapply current masking to legacy text without changing source evidence."""
+    from .runtime import clean
+    return clean(json.loads(row["body"]))
 
 
 def _read_file_version(relative_path, workspace):
@@ -659,6 +665,8 @@ class WorkMemoryMixin:
 
     def _work_index(self, project, memory_id, body, links):
         from .knowledge_index import terms
+        from .runtime import clean
+        body = clean(body)
         text = " ".join(terms(" ".join([body.get("title", ""), body.get("summary", ""),
                                         *(item.get("relative_path", "") for item in links)])))
         self.db.execute("DELETE FROM work_memory_fts WHERE project=? AND id=?", (project, memory_id))
@@ -700,9 +708,10 @@ class WorkMemoryMixin:
                 "state": state, "source_version": digest([event["id"], event["payload"], signature])}
 
     def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None):
-        from .runtime import digest
+        from .runtime import clean, digest
         row = dict(row)
-        body = json.loads(row["body"])
+        original_body = json.loads(row["body"])
+        body = clean(original_body)
         sources = self.db.execute("SELECT event_id,source_hash,source_version FROM work_memory_sources WHERE project=? AND memory_id=? ORDER BY event_id",
                                   (project, row["id"])).fetchall()
         snapshots = [self.work_source_snapshot(project, source["event_id"]) for source in sources]
@@ -736,6 +745,10 @@ class WorkMemoryMixin:
         reference_risks = [risk for source in sources
                            if (risk := lineage_risk(self, project, source["event_id"])) and risk.get("blocked", True)]
         source_identity = [row["revision"], row["body"], snapshots, reference_risks]
+        if body != original_body:
+            # Refresh affected display receipts, not the authority hash or
+            # evidence grade. Unaffected historical identities stay stable.
+            source_identity.append({"masked_projection": digest(body)})
         # Capture mismatch can change health without changing the live snapshot.
         # Keep healthy legacy fingerprints stable; only append the missing risk.
         if mismatch:
@@ -860,7 +873,7 @@ class WorkMemoryMixin:
                        for word in plan["terms"]}
             denominator = sum(weights.values())
         for row in rows:
-            body = json.loads(row["body"])
+            body = _body_projection(row)
             if automatic and _metadata_only_write(body):
                 continue
             if (automatic and body.get("type") == "user_request" and history_topic is None
@@ -963,7 +976,7 @@ class WorkMemoryMixin:
                 receipt = _delivery.completed(result, _delivery_scope, section=section, offset=offset, max_chars=max_chars)
                 if receipt is not None:
                     return receipt
-            body = json.loads(row["body"])
+            body = _body_projection(row)
             if section == "summary":
                 text = body["summary"]
             else:
@@ -1008,11 +1021,18 @@ class WorkMemoryMixin:
             return result
 
     def _work_evidence_text(self, project, refs):
+        from .runtime import clean
         evidence = []
         for ref in refs:
             event = self.db.execute("SELECT id,type,outcome,payload,capture_digest FROM events WHERE project=? AND id=?",
                                     (project, ref)).fetchone()
-            evidence.append(dict(event) if event else {"id": ref, "state": "missing"})
+            item = dict(event) if event else {"id": ref, "state": "missing"}
+            if event:
+                try:
+                    item["payload"] = _json(clean(json.loads(item["payload"])))
+                except json.JSONDecodeError:
+                    item["payload"] = clean(item["payload"])
+            evidence.append(item)
         return _json({"projection_only": True, "events": evidence})
 
     def work_record_exposure(self, project, conversation, items, agent_id=None, *, delivery="persistent",
@@ -1159,7 +1179,7 @@ class WorkMemoryMixin:
             seen = {item["memory_id"] for item in result}
             public_messages = set()
             for row in rows:
-                body = json.loads(row["body"])
+                body = _body_projection(row)
                 parent = body.get("public_message_id")
                 if _metadata_only_write(body) or compact and parent and parent in public_messages:
                     continue
@@ -1224,6 +1244,9 @@ class WorkMemoryMixin:
         from .runtime import digest
         if not any('"proven_public_response_event"' in row["body"] for row in rows):
             return rows, {}
+        # These bodies establish the original native digest relationship.
+        # Presentation masking happens in _work_item/final validation, never
+        # before comparing retained evidence identities.
         bodies = {row["id"]: json.loads(row["body"]) for row in rows}
         prepared, replacements = {}, {}
 
@@ -1449,7 +1472,7 @@ class WorkMemoryMixin:
                                           preview_query=item.get("_preview_query"))
                 if current.get("file_projection_incomplete"):
                     continue
-                body = json.loads(row["body"])
+                body = _body_projection(row)
                 if item.get("reference_role") == "task_handoff":
                     scope = item.get("_handoff_scope")
                     if (not isinstance(scope, dict) or not self._work_handoff_usable(current)

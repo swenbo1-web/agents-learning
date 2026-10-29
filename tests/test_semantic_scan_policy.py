@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 import sqlite3
 import struct
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +22,7 @@ class MemoryRuntime(semantic.SemanticRetrievalMixin):
         self.db.executescript("""
             CREATE TABLE knowledge(project TEXT,id TEXT,revision INTEGER,body TEXT,created REAL,
                 PRIMARY KEY(project,id,revision));
+            CREATE INDEX knowledge_recent ON knowledge(project,created DESC,id,revision);
             CREATE TABLE active(project TEXT,id TEXT,revision INTEGER,PRIMARY KEY(project,id));
             CREATE TABLE semantic_vectors(project TEXT,knowledge_id TEXT,revision INTEGER,identity TEXT,
                 content_hash TEXT,dimensions INTEGER,vector BLOB,input_truncated INTEGER,
@@ -51,7 +54,8 @@ class MemoryRuntime(semantic.SemanticRetrievalMixin):
     def prepared(self, limit, query="query with no lexical overlap", *, key=None, vector=(1.0, 0.0)):
         return {"config": {**self._semantic_config(), "scan_limit": limit},
                 "vector": list(vector), "query_text": query,
-                "query_key": key or semantic._hash(query), "diagnostics": {}}
+                "query_key": semantic._hash(query), "scan_key": key or semantic._hash(query)[:32],
+                "diagnostics": {}}
 
 
 class SemanticScanPolicyTests(unittest.TestCase):
@@ -94,16 +98,17 @@ class SemanticScanPolicyTests(unittest.TestCase):
         self.assertIn("latest-z", result)
         diagnostics = prepared["diagnostics"]
         self.assertTrue(diagnostics["scan_truncated"])
-        self.assertEqual(diagnostics["eligible_vectors"], 22)
-        self.assertEqual(diagnostics["scan_policy"], "lexical_recent_history")
+        self.assertIsNone(diagnostics["eligible_vectors"])
+        self.assertEqual(diagnostics["eligible_vectors_lower_bound"], 5)
+        self.assertEqual(diagnostics["scan_policy"], "stable_interleaved_keyset")
         self.assertEqual(diagnostics["scan_lanes"], {"lexical": 1, "recent": 1, "historical": 2})
         self.assertNotIn("E713_IMPORT", json.dumps(diagnostics))
 
     def test_history_window_is_stable_for_same_query_and_varies_across_queries(self):
         self.populate()
-        first = self.runtime.prepared(4, key="0000000000000000")
-        repeat = self.runtime.prepared(4, key="0000000000000000")
-        later = self.runtime.prepared(4, key="0000000000000008")
+        first = self.runtime.prepared(4, key="item-000")
+        repeat = self.runtime.prepared(4, key="item-000")
+        later = self.runtime.prepared(4, key="item-008")
         a, b, c = self.search(first), self.search(repeat), self.search(later)
         self.assertEqual(a, b)
         self.assertEqual(first["diagnostics"], repeat["diagnostics"])
@@ -114,23 +119,23 @@ class SemanticScanPolicyTests(unittest.TestCase):
 
     def test_history_window_wraps_and_overlapping_recent_ids_do_not_waste_budget(self):
         self.populate(12)
-        prepared = self.runtime.prepared(4, key="000000000000000b")
+        prepared = self.runtime.prepared(4, key="item-011")
         result = self.search(prepared)
-        self.assertEqual(set(result), {"item-011", "item-000", "item-001", "item-002"})
+        self.assertEqual(set(result), {"item-011", "item-010", "item-000", "item-001"})
         self.assertEqual(sum(prepared["diagnostics"]["scan_lanes"].values()), 4)
 
     def test_one_two_and_three_slot_budgets_keep_history_and_never_overrun_body_work(self):
         self.populate(12)
         for limit in [1, 2, 3]:
             with self.subTest(limit=limit):
-                prepared = self.runtime.prepared(limit, key="0000000000000005")
+                prepared = self.runtime.prepared(limit, key="item-005")
                 with patch.object(semantic, "_document", wraps=semantic._document) as documents:
                     result = self.search(prepared)
                 self.assertEqual(len(result), limit)
                 self.assertEqual(documents.call_count, limit)
                 self.assertEqual(prepared["diagnostics"]["scanned"], limit)
                 self.assertGreaterEqual(prepared["diagnostics"]["scan_lanes"]["historical"], 1)
-        self.assertEqual(self.search(self.runtime.prepared(1, key="0000000000000005")).keys(), {"item-005"})
+        self.assertEqual(self.search(self.runtime.prepared(1, key="item-005")).keys(), {"item-005"})
 
     def test_all_lanes_apply_project_filter_active_revision_and_vector_identity(self):
         self.populate()
@@ -144,7 +149,7 @@ class SemanticScanPolicyTests(unittest.TestCase):
         self.assertEqual(len(result), 4)
         self.assertIn("eligible-seed", result)
         self.assertTrue(set(result).isdisjoint({"foreign", "wrong-env", "old-revision", "old-model"}))
-        self.assertEqual(prepared["diagnostics"]["eligible_vectors"], 21)
+        self.assertEqual(prepared["diagnostics"]["eligible_vectors_lower_bound"], 5)
 
     def test_corrupt_body_and_vector_still_count_invalid_without_poisoning_other_rows(self):
         self.populate()
@@ -187,6 +192,69 @@ class SemanticScanPolicyTests(unittest.TestCase):
             self.assertEqual(semantic._vector_identity(config), identity)
         self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM semantic_vectors").fetchone()[0], 1)
 
+    def test_growing_budget_preserves_all_previously_selected_candidates(self):
+        self.populate(84)
+        for index in range(12):
+            self.runtime.add(f"legacy-{index:03}", title="E_RETAIN legacy repair", created=-100-index)
+        previous = set()
+        for limit in range(1, 101):
+            prepared = self.runtime.prepared(limit, "E_RETAIN", key="item-010")
+            rows = self.runtime._semantic_scan_rows("p", prepared, {})
+            selected = {row["id"] for row in rows}
+            self.assertTrue(previous <= selected, (limit, previous-selected))
+            self.assertEqual(len(selected), min(limit, 96))
+            previous = selected
+
+    def test_seven_to_eight_budget_keeps_pure_semantic_result(self):
+        self.populate(40)
+        for index in range(4):
+            self.runtime.add(f"legacy-{index}", title="E_RETAIN legacy repair", created=-100)
+        small = self.runtime.prepared(7, "E_RETAIN", key="item-010")
+        large = self.runtime.prepared(8, "E_RETAIN", key="item-010")
+        rows = self.runtime._semantic_scan_rows("p", small, {})
+        target = next(row["id"] for row in rows if row["id"].startswith("item-01"))
+        self.runtime.db.execute("UPDATE semantic_vectors SET vector=?", (struct.pack("<ff", 0, 1),))
+        self.runtime.db.execute("UPDATE semantic_vectors SET vector=? WHERE knowledge_id=?",
+                                (struct.pack("<ff", 1, 0), target))
+        self.assertIn(target, self.search(small))
+        self.assertIn(target, self.search(large))
+
+    def test_unrelated_insertion_and_generation_do_not_rotate_history_cursor(self):
+        self.populate(30)
+        original = self.runtime.prepared(8, key="item-010")
+        before = self.runtime._semantic_scan_rows("p", original, {})
+        self.runtime.add("000-unrelated-older", created=-100)
+        self.runtime.db.execute("UPDATE semantic_index_state SET generation=generation+1")
+        again = self.runtime.prepared(8, key="item-010")
+        again["query_key"] = "different-generation-cache-key"
+        after = self.runtime._semantic_scan_rows("p", again, {})
+        self.assertEqual({row["id"] for row in before}, {row["id"] for row in after})
+
+    def test_metadata_selection_uses_ranges_and_recent_index_without_count_or_offset(self):
+        self.populate(620)
+        statements = []
+        self.runtime.db.set_trace_callback(statements.append)
+        prepared = self.runtime.prepared(20, query="", key="item-500")
+        self.runtime._semantic_scan_rows("p", prepared, {})
+        self.runtime.db.set_trace_callback(None)
+        self.assertFalse(any("COUNT(" in sql or "OFFSET" in sql for sql in statements))
+        recent = next(sql for sql in statements if "ORDER BY k.created DESC" in sql)
+        plan = [row[3] for row in self.runtime.db.execute("EXPLAIN QUERY PLAN " + recent)]
+        self.assertTrue(any("knowledge_recent" in step for step in plan), plan)
+        self.assertFalse(any("TEMP B-TREE" in step for step in plan), plan)
+        ranges = [sql for sql in statements if "k.id>=" in sql or "k.id<" in sql]
+        self.assertTrue(ranges)
+        for sql in ranges:
+            plan = [row[3] for row in self.runtime.db.execute("EXPLAIN QUERY PLAN " + sql)]
+            self.assertTrue(any("id>?" in step or "id<?" in step for step in plan), plan)
+
+    def test_old_read_only_database_without_recent_index_remains_compatible(self):
+        self.populate()
+        self.runtime.db.execute("DROP INDEX knowledge_recent")
+        self.runtime.db.execute("PRAGMA query_only=ON")
+        prepared = self.runtime.prepared(4)
+        self.assertEqual(len(self.runtime._semantic_scan_rows("p", prepared, {})), 4)
+
     def test_dot_product_retains_previous_accumulation_result(self):
         vectors = [(0.8, 0.6), (0.6, 0.8), (0.0, 1.0)]
         for index, values in enumerate(vectors):
@@ -214,6 +282,58 @@ class SemanticScanPolicyTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "invalid_stored_vector"):
                         semantic._stored_vector(blob, 2, 2)
+
+
+class SemanticScanRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        from agent_learning.runtime import Runtime
+        from tests.test_hybrid_retrieval import HybridRetrievalTests
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        # Every embedding in this suite is a controlled in-process fixture,
+        # including comparisons made by review_packet while publishing.
+        provider = patch.object(semantic, "embed_texts", side_effect=lambda config, texts, dimensions:
+                                [[0.0, 1.0] for _ in texts])
+        provider.start()
+        self.addCleanup(provider.stop)
+        self.r = Runtime(Path(self.temp.name) / "home", config={"retrieval": {
+            "semantic": {"enabled": True, "model": "synthetic", "scan_limit": 7}}})
+        self.addCleanup(self.r.close)
+        self.p = self.r.project(Path(self.temp.name) / "project")
+        self.r.task_update(self.p, "chat", "read synthetic fixtures", {"mode": "analysis"})
+        self.fixture = HybridRetrievalTests()
+        self.fixture.r, self.fixture.p, self.fixture.serial = self.r, self.p, 0
+        for index in range(40):
+            self.fixture.publish(title="opaque record " + str(index), content="controlled synthetic text")
+        for index in range(4):
+            self.fixture.publish(title="capacitor voltage " + str(index), content="controlled synthetic text")
+        self.r.semantic_refresh(self.p, limit=100)
+        self.r.db.execute("UPDATE knowledge SET created=-1 WHERE json_extract(body,'$.title') LIKE 'capacitor%'")
+
+    def test_public_automatic_search_preserves_pure_semantic_target_when_budget_grows(self):
+        query = "capacitor voltage"
+        with patch.object(semantic, "embed_texts", return_value=[[1.0, 0.0]]):
+            prepared = self.r._semantic_prepare(self.p, query)
+        rows = self.r._semantic_scan_rows(self.p, prepared, {})
+        target = next(row["id"] for row in rows if json.loads(row["body"])["title"].startswith("opaque"))
+        self.r.db.execute("UPDATE semantic_vectors SET vector=? WHERE knowledge_id=?",
+                          (struct.pack("<ff", 1, 0), target))
+        for limit in (7, 8, 9, 16, 32, 44, 45):
+            self.r.config["retrieval"]["semantic"]["scan_limit"] = limit
+            result = self.r.search(self.p, query, limit=10, _automatic=True)
+            match = next((item["match"] for item in result["items"] if item["knowledge_id"] == target), None)
+            self.assertIsNotNone(match, limit)
+            self.assertEqual(match["score"], 0)
+            self.assertEqual(match["semantic_score"], 1)
+
+    def test_prepare_cursor_survives_index_generation_change_without_stale_embedding_key(self):
+        before = self.r._semantic_prepare(self.p, "battery voltage")
+        self.fixture.publish(title="unrelated older material", content="synthetic unrelated statement")
+        self.r.semantic_refresh(self.p, limit=100)
+        after = self.r._semantic_prepare(self.p, "battery voltage")
+        self.assertEqual(before["scan_key"], after["scan_key"])
+        self.assertNotEqual(before["query_key"], after["query_key"])
+        self.assertNotEqual(before["signature"], after["signature"])
 
 
 if __name__ == "__main__":

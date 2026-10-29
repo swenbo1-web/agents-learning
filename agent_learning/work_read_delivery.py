@@ -56,9 +56,9 @@ class WorkReadDelivery:
 
     @staticmethod
     def _fingerprint(result):
-        return _hash({key: result.get(key) for key in (
+        return _hash({"read_projection_version": 2, **{key: result.get(key) for key in (
             "revision", "source_version", "state", "completion", "source_changed",
-            "file_check", "section_length")})
+            "file_check", "section_length")}})
 
     @staticmethod
     def _receipt(result):

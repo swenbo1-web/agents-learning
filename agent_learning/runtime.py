@@ -38,6 +38,7 @@ from .scheduler import SCHEDULER_DEFAULTS, SchedulerMixin, validate_scheduler_co
 from .learning_evaluation import LearningEvaluationMixin
 from .semantic_retrieval import SEMANTIC_DEFAULTS, validate_semantic_config
 from .software_updates import DEFAULTS as SOFTWARE_UPDATE_DEFAULTS, validate_config as validate_update_config
+from .redaction import clean_text
 
 CATEGORIES = {"operation", "professional", "project", "mixed", "unknown"}
 TASK_STATUSES = {"active", "delivered", "cancelled", "interrupted", "paused"}
@@ -76,18 +77,6 @@ def digest(value):
 
 
 _SENSITIVE_KEY_RE = re.compile(r"(?i)(password|secret|api.?key|authorization|token)$")
-_BEARER_VALUE_RE = re.compile(r"(?i)\bBearer\s+[^\s\"']+")
-_REDACTED_ASSIGNMENT_RE = re.compile(r"\[REDACTED\](?:[&#]|$)")
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)((?:api[_-]?key|password|secret|access_token)\s*[=:]\s*)([^\s,;]+)")
-
-
-def _redact_assignment(match):
-    # 已脱敏 URL 的公开 query/fragment 不应被后续采集再次吞掉。
-    # 仅完整的脱敏标记（或标记后 URL 分隔符）可原样通过。
-    if _REDACTED_ASSIGNMENT_RE.match(match[2]):
-        return match[0]
-    return match[1] + "[REDACTED]"
 
 
 def clean(value):
@@ -98,12 +87,7 @@ def clean(value):
     if isinstance(value, list):
         return [clean(v) for v in value]
     if isinstance(value, str):
-        # Both string patterns need at least eight characters. Keep subclasses
-        # on the regex path so the existing plain-string result is preserved.
-        if type(value) is str and len(value) < 8:
-            return value
-        value = _BEARER_VALUE_RE.sub("Bearer [REDACTED]", value)
-        value = _SECRET_ASSIGNMENT_RE.sub(_redact_assignment, value)
+        value = clean_text(value)
     return value
 
 
@@ -195,6 +179,7 @@ CREATE TABLE IF NOT EXISTS candidates(id TEXT PRIMARY KEY, project TEXT NOT NULL
  problem_revision INTEGER NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS knowledge(project TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,
  body TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(project,id,revision));
+CREATE INDEX IF NOT EXISTS knowledge_recent ON knowledge(project,created DESC,id,revision);
 CREATE TABLE IF NOT EXISTS knowledge_fingerprints(project TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,
  fingerprint TEXT NOT NULL,PRIMARY KEY(project,id,revision));
 CREATE INDEX IF NOT EXISTS knowledge_duplicates ON knowledge_fingerprints(project,fingerprint);
@@ -667,15 +652,25 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
 
     def _event(self, project, conversation, kind, payload, event_id=None, task_id=None,
                task_revision=None, agent_id=None, operation_id=None, outcome="unknown",
-               task_write_version=None, execution_epoch=None, assignment_id=None, task_status=None, capture_digest=None):
+               task_write_version=None, execution_epoch=None, assignment_id=None, task_status=None, capture_digest=None,
+               _capture_original=None):
         text, payload_digest = prepare_event(payload, self.config["event_max_chars"])
         capture_digest = capture_digest or payload_digest
         input_digest = digest(clean(payload["tool_input"])) if "tool_input" in payload else None
         ident = digest([project, event_id]) if event_id else str(uuid.uuid4())
         old = self.db.execute("SELECT * FROM events WHERE id=?", (ident,)).fetchone()
         if old:
-            if (old["payload"] != text or old["type"] != kind or old["conversation"] != conversation
-                    or old["capture_digest"] and old["capture_digest"] != capture_digest):
+            equivalent = old["payload"] == text and (not old["capture_digest"] or old["capture_digest"] == capture_digest)
+            if not equivalent and old["capture_digest"]:
+                from .capture_compat import legacy_clean, legacy_digest
+                # Retain the original row/digest. Equality under the historical
+                # policy verifies the complete supplied observation, including
+                # fields hidden by today's stronger presentation masking.
+                original = payload if _capture_original is None else _capture_original
+                if old["capture_digest"] == legacy_digest(original):
+                    equivalent = old["payload"] == prepare_event(
+                        payload, self.config["event_max_chars"], _clean=legacy_clean)[0]
+            if not equivalent or old["type"] != kind or old["conversation"] != conversation:
                 raise ContractError("event id reused with different content")
             return dict(old), False
         if task_id:
@@ -917,6 +912,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 outcome = "reported"
         payload["agent_identity_known"] = bool(raw.get("agent_id"))
         capture_digest = digest(clean(payload))
+        capture_original = dict(payload)
         legacy_event_key = event_key
         if kind == "PostToolUse" and tool_id:
             # 工具响应相同而输入/工具名不同仍是独立证据，由 operation 统一判冲突。
@@ -933,13 +929,24 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 identical_replay = False
                 replay = self.db.execute("SELECT capture_digest FROM events WHERE id=?", (digest([project, [epoch, event_key]]),)).fetchone()
                 if replay and replay[0] is not None:
-                    if replay[0] != capture_digest:
+                    from .capture_compat import matches_digest
+                    if not matches_digest(replay[0], capture_digest, capture_original):
                         raise ContractError("event id reused with different content")
                     identical_replay = True
+                if (not identical_replay and tool_id and _adapter_event_key is None
+                        and self.db.execute("SELECT 1 FROM events WHERE project=? AND operation=? "
+                                            "AND type='PostToolUse' LIMIT 1", (project, operation)).fetchone()):
+                    from .capture_compat import legacy_digest
+                    old_capture = legacy_digest(capture_original)
+                    old_key = [conversation, agent_id, kind, tool_id, old_capture]
+                    old_replay = self.db.execute("SELECT capture_digest FROM events WHERE id=?",
+                        (digest([project, [epoch, old_key]]),)).fetchone()
+                    identical_replay = bool(old_replay and old_replay[0] == old_capture)
                 legacy_replay = (self.db.execute("SELECT capture_digest,payload FROM events WHERE id=?",
                     (digest([project, [epoch, legacy_event_key]]),)).fetchone() if _adapter_event_key is None else None)
-                if legacy_replay and legacy_replay[0] == capture_digest:
-                    identical_replay = True
+                if legacy_replay:
+                    from .capture_compat import matches_digest
+                    identical_replay |= matches_digest(legacy_replay[0], capture_digest, capture_original)
                 if legacy_replay and legacy_replay[0] is None:
                     legacy_payload = json.loads(legacy_replay["payload"])
                     if not projected_evidence(legacy_payload):
@@ -947,7 +954,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                             "tool_name", "tool_input", "tool_response", "prompt", "source",
                             "last_assistant_message", "agent_type", "turn_id")}
                         observable["agent_identity_known"] = legacy_payload.get("agent_identity_known", bool(agent_id))
-                        if digest(clean(observable)) == capture_digest:
+                        from .capture_compat import legacy_digest
+                        if legacy_digest(observable) == legacy_digest(capture_original):
                             identical_replay = True
                 if identical_replay:
                     previous = self.db.execute("SELECT * FROM operations WHERE project=? AND id=?",
@@ -1003,6 +1011,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if _adapter_conflict:
                     denied, deny_reason = True, "native_step_conflict"
                 if binding and self.config["enforce_task_policy"] and raw.get("tool_name") not in recovery_tools:
+                    from .capture_compat import matches_digest
                     prior_pre = self.db.execute("SELECT capture_digest FROM events WHERE project=? AND operation=? AND type='PreToolUse' "
                                                 "ORDER BY created,id LIMIT 1", (project, operation)).fetchone()
                     same_round = task and (binding["task_id"], binding["task_revision"], binding["execution_epoch"]) == (
@@ -1011,7 +1020,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                         denied, deny_reason = True, "operation_execution_epoch_stale"
                     elif binding["state"] not in {"started", "running"}:
                         denied, deny_reason = True, "operation_already_terminal_or_unknown"
-                    elif not prior_pre or prior_pre[0] != capture_digest:
+                    elif not prior_pre or not matches_digest(prior_pre[0], capture_digest, capture_original):
                         denied, deny_reason = True, "operation_payload_mismatch"
                 decision = "denied" if denied else "allowed" if self.config["enforce_task_policy"] else "observed"
                 payload["control_decision"] = {"decision": decision, "reason": deny_reason or "observed"}
@@ -1038,7 +1047,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                        task_id=task_id, task_revision=task_revision,
                                        agent_id=agent_id, operation_id=operation, outcome=outcome,
                                        task_write_version=task_write_version, execution_epoch=execution_epoch, assignment_id=assignment_id,
-                                       capture_digest=capture_digest)
+                                       capture_digest=capture_digest, _capture_original=capture_original)
             if fresh and not agent_id and kind in {"SessionStart", "UserPromptSubmit", "Stop"}:
                 try:
                     self.admin_observe_model(project, conversation, raw.get("model"), expected_epoch=epoch)

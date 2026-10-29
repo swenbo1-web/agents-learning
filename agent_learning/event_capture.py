@@ -91,11 +91,11 @@ def _project(value, text_limit):
     return value
 
 
-def prepare_event(payload, budget):
+def prepare_event(payload, budget, *, _clean=None):
     """返回有限 JSON 与完整脱敏内容摘要；完整摘要在独立数据库字段保存。"""
     from .runtime import clean, clip, encode
 
-    sanitized = clean(payload)
+    sanitized = (_clean or clean)(payload)
     original = encode(sanitized)
     capture_digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
     if len(original) <= budget:
@@ -177,10 +177,12 @@ def operation_input_conflict(runtime, project, operation, raw):
     payload = _payload(pre_event)
     signature = pre_event.get("tool_input_digest") if isinstance(pre_event, dict) else None
     if signature:
-        return signature != digest(clean(raw["tool_input"]))
+        from .capture_compat import matches_digest
+        return not matches_digest(signature, digest(clean(raw["tool_input"])), raw["tool_input"])
     if payload.get("truncated") or "tool_input" not in payload:
         return False
-    return digest(clean(payload["tool_input"])) != digest(clean(raw["tool_input"]))
+    from .capture_compat import legacy_digest
+    return legacy_digest(payload["tool_input"]) != legacy_digest(raw["tool_input"])
 
 
 _TARGET_KEYS = {"path", "paths", "file", "file_path", "filepath", "filename", "target",
