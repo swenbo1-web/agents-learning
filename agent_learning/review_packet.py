@@ -225,8 +225,38 @@ class ReviewPacketMixin:
         # 比较资料只能使用真实证据之后的余额；读取过程不写检索缓存或指标。
         remaining = limit - len(review_instruction(packet))
         if remaining >= 300:
-            query = problem["summary"] + " " + (task.get("goal", "") if task else "")
-            knowledge, candidates = self._review_related(project, problem_id, query)
+            from .phase_local_triage import comparison_queries
+            queries = comparison_queries(problem, task, packet["events"])
+            if queries["fallback_reason"] != "not_stage":
+                # The bounded packet window may retain an earlier Stop while
+                # the real latest source is omitted. Never recall from that
+                # stale conclusion merely because it fits the packet budget.
+                latest = self.db.execute("SELECT e.id FROM problem_events p JOIN events e ON e.id=p.event "
+                    "WHERE p.problem=? AND p.role!='history_related' AND e.project=? AND e.type='Stop' "
+                    "ORDER BY e.created DESC,e.id DESC LIMIT 1", (problem_id, project)).fetchone()
+                queries = comparison_queries(problem, task, packet["events"],
+                                             latest_delivery_id=latest["id"] if latest else None)
+            knowledge, candidates = self._review_related(project, problem_id, queries["primary"])
+            primary_counts = {"knowledge": len(knowledge), "candidates": len(candidates)}
+            fallback = "not_needed" if knowledge else queries["fallback_reason"]
+            if not knowledge and queries["fallback"]:
+                fallback_knowledge, fallback_candidates = self._review_related(project, problem_id, queries["fallback"])
+                knowledge = fallback_knowledge
+                existing = {item["candidate_id"] for item in candidates}
+                candidates += [item for item in fallback_candidates if item["candidate_id"] not in existing]
+                candidates = candidates[:3]
+            # Only generated stage packets need this diagnostic. It is an
+            # observation of bounded recall, not a verdict or reusable fact.
+            diagnostic = None
+            if queries["fallback_reason"] != "not_stage":
+                diagnostic = {"primary": primary_counts, "fallback": fallback,
+                              "returned": {"knowledge": len(knowledge), "candidates": len(candidates)},
+                              "visible": {"knowledge": 0, "candidates": 0}}
+                packet["comparison_retrieval"] = diagnostic
+                if not _fits(packet, limit):
+                    packet.pop("comparison_retrieval")
+                    diagnostic = None
+            remaining = limit - len(review_instruction(packet))
             compare_budget = min(2400, max(0, remaining // 2))
             used = 0
             for key, items in (("related_knowledge", knowledge), ("related_candidates", candidates)):
@@ -239,6 +269,15 @@ class ReviewPacketMixin:
                         used += size
                     else:
                         packet[key].pop()
+            if diagnostic is not None:
+                diagnostic["visible"] = {"knowledge": len(packet["related_knowledge"]),
+                                         "candidates": len(packet["related_candidates"])}
+        else:
+            from .phase_local_triage import comparison_queries
+            if comparison_queries(problem, task, packet["events"])["fallback_reason"] != "not_stage":
+                packet["comparison_retrieval"] = {"primary": "not_attempted", "fallback": "comparison_budget"}
+                if not _fits(packet, limit):
+                    packet.pop("comparison_retrieval")
 
         if not _fits(packet, limit):
             # 极小预算仍返回可识别、可恢复的诊断包，不输出超预算材料。
@@ -264,6 +303,10 @@ class ReviewPacketMixin:
                 packet["phase_tool_context_omitted"] = True
                 if not _fits(packet, limit):
                     packet.pop("phase_tool_context_omitted")
+        diagnostic = packet.get("comparison_retrieval")
+        if isinstance(diagnostic, dict) and "visible" in diagnostic:
+            diagnostic["visible"] = {"knowledge": len(packet["related_knowledge"]),
+                                     "candidates": len(packet["related_candidates"])}
         return packet
 
     def _review_target(self, project, problem_id):

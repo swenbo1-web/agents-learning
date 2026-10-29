@@ -8,8 +8,8 @@ import time
 
 
 _CONTINUATION_ACKS = {
-    "继续", "好的", "可以", "接着", "继续吧", "好", "确认", "确定", "同意",
-    "continue", "go on", "ok", "yes", "confirm", "confirmed",
+    "继续", "好的", "可以", "接着", "继续吧", "好", "确认", "确定", "同意", "是的", "没问题",
+    "continue", "go on", "ok", "okay", "yes", "confirm", "confirmed",
 }
 _ZH_ACTION = r"(?:确认修复|验证|检查|测试|核对|确认|修复|复查|复验)"
 _ZH_CONTINUATION = re.compile(
@@ -44,15 +44,39 @@ _EN_FOLLOWUP = re.compile(
     + r"(?:(?: and(?: then)? | then |[,;] ?(?:and(?: then)? |then )?)"
     + _EN_FOLLOWUP_ACTION + r")*\Z")
 
+# Acknowledgements and a completed host reload are common wrappers around a
+# follow-up. Remove at most one of each, and still require the entire remainder
+# to be action-only. Subjects, versions and negations are never discarded.
+_ZH_PROGRESS = re.compile(
+    r"(?:请|麻烦)?(?:按你说的|按此|按上述方案|按原计划)?"
+    r"(?:继续|接着)(?:推进|进行|执行|完成)?(?:一下|下去)?(?:吧)?\Z")
+_ZH_ACK_PREFIX = re.compile(r"^(?:是的|好的|没问题|可以|同意|确认|确定|好)[，,、;；]*")
+_ZH_RESUMED_PREFIX = re.compile(
+    r"^(?:(?:已经|已)(?:重启|重载|重连|重新连接|刷新)(?:完成|好了|了)?"
+    r"|(?:重启|重载|重连|重新连接|刷新)(?:完成|好了|了))[，,、;；]*(?:之后|以后|后)?")
+_EN_ACK_PREFIX = re.compile(r"^(?:yes|ok|okay|confirmed)[,;]?\s+")
+_EN_RESUMED_PREFIX = re.compile(
+    r"^(?:(?:already )?(?:restarted|reloaded|reconnected)"
+    r"|(?:restart|reload|reconnect) (?:completed|finished|done))[,;]?\s+")
+
 
 def _continuation_query(value):
     """Recognize whole action-only prompts; remaining subject words start a query."""
     value = re.sub(r"\s+", " ", value.lower()).strip("。.!！?？,，;；:： ")
-    return (not value or value in _CONTINUATION_ACKS
-            or bool(_ZH_CONTINUATION.fullmatch(value.replace(" ", "")))
-            or bool(_EN_CONTINUATION.fullmatch(value))
-            or bool(_ZH_FOLLOWUP.fullmatch(value.replace(" ", "")))
-            or bool(_EN_FOLLOWUP.fullmatch(value)))
+    candidates = [value]
+    chinese = value.replace(" ", "")
+    acknowledged = _ZH_ACK_PREFIX.sub("", chinese, count=1)
+    english = _EN_ACK_PREFIX.sub("", value, count=1)
+    for phrase in (chinese, acknowledged):
+        candidates.extend((phrase, _ZH_RESUMED_PREFIX.sub("", phrase, count=1)))
+    candidates.extend((english, _EN_RESUMED_PREFIX.sub("", english, count=1),
+                       _EN_RESUMED_PREFIX.sub("", value, count=1)))
+    return not value or any(phrase in _CONTINUATION_ACKS
+               or bool(_ZH_CONTINUATION.fullmatch(phrase))
+               or bool(_ZH_PROGRESS.fullmatch(phrase))
+               or bool(_EN_CONTINUATION.fullmatch(phrase))
+               or bool(_ZH_FOLLOWUP.fullmatch(phrase))
+               or bool(_EN_FOLLOWUP.fullmatch(phrase)) for phrase in candidates)
 
 
 class KnowledgeContextMixin:
@@ -379,6 +403,10 @@ class KnowledgeContextMixin:
         candidate_context_failed = False
         work_context_failed = False
         work_context_epoch = initial["epoch"] + int(compact)
+        from .context_dedup import scope_key
+        from .work_notice_delivery import FileNoticeGate
+        work_notices = FileNoticeGate(self, project, conversation, agent_id,
+            scope_key(self, conversation, agent_id, workspace, task_state, work_context_epoch, environment), delivery)
         if (work_settings.get("enabled", True) and work_settings.get("automatic_context", True)
                 and work_settings.get("max_context_chars", 600)):
             # 文件触发独立于故障队列；工作历史只给索引，不能转成解法或执行许可。
@@ -395,10 +423,11 @@ class KnowledgeContextMixin:
                         exclude_event_id=_source_event_id,
                         allow_unfocused_history=_query_available or bool(effective.strip()),
                         handoff_only=bool(work_query and not effective_plan["automatic_safe"]),
-                        conclusion_max_chars=240, applicability_query=effective)
+                        conclusion_max_chars=240, applicability_query=effective, _notice_gate=work_notices)
                 else:
                     # Safety/expiry notices stay independent of optional recall.
-                    work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace)
+                    work_items = self.work_exposure_updates(project, conversation, agent_id, workspace=workspace,
+                                                            _notice_gate=work_notices)
             except ContractError:
                 # 身份与任务契约失败仍必须由主上下文拒绝，不能当作派生索引故障。
                 raise
@@ -655,8 +684,13 @@ class KnowledgeContextMixin:
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     conclusion_used = False
-                    for work_item in self.work_validate_items(project, work_items, workspace=workspace,
-                                                              conclusion_max_chars=240, applicability_query=effective):
+                    from .work_notice_delivery import FileNoticeGate, coalesce
+                    notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
+                    validated = self.work_validate_items(project, work_items, workspace=workspace,
+                                                         conclusion_max_chars=240, applicability_query=effective)
+                    for work_item in coalesce(validated):
+                        if notices.deferred(work_item):
+                            continue  # No exposure acknowledgement; retry latest state at a later supported event.
                         from .candidate_reference_context import suppress_work
                         changed_work = bool(work_item.get("source_changed") or work_item.get("file_state_changed"))
                         if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
@@ -690,7 +724,14 @@ class KnowledgeContextMixin:
                             # A risk update survives duplicate-body suppression,
                             # without replaying the stale statement as advice.
                             card.pop("summary", None)
+                            card["title"] = "关联来源或文件状态变化"
                             card["reference_role"] = "source_update"
+                            card["recheck"] = "来源或文件已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            members = work_item.get("_notice_members", [])
+                            if len(members) > 1:
+                                card["related_memories"] = [{"memory_id": member["memory_id"],
+                                                             "revision": member["revision"]}
+                                                            for member in members[1:]]
                         files = work_item.get("files", [])
                         if files:
                             if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
@@ -736,12 +777,14 @@ class KnowledgeContextMixin:
                         lines.append(note)
                         work_used += cost
                         work_delivered.append(work_item)
+                        notices.record(work_item)
                         if expanded and card.get("summary") == expanded:
                             conclusion_used = True
                         dedup.record(delivery_entry)
                     if work_delivered:
                         self.work_record_exposure(
-                            project, conversation, work_delivered, agent_id=agent_id, delivery=delivery,
+                            project, conversation, [member for item in work_delivered
+                                for member in item.get("_notice_members", [item])], agent_id=agent_id, delivery=delivery,
                             task_state=task_state, compact=compact, context_epoch=work_context_epoch,
                             method="hook", context_handle=context_handle, expected_epoch=epoch)
                         self._metric(project, "work_indices_delivered", len(work_delivered))

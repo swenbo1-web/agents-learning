@@ -1072,7 +1072,8 @@ class WorkMemoryMixin:
             (project, conversation, agent_id or "", project, conversation, agent_id or ""))
         return {"recorded": count, "delivery": delivery, "model_read_confirmed": False}
 
-    def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None):
+    def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None,
+                              _notice_gate=None):
         result = []
         with _snapshot(self):
             rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT 100",
@@ -1089,6 +1090,8 @@ class WorkMemoryMixin:
                 if file_changed:
                     item["file_state_changed"] = True
                 if source_changed or file_changed:
+                    if _notice_gate is not None and _notice_gate.deferred(item):
+                        continue  # Deferred ordinary notices cannot occupy a risk update's slot.
                     result.append(item)
                     if len(result) >= limit:
                         break
@@ -1097,14 +1100,16 @@ class WorkMemoryMixin:
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
                            context_epoch=None, file_only=False, exclude_event_id=None, handoff_only=False,
-                           allow_unfocused_history=True, conclusion_max_chars=80, applicability_query=""):
+                           allow_unfocused_history=True, conclusion_max_chars=80, applicability_query="",
+                           _notice_gate=None):
         if not _config(self)["enabled"] or not _config(self)["automatic_context"]:
             return []
         with _snapshot(self):
             name, args = _tool(raw or {})
             links = (file_links_from_payload(name, args, workspace, observe_version=False)
                      if workspace and not handoff_only else [])
-            result = self.work_exposure_updates(project, conversation, agent_id, limit=limit, workspace=workspace)
+            result = self.work_exposure_updates(project, conversation, agent_id, limit=limit, workspace=workspace,
+                                                _notice_gate=_notice_gate)
             if not handoff_only and not links and not query.strip() and workspace and not file_only:
                 # AG 下一次 invocation 无工具参数，仅使用本会话/agent近期明确目标。
                 filters, parameters = "", [project, conversation, agent_id, checkout_key(workspace)]
@@ -1226,6 +1231,8 @@ class WorkMemoryMixin:
                                 else None)
                     if not expanded or len(expanded) <= 80:
                         continue
+                if _notice_gate is not None and _notice_gate.deferred(item):
+                    continue
                 result.append(item)
                 seen.add(item["memory_id"])
                 if parent:

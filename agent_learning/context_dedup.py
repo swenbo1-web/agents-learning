@@ -29,6 +29,8 @@ def _migrate(runtime):
         PRIMARY KEY(project,scope,channel,item_id))""")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS context_delivery_material ON "
                        "context_delivery_cache(project,scope,material_key)")
+    from .work_notice_delivery import install
+    install(runtime)
 
 
 def _text(value):
@@ -95,20 +97,24 @@ def _formal_key(value):
         return None
 
 
+def scope_key(runtime, conversation, agent_id, workspace, task_state, context_epoch, environment):
+    from .runtime import digest
+    from .work_files import checkout_key
+    state = task_state or {}
+    return digest([POLICY_VERSION, conversation, agent_id or "",
+        checkout_key(workspace) if workspace else None, runtime.host, runtime.host_instance,
+        runtime.session_epoch(), runtime.host_epoch(), context_epoch,
+        {key: state.get(key) for key in ("id", "revision", "assignment_id")}, environment])
+
+
 class ContextDedup:
     """Only complete automatic cards in this exact input scope can suppress cards."""
 
     def __init__(self, runtime, project, conversation, agent_id, workspace, task_state,
                  context_epoch, delivery, environment):
-        from .runtime import digest
-        from .work_files import checkout_key
         self.r, self.project, self.conversation = runtime, project, conversation
         self.agent, self.workspace, self.delivery = agent_id or "", workspace, delivery
-        state = task_state or {}
-        self.scope = digest([POLICY_VERSION, conversation, self.agent,
-            checkout_key(workspace) if workspace else None, runtime.host, runtime.host_instance,
-            runtime.session_epoch(), runtime.host_epoch(), context_epoch,
-            {key: state.get(key) for key in ("id", "revision", "assignment_id")}, environment])
+        self.scope = scope_key(runtime, conversation, agent_id, workspace, task_state, context_epoch, environment)
         self.entries = []
         self.pending = []
         self.validity = {}

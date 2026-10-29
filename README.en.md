@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.43 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.44 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.43 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.44 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1819,7 +1819,17 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.43</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.44</summary>
+
+## Continuation focus and quieter source notices (1.4.44)
+
+- **Keep the business focus:** subject-free continuations such as “是的继续推进吧” reuse a valid question or task. Requests containing new objects, paths, versions or negation retain their own meaning. This grants no execution authority.
+- **Coalesce ordinary file notices:** matching current file observations can share one card with every source ID and revision retained. The first notice is immediate; subsequent ordinary changes to the same files are deferred for30 seconds without acknowledging unsent exposure. A later supported event rechecks the latest state. Source changes, conflicts, denial, missing sources, counterexamples and restoration to the captured file state bypass cooldown. Compaction and identity/task changes recheck scope; missing or malformed caches fail open.
+- **Do not replay stale conclusions:** change notices use neutral titles and an explicit recheck instruction. File checks remain bounded metadata observations, not full-content hashing or a resident watcher.
+- **Better stage comparisons:** remove generated retrieval labels. If the primary query finds no formal knowledge, try at most one complete short task/public-delivery query. Long, missing or incomplete sources are not guessed. Returned and actually displayed counts are separate; no-match is not a skip verdict or publication permission.
+- **Preserve unknown tool outcomes:** some Codex Hooks provide only textual `tool_response`, without independent result status. These remain `unknown`; “exit code0” inside output is not structured success evidence.
+
+No additional generative model calls. Schema/publication protocol25 and indexes7/3/1 remain unchanged. File-notice caches are discardable derived data; knowledge, events and publication policy are unchanged. Offline checks do not establish real-host acceptance.
 
 ## DSH GitHub installation and first-time setup (1.4.43)
 

@@ -10,6 +10,52 @@ import re
 import unicodedata
 
 
+_STAGE_SUMMARY = re.compile(r"\A阶段公开记录：(.*) \[[a-f0-9]{32}\] part [0-9]+\Z", re.S)
+
+
+def comparison_queries(problem, task, events, *, latest_delivery_id=None):
+    """Keep generated labels out of recall, without inventing a business topic.
+
+    A fallback is only a complete short public delivery plus the unchanged
+    original goal (except an exact continuation with no business subject).
+    Negation, versions and paths stay visible to the comparator;
+    these queries never classify a project report as routine or grant release.
+    """
+    from .public_observations import observed_public
+
+    summary = problem.get("summary", "")
+    goal = (task or {}).get("goal", "")
+    match = _STAGE_SUMMARY.fullmatch(summary) if isinstance(summary, str) else None
+    if match is None:
+        return {"primary": summary + " " + goal, "fallback": None, "fallback_reason": "not_stage"}
+    primary = goal or match[1]
+    if len(primary) > 1024:
+        return {"primary": primary, "fallback": None, "fallback_reason": "goal_too_long"}
+    deliveries = [event for event in events if event.get("type") == "Stop"]
+    if latest_delivery_id is not None:
+        deliveries = [event for event in deliveries if event.get("id") == latest_delivery_id]
+        if not deliveries:
+            return {"primary": primary, "fallback": None, "fallback_reason": "delivery_omitted"}
+    if not deliveries:
+        return {"primary": primary, "fallback": None, "fallback_reason": "no_delivery"}
+    # The latest source cannot be replaced with an earlier, easier-to-match
+    # conclusion when its real final statement is incomplete or over budget.
+    delivery = max(deliveries, key=lambda event: (event.get("created") or 0, event.get("id", "")))
+    body = delivery.get("payload")
+    if (delivery.get("health", "valid") != "valid" or delivery.get("agent")
+            or delivery.get("outcome") not in {"reported", "unknown"}
+            or not observed_public("Stop", body, require_complete=True)):
+        return {"primary": primary, "fallback": None, "fallback_reason": "incomplete_delivery"}
+    text = body["last_assistant_message"]
+    if len(text) > 2048:
+        return {"primary": primary, "fallback": None, "fallback_reason": "delivery_too_long"}
+    if _text(text) == _text(primary):
+        return {"primary": primary, "fallback": None, "fallback_reason": "same_material"}
+    context = "" if _text(primary) in {"继续", "继续推进", "继续执行", "continue", "proceed"} else primary
+    return {"primary": primary, "fallback": (context + "\n" if context else "") + text,
+            "fallback_reason": "complete_public_delivery"}
+
+
 def _text(value):
     if not isinstance(value, str):
         return ""
