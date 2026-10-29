@@ -11,6 +11,7 @@ from http.client import HTTPConnection, HTTPException
 import ipaddress
 import json
 import math
+import operator
 import re
 import socket
 import struct
@@ -24,6 +25,8 @@ SEMANTIC_DEFAULTS = {
     "min_similarity": 0.55, "automatic_min_similarity": 0.85,
 }
 SEMANTIC_INDEX_VERSION = 1
+# Selection changes invalidate query/context caches without rebuilding vectors.
+SEMANTIC_SCAN_POLICY_VERSION = 2
 _MAX_DIMENSIONS = 4096
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _FAILURE_COOLDOWN_SECONDS = 5
@@ -129,8 +132,8 @@ def _stored_vector(blob, dimensions, expected=None):
             or len(blob) != dimensions * 4):
         raise ValueError("invalid_stored_vector")
     vector = struct.unpack("<" + "f" * dimensions, blob)
-    if (any(not math.isfinite(value) for value in vector)
-            or abs(sum(value * value for value in vector) - 1) > 0.0001):
+    norm_sq = sum(value * value for value in vector)
+    if not math.isfinite(norm_sq) or abs(norm_sq - 1) > 0.0001:
         raise ValueError("invalid_stored_vector")
     return vector
 
@@ -258,7 +261,8 @@ class SemanticRetrievalMixin:
             return "disabled"
         state = self._semantic_state(project, config)
         return _hash([config, state["generation"] if state else 0,
-                      state["dimensions"] if state else 0, SEMANTIC_INDEX_VERSION])
+                      state["dimensions"] if state else 0, SEMANTIC_INDEX_VERSION,
+                      SEMANTIC_SCAN_POLICY_VERSION])
 
     def semantic_status(self, project):
         from .runtime import ContractError
@@ -394,6 +398,8 @@ class SemanticRetrievalMixin:
             diagnostics.update(semantic_status="empty_query")
             return prepared
         key = _hash([_vector_identity(config), state["dimensions"], state["generation"], text])
+        # Internal selection inputs only: diagnostics never disclose the query.
+        prepared.update(query_text=text, query_key=key)
         cache = getattr(self, "_semantic_query_vectors", None)
         if cache is None:
             self._semantic_query_vectors = cache = OrderedDict()
@@ -430,22 +436,96 @@ class SemanticRetrievalMixin:
         diagnostics.update(semantic_status="ready", query_cache_hit=False, query_truncated=len(query) > len(text))
         return prepared
 
+    def _semantic_scan_rows(self, project, prepared, filters):
+        """Bound body/vector work while avoiding a permanent ID-prefix sample.
+
+        A small collection keeps its original complete scan. Large collections
+        combine lexical seeds, recent revisions and a query-stable historical
+        window. SQL population counts/order/offset can still scale with the
+        collection; this is not an ANN index or a full-coverage guarantee.
+        """
+        from .knowledge_index import _filter_sql, lexical_rows, normalized_query_plan
+        config = prepared["config"]
+        limit = config["scan_limit"]
+        identity = _vector_identity(config)
+        source = (" FROM semantic_vectors v JOIN active a ON a.project=v.project AND a.id=v.knowledge_id "
+            "AND a.revision=v.revision JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
+            "WHERE v.project=? AND v.identity=?" + _filter_sql(filters))
+        parameters = (project, identity, *filters.values())
+        columns = "SELECT k.*,v.content_hash,v.dimensions,v.vector,v.input_truncated"
+        # The probe reads identities, not every authoritative body/vector.
+        probe = self.db.execute("SELECT k.id" + source + " ORDER BY k.id LIMIT ?",
+                                (*parameters, limit + 1)).fetchall()
+        if len(probe) <= limit:
+            prepared["diagnostics"].update(scan_policy="complete", eligible_vectors=len(probe),
+                scan_truncated=False, scan_lanes={"complete": len(probe)})
+            return self.db.execute(columns + source + " ORDER BY k.id LIMIT ?", (*parameters, limit)).fetchall()
+
+        population = self.db.execute("SELECT COUNT(*)" + source, parameters).fetchone()[0]
+        seed_key = prepared.get("query_key") or _hash(prepared["vector"])
+        offset = int(seed_key[:16], 16) % population
+        selected = {}
+        lanes = {"lexical": 0, "recent": 0, "historical": 0}
+        lexical_quota = min(128, limit // 4)
+        query = prepared.get("query_text", "")
+        if lexical_quota and query:
+            plan = normalized_query_plan(query)
+            if plan["terms"]:
+                lexical = lexical_rows(self.db, project, plan, filters, max_candidates=lexical_quota)
+                if lexical:
+                    placeholders = ",".join("?" for _ in lexical)
+                    eligible = {row[0] for row in self.db.execute("SELECT k.id" + source +
+                        " AND k.id IN (" + placeholders + ")", (*parameters, *(row["id"] for row in lexical)))}
+                    for row in lexical:
+                        if row["id"] in eligible:
+                            selected[row["id"]] = None
+                    lanes["lexical"] = len(selected)
+
+        # A single-slot custom budget cannot guarantee recent and historical
+        # coverage together. Preserve the historical window in that case.
+        recent_quota = max(1, limit // 4) if limit > 1 else 0
+        recent = self.db.execute("SELECT k.id" + source + " ORDER BY k.created DESC,k.id LIMIT ?",
+                                 (*parameters, recent_quota)).fetchall()
+        for row in recent:
+            if row[0] not in selected:
+                selected[row[0]] = None
+                lanes["recent"] += 1
+
+        # At most limit historical identities suffice even if all already
+        # selected IDs overlap this window. Wrap once; never rotate on time or
+        # mutable cursor state, which would invalidate cached query semantics.
+        first = min(limit, population - offset)
+        history = self.db.execute("SELECT k.id" + source + " ORDER BY k.id LIMIT ? OFFSET ?",
+                                 (*parameters, first, offset)).fetchall()
+        if first < limit:
+            history += self.db.execute("SELECT k.id" + source + " ORDER BY k.id LIMIT ?",
+                                       (*parameters, limit - first)).fetchall()
+        for row in history:
+            if len(selected) == limit:
+                break
+            if row[0] not in selected:
+                selected[row[0]] = None
+                lanes["historical"] += 1
+
+        # Chunk parameters for SQLite builds with a 999-variable limit.
+        identities = list(selected)
+        rows = []
+        for start in range(0, len(identities), 256):
+            batch = identities[start:start + 256]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(self.db.execute(columns + source + " AND k.id IN (" + placeholders + ")",
+                                       (*parameters, *batch)).fetchall())
+        prepared["diagnostics"].update(scan_policy="lexical_recent_history", eligible_vectors=population,
+            scan_truncated=True, scan_lanes=lanes, metadata_selection="count_and_offset")
+        return rows
+
     def _semantic_candidates(self, project, prepared, filters):
-        from .knowledge_index import _filter_sql
         config, vector = prepared["config"], prepared["vector"]
         if vector is None:
             return {}
-        identity = _vector_identity(config)
-        rows = self.db.execute("SELECT k.*,v.content_hash,v.dimensions,v.vector,v.input_truncated "
-            "FROM semantic_vectors v JOIN active a ON a.project=v.project AND a.id=v.knowledge_id "
-            "AND a.revision=v.revision JOIN knowledge k ON k.project=a.project AND k.id=a.id AND k.revision=a.revision "
-            "WHERE v.project=? AND v.identity=?" + _filter_sql(filters) + " ORDER BY k.id LIMIT ?",
-            (project, identity, *filters.values(), config["scan_limit"] + 1))
-        matches, scanned, invalid = [], 0, 0
+        rows = self._semantic_scan_rows(project, prepared, filters)
+        matches, invalid = [], 0
         for row in rows:
-            scanned += 1
-            if scanned > config["scan_limit"]:
-                break
             try:
                 content_hash = _document(row["body"], config["document_max_chars"])[1]
             except json.JSONDecodeError:
@@ -461,15 +541,14 @@ class SemanticRetrievalMixin:
             except ValueError:
                 invalid += 1
                 continue
-            similarity = max(-1.0, min(1.0, sum(left * right for left, right in zip(vector, values))))
+            similarity = max(-1.0, min(1.0, sum(map(operator.mul, vector, values))))
             if similarity >= config["min_similarity"]:
                 matches.append((similarity, row["id"], row))
                 if len(matches) > config["candidate_limit"]:
                     matches.sort(key=lambda item: (-item[0], item[1]))
                     del matches[config["candidate_limit"]:]
         matches.sort(key=lambda item: (-item[0], item[1]))
-        prepared["diagnostics"].update(scanned=min(scanned, config["scan_limit"]),
-            scan_truncated=scanned > config["scan_limit"], invalid_vectors=invalid)
+        prepared["diagnostics"].update(scanned=len(rows), invalid_vectors=invalid)
         return {row["id"]: {"row": row, "score": score, "rank": rank,
                              "input_truncated": bool(row["input_truncated"])}
                 for rank, (score, _, row) in enumerate(matches[:config["candidate_limit"]], 1)}

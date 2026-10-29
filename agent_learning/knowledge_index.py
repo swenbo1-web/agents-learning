@@ -36,6 +36,9 @@ _MAX_QUERY_TERMS = 128
 _LEXICAL_CANDIDATES = 128
 _MAX_RECALL_PAGES = 4
 _MAX_QUERY_CHARS = 65536
+_CACHE_LIMIT = 256
+_CACHE_RETAIN = 224
+_CACHE_TOUCH_DISTANCE = 32
 _MATCH_POLICY_VERSION = 10
 _RANK_POLICY_VERSION = 1
 _RECALL_POLICY_VERSION = 1
@@ -315,7 +318,7 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
     return result
 
 
-def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
+def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None, max_candidates=None):
     """Bound FTS recall without installing per-query SQLite functions.
 
     Manual queries retain the broad lane. Automatic queries that require every
@@ -339,9 +342,17 @@ def lexical_rows(db, project, plan, filters=None, *, page=0, diagnostics=None):
         lanes.append((" OR ".join(quote(word) for word in plan["recall_terms"]),
                       _LEXICAL_CANDIDATES // 2 if anchors else _LEXICAL_CANDIDATES))
     rows = {}
+    remaining = max_candidates
     for expression, maximum in lanes:
+        offset = page * maximum
+        if remaining is not None:
+            if remaining <= 0:
+                break
+            maximum = min(maximum, remaining)
         if expression:
-            found = db.execute(base, (expression, project, *filters.values(), maximum, page * maximum)).fetchall()
+            found = db.execute(base, (expression, project, *filters.values(), maximum, offset)).fetchall()
+            if remaining is not None:
+                remaining -= len(found)
             if diagnostics is not None and len(found) == maximum:
                 diagnostics["page_may_have_more"] = True
             for row in found:
@@ -364,6 +375,24 @@ def _filter_sql(filters):
 
 
 class KnowledgeIndexMixin(SemanticRetrievalMixin):
+    def _store_search_cache(self, key, body, cached=None):
+        """Bound cross-process cache growth and coarsen recency-only rewrites.
+
+        The caller owns a short write transaction. Hits within 32 insert/touch
+        positions keep their row; older hits refresh approximate LRU recency.
+        Overflow trims a batch to 224, always leaving at most 256 entries.
+        Metrics, authority validation and query results remain independent.
+        """
+        changed = (cached is None or cached["body"] != body
+                   or cached["newest_rowid"] - cached["rowid"] >= _CACHE_TOUCH_DISTANCE)
+        if changed:
+            self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, body))
+        if changed or cached["cache_size"] > _CACHE_LIMIT:
+            size = self.db.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            if size > _CACHE_LIMIT:
+                self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
+                                "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT ?)", (_CACHE_RETAIN,))
+
     def _index_knowledge(self, project, knowledge_id, revision, body):
         from .runtime import clean
 
@@ -447,11 +476,12 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             key = digest([project, plan, limit, filters, manifest, cache_identity, INDEX_VERSION,
                           bool(_automatic), source_epoch if _automatic else None,
                           _environment if _automatic else None])
-            cached = self.db.execute("SELECT body FROM cache WHERE key=?", (key,)).fetchone()
+            cached = self.db.execute("SELECT rowid,body,(SELECT MAX(rowid) FROM cache) AS newest_rowid,"
+                                     "(SELECT COUNT(*) FROM cache) AS cache_size FROM cache WHERE key=?", (key,)).fetchone()
             references = None
             if cached:
                 try:
-                    references = json.loads(cached[0])
+                    references = json.loads(cached["body"])
                     if (not isinstance(references, list) or len(references) > limit or any(
                             not isinstance(ref, dict) or set(ref) != {"knowledge_id", "revision"}
                             or not isinstance(ref["knowledge_id"], str)
@@ -603,10 +633,9 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
         def write_derived():
             # Retryable provider failure must not cache a hybrid absence and suppress
             # recovery. Existing lexical cache may still be read safely.
-            if not semantic["diagnostics"].get("retryable") and not recall["scan_limit_reached"] and not unreadable:
-                self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (key, encode(references)))
-                self.db.execute("DELETE FROM cache WHERE rowid NOT IN "
-                                "(SELECT rowid FROM cache ORDER BY rowid DESC LIMIT 256)")
+            if (not semantic["diagnostics"].get("retryable") and not recall["scan_limit_reached"] and not unreadable
+                    and not (semantic["diagnostics"].get("scan_truncated") and not items)):
+                self._store_search_cache(key, encode(references), cached)
             self._metric(project, "search_queries")
             self._metric(project, "search_matches", int(bool(items)))
 

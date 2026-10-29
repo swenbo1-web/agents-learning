@@ -795,7 +795,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.40 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.41 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **6/2/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1123,7 +1123,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.40 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.41 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 6/2/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1173,7 +1173,7 @@ python -B scripts/learning.py --workspace . search "How did we investigate simil
 
 Queries use RRF to combine bounded lexical and cosine candidates. Match information includes `method`, `semantic_score`, `semantic_rank` and `fusion_method`. Similarity does not prove correctness. Automatic injection retains exact filters, active revision checks, source health and match thresholds. With semantic retrieval enabled, automatic results must cover exact error codes, versions, paths and C++/C# identifiers; provider fallback retains this check. Knowledge cannot issue execution permission. Existing condition and summary budgets apply.
 
-Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates; `scan_truncated` signals the bound. This is a bounded linear scan without a full-corpus ANN guarantee. Embeddings add local computation and initial latency; speed improvements require measurement.
+Outages, invalid responses and index changes during a query fall back to full-text search with `retrieval` diagnostics. Transient failures cool down for at least five seconds and can retry at later supported events while notices continue. Queries never refresh the whole index. Vector scanning defaults to at most 2000 entries and 32 candidates. Small corpora are scanned in full; larger corpora combine bounded lexical seeds, recent knowledge and a query-stable historical window, with `scan_policy` coverage diagnostics and `scan_truncated`. Body/vector processing is bounded, while metadata counting and positioning still scale with corpus size. This is not full-corpus ANN retrieval: unselected knowledge may not participate in that query. Embeddings add local computation and initial latency; speed improvements require measurement.
 
 ## Knowledge browser
 
@@ -1790,7 +1790,15 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.40</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.41</summary>
+
+## Retrieval coverage and lighter local maintenance (1.4.41)
+
+- Precompiled redaction patterns and a short-string fast path retain existing sensitive-key, URL and redacted-marker behavior.
+- The query cache retains a hard limit of 256 entries. Recent hits avoid cache rewrites, older hits refresh approximate recency, and overflow trims a batch to 224. Query metrics and authoritative revision/source checks remain.
+- Optional semantic retrieval combines vector-validation passes. Small corpora retain full scanning; larger corpora combine a bounded lexical seed, recent records and a query-stable historical window. Diagnostics disclose truncation without claiming full-corpus nearest-neighbor coverage.
+- A scan-policy change invalidates old query/context plans without rebuilding embeddings. Authoritative body hashes, SQLite FULL durability, administrator budgets and publication evidence keep their existing contracts.
+- No additional model calls, inferred recovery proofs, NumPy dependency or default external connection. Database, protocol and index versions remain unchanged.
 
 ## Shared knowledge health check after upgrade (1.4.40)
 

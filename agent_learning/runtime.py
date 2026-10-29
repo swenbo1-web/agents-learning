@@ -75,23 +75,35 @@ def digest(value):
     return hashlib.sha256(encode(value).encode("utf-8")).hexdigest()
 
 
+_SENSITIVE_KEY_RE = re.compile(r"(?i)(password|secret|api.?key|authorization|token)$")
+_BEARER_VALUE_RE = re.compile(r"(?i)\bBearer\s+[^\s\"']+")
+_REDACTED_ASSIGNMENT_RE = re.compile(r"\[REDACTED\](?:[&#]|$)")
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)((?:api[_-]?key|password|secret|access_token)\s*[=:]\s*)([^\s,;]+)")
+
+
+def _redact_assignment(match):
+    # 已脱敏 URL 的公开 query/fragment 不应被后续采集再次吞掉。
+    # 仅完整的脱敏标记（或标记后 URL 分隔符）可原样通过。
+    if _REDACTED_ASSIGNMENT_RE.match(match[2]):
+        return match[0]
+    return match[1] + "[REDACTED]"
+
+
 def clean(value):
     """减少常见凭证进入记录；不能代替专门的数据脱敏策略。"""
     if isinstance(value, dict):
-        return {k: "[REDACTED]" if re.search(r"(?i)(password|secret|api.?key|authorization|token)$", k)
+        return {k: "[REDACTED]" if _SENSITIVE_KEY_RE.search(k)
                 else clean(v) for k, v in value.items()}
     if isinstance(value, list):
         return [clean(v) for v in value]
     if isinstance(value, str):
-        value = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [REDACTED]", value)
-        def redact_assignment(match):
-            # 已脱敏 URL 的公开 query/fragment 不应被后续采集再次吞掉。
-            # 仅完整的脱敏标记（或标记后 URL 分隔符）可原样通过。
-            if re.match(r"\[REDACTED\](?:[&#]|$)", match[2]):
-                return match[0]
-            return match[1] + "[REDACTED]"
-        value = re.sub(r"(?i)((?:api[_-]?key|password|secret|access_token)\s*[=:]\s*)([^\s,;]+)",
-                       redact_assignment, value)
+        # Both string patterns need at least eight characters. Keep subclasses
+        # on the regex path so the existing plain-string result is preserved.
+        if type(value) is str and len(value) < 8:
+            return value
+        value = _BEARER_VALUE_RE.sub("Bearer [REDACTED]", value)
+        value = _SECRET_ASSIGNMENT_RE.sub(_redact_assignment, value)
     return value
 
 
