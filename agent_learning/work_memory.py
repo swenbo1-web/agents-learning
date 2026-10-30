@@ -770,7 +770,7 @@ class WorkMemoryMixin:
 
     def _work_search_rows(self, project, query, *, file_path=None, workspace=None, limit=5,
                           conversation=None, agent_id=None, task_state=None, exclude_event_id=None,
-                          automatic=False, handoff=False):
+                          automatic=False, handoff=False, _row_gate=None):
         from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
         from .runtime import ContractError
         query_limit = _MAX_QUERY_CHARS if automatic else 8000
@@ -899,6 +899,8 @@ class WorkMemoryMixin:
                     requests.append(row)
                     continue
             parent = body.get("public_message_id", row["id"])
+            if _row_gate is not None and not _row_gate(row):
+                continue
             if counts.get(parent, 0) >= 2:
                 continue
             counts[parent] = counts.get(parent, 0) + 1
@@ -909,6 +911,8 @@ class WorkMemoryMixin:
             for row in requests:
                 body = json.loads(row["body"])
                 parent = body.get("public_message_id", row["id"])
+                if _row_gate is not None and not _row_gate(row):
+                    continue
                 if counts.get(parent, 0) >= 2:
                     continue
                 counts[parent] = counts.get(parent, 0) + 1
@@ -1074,6 +1078,7 @@ class WorkMemoryMixin:
 
     def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None,
                               _notice_gate=None):
+        from .work_notice_delivery import mark_file_transition
         result = []
         with _snapshot(self):
             rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT 100",
@@ -1082,13 +1087,11 @@ class WorkMemoryMixin:
                 old_files = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
                 item = self._work_item(project, row, workspace=workspace if old_files else None,
                                        file_paths=list(old_files))
-                file_changed = any(path in old_files and old_files[path] != version
-                                   for path, version in (item["file_state"] or {}).items())
+                mark_file_transition(item, old_files)
+                file_changed = bool(item.get("file_state_changed"))
                 source_changed = item["source_version"] != row["shown_version"]
                 if source_changed:
                     item["source_changed"] = True
-                if file_changed:
-                    item["file_state_changed"] = True
                 if source_changed or file_changed:
                     if _notice_gate is not None and _notice_gate.deferred(item):
                         continue  # Deferred ordinary notices cannot occupy a risk update's slot.
@@ -1139,17 +1142,24 @@ class WorkMemoryMixin:
                         links = [dict(row, task_affinity="context_only") for row in hints] + links
             if file_only and not links:
                 return result[:limit]
+            row_gate = None
+            if _notice_gate is not None and _notice_gate.delivery == "persistent":
+                def row_gate(row):
+                    item = self._work_item(project, row, workspace=workspace,
+                        file_paths=[link["relative_path"] for link in links[:3]])
+                    _notice_gate.annotate(item)
+                    return not _notice_gate.deferred(item)
             rows = []
             for link in links[:3]:
                 rows.extend(self._work_search_rows(project, query[:8000],
                     file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
-                    exclude_event_id=exclude_event_id, automatic=True))
+                    exclude_event_id=exclude_event_id, automatic=True, _row_gate=row_gate))
             if not links and not handoff_only and (query.strip() or allow_unfocused_history):
                 # 缺少当前请求时不猜历史焦点。空查询只恢复本会话；跨会话
                 # 资料必须通过实际问题召回或明确文件关联，不能仅按新近程度。
                 rows = self._work_search_rows(project, query, limit=limit,
                     conversation=None if query.strip() else conversation, agent_id=agent_id, task_state=task_state,
-                    exclude_event_id=exclude_event_id, automatic=True)
+                    exclude_event_id=exclude_event_id, automatic=True, _row_gate=row_gate)
             # A query that cannot represent every identity is not a blank query.
             # Its compact-only lane never infers files or falls back to other
             # conversations. Reserve one healthy current-task handoff so ordinary
@@ -1214,11 +1224,10 @@ class WorkMemoryMixin:
                                             (project, conversation, agent_id or "", item["memory_id"])).fetchone()
                 previous_files = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
                 current_files = item["file_state"] or {}
-                file_changed = any(path in previous_files and previous_files[path] != version
-                                   for path, version in current_files.items())
+                from .work_notice_delivery import mark_file_transition
+                mark_file_transition(item, previous_files)
+                file_changed = bool(item.get("file_state_changed"))
                 file_unseen = bool(current_files) and any(path not in previous_files for path in current_files)
-                if file_changed:
-                    item["file_state_changed"] = True
                 if (previous and delivery == "persistent" and not compact and previous["source_version"] == item["source_version"]
                         and not file_changed and not file_unseen and previous["context_epoch"] == int(context_epoch or 0)
                         and _same_exposure_task(previous["task_key"], task_state)):
@@ -1469,7 +1478,8 @@ class WorkMemoryMixin:
                     "coverage": {"observable_events_only": True, "history_backfill_automatic": False,
                                  "internal_thinking_captured": False, "project_permissions_restored": False}}
 
-    def work_validate_items(self, project, items, workspace=None, *, conclusion_max_chars=80, applicability_query=""):
+    def work_validate_items(self, project, items, workspace=None, *, conclusion_max_chars=80, applicability_query="",
+                            _notice_gate=None):
         """最终发送事务中刷新来源状态；不能用旧状态确认当前有效性。"""
         result = []
         for item in items[:20]:
@@ -1496,6 +1506,10 @@ class WorkMemoryMixin:
                     current["task_affinity"] = "context_only"
                 if item.get("file_state_changed"):
                     current["file_state_changed"] = True
+                if _notice_gate is not None:
+                    # Files may have changed again since recall. Recompute the
+                    # transition against current exposure, not recalled paths.
+                    _notice_gate.annotate(current)
                 if (not current.get("source_changed") and not current.get("file_state_changed")
                         and not _work_version_applicable(body, applicability_query or item.get("_preview_query"), workspace)):
                     continue

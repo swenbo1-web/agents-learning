@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.44 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.45 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.44 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.45 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1819,7 +1819,15 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.44</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.45</summary>
+
+## Multiple-file notices and replacement of deferred results (1.4.45)
+
+- **Compare each changed path:** distinguish ordinary changes from restoration using paths that changed since actual exposure. An unchanged associated file no longer disables the30-second cooldown; genuine restoration to the captured file state still gets a timely notice.
+- **Deferred items do not consume slots:** filter ordinary cooling notices inside the existing bounded recall pool before counting public-message segments or applying the final result limit. Both the normal and request-fallback lanes keep useful unseen alternatives available. Database recall bounds and `max_items` stay unchanged.
+- **Recheck at delivery:** compare current files against this conversation's actual exposure in the final context transaction. Old retrieval-time path decisions cannot acknowledge a new state. Unsent notices remain pending; source conflict, missing sources, denial and other risks retain their protections.
+
+The30-second window only governs ordinary file notices. Administrator admission still follows the selected stage cadence and token budget, with bounded continuation batches for a large stage; stage-triggered review does not mean exactly one model call. No change to administrator, publication, budget or installation switches, no added model calls, and no schema/protocol/index version changes.
 
 ## Continuation focus and quieter source notices (1.4.44)
 

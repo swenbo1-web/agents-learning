@@ -687,7 +687,8 @@ class KnowledgeContextMixin:
                     from .work_notice_delivery import FileNoticeGate, coalesce
                     notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
                     validated = self.work_validate_items(project, work_items, workspace=workspace,
-                                                         conclusion_max_chars=240, applicability_query=effective)
+                                                         conclusion_max_chars=240, applicability_query=effective,
+                                                         _notice_gate=notices)
                     for work_item in coalesce(validated):
                         if notices.deferred(work_item):
                             continue  # No exposure acknowledgement; retry latest state at a later supported event.
