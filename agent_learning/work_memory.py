@@ -890,7 +890,7 @@ class WorkMemoryMixin:
                                     "validation_level": body.get("validation_level")})
                 if not denominator or not _match_info(comparable, weights, denominator,
                                                        plan["meaningful"], _anchors=plan["exact_anchors"],
-                                                       _intent=intent)["auto_eligible"]:
+                                                       _intent=intent, _focus=plan["focused_settings"])["auto_eligible"]:
                     continue
                 # Prefer recorded results over a previous short question about
                 # the same subject. Keep explicit user constraints/corrections;

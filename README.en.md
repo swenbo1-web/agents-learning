@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.45 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.46 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.45 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.46 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1819,7 +1819,15 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.45</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.46</summary>
+
+## Injection topics and settings in descriptive questions (1.4.46)
+
+- **Exclusions do not complete a topic match:** automatic qualification and ranking use a separate topic projection. A record that mentions an issue only as an excluded use cannot qualify through that mention. Useful prohibitive conclusions remain eligible; nested conclusions cannot escape a parent restriction. Manual access and delivered excerpts retain original conditions and evidence grades.
+- **Keep a concrete setting in a longer question:** a single CamelCase setting/API in a complete query can provide bounded relevance evidence when its full name appears in the positive title and other English business topics match. Generic tools, ambiguous multiple settings and truncated input cannot use this shortcut. Error, path, version and source checks still apply.
+- **Consistent delivery channels:** formal knowledge, candidate references and work history share the rule. High semantic similarity cannot revive an exclusion-only topic match. Matching and ranking cache policies advance, reusing per-record analysis without additional model calls, injection budget or database index migration.
+
+Default lexical retrieval still cannot guarantee paraphrase coverage. These rules do not replace model judgement or prove adoption. File-notice cooldown, administrator admission and publication scope retain project settings.
 
 ## Multiple-file notices and replacement of deferred results (1.4.45)
 

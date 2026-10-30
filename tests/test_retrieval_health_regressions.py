@@ -116,7 +116,7 @@ class RetrievalHealthTests(unittest.TestCase):
         legacy_key = digest([self.p, legacy_plan, 5, {}, manifest, "local-fts", 4, True, source_epoch, None])
         self.r.db.execute("DELETE FROM cache")
         self.r.db.execute("INSERT INTO cache VALUES(?,'[]')", (legacy_key,))
-        self.assertEqual(plan["match_policy_version"], 10)
+        self.assertEqual(plan["match_policy_version"], 11)
         self.assertEqual(self.ids("E_IMPORT"), [expected["knowledge_id"]])
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM cache").fetchone()[0], 2)
         self.assertEqual(self.r.db.execute("SELECT body FROM cache WHERE key=?", (legacy_key,)).fetchone()[0], "[]")

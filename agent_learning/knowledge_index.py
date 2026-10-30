@@ -8,6 +8,7 @@ import sqlite3
 from .query_language import LANGUAGE_VERSION, canonical_text, recall_terms, matched_labels
 from .automatic_relevance import automatic_action_plan, automatic_state_exclusion
 from .semantic_retrieval import SemanticRetrievalMixin
+from .knowledge_topics import focused_settings, topic_body
 
 
 INDEX_VERSION = 7
@@ -39,8 +40,8 @@ _MAX_QUERY_CHARS = 65536
 _CACHE_LIMIT = 256
 _CACHE_TOUCH_DISTANCE = 32
 _CACHE_PRESSURE_TOUCH_DISTANCE = 8
-_MATCH_POLICY_VERSION = 10
-_RANK_POLICY_VERSION = 1
+_MATCH_POLICY_VERSION = 11
+_RANK_POLICY_VERSION = 2
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 # These transport/tool names describe how an operation was performed. Unlike a
@@ -178,6 +179,7 @@ def normalized_query_plan(query):
                       and (bool(anchors) or not diagnostics["input_truncated"]))
     diagnostics["automatic_safe"] = automatic_safe
     return {"terms": selected, "meaningful": meaningful,
+            "focused_settings": focused_settings(query, _GENERIC_TOOL_NAMES),
             "automatic_intent": automatic_action_plan(scanned),
             "recall_terms": recall_terms(selected, terms), "language_version": LANGUAGE_VERSION,
             "exact_anchors": anchors, "automatic_safe": automatic_safe,
@@ -204,20 +206,32 @@ def _index_text(body):
 def _match_values(body_json, query_weights, denominator, *, _ranking=False):
     """查询覆盖优先；每个词只取最高字段权重，重复字段不能累加刷高分。"""
     body = json.loads(body_json)
-    matches, topical = {}, set()
+    topic = topic_body(body) if _ranking else None
+    matches, topical, topic_matches, topic_positive = {}, set(), {}, set()
     positive_terms = set()
     for field, weight in _FIELD_WEIGHTS.items():
         value = body.get(field, "solution" if field == "knowledge_kind" else "")
         if isinstance(value, str):
             tokens = match_terms(value)
-            if _ranking and field in {"title", "content"}:
-                positive_terms.update(tokens)
-                topical.update(token for token in tokens if token in query_weights)
+            if _ranking:
+                topic_tokens = match_terms(topic.get(field, "solution" if field == "knowledge_kind" else ""))
+                if field in {"title", "content"}:
+                    positive_terms.update(topic_tokens)
+                    topical.update(token for token in topic_tokens if token in query_weights)
+                if field in {"title", "content", "applicability"}:
+                    topic_positive.update(topic_tokens)
+                for token in topic_tokens:
+                    if token in query_weights:
+                        topic_matches[token] = max(weight, topic_matches.get(token, 0))
             for token in tokens:
                 if token in query_weights:
                     matches[token] = max(weight, matches.get(token, 0))
     values = body.get("metadata", {}).values()
     for token in match_terms(" ".join(value for value in values if isinstance(value, str))):
+        if _ranking:
+            topic_positive.add(token)
+            if token in query_weights:
+                topic_matches[token] = max(2, topic_matches.get(token, 0))
         if token in query_weights:
             matches[token] = max(2, matches.get(token, 0))
     coverage = sum(query_weights[token] for token in matches) / denominator
@@ -231,7 +245,8 @@ def _match_values(body_json, query_weights, denominator, *, _ranking=False):
         # only: the independent automatic/identifier/health gates stay intact.
         topic_coverage = sum(query_weights[token] for token in topical) / denominator
         specificity = len(topical) / max(1, len(positive_terms))
-        return (*values, (topic_coverage, specificity))
+        return (*values, (topic_coverage, specificity),
+                {"body": body, "topic": topic, "positive": topic_positive, "matches": topic_matches})
     return values
 
 
@@ -241,6 +256,7 @@ def _rank(body_json, query_weights, denominator):
 
 
 def _positive_match_terms(body):
+    body = topic_body(body)
     fields = [body.get(field, "") for field in ("title", "content", "applicability")]
     fields.extend(body.get("metadata", {}).values())
     return set(match_terms(" ".join(value for value in fields if isinstance(value, str))))
@@ -255,24 +271,38 @@ def _positive_anchors_allowed(body_json, anchors):
     return all(anchor in positive for anchor in anchors)
 
 
-def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None, _intent=None):
+def _match_info(body_json, query_weights, denominator, query, *, _values=None, _anchors=None, _intent=None, _focus=None):
     # 独立于 _rank，缓存命中仍生成可解释字段，但不重排已经固定的修订引用。
-    values = (_match_values(body_json, query_weights, denominator) if _values is None else _values)
+    values = (_match_values(body_json, query_weights, denominator, _ranking=True)
+              if _values is None or len(_values) < 5 else _values)
     score, coverage, matches = values[:3]
-    strong = [token for token in matches if len(token) > 1]
+    analysis = values[4]
+    body, positive_body, positive = analysis["body"], analysis["topic"], analysis["positive"]
+    positive_matches = analysis["matches"]
+    positive_coverage = sum(query_weights[token] for token in positive_matches) / denominator
+    strong = [token for token in positive_matches if len(token) > 1]
     anchors = ([word for word in _exact_anchors(query) if word in query_weights]
                if _anchors is None else _anchors)
-    exact = _positive_anchors_allowed(body_json, anchors)
-    eligible = exact and bool(strong) and (coverage >= 0.65 or any(
+    exact = all(anchor in positive for anchor in anchors)
+    eligible = exact and bool(strong) and (positive_coverage >= 0.65 or any(
         _specific_anchor(anchor) for anchor in anchors))
+    focus = focused_settings(query, _GENERIC_TOOL_NAMES) if _focus is None else _focus
+    # A named setting/API plus an exact positive title match is a focused query.
+    # Additional English business topics must still match; generic tool names,
+    # transport failures and explanatory Chinese prose do not dilute the setting.
+    named_terms = match_terms(" ".join(re.findall(r"[A-Za-z][A-Za-z0-9]*", query)))
+    technical = {token for token in named_terms if token in query_weights and re.fullmatch(r"[a-z][a-z0-9]*", token)
+                 and token not in _GENERIC_TOOL_NAMES | _EN_REQUEST_WORDS | _TOOL_FAULT_WORDS | _TOOL_USAGE_WORDS}
+    if (exact and focus and set(focus) <= set(match_terms(positive_body.get("title", "")))
+            and technical <= positive):
+        eligible = True
     if not eligible and strong:
         # 长中文请求会降低全句覆盖；连续四字的问题短语仍可作为明确命中依据。
-        body = json.loads(body_json)
-        positive = " ".join(body.get(key, "") for key in ("title", "content", "applicability")
-                            if isinstance(body.get(key, ""), str))
+        positive_text = " ".join(positive_body.get(key, "") for key in ("title", "content", "applicability")
+                                 if isinstance(positive_body.get(key, ""), str))
         for segment in re.findall(r"[\u3400-\u9fff]+", _ZH_CONTEXT.sub(" ", query)):
             for index in range(len(segment) - 3):
-                if exact and segment[index:index + 4] in positive:
+                if exact and segment[index:index + 4] in positive_text:
                     eligible = True
                     break
             if eligible:
@@ -280,6 +310,8 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
     result = {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
+    if not eligible and any(len(token) > 1 and token not in positive_matches for token in matches):
+        result["auto_exclusion_reason"] = "topic_only_in_restrictions"
     tool_names = _GENERIC_TOOL_NAMES.intersection(query_weights)
     if tool_names:
         # A split tool name can account for most of a short query's coverage.
@@ -291,7 +323,6 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
             if not _ZH_TOOL_USAGE.sub("", segment):
                 tool_terms.update(match_terms(segment))
         business = {word for word in query_weights if len(word) > 1 and word not in tool_terms}
-        positive = _positive_match_terms(json.loads(body_json))
         if not business:
             result["auto_eligible"] = exact and bool(tool_names.intersection(positive))
         elif not business.intersection(positive):
@@ -299,12 +330,15 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
         background = _tool_background_terms(query, query_weights)
         if background:
             weights = {word: query_weights[word] for word in background}
-            positive_body = json.loads(body_json)
-            positive_body["limitations"] = ""
             domain = _match_info(json.dumps(positive_body), weights, sum(weights.values()), query,
-                                 _anchors=anchors, _intent=_intent)
+                                 _anchors=anchors, _intent=_intent, _focus=focus)
             result["auto_eligible"] = domain["auto_eligible"]
-            if not domain["auto_eligible"]:
+            if domain["auto_eligible"]:
+                # A generic transport mentioned only in restrictions cannot
+                # veto an independently matched business topic. All channels
+                # consume the same final eligibility and exclusion state.
+                result.pop("auto_exclusion_reason", None)
+            else:
                 result["auto_exclusion_reason"] = "tool_context_business_mismatch"
     # Consumers opt into the original-query rule. Review-packet comparison
     # still needs old records for deduplication; concrete questions add no
@@ -561,7 +595,8 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
                 values = analyze(row)
                 identity = (row["id"], row["revision"])
                 explanation = (_match_info(row["body"], weights, denominator, meaningful, _values=values,
-                                           _anchors=plan["exact_anchors"], _intent=plan["automatic_intent"])
+                                           _anchors=plan["exact_anchors"], _intent=plan["automatic_intent"],
+                                           _focus=plan["focused_settings"])
                                if identity not in unreadable else
                                {"score": 0, "coverage": 0, "matched_terms": [], "auto_eligible": False})
                 # 分词已统一；仍过滤派生投影异常或缓存中没有任何有效词重合的引用。
