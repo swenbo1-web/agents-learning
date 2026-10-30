@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.49 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.50 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.49 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.50 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1821,7 +1821,17 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.49</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.50</summary>
+
+## AG public windows, file-index frequency and panel recovery (1.4.50)
+
+Added 61 isolated cases. The final 232 targeted checks have no failures and two Windows symlink-permission skips. An earlier 1,355-test integration run had no failures and six skips; subsequent tail-window and old-stop fixes are covered by the final checks. Three-host sandbox installation, integrity and MCP entry checks pass without live reviewer-model calls. Existing uncommitted UI-installer changes are excluded from this acceptance copy and commit.
+
+- **Recover from verified native input:** isolate user-boundary rewinds in the host's public export without sorting or merging old branches. A new invocation must verify conversation, host generation, native-input digest and step bounds before rebinding. Responses and stops still match that invocation's window. Without sufficient stop evidence, only public segments recover; phase delivery is not inferred. Unproven rewinds, conflicts and late deliveries remain capture gaps; user acceptance is never inferred.
+- **Cover AG file-index repetition:** shared deduplication already shipped to all hosts. Codex/DSH use persistent inputs; AG ephemeral inputs cannot borrow that coverage. A separate exact-delivery cache now limits optional file indices containing only empty-error/protocol-completion summaries, with complete, verifiable source and file observations. First delivery, revisions, source changes, risks, task/native boundaries and compaction keep their checks. Ephemeral formal knowledge and candidates do not become permanent coverage. File cards omit empty error/protocol-only summaries while preserving readable originals.
+- **Recheck panel access:** an initially unbound, valid single-project scope can reconnect read-only. Page activation can refresh a failed connection with a bounded request, without periodic polling or replaying uncertain actions. Registration and receipts are revalidated after asynchronous results so removed or switched projects cannot regain old controls.
+
+These local mechanisms add no model calls. Complete native receipts do not prove public-text capture. Old frozen packets, failed paid calls, publication policy and host trust are not rewritten automatically. Schema/publication protocol and indexes remain 25/25 and 7/3/1; live-host acceptance is reported separately from offline tests.
 
 ## Review evidence compatibility and early task registration (1.4.49)
 

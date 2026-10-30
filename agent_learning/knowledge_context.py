@@ -626,7 +626,7 @@ class KnowledgeContextMixin:
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     conclusion_used = False
-                    from .work_notice_delivery import FileNoticeGate, coalesce
+                    from .work_notice_delivery import FileNoticeGate, coalesce, protocol_only_file_summary
                     notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
                     validated = self.work_validate_items(project, work_items, workspace=workspace,
                                                          conclusion_max_chars=240, applicability_query=effective,
@@ -652,6 +652,8 @@ class KnowledgeContextMixin:
                             card["summary"] = expanded
                         if handoff:
                             card["reference_role"] = "task_handoff"
+                        if protocol_only_file_summary(work_item):
+                            card.pop("summary", None)
                         if work_item.get("completion", "complete") != "complete":
                             card["completion"] = work_item["completion"]
                         if work_item.get("task_binding_known") is False:
@@ -722,12 +724,15 @@ class KnowledgeContextMixin:
                         delivery_entry = dedup.prepare("work", work_item, card)
                         if dedup.repeated(delivery_entry):
                             continue
+                        if notices.index_repeated(work_item, card):
+                            continue
                         if not work_delivered:
                             lines.append(work_header)
                         lines.append(note)
                         work_used += cost
                         work_delivered.append(work_item)
                         notices.record(work_item)
+                        notices.record_index(work_item, card)
                         if expanded and card.get("summary") == expanded:
                             conclusion_used = True
                         dedup.record(delivery_entry)

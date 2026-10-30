@@ -42,6 +42,18 @@ def _public_field(raw, field):
     return clip(value, PUBLIC_TEXT_MAX_CHARS), coverage
 
 
+def _native_user_position(records, user, initial):
+    """Prove this visible user could be the last user at a native Pre boundary."""
+    if type(initial) is not int or user["step_index"] >= initial:
+        return False
+    trailing = [item for item in records if user["step_index"] < item["step_index"] < initial]
+    return (len(trailing) == initial - user["step_index"] - 1
+            and all(item["step_index"] == user["step_index"] + index + 1
+                    for index, item in enumerate(trailing))
+            and all((item["type"], item["source"], item["status"]) ==
+                    ("EPHEMERAL_MESSAGE", "SYSTEM_SDK", "DONE") for item in trailing))
+
+
 def _native_digest(observed):
     # Optional public capture and local diagnostics cannot change native replay
     # identity, including compatibility with receipts from before this reader.
@@ -327,6 +339,74 @@ class AntigravityAdapter:
                      "(SELECT signature FROM antigravity_faults WHERE project=? AND conversation=? ORDER BY created DESC LIMIT 32)",
                      (project, conversation, project, conversation))
 
+    def _native_branch_anchor(self, project, conversation, observed, snapshot, user, epoch, generation):
+        """A fresh Pre may rebind an exported branch to an exact native input.
+
+        Public model text, ordinary history and inputs before the latest Stop
+        cannot establish this anchor. Existing complete callbacks stay immutable.
+        """
+        r = self.runtime
+        row = r.db.execute(
+            "SELECT e.id,e.payload FROM events e WHERE e.project=? AND e.conversation=? "
+            "AND e.type='AntigravityPublicInput' "
+            "AND json_extract(e.payload,'$.capture_coverage.lastUserInput.source')='native_hook' "
+            "AND e.rowid>COALESCE((SELECT rowid FROM events WHERE project=? AND conversation=? "
+            "AND type='AntigravityStop' ORDER BY created DESC,id DESC LIMIT 1),0) "
+            "ORDER BY e.rowid DESC LIMIT 1", (project, conversation, project, conversation)).fetchone()
+        if row is None:
+            return False
+        try:
+            value = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(value, dict):
+            return False
+        coverage = value.get("capture_coverage", {})
+        if not isinstance(coverage, dict):
+            return False
+        field = coverage.get("lastUserInput", {})
+        if not isinstance(field, dict):
+            return False
+        invocation, initial = value.get("invocation_num"), value.get("initial_steps")
+        if (value.get("host_epoch") != epoch or value.get("generation") != generation
+                or coverage.get("workspace_association") != "installed_workspace"
+                or coverage.get("trajectory_identity") != "current"
+                or field.get("available") is not True or field.get("truncated") is not False
+                or field.get("full_original_available") is not True
+                or value.get("public_input_digest") != digest(clean(user["content"]))
+                or type(invocation) is not int or type(initial) is not int
+                or observed["invocationNum"] <= invocation or observed["initialNumSteps"] < initial):
+            return False
+        pre_key = digest([epoch, generation, _native_digest({"kind": "PreInvocation",
+                         "invocationNum": invocation, "initialNumSteps": initial})])
+        if row["id"] != digest([project, ["antigravity-public-input", conversation, pre_key]]):
+            return False
+        receipt = r.db.execute("SELECT state,host_epoch,generation,task_signature FROM antigravity_receipts "
+            "WHERE project=? AND conversation=? AND event_key=? AND kind='PreInvocation'",
+            (project, conversation, pre_key)).fetchone()
+        if not receipt or tuple(receipt)[:3] != ("complete", epoch, generation):
+            return False
+        window = r.db.execute("SELECT payload FROM events WHERE project=? AND conversation=? "
+            "AND id=? AND type='AntigravityPublicWindow'",
+            (project, conversation, digest([project, ["antigravity-public-window", conversation, pre_key]]))).fetchone()
+        if window:
+            try:
+                saved = json.loads(window[0])
+            except (ValueError, TypeError):
+                return False
+            return (isinstance(saved, dict) and saved.get("version") == 2
+                    and saved.get("host_epoch") == epoch and saved.get("generation") == generation
+                    and saved.get("pre_receipt_key") == pre_key
+                    and saved.get("pre_receipt_signature") == receipt["task_signature"]
+                    and saved.get("user_step") == user["step_index"]
+                    and saved.get("user_digest") == value["public_input_digest"]
+                    and saved.get("file_identity") == snapshot["file_identity"]
+                    and saved.get("path_digest") == snapshot["path_digest"])
+        # The native input can precede a delayed export, so its first window may
+        # be absent. Require the explicit user immediately before its native
+        # initial step, allowing only a fully present run of SDK ephemeral steps.
+        return _native_user_position(snapshot["records"], user, initial)
+
     def _transcript_public(self, project, conversation, observed, raw,
                            epoch, generation, phase_guard, *, _snapshot=None):
         """Public input/response recovery uses the native invocation pair only.
@@ -398,6 +478,10 @@ class AntigravityAdapter:
                     # cannot establish this invocation's response window.
                     unavailable("transcript_native_prompt_mismatch")
                     return
+                if (snapshot.get("branch_recovered") and not native_prompt
+                        and not self._native_branch_anchor(project, conversation, observed, snapshot, user, epoch, generation)):
+                    unavailable("transcript_window_unbound")
+                    return
                 receipt = self.runtime.db.execute("SELECT task_signature FROM antigravity_receipts "
                     "WHERE project=? AND conversation=? AND event_key=?", (project, conversation, pre_key)).fetchone()
                 if receipt is None:
@@ -425,6 +509,29 @@ class AntigravityAdapter:
                               and previous_stop["host_epoch"] == epoch and previous_stop["generation"] == generation else None),
                           "execution_user_step": anchor.get("execution_user_step", user["step_index"]),
                           "execution_user_digest": anchor.get("execution_user_digest", user_digest)}
+                if snapshot.get("branch_identity"):
+                    window["branch_identity"] = snapshot["branch_identity"]
+                    if not anchor:
+                        # Earlier native inputs may have had no public window
+                        # at all. Recovery cannot turn the latest user into a
+                        # new execution start while an older input is unclosed.
+                        first = self.runtime.db.execute(
+                            "SELECT payload FROM events WHERE project=? AND conversation=? "
+                            "AND type='AntigravityPublicInput' "
+                            "AND json_extract(payload,'$.host_epoch')=? "
+                            "AND json_extract(payload,'$.generation')=? "
+                            "AND json_extract(payload,'$.capture_coverage.lastUserInput.source')='native_hook' "
+                            "AND rowid>COALESCE((SELECT rowid FROM events WHERE id=?),0) "
+                            "ORDER BY rowid LIMIT 1", (project, conversation, epoch, generation, prior_stop_id)).fetchone()
+                        if first:
+                            original = json.loads(first[0])
+                            original_field = original.get("capture_coverage", {}).get("lastUserInput", {})
+                            if (original.get("public_input_digest") != user_digest
+                                    or original_field.get("full_original_available") is not True
+                                    or original_field.get("truncated") is not False
+                                    or not _native_user_position(snapshot["records"], user, original.get("initial_steps"))):
+                                window["execution_user_step"] = None
+                                window["execution_user_digest"] = None
                 self.runtime._event(project, conversation, "AntigravityPublicWindow", window,
                     event_id=["antigravity-public-window", conversation, pre_key])
                 observed["public_window"] = {"available": True, "reason": "bound",
@@ -469,6 +576,11 @@ class AntigravityAdapter:
             if (window.get("file_identity") != snapshot["file_identity"]
                     or window.get("path_digest") != snapshot["path_digest"]):
                 coverage["reason"] = "transcript_file_changed"
+                return
+            legacy_normal = ("branch_identity" not in window and not snapshot.get("branch_recovered")
+                             and not snapshot.get("head_omitted"))
+            if not legacy_normal and window.get("branch_identity") != snapshot.get("branch_identity"):
+                coverage["reason"] = "transcript_user_boundary_changed"
                 return
             if (window.get("user_step") != user["step_index"] or window.get("user_digest") != user_digest
                     or any(item["type"] == "USER_INPUT" and item["step_index"] >= initial for item in records)):

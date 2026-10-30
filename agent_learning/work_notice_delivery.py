@@ -71,6 +71,66 @@ class FileNoticeGate:
     def __init__(self, runtime, project, conversation, agent, scope, delivery):
         self.r, self.project, self.conversation, self.agent = runtime, project, conversation, agent or ""
         self.scope, self.delivery = scope, delivery
+        self._index_scope_computed, self._index_scope_value = False, None
+
+    def _index_scope(self):
+        """File-index frequency is not proof of persistent model coverage."""
+        if not self._index_scope_computed:
+            from .runtime import digest
+            self._index_scope_computed = True
+            generation = None
+            if self.r.host in {"antigravity", "dsh"}:
+                table = "antigravity_trajectories" if self.r.host == "antigravity" else "dsh_sessions"
+                row = self.r.db.execute(f"SELECT generation,ambiguous FROM {table} WHERE project=? AND conversation=?",
+                                       (self.project, self.conversation)).fetchone()
+                if row is None or row["ambiguous"] or type(row["generation"]) is not int or row["generation"] < 1:
+                    return None
+                generation = row["generation"]
+            self._index_scope_value = digest([self.scope, "file-index-v1", generation])
+        return self._index_scope_value
+
+    def _index_key(self, item, card):
+        from .runtime import digest
+        if (not protocol_only_file_summary(item) or item.get("state") not in {"call_completed", "succeeded", "reported", "model_reported"}
+                or item.get("completion", "complete") != "complete" or not card.get("files")
+                or card.get("read_required") is not True or card.get("reference_role") == "source_update"
+                or item.get("source_changed") or item.get("file_state_changed") or item.get("source_files_changed")
+                or item.get("candidate_reference_risk") or item.get("published_knowledge_risk")
+                or item.get("pending_counterexample_count") or item.get("file_projection_incomplete")
+                or item.get("coverage", {}).get("truncated") or not item.get("source_event_refs")
+                or not item.get("source_version") or not item.get("file_state")):
+            return None
+        files = item.get("files", [])
+        if not files or any(file.get("current_version", {}).get("status") != "stat_observed" for file in files):
+            return None
+        return "index:" + digest([item["memory_id"], item["revision"], item["source_version"], item["file_state"], card])
+
+    def index_repeated(self, item, card):
+        """Suppress only the same protocol-only file index in a verified boundary.
+
+        Formal/candidate material, substantive file results and source-change
+        warnings never use this cache. Ephemeral inputs still need knowledge.
+        """
+        try:
+            key = self._index_key(item, card)
+            scope = self._index_scope() if key else None
+            if scope is None:
+                return False
+            row = self.r.db.execute("SELECT created FROM work_notice_delivery WHERE project=? AND scope=? AND path_key=?",
+                                   (self.project, scope, key)).fetchone()
+            return bool(row and type(row[0]) in (int, float) and math.isfinite(row[0]) and row[0] <= time.time())
+        except (sqlite3.Error, ValueError, TypeError, KeyError):
+            return False
+
+    def record_index(self, item, card):
+        """Called inside the delivery savepoint only after the whole card fits."""
+        try:
+            key = self._index_key(item, card)
+            scope = self._index_scope() if key else None
+            if scope is not None:
+                self._record_keys([key], scope)
+        except (sqlite3.Error, ValueError, TypeError, KeyError):
+            pass
 
     def annotate(self, item):
         """Use the trusted context owner, never an identity from a recall item."""
@@ -119,12 +179,27 @@ class FileNoticeGate:
         if not keys:
             return
         try:
-            for key in keys:
-                self.r.db.execute("INSERT OR REPLACE INTO work_notice_delivery VALUES(?,?,?,?,?,?)",
-                                 (self.project, self.conversation, self.agent, self.scope, key, time.time()))
-            self.r.db.execute("DELETE FROM work_notice_delivery WHERE project=? AND conversation=? AND agent=? "
-                              "AND rowid NOT IN (SELECT rowid FROM work_notice_delivery WHERE project=? "
-                              "AND conversation=? AND agent=? ORDER BY created DESC,rowid DESC LIMIT 256)",
-                              (self.project, self.conversation, self.agent, self.project, self.conversation, self.agent))
+            self._record_keys(keys, self.scope)
         except sqlite3.Error:
             pass  # Optional cache failure keeps normal warnings available.
+
+    def _record_keys(self, keys, scope):
+        for key in keys:
+            self.r.db.execute("INSERT OR REPLACE INTO work_notice_delivery VALUES(?,?,?,?,?,?)",
+                             (self.project, self.conversation, self.agent, scope, key, time.time()))
+        self.r.db.execute("DELETE FROM work_notice_delivery WHERE project=? AND conversation=? AND agent=? "
+                          "AND rowid NOT IN (SELECT rowid FROM work_notice_delivery WHERE project=? "
+                          "AND conversation=? AND agent=? ORDER BY created DESC,rowid DESC LIMIT 256)",
+                          (self.project, self.conversation, self.agent, self.project, self.conversation, self.agent))
+
+
+def protocol_only_file_summary(item):
+    """Trim an empty protocol envelope from an automatic index, not its source."""
+    if item.get("type") != "file_change":
+        return False
+    try:
+        value = json.loads(item.get("summary", ""))
+        return (isinstance(value, dict) and set(value) == {"error", "isError"}
+                and value["error"] in ("", None) and value["isError"] is False)
+    except (ValueError, TypeError):
+        return False

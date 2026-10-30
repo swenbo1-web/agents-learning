@@ -275,7 +275,27 @@ export function createRegistryController(root, spawnProcess = spawn) {
         record = { identity: registryIdentity(entry), bridge, controller: createController(installation, bridge) };
       }
       records.delete(workspaceKey); records.set(workspaceKey, record);
-      return record.controller(method, data);
+      const result = await record.controller(method, data);
+      // Registration can change while Python is processing a read or action.
+      // Never publish a capability/result from a removed or replaced binding.
+      let current;
+      try {
+        current = loadRegistry(root).projects.find((value) => key(value.workspace) === workspaceKey);
+      } catch (error) { close(); throw error; }
+      if (!current || registryIdentity(current) !== record.identity || records.get(workspaceKey) !== record
+          || record.bridge.closed) {
+        if (records.get(workspaceKey) === record) {
+          record.bridge.close(); records.delete(workspaceKey);
+        }
+        return { visible: false, reason: current ? "panel_refresh_required" : "workspace_not_bound" };
+      }
+      try { record.bridge.assertCurrent(); }
+      catch (error) {
+        record.bridge.close();
+        if (records.get(workspaceKey) === record) records.delete(workspaceKey);
+        throw error;
+      }
+      return result;
     },
   };
 }

@@ -72,9 +72,12 @@
   Object.assign(strings["zh-CN"], {reconnect:"重新连接",connectionLost:"本次连接请求未完成。可重新连接核对当前项目，不会重放刚才的操作。",actionUncertain:"刚才的操作结果尚未确认。请重新连接并核对当前状态，再决定后续操作；不会自动重试。"});
   Object.assign(strings.en, {renewingRead:"Refreshing the local read connection…"});
   Object.assign(strings["zh-CN"], {renewingRead:"正在刷新本地只读连接…"});
+  Object.assign(strings.en, {registrationPending:"No current project binding is available. Reconnect to check an installation or registration added since this panel opened. Project controls stay hidden until verified."});
+  Object.assign(strings["zh-CN"], {registrationPending:"当前项目尚未完成绑定。安装或更新登记后，可点“重新连接”核对；验证前不会显示项目控制。"});
   let generation = 0, capability = null, summary = null, diagnostics = null, context = null, busy = false, disposed = false;
   let leaseStartedAt = null, installationFingerprint = null;
   let recoveryAvailable = false, recoveryIntent = false, reconnectTurn = null, bindTurn = null, noticeKey = "waiting", resumeRecovery = false;
+  let lastActivationReadAt = null;
   Object.assign(strings["zh-CN"], {dispatch_failed_call_requires_review:"旧失败调用待确认，可在审批与设置中选择恢复操作。",dispatch_unknown_call_requires_review:"上次调用结果待确认，请先核对后再决定是否重试。"});
   Object.assign(strings.en, {dispatch_failed_call_requires_review:"A previous call failed. Review recovery options in Approval & settings.",dispatch_unknown_call_requires_review:"A previous call outcome is unknown. Verify it before deciding whether to retry."});
   Object.assign(strings["zh-CN"], {dispatch_protected_history_only:"现有调用保护仍保留，当前没有可直接送审的新工作；待处置阶段另列，旧调用不会自动重试。"});
@@ -249,6 +252,15 @@
 
   const validFingerprint = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 
+  function validHostContext(uris, conversation) {
+    if (!Array.isArray(uris) || uris.length !== 1 || typeof uris[0] !== "string"
+        || typeof conversation !== "string" || !conversation || conversation.length > 500) return false;
+    try {
+      const uri = new URL(uris[0]);
+      return uri.protocol === "file:" && (!uri.hostname || uri.hostname === "localhost") && !uri.search && !uri.hash;
+    } catch { return false; }
+  }
+
   async function renewReadLease(turn) {
     const now = monotonicNow(), identity = readIdentity(summary);
     // Server leases last 300 seconds. Start at request dispatch, with a margin;
@@ -283,7 +295,7 @@
     recoveryIntent = recoverable;
     bindTurn = turn;
     const conversation = window.sidecar?.conversationId;
-    if (!Array.isArray(uris) || uris.length !== 1 || typeof conversation !== "string" || !conversation) { bindTurn = null; hide(); return; }
+    if (!validHostContext(uris, conversation)) { bindTurn = null; hide(); return; }
     const next = {workspace_uris:uris.slice(),conversation_id:conversation};
     const started = monotonicNow();
     try {
@@ -291,14 +303,14 @@
       if (disposed || turn !== generation) return;
       if (window.sidecar?.conversationId !== conversation) { hide(); return; }
       if (!result.visible || typeof result.capability !== "string" || !result.summary) {
-        const retryable = recoverable && ["connection_unavailable", "panel_refresh_required"].includes(result.reason);
-        hide(retryable ? "connectionLost" : "unavailable", retryable); return;
+        const retryable = ["workspace_not_bound", "connection_unavailable", "panel_refresh_required", "installation_changed"].includes(result.reason);
+        hide(result.reason === "workspace_not_bound" ? "registrationPending" : retryable ? "connectionLost" : "unavailable", retryable); return;
       }
       recoveryIntent = false;
       context = next; capability = result.capability; leaseStartedAt = started;
       installationFingerprint = validFingerprint(result.installation_fingerprint) ? result.installation_fingerprint : null;
       summary = result.summary; render();
-    } catch { if (!disposed && turn === generation) hide("connectionLost", recoverable); }
+    } catch { if (!disposed && turn === generation) hide("connectionLost", true); }
     finally { if (bindTurn === turn) { bindTurn = null; render(); } }
   }
 
@@ -321,6 +333,16 @@
       clearTimeout(timer);
       if (reconnectTurn === turn) { reconnectTurn = null; render(); }
     }
+  }
+
+  function retryOnActivation() {
+    if (disposed || busy || !recoveryAvailable || reconnectTurn !== null || bindTurn !== null
+        || document.visibilityState === "hidden") return;
+    const now = monotonicNow();
+    if (now === null || lastActivationReadAt !== null && now - lastActivationReadAt < 2000) return;
+    lastActivationReadAt = now;
+    // Only re-read current SDK context and bootstrap. Never replay an action.
+    reconnect(true);
   }
 
   async function action(name, extra = {}) {
@@ -364,6 +386,8 @@
     if (!disposed) return;
     disposed = false; reconnect(resumeRecovery);
   });
+  window.addEventListener("focus", retryOnActivation);
+  document.addEventListener?.("visibilitychange", retryOnActivation);
   render(); hide("waiting");
   if (window.parent === window || !window.sidecar || typeof window.sidecar.getWorkspaceUris !== "function"
       || typeof window.sidecar.onWorkspaceChange !== "function") { hide(); return; }

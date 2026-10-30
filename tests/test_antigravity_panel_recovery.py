@@ -61,9 +61,9 @@ async function reconnect(){const before=requests.length;const queries=sdkQueries
  if(scenario==='late_initial_sdk_rejection')reader=()=>new Promise((_,reject)=>{rejectInitialRead=reject;});
  runInNewContext(script,context);
  if(scenario==='initial_uninstalled'){
-   await flush();assert.equal(requests.length,1);reply(requests[0],{visible:false,reason:'workspace_not_bound'});await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,true);
+   await flush();assert.equal(requests.length,1);reply(requests[0],{visible:false,reason:'workspace_not_bound'});await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,false);
  }else if(scenario==='initial_connection_failure'){
-   await flush();assert.equal(requests.length,1);requests[0].reject(new Error('initial connection unavailable'));await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,true);assert.equal(requests.length,1);
+   await flush();assert.equal(requests.length,1);requests[0].reject(new Error('initial connection unavailable'));await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,false);assert.equal(requests.length,1);
  }else if(scenario==='initial_context_missing'){
    await flush();assert.equal(requests.length,0);assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,true);
  }else if(scenario==='late_initial_sdk_rejection'){
@@ -81,7 +81,7 @@ async function reconnect(){const before=requests.length;const queries=sdkQueries
      const req=await reconnect();const before=requests.length;reply(req,{visible:false,reason});await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,false,`${reason} removed explicit recovery`);assert.equal(elements.reconnect.disabled,false);assert.equal(requests.length,before,'recoverable bootstrap retried itself');
    }
    const restored=await reconnect();reply(restored,valid('recovered-cap'));await flush();assert.equal(elements.panel.hidden,false);assert.equal(requests.filter(r=>r.body.action==='debug').length,1);
-   await failAction();const uninstalled=await reconnect();reply(uninstalled,{visible:false,reason:'workspace_not_bound'});await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,true,'an uninstalled project retained recovery authority');
+   await failAction();const uninstalled=await reconnect();reply(uninstalled,{visible:false,reason:'workspace_not_bound'});await flush();assert.equal(elements.panel.hidden,true);assert.equal(elements.reconnect.hidden,false,'a current workspace lost its read-only registration check');
  }else if(scenario==='mutating_unknown_not_replayed'){
    await boot();const req=await failAction('history');assert.equal(req.body.confirm,true);assert.equal(typeof req.body.request_id,'string');const before=requests.length;const next=await reconnect();reply(next,valid('fresh-after-unknown'));await flush();assert.equal(requests.length,before+1);assert.equal(requests.filter(r=>r.body.action==='archive_history').length,1);assert.equal(elements.result.textContent,'');
  }else if(scenario==='reconnect_reads_new_host_context'){
@@ -221,10 +221,10 @@ class AntigravityPanelRecoveryTests(unittest.TestCase):
     def test_first_pageshow_does_not_duplicate_initial_bootstrap(self):
         self.scenario("initial_pageshow_no_duplicate")
 
-    def test_uninstalled_project_has_no_controls_or_reconnect(self):
+    def test_uninstalled_project_has_no_controls_but_can_recheck_registration(self):
         self.scenario("initial_uninstalled")
 
-    def test_first_connection_failure_has_no_prior_scope_to_recover(self):
+    def test_first_connection_failure_allows_read_only_context_recheck(self):
         self.scenario("initial_connection_failure")
 
     def test_initial_missing_context_does_not_request(self):

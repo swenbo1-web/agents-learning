@@ -89,17 +89,23 @@ def read_public(raw):
             return _failure("transcript_changed_during_read")
         if len(data) > MAX_SCAN_BYTES:
             return _failure("transcript_scan_budget")
+        data_offset = offset
         if offset:
-            _, separator, data = data.partition(b"\n")
+            discarded, separator, data = data.partition(b"\n")
             if not separator:
                 return _failure("transcript_scan_budget")
+            data_offset += len(discarded) + len(separator)
         if data and not data.endswith(b"\n"):
             return _failure("transcript_incomplete_line")
-        lines = data.splitlines()
+        lines = data.splitlines(keepends=True)
         if len(lines) > MAX_RECORDS:
             return _failure("transcript_scan_budget")
-        records, last_step = [], -1
-        for line in lines:
+        records, last_step, branch_identity = [], -1, None
+        branch_recovered, line_position = False, data_offset
+        for raw_line in lines:
+            position = line_position
+            line_position += len(raw_line)
+            line = raw_line.rstrip(b"\r\n")
             if time.monotonic() - started > READ_SECONDS:
                 return _failure("transcript_read_deadline")
             if not line.strip():
@@ -116,9 +122,6 @@ def read_public(raw):
             if (isinstance(step, bool) or not isinstance(step, int) or not 0 <= step < 2 ** 53
                     or not all(isinstance(entry.get(key), str) for key in ("type", "source", "status"))):
                 return _failure("transcript_schema_unknown")
-            if step <= last_step:
-                return _failure("transcript_step_conflict")
-            last_step = step
             record = {key: entry[key] for key in ("step_index", "type", "source", "status")}
             public = ((entry["type"], entry["source"]) in {
                 ("USER_INPUT", "USER_EXPLICIT"), ("PLANNER_RESPONSE", "MODEL")})
@@ -132,6 +135,25 @@ def read_public(raw):
                         or any(not isinstance(item, str) for item in truncation)):
                     return _failure("transcript_schema_unknown")
                 record["truncated"] = "content" in truncation
+            if step <= last_step:
+                # An explicit user can replace a prior exported suffix. Keep
+                # the physical order and discard that entire abandoned branch;
+                # never sort or merge competing model/tool records. Consumers
+                # must independently bind a recovered branch to a native input.
+                if (step == last_step or (record["type"], record["source"], record["status"]) !=
+                        ("USER_INPUT", "USER_EXPLICIT", "DONE")
+                        or not isinstance(record.get("content"), str) or not record["content"].strip()
+                        or record.get("truncated")):
+                    return _failure("transcript_step_conflict")
+                branch_recovered = True
+                records = []
+            last_step = step
+            if ((record["type"], record["source"], record["status"]) == ("USER_INPUT", "USER_EXPLICIT", "DONE")
+                    and isinstance(record.get("content"), str) and record["content"].strip()):
+                # Byte position is stable when a bounded tail advances. A fresh
+                # physical user line still has a distinct identity even when
+                # the host reuses its index and exact public text.
+                branch_identity = _hash(["public-user-position", position, record])
             # Do not copy thinking, tool calls/results, arbitrary metadata or any
             # other text from the parsed source object into the public result.
             records.append(record)
@@ -141,6 +163,7 @@ def read_public(raw):
         return {"available": True, "source": "antigravity_transcript", "records": records,
                 "head_omitted": bool(offset), "last_step": last_step,
                 "file_identity": _hash([before.st_dev, before.st_ino]),
-                "path_digest": _hash(os.path.normcase(str(path)))}
+                "path_digest": _hash(os.path.normcase(str(path))),
+                "branch_identity": branch_identity, "branch_recovered": branch_recovered}
     except (OSError, ValueError, OverflowError):
         return _failure("transcript_unavailable")
