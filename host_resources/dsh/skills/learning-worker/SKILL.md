@@ -10,7 +10,8 @@ Complete the current authorized task. Querying or adopting knowledge never expan
 ## Identity and task state
 
 - Pass the current Hook's `context_handle` on every stateful call (`session_context`, `task_update`, `case_feedback`, `knowledge_use`, `work_memory_read`) and to `knowledge_search`, `knowledge_read` and `work_memory_search` to register actual exposure. Without a verified handle, use read-only project queries.
-- For an existing task, read `session_context` and pass `expected_task_id` and `expected_write_version` to every `task_update`, including replacement with `new_task=true`. Start a new task only for genuinely new work. Resume an inactive task explicitly; this does not restore execution permissions.
+- You may first read project rules and connection state. Register genuinely new work with `task_update(new_task=true)` **before the first write, execution or child delegation**. Explicitly resume an inactive task only when continuing that actual work after checking the current request. Ordinary continuation of an active task and ordinary questions do not require a new task. Registration never restores execution permissions.
+- For an existing task, read `session_context` and pass `expected_task_id` and `expected_write_version` to every `task_update`, including replacement with `new_task=true`. Pre-registration observations and already-started children keep their original identities; registering at delivery cannot backfill them into the new stage.
 - Child agents (`subagent` / `subagent_fork` / `workflow`) receive fixed assignments bound to the parent task snapshot. Read `session_context` to inspect the assigned scope, and never overwrite the parent task.
 
 ## Retrieval, work history and progressive reading

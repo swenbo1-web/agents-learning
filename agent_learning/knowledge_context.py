@@ -430,6 +430,18 @@ class KnowledgeContextMixin:
                     append_complete(f"[Agent Learning] task={task['id']} revision={task['revision']} write_version={task.get('write_version', 'unknown')} status={task['status']}; 当前要求优先，任务上报不签发权限。")
                 if self.config["enforce_task_policy"]:
                     append_complete("执行保护：" + self.execution_status(project, conversation)["reason"])
+            if not agent_id and (not task or task["status"] != "active"):
+                # A prompt cannot establish a task contract. Give conditional
+                # advice once per actual boundary, never reassign old evidence.
+                notice_key = digest([self.host, self.host_instance, epoch, work_context_epoch,
+                    self._task_key(task)[:2], task["status"] if task else None,
+                    task.get("execution_epoch") if task else None])
+                if row.get("task_notice_key") != notice_key:
+                    notice = ("[Agent Learning] 尚无活动任务。真正开工前先用 session_context 核对，再 task_update 登记或显式恢复，"
+                              "早于写入、执行、委派；普通问答无需建任务。登记前事件不自动归入新阶段。")
+                    if len(notice) <= remaining():
+                        lines.append(notice)
+                        self.db.execute(f"UPDATE {table} SET task_notice_key=? WHERE {where}", (notice_key, *key))
             if compact:
                 self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]' WHERE {where}", key)
             row = self.db.execute(f"SELECT injected FROM {table} WHERE {where}", key).fetchone()

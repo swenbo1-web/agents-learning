@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 
@@ -138,6 +139,14 @@ class ContextStorageMixin:
             fault_columns = {row[1] for row in self.db.execute("PRAGMA table_info(context_faults)")}
             if "results" not in fault_columns:
                 self.db.execute("ALTER TABLE context_faults ADD COLUMN results TEXT NOT NULL DEFAULT '[]'")
+            # Optional one-slot reminder state: check column availability without
+            # scanning rows or inspecting schema on every context/tool event.
+            try:
+                self.db.execute("SELECT task_notice_key FROM contexts LIMIT 0")
+            except sqlite3.OperationalError as exc:
+                if "no such column: task_notice_key" not in str(exc):
+                    raise
+                self.db.execute("ALTER TABLE contexts ADD COLUMN task_notice_key TEXT")
             # 索引是独立派生版本；schema 已是 6 也不能沿用旧分词投影。
             exists = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                      "AND name='knowledge_index_state'").fetchone()

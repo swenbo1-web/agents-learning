@@ -591,6 +591,19 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
                 "reason": "bounded scan blocked; no invocation reserved"} if skipped else {})}
 
 
+def _canonical_candidate_evidence(packet, body):
+    """Normalize exact current-case qualifications without granting source access.
+
+    Only visible primary event IDs are mapped. Raw IDs (including explicitly
+    offered related history) and all unknown strings retain their spelling for
+    the existing source/authorization checks. Never mutate the archived reply.
+    """
+    problem = packet["problem"]
+    qualified = {f"{problem['id']}@{problem['revision']}:{event['id']}": event["id"]
+                 for event in packet["events"]}
+    return dict(body, evidence_refs=[qualified.get(ref, ref) for ref in body["evidence_refs"]])
+
+
 def _accept_history_candidates(runtime, project, reserved, bodies, reason):
     """同一调用的候选全部成功或回滚；每条仍有独立来源与审批身份。"""
     from .admin_governance import propose_governance
@@ -605,6 +618,7 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
         if (body["problem_id"] != packet["problem"]["id"]
                 or body["problem_revision"] != packet["problem"]["revision"]):
             raise ContractError("administrator changed review identity or revision")
+        body = _canonical_candidate_evidence(packet, body)
         if job_id and body["validation_level"] != "reported":
             raise ContractError("historical public text must remain reported")
         if not job_id and set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
@@ -728,6 +742,7 @@ def _accept_response(runtime, project, reserved, response):
             raise ResponseRejected("candidate_schema_invalid", "response.candidate") from exc
         if body["problem_id"] != packet["problem"]["id"] or body["problem_revision"] != packet["problem"]["revision"]:
             raise ContractError("administrator changed review identity or revision")
+        body = _canonical_candidate_evidence(packet, body)
         if history_job_id:
             from .history_context import link_history_evidence
             if body["validation_level"] != "reported":

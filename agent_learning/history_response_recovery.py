@@ -341,10 +341,13 @@ def local_access(runtime, project, problem_id, job_id, *, action, candidate=None
 
 
 def _candidate_digests(response, packet):
+    from .admin import _canonical_candidate_evidence
     values = response.get("candidates") or ([response["candidate"]] if response.get("candidate") else [])
     result = []
     for body in values:
-        body = clean(dict(body))
+        # Authorization must bind the same working body acceptance will submit;
+        # the frozen response and its digest remain the original public reply.
+        body = clean(_canonical_candidate_evidence(packet, body))
         body["metadata"] = metadata(body.get("metadata"))
         body["knowledge_kind"] = body.get("knowledge_kind", "solution")
         body["evidence_refs"] = sorted(set(body["evidence_refs"]))

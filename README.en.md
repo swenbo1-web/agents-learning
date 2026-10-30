@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.48 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.49 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.48 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.49 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1331,6 +1331,8 @@ Use the actual returned problem ID in `packet PROBLEM_ID`. The administrator pre
 | `validation_level` | `reported` or `tool_success` |
 | `metadata` (optional) | Strings for `tool`, `tool_version`, `error_code`, `environment`, `verification`; omit or leave empty when unknown |
 | `knowledge_kind` (optional) | `fact`, `solution` or `pattern`; defaults to `solution` |
+
+Use visible raw event IDs in `evidence_refs`. Acceptance of frozen administrator replies and explicit local revalidation also supports exact current-case qualifications. Direct `propose`/candidate writes still require raw IDs; this compatibility never searches for or expands sources.
 
 `reported` means a statement has been recorded, not verified. `tool_success` requires an explicitly completed and successful `PostToolUse` event and can only support that specific tool result. Standard MCP `isError:false` is recorded as `call_completed`, which only means the protocol call completed and cannot by itself support `tool_success`. A zero exit code does not by itself establish a domain root cause, gameplay outcome or user acceptance.
 
@@ -1819,7 +1821,18 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.48</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.49</summary>
+
+## Review evidence compatibility and early task registration (1.4.49)
+
+Isolated checks add 36 tests; the final 119 targeted regressions all pass with no skips. A broader 2,326-test run found one prompt-budget regression, fixed and covered by the final checks; seven tests skipped. That broader run is not reported as fully passing. Tests launched no live reviewer models and changed no real knowledge.
+
+- **Compatible spelling for visible evidence:** administrators should copy `events[].id` into `evidence_refs` and fill problem identity/revision separately. Acceptance only canonicalizes an exact `problem_id@revision:event_id` from the current frozen case, matching revision and visible events. Wrong cases, revisions and out-of-packet sources remain rejected. Related history retains its separate batch authorization checks.
+- **Preserve original replies and accounting:** normalization uses a working copy. Archived public replies, frozen snapshots, calls and usage remain unchanged. Eligible old replies still require explicit local revalidation; updating does not retry models, restore failed calls or rebuild old packets. Format guidance leaves existing semantic review signatures unchanged.
+- **Register before execution or delegation:** workers may first read project rules and connection state. Register real new work before writing, executing or delegating; explicitly resume inactive work. Parent contexts without an active task receive a bounded, deduplicated conditional reminder. Ordinary questions do not create tasks, and previous tool events or child assignments are never reassigned to a new phase.
+- **Guidance limits:** reminders cannot guarantee worker compliance or infer a new goal within an active task. The worker still explicitly registers genuine task changes.
+
+Schema/publication protocol and index versions remain 25/25 and 7/3/1. No additional model calls or changes to administrator, publication or installation switches. Offline regression does not replace live host acceptance.
 
 ## Follow-up history filtering and phase delivery metadata (1.4.48)
 

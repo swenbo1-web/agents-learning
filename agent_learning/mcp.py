@@ -61,7 +61,8 @@ CANDIDATE = schema({
     "problem_id": NONEMPTY, "problem_revision": {"type": "integer", "minimum": 1},
     "title": NONEMPTY, "content": NONEMPTY, "category": CATEGORY,
     "applicability": NONEMPTY, "limitations": NONEMPTY,
-    "evidence_refs": {"type": "array", "items": NONEMPTY, "minItems": 1},
+    "evidence_refs": {"type": "array", "items": NONEMPTY, "minItems": 1,
+                      "description": "Copy visible raw events[].id verbatim; keep problem_id and problem_revision separate. History related IDs must be explicitly visible."},
     "validation_level": {"type": "string", "enum": sorted(VALIDATION_LEVELS)},
     "metadata": METADATA, "knowledge_kind": KNOWLEDGE_KIND,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
