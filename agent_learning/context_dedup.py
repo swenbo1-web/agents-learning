@@ -162,7 +162,7 @@ class ContextDedup:
     def _prepare(self, channel, item, card):
         from .runtime import digest
         if (item.get("source_changed") or item.get("file_state_changed")
-                or item.get("source_files_changed") or item.get("candidate_reference_risk")
+                or item.get("source_files_changed") or item.get("candidate_reference_risk") or item.get("published_knowledge_risk")
                 or item.get("pending_counterexample_count")
                 or any(file.get("version_changed") is True for file in item.get("files", ()))):
             return None

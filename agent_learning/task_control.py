@@ -96,9 +96,20 @@ class TaskControlMixin:
                          "write_version": next_write_version, "execution_epoch": execution_epoch},
                         task_id=task_id, task_revision=next_revision)
             if changed_contract:
-                for table in ("contexts", "subagent_contexts"):
-                    self.db.execute(f"UPDATE {table} SET epoch=epoch+1,injected='[]',last_query='',retrieval_signature='',retrieval_refs='[]' WHERE project=? AND conversation=?",
-                                    (project, conversation_id))
+                self.db.execute("UPDATE contexts SET epoch=epoch+1,injected='[]',last_query='',"
+                                "retrieval_signature='',retrieval_refs='[]' WHERE project=? AND conversation=?",
+                                (project, conversation_id))
+                # A dispatched child retrieves its immutable assignment snapshot,
+                # not this new parent contract. Keep its delivery coverage; real
+                # compaction, assignment/host changes and risk notices retain
+                # their independent boundaries. Unknown legacy children reset.
+                self.db.execute("UPDATE subagent_contexts SET epoch=epoch+1,injected='[]',last_query='',"
+                    "retrieval_signature='',retrieval_refs='[]' WHERE project=? AND conversation=? "
+                    "AND NOT EXISTS(SELECT 1 FROM assignments a JOIN context_access c ON c.handle=a.context_handle "
+                    "WHERE a.project=subagent_contexts.project AND a.conversation=subagent_contexts.conversation "
+                    "AND a.agent=subagent_contexts.agent AND a.host_epoch=? AND a.task_id IS NOT NULL "
+                    "AND c.project=a.project AND c.conversation=a.conversation AND c.agent=a.agent "
+                    "AND c.host_epoch=a.host_epoch)", (project, conversation_id, self.session_epoch()))
             from .phase_review import arm
             from .phase_window import task_changed
             current = self.task(project, conversation_id)

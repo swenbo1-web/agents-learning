@@ -1,6 +1,6 @@
 {
   "name": "agent-learning",
-  "version": "1.4.46",
+  "version": "1.4.47",
   "description": "Local-first governed project memory for DeepSeek Harness, Codex and Antigravity",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/swenbo1-web/agents-learning.git" },

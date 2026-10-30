@@ -40,8 +40,8 @@ _MAX_QUERY_CHARS = 65536
 _CACHE_LIMIT = 256
 _CACHE_TOUCH_DISTANCE = 32
 _CACHE_PRESSURE_TOUCH_DISTANCE = 8
-_MATCH_POLICY_VERSION = 11
-_RANK_POLICY_VERSION = 2
+_MATCH_POLICY_VERSION = 12
+_RANK_POLICY_VERSION = 3
 _RECALL_POLICY_VERSION = 1
 _TOOL_FIELDS = {"exit_code", "return_code", "returncode", "is_error", "tool_response", "tool_name"}
 # These transport/tool names describe how an operation was performed. Unlike a
@@ -288,13 +288,17 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
         _specific_anchor(anchor) for anchor in anchors))
     focus = focused_settings(query, _GENERIC_TOOL_NAMES) if _focus is None else _focus
     # A named setting/API plus an exact positive title match is a focused query.
-    # Additional English business topics must still match; generic tool names,
-    # transport failures and explanatory Chinese prose do not dilute the setting.
+    # English and Chinese business topics remain independent evidence. Sharing
+    # just "cache" or "recovery" cannot make a setting's other domain relevant.
     named_terms = match_terms(" ".join(re.findall(r"[A-Za-z][A-Za-z0-9]*", query)))
     technical = {token for token in named_terms if token in query_weights and re.fullmatch(r"[a-z][a-z0-9]*", token)
                  and token not in _GENERIC_TOOL_NAMES | _EN_REQUEST_WORDS | _TOOL_FAULT_WORDS | _TOOL_USAGE_WORDS}
-    if (exact and focus and set(focus) <= set(match_terms(positive_body.get("title", "")))
-            and technical <= positive):
+    chinese = " ".join(re.findall(r"[\u3400-\u9fff]+", _ZH_CONTEXT.sub(" ", query)))
+    scope = {token for token in match_terms(_TOOL_FAULT_ZH.sub(" ", _ZH_REQUEST.sub(" ", chinese)))
+             if len(token) > 1}
+    scope_matched = len(scope.intersection(positive)) >= min(2, len(scope))
+    focused_title = bool(focus) and set(focus) <= set(match_terms(positive_body.get("title", "")))
+    if exact and focused_title and technical <= positive and scope_matched:
         eligible = True
     if not eligible and strong:
         # 长中文请求会降低全句覆盖；连续四字的问题短语仍可作为明确命中依据。
@@ -307,11 +311,20 @@ def _match_info(body_json, query_weights, denominator, query, *, _values=None, _
                     break
             if eligible:
                 break
+    focus_scope_mismatch = (focused_title and not scope_matched
+                            and not any(_specific_anchor(anchor) for anchor in anchors))
+    if focus_scope_mismatch:
+        # Candidate and work lanes may use different token weights. A shared
+        # setting plus a generic word must not pass their ordinary coverage
+        # threshold when its independently stated business scope is absent.
+        eligible = False
     result = {"score": round(score, 6), "coverage": round(coverage, 6),
             "matched_terms": matched_labels(query, [token for token in query_weights if token in matches], terms),
             "auto_eligible": eligible}
     if not eligible and any(len(token) > 1 and token not in positive_matches for token in matches):
         result["auto_exclusion_reason"] = "topic_only_in_restrictions"
+    if focus_scope_mismatch:
+        result["auto_exclusion_reason"] = "setting_business_scope_mismatch"
     tool_names = _GENERIC_TOOL_NAMES.intersection(query_weights)
     if tool_names:
         # A split tool name can account for most of a short query's coverage.

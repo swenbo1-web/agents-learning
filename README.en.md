@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.46 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.47 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.46 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.47 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1819,7 +1819,16 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.46</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.47</summary>
+
+## Governed work history and injection scope fixes (1.4.47)
+
+- **Retired claims cannot return through history:** existing reverse event/case indexes connect work material to published conclusions. Matching full original text, an explicit complete conclusion sentence, or a clearly bounded original block stops automatic replay when disputed, revoked or superseded. Fresh chats, file lookup, compaction and task handoffs share this check. It compares source-linked literal material, not semantic guesses or every independent claim sharing an event.
+- **Keep history inspectable:** manual reads and completed-section receipts retain governance risks. Previously exposed material gets a neutral update without repeating stale advice. Explicit restoration or counterexample resolution is rechecked. Comparison is bounded; incomplete checks are unknown. Original records and explicit governance requirements remain.
+- **Business and formatting boundaries:** setting-name shortcuts also check Chinese business scope; inline conclusion/restriction labels no longer complete an unrelated topic. Original text, full conditions and useful prohibitive conclusions are retained.
+- **Less repetition for assigned children:** changing a parent task preserves valid fixed-assignment child coverage. Actual compaction, assignment/host changes and risk notices keep their own invalidation boundaries.
+
+Schema/publication protocol remain 25/25 and index versions 7/3/1; matching/ranking policies advance to 12/3. No additional model calls or changes to administrator, publication, budget or installation switches. Default lexical retrieval still has limited paraphrase coverage; sandbox metrics do not establish real-task benefits.
 
 ## Injection topics and settings in descriptive questions (1.4.46)
 

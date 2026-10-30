@@ -334,7 +334,7 @@ class ContextDedupTests(unittest.TestCase):
         self.assertEqual(changed["reference_role"], "source_update")
         self.assertNotIn("summary", changed)
 
-    def test_formal_coverage_is_revalidated_after_source_selection(self):
+    def test_revocation_after_selection_cannot_replay_the_same_work_claim(self):
         formal, source = self.published()
         self.r.config["work_memory"]["automatic_context"] = False
         self.context()
@@ -345,7 +345,10 @@ class ContextDedupTests(unittest.TestCase):
             return original(project, items, workspace=workspace, **kwargs)
         with patch.object(self.r, "work_validate_items", side_effect=revoked):
             text = self.context()
-        self.assertIn(source["memory"]["memory_id"], text)
+        self.assertNotIn(source["memory"]["memory_id"], text)
+        retained = self.r.work_read(self.p, source["memory"]["memory_id"], workspace=self.workspace)
+        self.assertEqual(retained["content"], self.CONTENT)
+        self.assertTrue(retained["published_knowledge_risk"])
 
     def test_missing_derived_cache_does_not_block_normal_automatic_injection(self):
         formal, _ = self.published()

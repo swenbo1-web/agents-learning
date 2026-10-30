@@ -97,6 +97,8 @@ def _read_metadata_preview(result, max_chars, *, paginated=False):
         result["coverage_omitted"] = True
     if len(_json(result)) > target and result.get("candidate_reference_risk"):
         result["candidate_reference_risk"] = [{"blocked": True, "details_omitted": True}]
+    if len(_json(result)) > target and result.get("published_knowledge_risk"):
+        result["published_knowledge_risk"] = [{"blocked": True, "details_omitted": True}]
     # Index-only hints and presentation fields do not establish source validity.
     # The immutable source_version includes the full source/risk snapshots.
     for key in ("file_focus", "summary_only", "read_required", "permission_restored",
@@ -744,7 +746,12 @@ class WorkMemoryMixin:
         from .candidate_references import lineage_risk
         reference_risks = [risk for source in sources
                            if (risk := lineage_risk(self, project, source["event_id"])) and risk.get("blocked", True)]
+        from .work_publication_risk import assess
+        publication_risks = assess(self, project, original_body.get("summary", ""),
+                                   [source["event_id"] for source in sources])
         source_identity = [row["revision"], row["body"], snapshots, reference_risks]
+        if publication_risks:
+            source_identity.append({"published_knowledge_risk": publication_risks})
         if body != original_body:
             # Refresh affected display receipts, not the authority hash or
             # evidence grade. Unaffected historical identities stay stable.
@@ -758,6 +765,7 @@ class WorkMemoryMixin:
                 **({"automatic_eligible": False, "file_projection_incomplete": True}
                    if body.get("coverage", {}).get("file_projection_complete") is False else {}),
                 **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
+                **({"published_knowledge_risk": publication_risks, "automatic_eligible": False} if publication_risks else {}),
                 "type": body["type"], "title": body["title"],
                 "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
                 "completion": body.get("completion", "complete"), "execution_authority": False,
@@ -1148,7 +1156,7 @@ class WorkMemoryMixin:
                     item = self._work_item(project, row, workspace=workspace,
                         file_paths=[link["relative_path"] for link in links[:3]])
                     _notice_gate.annotate(item)
-                    return not _notice_gate.deferred(item)
+                    return not item.get("published_knowledge_risk") and not _notice_gate.deferred(item)
             rows = []
             for link in links[:3]:
                 rows.extend(self._work_search_rows(project, query[:8000],
@@ -1208,6 +1216,8 @@ class WorkMemoryMixin:
                         file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
                 if item.get("file_projection_incomplete"):
                     continue
+                if item.get("published_knowledge_risk"):
+                    continue  # Existing exposures receive a neutral update through the separate notice lane.
                 item["_preview_query"] = preview_query
                 if handoff_scope:
                     if not self._work_handoff_usable(item):
@@ -1510,6 +1520,8 @@ class WorkMemoryMixin:
                     # Files may have changed again since recall. Recompute the
                     # transition against current exposure, not recalled paths.
                     _notice_gate.annotate(current)
+                if current.get("published_knowledge_risk") and not current.get("source_changed"):
+                    continue
                 if (not current.get("source_changed") and not current.get("file_state_changed")
                         and not _work_version_applicable(body, applicability_query or item.get("_preview_query"), workspace)):
                     continue

@@ -728,6 +728,13 @@ class KnowledgeContextMixin:
                             card["title"] = "关联来源或文件状态变化"
                             card["reference_role"] = "source_update"
                             card["recheck"] = "来源或文件已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            if work_item.get("published_knowledge_risk"):
+                                card["published_knowledge_risk"] = work_item["published_knowledge_risk"][:1]
+                                if any(risk.get("reason", "").startswith("publication_")
+                                       for risk in work_item["published_knowledge_risk"]):
+                                    card["recheck"] = "同源发布状态暂无法完整核对；先查阅来源，不沿用旧结论。"
+                                else:
+                                    card["recheck"] = "同源结论已被争议、撤销或替换；停止沿用旧结论，先核对治理状态。"
                             members = work_item.get("_notice_members", [])
                             if len(members) > 1:
                                 card["related_memories"] = [{"memory_id": member["memory_id"],

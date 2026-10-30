@@ -21,6 +21,8 @@ def card(item, max_chars=400):
 def suppress_work(runtime, project, item, candidate_items=()):
     """Retain audit records; suppress only automatic repetition of risky sources."""
     from .candidate_references import lineage_risk
+    if item.get("published_knowledge_risk"):
+        return True
     references = set(item.get("source_event_refs", ()))
     repeated = {ref for candidate in candidate_items for ref in candidate.get("source_event_refs", ())}
     repeated.update(ref for item in candidate_items for source in item.get("sources", ())

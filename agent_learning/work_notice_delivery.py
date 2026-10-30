@@ -40,7 +40,7 @@ def file_notice(item):
     return (item.get("file_state_changed") is True and not item.get("source_changed")
             and item.get("state") in {"unknown", "reported", "model_reported", "succeeded", "call_completed"}
             and item.get("completion", "complete") == "complete"
-            and not item.get("candidate_reference_risk") and not item.get("pending_counterexample_count")
+            and not item.get("candidate_reference_risk") and not item.get("published_knowledge_risk") and not item.get("pending_counterexample_count")
             and ("_changed_file_paths" not in item or bool(item["_changed_file_paths"]))
             and not item.get("_unseen_file_paths")
             and not any(file.get("version_changed") is False for file in item.get("files", ())

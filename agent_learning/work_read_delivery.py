@@ -80,6 +80,8 @@ class WorkReadDelivery:
             "file_check": result["file_check"],
             **({"candidate_reference_risk": [{"blocked": True, "details_omitted": True}],
                 "automatic_eligible": False} if result.get("candidate_reference_risk") else {}),
+            **({"published_knowledge_risk": [{"blocked": True, "details_omitted": True}],
+                "automatic_eligible": False} if result.get("published_knowledge_risk") else {}),
             **limits,
             "section": result["section"], "section_length": result["section_length"], "offset": result["offset"],
             "next_offset": None, "truncated": False, "content_omitted": True,

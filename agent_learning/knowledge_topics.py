@@ -19,6 +19,35 @@ _EXCLUSION = re.compile(r"不能用于|不用于|不适用于?|不涉及|不针�
 _SENTENCE = re.compile(r"(?<=[。！？；;\n])|(?<=[.!?])\s+")
 _CONTRAST = re.compile(r"[,，]\s*(?:但是?|but\b|however\b)\s*", re.I)
 _SETTING = re.compile(r"(?:[A-Z][a-z0-9]+){2,}|[a-z]+(?:[A-Z][a-z0-9]+)+")
+_INLINE_LIMIT = re.compile(r"(?<=[。；;.!?\t ])(?=(?:\*\*)?(?:" +
+    "|".join(re.escape(label) for label in sorted(_LIMIT, key=len, reverse=True)) + r")\s*[:：])", re.I)
+_INLINE_CODE = re.compile(r"(`+).*?\1")
+
+
+def _topic_lines(text):
+    """Virtual matching boundaries only; source text and excerpt offsets stay intact."""
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = _FENCE.match(line)
+        if marker:
+            run = marker[1]
+            if fence is None:
+                fence = (run[0], len(run))
+            elif run[0] == fence[0] and len(run) >= fence[1] and not line[marker.end():].strip():
+                fence = None
+            yield line
+            continue
+        if fence is not None:
+            yield line
+            continue
+        protected = [(match.start(), match.end()) for match in _INLINE_CODE.finditer(line)]
+        offset = 0
+        for match in _INLINE_LIMIT.finditer(line):
+            if any(start <= match.start() < end for start, end in protected):
+                continue
+            yield line[offset:match.start()]
+            offset = match.start()
+        yield line[offset:]
 
 
 def topic_text(text):
@@ -30,7 +59,7 @@ def topic_text(text):
     """
     result, restricted, level, fence = [], False, 0, None
     conclusion, conclusion_level = False, 0
-    for line in text.splitlines(keepends=True):
+    for line in _topic_lines(text):
         marker = _FENCE.match(line)
         if marker:
             run = marker[1]
