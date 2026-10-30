@@ -337,20 +337,58 @@ def _request_history_topic(query):
                   r"wording|words|exact)\b", " ", topic, flags=re.I).strip()
 
 
+def _request_question(text):
+    return bool("?" in text or "？" in text
+        or re.search(r"是否|能否|怎样|怎么|如何|为什么|是不是|有没有|可不可以|能不能|吗[。！!]?\Z", text)
+        or re.match(r"\W*(?:what|why|how|where|when|who|can|could|would|should|must|is|are|do|does|did)\b",
+                    text, re.I))
+
+
+def _request_numeric_tolerance(text):
+    return bool(re.search(r"\d", text) and re.search(
+        r"也没事|也可以|可接受|能接受|就行|即可|不要求|无需达到|"
+        r"\b(?:acceptable|tolerat(?:e|ed)|is okay|is fine|at least|at most)\b", text, re.I))
+
+
+def _request_statement_parts(text):
+    """Keep a question whole before considering its comma-separated clauses."""
+    for sentence in re.split(r"(?<=[。！？?!;；])|(?<=\.)\s+|\n", text):
+        sentence = sentence.strip()
+        if _request_question(sentence):
+            continue
+        # Numeric acceptance can span commas. Other statements are inspected
+        # by clause so a question following an action cannot supply a fact.
+        if _request_numeric_tolerance(sentence):
+            yield sentence
+        else:
+            yield from re.split(r"[，,]", sentence)
+
+
 def _request_has_context(text):
     """Keep observable facts and directives, not unanswered questions as facts.
 
     This only selects existing user records for automatic reference. It neither
     judges the statement true nor changes its reported evidence level.
     """
-    for part in re.split(r"(?<=[。！？?!;；])|(?<=\.)\s+|\n", text):
-        part = part.strip()
+    from .continuation import is_continuation_query, strip_confirmation
+    # A resumed/confirmed action is navigation, not a reusable project fact.
+    # Test the complete request before splitting: a bare completed restart is
+    # still an observable status, but "already restarted, continue" is not.
+    if is_continuation_query(text):
+        return False
+    for part in _request_statement_parts(text):
+        part = strip_confirmation(part.strip())
         if not part:
             continue
-        if ("?" in part or "？" in part or re.search(r"是否|能否|怎样|怎么|如何|为什么|是不是|有没有|可不可以|能不能|吗[。！!]?\Z", part)
-                or re.match(r"\W*(?:what|why|how|where|when|who|can|could|would|should|must|is|are|do|does|did)\b", part, re.I)):
+        if is_continuation_query(part):
+            continue
+        if _request_question(part):
             continue
         if _constraint_request(part) or _correction(part):
+            return True
+        # Explicit numeric acceptance/tolerance remains a useful requirement
+        # even when phrased as an imperative (e.g. "less than 10% is okay").
+        if _request_numeric_tolerance(part):
             return True
         if re.match(r"(?:请|帮我|帮忙|继续|接着|先|再|重新|检查|查看|分析|修复|优化|实现|完成|执行|"
                     r"我想|我要|我们想|我们需要|对.{0,80}(?:分析|检查|修复|优化))|"

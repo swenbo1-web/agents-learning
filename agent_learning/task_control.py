@@ -6,6 +6,12 @@ import time
 import uuid
 
 
+def _contract_scope(scope):
+    # The top-level result reports delivery; it cannot grant execution rights.
+    # Keep every other field (including nested result keys) in the contract.
+    return {key: value for key, value in scope.items() if key != "result"}
+
+
 class TaskControlMixin:
     def task_update(self, project, conversation_id, goal, scope=None, expected_revision=None, status=None,
                     new_task=False, context_handle=None, expected_epoch=None, *, expected_task_id=None,
@@ -70,7 +76,8 @@ class TaskControlMixin:
                     goal, effective_scope, effective_status):
                 return previous
 
-            changed_contract = not previous or new_task or previous["goal"] != goal or previous["scope"] != effective_scope
+            changed_contract = (not previous or new_task or previous["goal"] != goal
+                                or _contract_scope(previous["scope"]) != _contract_scope(effective_scope))
             next_revision = 1 if new_task or not previous else revision + int(changed_contract)
             task_id = previous["id"] if previous and not new_task else str(uuid.uuid4())
             next_write_version = write_version + 1
@@ -91,6 +98,16 @@ class TaskControlMixin:
                             "VALUES(?,?,?,?,?,?,?,?)",
                             (project, task_id, next_revision, next_write_version, conversation_id, effective_status,
                              execution_epoch, now))
+            # Keep result metadata by write version, without rewriting the
+            # immutable revision snapshot. Events may be truncated, so their
+            # preview cannot restore the authoritative result later.
+            self.db.execute("CREATE TABLE IF NOT EXISTS task_result_states("
+                            "project TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,"
+                            "write_version INTEGER NOT NULL,body TEXT NOT NULL,"
+                            "PRIMARY KEY(project,id,revision,write_version))")
+            self.db.execute("INSERT INTO task_result_states VALUES(?,?,?,?,?)",
+                            (project, task_id, next_revision, next_write_version,
+                             encode({"result": effective_scope["result"]} if "result" in effective_scope else {})))
             self._event(project, conversation_id, "TaskUpdate",
                         {"goal": goal, "scope": effective_scope, "status": effective_status,
                          "write_version": next_write_version, "execution_epoch": execution_epoch},
@@ -114,7 +131,8 @@ class TaskControlMixin:
             from .phase_window import task_changed
             current = self.task(project, conversation_id)
             task_changed(self, project, conversation_id, previous, current, changed_contract=changed_contract, resume=resume)
-            arm(self, project, conversation_id, previous, current)
+            arm(self, project, conversation_id, previous, current,
+                result_only=not changed_contract and previous["scope"] != current["scope"])
             # 在事务内取得回执，避免提交后被并发写入替换成另一项任务。
             return self.task(project, conversation_id)
 
@@ -134,4 +152,13 @@ class TaskControlMixin:
                 return None
             for key in ("status", "write_version", "execution_epoch", "updated"):
                 result[key] = state[key]
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='task_result_states'").fetchone():
+                metadata = self.db.execute("SELECT body FROM task_result_states WHERE project=? AND id=? "
+                    "AND revision=? AND write_version<=? ORDER BY write_version DESC LIMIT 1",
+                    (project, task_id, revision, write_version)).fetchone()
+                if metadata:
+                    body = json.loads(metadata[0])
+                    result["scope"].pop("result", None)
+                    if "result" in body:
+                        result["scope"]["result"] = body["result"]
         return clean(result)

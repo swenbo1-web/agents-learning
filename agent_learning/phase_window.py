@@ -48,9 +48,15 @@ def event_bounds(runtime, project, phase):
     Older windows have no marker; their immutable task history still excludes
     observations from an earlier paused/completed suffix at the same timestamp.
     """
+    # A delivery may receive result-only amendments before Stop. Its earlier
+    # delivered writes are in the same suffix, so anchor at the last active
+    # state before locating the previous pause/completion boundary.
+    active = runtime.db.execute("SELECT MAX(write_version) FROM task_states "
+        "WHERE project=? AND id=? AND revision=? AND status='active' AND write_version<?",
+        (project, phase["task_id"], phase["task_revision"], phase["delivery_version"])).fetchone()[0]
     last = runtime.db.execute("SELECT COALESCE(MAX(write_version),0) FROM task_states "
         "WHERE project=? AND id=? AND revision=? AND status!='active' AND write_version<?",
-        (project, phase["task_id"], phase["task_revision"], phase["delivery_version"])).fetchone()[0]
+        (project, phase["task_id"], phase["task_revision"], active or phase["delivery_version"])).fetchone()[0]
     first = runtime.db.execute("SELECT MIN(write_version) FROM task_states WHERE project=? AND id=? "
         "AND revision=? AND status='active' AND write_version>? AND write_version<?",
         (project, phase["task_id"], phase["task_revision"], last, phase["delivery_version"])).fetchone()[0]

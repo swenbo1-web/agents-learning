@@ -173,9 +173,27 @@ def retry(runtime, project, problem_id):
     runtime.db.execute("UPDATE phase_review_batches SET state='pending' WHERE problem_id=?", (problem_id,))
 
 
-def arm(runtime, project, conversation, previous, task):
+def arm(runtime, project, conversation, previous, task, *, result_only=False):
     """Only an actual active -> delivered transition creates a phase, never a fence."""
     from .runtime import digest
+    if (result_only and previous and previous["status"] == task["status"] == "delivered"
+            and (previous["id"], previous["revision"]) == (task["id"], task["revision"])
+            and scope(runtime, project) is not None):
+        # Before its first Stop, a result correction still belongs to this
+        # logical delivery. Keep its identity/window and follow the new write.
+        # An observed Stop, recovery request or frozen packet pins the original
+        # version even if local sealing has not finished yet.
+        runtime.db.execute("UPDATE review_phases AS p SET delivery_version=? WHERE project=? AND host_scope=? "
+            "AND conversation=? AND task_id=? AND task_revision=? AND delivery_version=? "
+            "AND session_epoch=? AND governance_epoch=? AND state='awaiting_stop' AND event_id IS NULL "
+            "AND NOT EXISTS(SELECT 1 FROM phase_seal_requests q WHERE q.phase_id=p.id) "
+            "AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project=p.project AND e.conversation=p.conversation "
+            "AND e.task_id=p.task_id AND e.task_revision=p.task_revision AND e.task_write_version=p.delivery_version "
+            "AND e.type='Stop' AND e.agent IS NULL) "
+            "AND NOT EXISTS(SELECT 1 FROM phase_review_batches b,json_each(b.phase_ids) member "
+            "WHERE b.project=p.project AND b.host_scope=p.host_scope AND member.value=p.id)",
+            (task["write_version"], project, runtime._session_scope(), conversation, task["id"], task["revision"],
+             previous["write_version"], runtime.session_epoch(), runtime.host_epoch()))
     if (scope(runtime, project) is None or not previous or previous["status"] != "active"
             or task["status"] != "delivered" or previous["id"] != task["id"]):
         return
