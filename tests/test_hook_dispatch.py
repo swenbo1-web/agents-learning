@@ -200,7 +200,18 @@ class HookDispatchTests(unittest.TestCase):
     def test_real_entry_observe_overrides_enforce_config(self):
         self.configure({"enforce_task_policy": True})
         result = self.run_entry(["--event", "PreToolUse", "--hook-mode", "observe"])
-        self.assertEqual(result, {})
+        output = result["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        # Observe mode may advise task registration, but must never decide the
+        # host's permission policy (including granting permission implicitly).
+        self.assertNotIn("permissionDecision", output)
+        self.assertNotIn("permissionDecisionReason", output)
+        self.assertIn("session_context", output["additionalContext"])
+        self.assertIn("task_update", output["additionalContext"])
+
+        self.event["tool_use_id"] = "call-b"
+        repeated = self.run_entry(["--event", "PreToolUse", "--hook-mode", "observe"])
+        self.assertEqual(repeated, {}, "task advice must not repeat at an unchanged boundary")
 
 
 if __name__ == "__main__":

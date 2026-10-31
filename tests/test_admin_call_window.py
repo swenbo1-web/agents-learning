@@ -94,8 +94,13 @@ class AdminCallWindowTests(unittest.TestCase):
 
     def test_explicit_project_timeout_can_fit_a_short_window(self):
         configure_project_budget(self.r, self.p, {"timeout_seconds": 2}, expected_version=0)
-        with patch("agent_learning.admin.subprocess.Popen", fake_reviewer()):
-            result = admin_once(self.r, self.p, _deadline=time.monotonic() + 4)
+        def verify_timeout(packet, process):
+            self.assertEqual(process.timeout, 2)
+        # Test admission arithmetic, not filesystem/runner speed. A loaded
+        # Windows CI machine can spend the whole short window preparing a fake.
+        with patch("agent_learning.admin.time.monotonic", return_value=1000.0), \
+                patch("agent_learning.admin.subprocess.Popen", fake_reviewer(callback=verify_timeout)):
+            result = admin_once(self.r, self.p, _deadline=1004.0)
         self.assertEqual(result["status"], "skip")
         self.assertEqual(admin_project_budget_status(self.r, self.p)["used_calls"], 1)
 

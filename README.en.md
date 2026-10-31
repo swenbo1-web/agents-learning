@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.50 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.51 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.50 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.51 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1821,7 +1821,18 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.50</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.51</summary>
+
+## Tool-contract guidance and concurrent cold startup (1.4.51)
+
+- **Guide correct tool selection and calls:** all 11 worker MCP tools describe parameter meaning, ID/version sources, actual defaults, conditional requirements, pagination, responses and side effects. Existing tasks require task ID and write version even with `new_task=true`; inspect `session_context` after a lost reply instead of blindly creating another task. Feedback retries preserve the original idempotency key and identical arguments.
+- **Feedback has real effects:** `case_feedback` defaults to an unresolved counterexample when given a formal knowledge ID. Candidate feedback requires the exact displayed reference version, records a dispute and suspends automatic reference without proving falsity. Bound knowledge/history queries can write exposure or retrieval receipts without rewriting original material; they are not described as database-write-free.
+- **Align actual host surfaces:** Codex/Antigravity share MCP definitions; DSH's nine common native tools receive matching guidance while retaining its existing 11-tool surface, validation and permission classification. Worker publication/revocation remain unavailable. No extra reviewer/model is introduced, but tool definitions are model input and the additional guidance is not zero-token overhead.
+- **Repair reproduced CI boundaries:** cold initialization gets a separate finite five-second lock wait; ordinary SQLite busy handling remains 1.5 seconds and warm opens skip this lock. Readiness checks remain mandatory. Regression contracts cover observe-mode advice, small-budget cards, browser mocks and review deadlines. Normal Hooks have a ten-second outer deadline and Interrupt has three seconds; extreme cold starts may still hit the host deadline.
+
+Schema/publication protocol remain 25, with indexes 7/3/1. Existing AG public-window capture gaps require separate acceptance; documentation changes do not prove recovery. Cloud CI, directory inclusion and external ratings are also verified separately.
+
+Isolated acceptance: 259 of 263 integration checks passed; four skipped because build tools were absent (166.339 seconds). A separate offline build environment then passed all 30 checks (37.808 seconds), including those four wheel/sdist/export cases. Three-host sandbox installation integrity and actual stdio MCP entry checks passed (7.096 seconds), plus five contract checks against the exported native DSH definitions. No live models, existing-host updates or external regrading were started; these checks do not replace a new cloud CI run.
 
 ## AG public windows, file-index frequency and panel recovery (1.4.50)
 

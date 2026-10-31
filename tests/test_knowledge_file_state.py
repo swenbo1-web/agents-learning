@@ -32,11 +32,22 @@ class KnowledgeFileStateTests(unittest.TestCase):
         self.knowledge_id = self.runtime.publish(self.project, candidate["candidate_id"])["knowledge_id"]
         self.path.write_text("changed and longer\n", encoding="utf-8")
 
+    def context_after_task_notice(self, conversation):
+        handle = self.runtime.register_context(self.project, conversation)["context_handle"]
+        # These tests measure the knowledge card's budget after the independent,
+        # once-per-boundary task advice has been completely delivered.
+        self.runtime.config["injection_max_chars"] = 2400
+        notice = self.runtime._context(self.project, conversation, "",
+            context_handle=handle, workspace=str(self.workspace))
+        self.assertIn("task_update", notice)
+        self.assertNotIn(self.knowledge_id, notice)
+        return handle
+
     def test_identifier_card_keeps_file_change_flag_and_budget(self):
         for budget in (2400, 550, 450, 400):
             with self.subTest(budget=budget):
                 conversation = f"read-{budget}"
-                handle = self.runtime.register_context(self.project, conversation)["context_handle"]
+                handle = self.context_after_task_notice(conversation)
                 self.runtime.config["injection_max_chars"] = budget
                 text = self.runtime._context(self.project, conversation, "service startup config",
                     context_handle=handle, workspace=str(self.workspace))
@@ -52,7 +63,7 @@ class KnowledgeFileStateTests(unittest.TestCase):
         for budget in (350, 128):
             with self.subTest(budget=budget):
                 conversation = f"unfitting-{budget}"
-                handle = self.runtime.register_context(self.project, conversation)["context_handle"]
+                handle = self.context_after_task_notice(conversation)
                 self.runtime.config["injection_max_chars"] = budget
                 text = self.runtime._context(self.project, conversation, "service startup config",
                     context_handle=handle, workspace=str(self.workspace))
@@ -69,6 +80,28 @@ class KnowledgeFileStateTests(unittest.TestCase):
                 self.assertEqual(len(cards), 1, restored)
                 self.assertEqual(cards[0]["knowledge_id"], self.knowledge_id)
                 self.assertTrue(cards[0]["source_files_changed"])
+
+    def test_initial_task_notice_defers_small_card_without_acknowledging_it(self):
+        conversation = "first-task-notice"
+        handle = self.runtime.register_context(self.project, conversation)["context_handle"]
+        self.runtime.config["injection_max_chars"] = 400
+        first = self.runtime._context(self.project, conversation, "service startup config",
+            context_handle=handle, workspace=str(self.workspace))
+        self.assertIn("task_update", first)
+        self.assertNotIn(self.knowledge_id, first)
+        self.assertLessEqual(len(first), 400)
+        state = self.runtime.db.execute("SELECT shown,injected FROM contexts "
+            "WHERE project=? AND conversation=?", (self.project, conversation)).fetchone()
+        self.assertEqual(json.loads(state["shown"]), [])
+        self.assertEqual(json.loads(state["injected"]), [])
+
+        later = self.runtime._context(self.project, conversation, "service startup config",
+            context_handle=handle, workspace=str(self.workspace))
+        cards = [json.loads(line) for line in later.splitlines() if line.startswith('{"')]
+        self.assertEqual(len(cards), 1, later)
+        self.assertEqual(cards[0]["knowledge_id"], self.knowledge_id)
+        self.assertTrue(cards[0]["source_files_changed"])
+        self.assertLessEqual(len(later), 400)
 
     def test_mcp_read_and_search_report_same_drift(self):
         server = Server(self.runtime, self.project, workspace=str(self.workspace))

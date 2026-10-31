@@ -249,181 +249,441 @@ const STATUS_JSON_OUTPUT = {
 
 const WORKER_TOOL_SPECS = [
   {
-    name: "knowledge_search",
-    description:
-      "检索本项目正式知识的有限预览；完整正文使用 knowledge_read。预算是 JSON 正文字符数，默认 6000。",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        limit: { type: "integer" },
-        filters: { type: "object", additionalProperties: false, properties: {
-          category: { type: "string", enum: ["mixed", "operation", "professional", "project", "unknown"] },
-          knowledge_kind: { type: "string", enum: ["fact", "pattern", "solution"] },
-          tool: { type: "string" },
-          tool_version: { type: "string" },
-          error_code: { type: "string" },
-          environment: { type: "string" },
-          verification: { type: "string" },
-        }},
-        context_handle: { type: "string" },
-        max_chars: { type: "integer" },
+    "name": "knowledge_search",
+    "description": "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Current concrete problem, error code or technical identifier; avoid repeating an unchanged search without new need."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum result count, subject to the response budget.",
+          "default": 5
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "type": "string",
+              "enum": [
+                "mixed",
+                "operation",
+                "professional",
+                "project",
+                "unknown"
+              ],
+              "description": "Knowledge category; omit to search all categories."
+            },
+            "knowledge_kind": {
+              "type": "string",
+              "enum": [
+                "fact",
+                "pattern",
+                "solution"
+              ],
+              "description": "fact, solution or pattern; omit to search all kinds."
+            },
+            "tool": {
+              "type": "string",
+              "description": "Exact source metadata filter; omit if unknown."
+            },
+            "tool_version": {
+              "type": "string",
+              "description": "Exact source metadata filter; omit if unknown."
+            },
+            "error_code": {
+              "type": "string",
+              "description": "Exact source metadata filter; omit if unknown."
+            },
+            "environment": {
+              "type": "string",
+              "description": "Exact source metadata filter; omit if unknown."
+            },
+            "verification": {
+              "type": "string",
+              "description": "Exact source metadata filter; omit if unknown."
+            }
+          },
+          "description": "Optional exact metadata/category filters; omit unknown fields."
+        },
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "Response JSON character budget, not tokens.",
+          "default": 6000
+        }
       },
-      required: ["query"],
-      additionalProperties: false,
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
-    name: "knowledge_read",
-    description:
-      "分页读取当前有效知识正文、适用条件或限制；section 默认 content，续页保持 section 并传 next_offset 与 expected_revision。",
-    parameters: {
-      type: "object",
-      properties: {
-        knowledge_id: { type: "string" },
-        context_handle: { type: "string" },
-        max_chars: { type: "integer" },
-        expected_revision: { type: "integer" },
-        section: { type: "string", enum: ["content", "applicability", "limitations"] },
-        offset: { type: "integer" },
+    "name": "knowledge_read",
+    "description": "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "knowledge_id": {
+          "type": "string",
+          "description": "knowledge_id from formal search/injection; never a candidate_id or memory_id."
+        },
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "Response JSON character budget, not tokens.",
+          "default": 12000
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "Copy the returned formal revision; required when offset>0, recommended on the first page."
+        },
+        "section": {
+          "type": "string",
+          "enum": [
+            "content",
+            "applicability",
+            "limitations"
+          ],
+          "description": "Section to read; retain during pagination.",
+          "default": "content"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "First page is 0; subsequent pages use next_offset without increasing it manually.",
+          "default": 0
+        }
       },
-      required: ["knowledge_id"],
-      additionalProperties: false,
+      "required": [
+        "knowledge_id"
+      ],
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
-    name: "work_memory_search",
-    description:
-      "检索本项目已观察的工作历史索引（1.0.0）；不是正式解法或执行授权。可按目标文件 file_path 筛选，默认 3000 字符。",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        file_path: { type: "string" },
-        context_handle: { type: "string" },
-        limit: { type: "integer" },
-        max_chars: { type: "integer" },
+    "name": "work_memory_search",
+    "description": "Find observed work/file-history indexes, not formal solutions or execution authority. Returns items with memory_id/revision, source state, summaries and file links; use work_memory_read only for relevant missing detail. Does not read project file contents or rewrite original history. Bound calls write exposure receipts, so this is not a database-write-free operation. No matches or disabled history need not be retried.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Current work topic; omit for an unqualified/file-only index query.",
+          "default": ""
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Optional path in this installed workspace to filter recorded file associations; not permission to scan files."
+        },
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum index items, subject to budget.",
+          "default": 5
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "Response JSON character budget, not tokens.",
+          "default": 3000
+        }
       },
-      additionalProperties: false,
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
-    name: "work_memory_read",
-    description:
-      "绑定当前会话后，分页读取工作观察摘要 (summary) 或可见证据投影 (evidence)。续页保持 section 和 expected_revision；reread=true 开启新轮，正常续页无需重复该标记。",
-    parameters: {
-      type: "object",
-      properties: {
-        memory_id: { type: "string" },
-        context_handle: { type: "string" },
-        expected_revision: { type: "integer" },
-        offset: { type: "integer" },
-        max_chars: { type: "integer" },
-        section: { type: "string", enum: ["summary", "evidence"] },
-        reread: { type: "boolean" },
+    "name": "work_memory_read",
+    "description": "Expand relevant observed history in a verified context. Returns revision, section, pagination, source/file checks; previously complete reads may return already_read instead of the body. Keep section/revision and use next_offset on continuation. Revision changes require a fresh first page. Writes exposure/read tracking, not original history. file_check.complete=false means unknown file state; truncated original evidence cannot be reconstructed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "description": "memory_id from work search/injection, not a knowledge_id or event ID."
+        },
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "Copy this memory's returned revision; required when offset>0."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "0 for the first page; continue using next_offset with the same section/revision.",
+          "default": 0
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "Response JSON character budget, not tokens.",
+          "default": 6000
+        },
+        "section": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "evidence"
+          ],
+          "description": "Select summary or visible evidence; keep the section unchanged while paging.",
+          "default": "summary"
+        },
+        "reread": {
+          "type": "boolean",
+          "description": "Set true only to deliberately re-present an already read version; starts a new read round. Normal continuation pages omit it.",
+          "default": false
+        }
       },
-      required: ["memory_id"],
-      additionalProperties: false,
+      "required": [
+        "memory_id"
+      ],
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
-    name: "session_context",
-    description:
-      "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。",
-    parameters: {
-      type: "object",
-      properties: {
-        context_handle: { type: "string" },
+    "name": "session_context",
+    "description": "Inspect the current verified binding before task writes. Returns context_bound/rebind_required, host_epoch, task (id/revision/write_version/status), and any assignment. Without a handle/bound connection it returns only project state, not another chat. A child sees its assignment and cannot overwrite the parent task. If reconnect_required is returned, reload the host connection for a new Hook-issued handle; never borrow one.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        }
       },
-      additionalProperties: false,
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
-    name: "task_update",
-    description: "保存当前明确的任务范围和状态；不增加执行权限。",
-    parameters: {
-      type: "object",
-      properties: {
-        context_handle: { type: "string" },
-        conversation_id: { type: "string" },
-        goal: { type: "string" },
-        scope: { type: "object", additionalProperties: true },
-        expected_revision: { type: "integer" },
-        status: { type: "string", enum: ["active", "cancelled", "delivered", "interrupted", "paused"] },
-        new_task: { type: "boolean" },
-        expected_task_id: { type: "string" },
-        expected_write_version: { type: "integer" },
-        resume: { type: "boolean" },
+    "name": "task_update",
+    "description": "Persist the parent's current user-authorized task before writes/execution/delegation; this grants no execution rights. Returns task id/revision/write_version/status. If a task exists, ALWAYS supply its id and write_version from session_context, even for new_task=true; revision is not a substitute. Children cannot overwrite it. No idempotency key: after a lost reply or stale version, read session_context and compare the state before deciding to write again; never blindly repeat new_task.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Normally omit: the verified handle selects the conversation. If supplied, it must match that handle."
+        },
+        "goal": {
+          "type": "string",
+          "description": "Current user-authorized goal; ordinary questions do not need a synthetic task."
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Task boundaries and acceptance checks. Omit to retain existing scope; a new task defaults to {}. This cannot approve execution."
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "Optional extra task.revision check; never replaces expected_task_id and expected_write_version."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "cancelled",
+            "delivered",
+            "interrupted",
+            "paused"
+          ],
+          "description": "Omit to retain existing status (new task: active). Use delivered only for completed work; resuming requires resume=true."
+        },
+        "new_task": {
+          "type": "boolean",
+          "description": "True for genuinely different work: creates a new task identity. Existing-task CAS fields remain required; false updates the current task.",
+          "default": false
+        },
+        "expected_task_id": {
+          "type": "string",
+          "description": "Copy task.id from session_context or the latest task_update result; never substitute a conversation ID."
+        },
+        "expected_write_version": {
+          "type": "integer",
+          "description": "Copy task.write_version from the latest context/result; required with expected_task_id whenever a task exists."
+        },
+        "resume": {
+          "type": "boolean",
+          "description": "Explicitly reactivate an existing inactive task; incompatible with new_task=true or non-active status. Does not restore execution approval.",
+          "default": false
+        }
       },
-      required: ["goal"],
-      additionalProperties: false,
+      "required": [
+        "goal"
+      ],
+      "additionalProperties": false
     },
-    readOnly: false,
+    "readOnly": false
   },
   {
-    name: "case_feedback",
-    description: "补充专业问题、用户纠正或关键依据；常规工具事件由 Hook 采集。",
-    parameters: {
-      type: "object",
-      properties: {
-        context_handle: { type: "string" },
-        conversation_id: { type: "string" },
-        summary: { type: "string" },
-        category: { type: "string", enum: ["mixed", "operation", "professional", "project", "unknown"] },
-        event_refs: { type: "array", items: { type: "string" } },
-        resolution: { type: "string" },
-        knowledge_id: { type: "string" },
-        knowledge_revision: { type: "integer" },
-        feedback_kind: { type: "string", enum: ["observation", "counterexample"] },
-        idempotency_key: { type: "string" },
-        expected_task_id: { type: "string" },
-        expected_task_revision: { type: "integer" },
+    "name": "case_feedback",
+    "description": "Record a material issue, correction or resolution observation; routine tool events are captured by Hooks. Writes a reported Feedback event and problem/evidence records. With knowledge_id the default is an unresolved counterexample against that revision, which may suspend automatic reference; it is not a mere note or proof of falsity. Returns a problem (id/revision/status). Parent task identity/revision are required when a task exists; children use their fixed assignment. Retry lost replies only with the same idempotency_key and identical original arguments.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Normally omit: the verified handle selects the conversation. If supplied, it must match that handle."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Concise observed issue/correction and its basis; distinguish report, tool evidence and user acceptance."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "mixed",
+            "operation",
+            "professional",
+            "project",
+            "unknown"
+          ],
+          "description": "Issue category; does not imply a validation level.",
+          "default": "unknown"
+        },
+        "event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Visible event IDs from this project, conversation and task revision; a child may cite only its own events. Omit if none are available.",
+          "default": []
+        },
+        "resolution": {
+          "type": "string",
+          "description": "Observed resolution, if any. Text alone never marks the issue resolved or user-accepted.",
+          "default": ""
+        },
+        "knowledge_id": {
+          "type": "string",
+          "description": "Optional formal knowledge being questioned; supplying it defaults feedback_kind to counterexample."
+        },
+        "knowledge_revision": {
+          "type": "integer",
+          "description": "Exact displayed formal revision; requires knowledge_id. Omission selects the active revision if available, so prefer the explicit observed revision."
+        },
+        "feedback_kind": {
+          "type": "string",
+          "enum": [
+            "observation",
+            "counterexample"
+          ],
+          "description": "Default: counterexample when knowledge_id is supplied, otherwise observation. Counterexample requires knowledge_id."
+        },
+        "idempotency_key": {
+          "type": "string",
+            "description": "Optional stable key. Omission creates no replay receipt: do not blindly retry a lost reply. With a key, preserve it and all original arguments on retry."
+        },
+        "expected_task_id": {
+          "type": "string",
+          "description": "Copy task.id from session_context or the latest task_update result; never substitute a conversation ID."
+        },
+        "expected_task_revision": {
+          "type": "integer",
+          "description": "Copy task.revision for that exact task from session_context; this is not write_version."
+        }
       },
-      required: ["summary"],
-      additionalProperties: false,
+      "required": [
+        "summary"
+      ],
+      "additionalProperties": false
     },
-    readOnly: false,
+    "readOnly": false
   },
   {
-    name: "knowledge_use",
-    description: "简短声明实际采用的知识修订，可关联本任务工具操作；声明和工具观察不证明因果或用户验收。",
-    parameters: {
-      type: "object",
-      properties: {
-        context_handle: { type: "string" },
-        knowledge_id: { type: "string" },
-        knowledge_revision: { type: "integer" },
-        expected_task_id: { type: "string" },
-        expected_task_revision: { type: "integer" },
-        expected_write_version: { type: "integer" },
-        operation_id: { type: "string" },
-        idempotency_key: { type: "string" },
+    "name": "knowledge_use",
+    "description": "Record ACTUAL use of a formal revision previously returned to this exact task/agent/write version; merely seeing it is insufficient. Requires current task/assignment and active knowledge. Writes an adoption receipt; returns reported adoption_id, knowledge_state and operation_observation, not causality or user acceptance. Same-key identical retries return the receipt; a key reused with different arguments is rejected. On task/exposure conflict, inspect current context before attempting new work.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "context_handle": {
+          "type": "string",
+          "description": "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query."
+        },
+        "knowledge_id": {
+          "type": "string",
+          "description": "Formal knowledge_id actually adopted; never a candidate_id or memory_id."
+        },
+        "knowledge_revision": {
+          "type": "integer",
+          "description": "Exact active revision displayed to this task/agent before the claimed use."
+        },
+        "expected_task_id": {
+          "type": "string",
+          "description": "Copy task.id from session_context or the latest task_update result; never substitute a conversation ID."
+        },
+        "expected_task_revision": {
+          "type": "integer",
+          "description": "Copy task.revision for that exact task from session_context; this is not write_version."
+        },
+        "expected_write_version": {
+          "type": "integer",
+          "description": "Copy the task.write_version for the exposure and use; different task writes are not interchangeable."
+        },
+        "operation_id": {
+          "type": "string",
+          "description": "Optional observed operation ID in this exact task/agent scope; needs matching PreToolUse starting no earlier than the knowledge exposure. Omit if unlinked."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "Optional stable request key; defaults to the request fingerprint. Identical retry arguments must be preserved, including task versions."
+        }
       },
-      required: [
+      "required": [
         "knowledge_id",
         "knowledge_revision",
         "expected_task_id",
         "expected_task_revision",
-        "expected_write_version",
+        "expected_write_version"
       ],
-      additionalProperties: false,
+      "additionalProperties": false
     },
-    readOnly: false,
+    "readOnly": false
   },
   {
-    name: "learning_status",
-    description: "查看本项目状态；调试用view=summary的有界摘要，省略view或full保留完整状态。",
-    parameters: {
-      type: "object",
-      properties: { view: { type: "string", enum: ["summary", "full"] } },
-      additionalProperties: false,
+    "name": "learning_status",
+    "description": "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for bounded diagnostics; full may be large. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "full"
+          ],
+          "description": "summary for routine diagnostics; omit or use full only when detailed status is needed.",
+          "default": "full"
+        }
+      },
+      "additionalProperties": false
     },
-    readOnly: true,
+    "readOnly": true
   },
   {
     name: "learning_history",

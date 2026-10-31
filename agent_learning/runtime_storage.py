@@ -6,9 +6,16 @@ from contextlib import contextmanager
 import time
 
 
+# Cold initialization installs all three hosts' storage and indexes. Its lock
+# budget is separate from the 1.5s allowance for ordinary SQLite operations:
+# concurrent first openers should survive a slow, valid migration. Keep this
+# finite and below the normal Hook's 10s outer deadline. Warm opens skip it.
+INITIALIZATION_LOCK_TIMEOUT = 5.0
+
+
 @contextmanager
-def initialization_guard(runtime, timeout=1.5):
-    """Serialize bootstrap across processes; warm opens never need this lock."""
+def initialization_guard(runtime, timeout=INITIALIZATION_LOCK_TIMEOUT):
+    """Wait finitely for exclusive bootstrap; acquiring it proves no readiness."""
     from .software_updates import _locked
     deadline = time.monotonic() + timeout
     while True:

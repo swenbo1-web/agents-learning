@@ -15,10 +15,15 @@ def schema(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
 
 
+def parameter(contract, description, **hints):
+    """Document a parameter without changing shared schemas or applying defaults."""
+    return {**contract, "description": description, **hints}
+
+
 S = {"type": "string"}
 NONEMPTY = {"type": "string", "minLength": 1, "pattern": r"\S"}
 STRINGS = {"type": "array", "items": S}
-METADATA = schema({key: S for key in sorted(METADATA_KEYS)})
+METADATA = schema({key: parameter(S, "Observed source metadata; omit unknown values.") for key in sorted(METADATA_KEYS)})
 CATEGORY = {"type": "string", "enum": sorted(CATEGORIES)}
 KNOWLEDGE_KIND = {"type": "string", "enum": sorted(KNOWLEDGE_KINDS)}
 PANEL_EXPECTED = schema({key: {"type": "integer", "minimum": 0} for key in (
@@ -47,15 +52,24 @@ DIRECT_PANEL_TOOLS = [
 ]
 PANEL_TOOL_NAMES = {entry[0] for entry in PANEL_TOOLS + DIRECT_PANEL_TOOLS}
 DIRECT_PANEL_TOOL_NAMES = {entry[0] for entry in DIRECT_PANEL_TOOLS}
-KNOWLEDGE_FILTERS = schema({**{key: NONEMPTY for key in sorted(METADATA_KEYS)},
-                            "category": CATEGORY, "knowledge_kind": KNOWLEDGE_KIND})
+KNOWLEDGE_FILTERS = schema({**{key: parameter(NONEMPTY, "Exact source metadata filter; omit if unknown.")
+                              for key in sorted(METADATA_KEYS)},
+    "category": parameter(CATEGORY, "Knowledge category; omit to search all categories."),
+    "knowledge_kind": parameter(KNOWLEDGE_KIND, "fact, solution or pattern; omit to search all kinds.")})
 TASK_SCOPE = {"type": "object", "additionalProperties": True, "properties": {
-    "mode": {"type": "string", "enum": ["analysis", "read_only", "implementation", "execute"]},
-    "allowed_tools": STRINGS, "allowed_paths": STRINGS,
-    "allowed_actions": {"type": "array", "items": {"type": "string", "enum": ["read", "write", "execute", "network"]}},
+    "mode": {"type": "string", "enum": ["analysis", "read_only", "implementation", "execute"],
+             "description": "Current user-authorized work mode; describing it grants no execution permission."},
+    "allowed_tools": parameter(STRINGS, "Tool names within the user's current task scope."),
+    "allowed_paths": parameter(STRINGS, "Paths within the user's current task scope."),
+    "allowed_actions": {"type": "array", "description": "Authorized action classes, not a permission grant.",
+                        "items": {"type": "string", "enum": ["read", "write", "execute", "network"]}},
     "budget": {"type": "object", "required": ["remaining"], "properties": {
-        "remaining": {"type": ["number", "null"], "minimum": 0}, "unit": NONEMPTY}},
-    "stop_conditions": STRINGS, "verification": STRINGS,
+        "remaining": {"type": ["number", "null"], "minimum": 0,
+                      "description": "Remaining task allowance; null means unspecified, not unlimited permission."},
+        "unit": parameter(NONEMPTY, "Unit of this task allowance, such as model calls.")},
+        "description": "User-defined task allowance; does not reset administrator accounting."},
+    "stop_conditions": parameter(STRINGS, "Conditions that require stopping the current work."),
+    "verification": parameter(STRINGS, "Observable acceptance checks for this task."),
 }}
 CANDIDATE = schema({
     "problem_id": NONEMPTY, "problem_revision": {"type": "integer", "minimum": 1},
@@ -66,69 +80,89 @@ CANDIDATE = schema({
     "validation_level": {"type": "string", "enum": sorted(VALIDATION_LEVELS)},
     "metadata": METADATA, "knowledge_kind": KNOWLEDGE_KIND,
 }, ("problem_id", "problem_revision", "title", "content", "category", "applicability", "limitations", "evidence_refs", "validation_level"))
+CONTEXT_HANDLE = parameter(NONEMPTY, "Copy the current Hook-issued context_handle; never guess or borrow another chat's handle. May be omitted only if this connection is already bound, or for an unbound project query.")
+CONVERSATION_ID = parameter(NONEMPTY, "Normally omit: the verified handle selects the conversation. If supplied, it must match that handle.")
+TASK_ID = parameter(NONEMPTY, "Copy task.id from session_context or the latest task_update result; never substitute a conversation ID.")
+TASK_REVISION = parameter({"type": "integer", "minimum": 1}, "Copy task.revision for that exact task from session_context; this is not write_version.")
+EVENT_REFS = parameter(STRINGS, "Visible event IDs from this project, conversation and task revision; a child may cite only its own events. Omit if none are available.", default=[])
+IDEMPOTENCY_KEY = parameter({"type": "string", "minLength": 1, "maxLength": 200}, "Stable key for one request. Retry a lost response with the same key and identical original arguments; a genuinely new observation needs a new key.")
 WORKER_TOOLS = [
-    ("candidate_reference_read", "读取已允许参考的未发布候选；不是验证结论或执行授权。按注入卡的版本分页，状态或来源变化时停止旧版读取。", schema({
-        "candidate_id": NONEMPTY, "context_handle": NONEMPTY,
-        "expected_version": {"type": "string", "minLength": 64, "maxLength": 64},
-        "section": {"type": "string", "enum": ["content", "applicability", "limitations", "evidence"]},
-        "offset": {"type": "integer", "minimum": 0},
-        "max_chars": {"type": "integer", "minimum": 512, "maximum": 4000}}, ["candidate_id", "expected_version"])),
-    ("candidate_reference_feedback", "报告已展示候选不适用或有疑问，暂停其自动参考；这是reported反馈，不证明已证伪，不发布或重试管理员。", schema({
-        "candidate_id": NONEMPTY, "context_handle": NONEMPTY,
-        "expected_version": {"type": "string", "minLength": 64, "maxLength": 64},
-        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
-        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
-        "event_refs": STRINGS}, ["candidate_id", "expected_version", "summary", "idempotency_key"])),
-    ("knowledge_search", "检索本项目正式知识的有限预览；完整正文使用knowledge_read。预算是JSON正文字符数，默认6000。", schema({
-        "query": S, "limit": {"type": "integer", "minimum": 1, "maximum": 10}, "filters": KNOWLEDGE_FILTERS,
-        "context_handle": NONEMPTY, "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}}, ["query"])),
-    ("knowledge_read", "分页读取当前有效正文、适用条件或限制；section默认content，续页保持section并传next_offset与expected_revision。fields_truncated中的条件用对应section续读；默认12000个JSON正文字符。", schema({
-        "knowledge_id": NONEMPTY, "context_handle": NONEMPTY,
-        "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
-        "expected_revision": {"type": "integer", "minimum": 1},
-        "section": {"type": "string", "enum": ["content", "applicability", "limitations"]},
-        "offset": {"type": "integer", "minimum": 0}}, ["knowledge_id"])),
-    ("work_memory_search", "检索本项目已观察的工作历史索引；不是正式解法或执行授权。可按目标文件筛选，默认3000个JSON正文字符，不读取项目文件。", schema({
-        "query": {"type": "string", "maxLength": 8000},
-        "file_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": r"\S"},
-        "context_handle": NONEMPTY,
-        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-        "max_chars": {"type": "integer", "minimum": 512, "maximum": 20000}})),
-    ("work_memory_read", "按需分页读取工作观察；续页保持section与expected_revision。同一上下文已完整返回的版本默认给简短回执；reread=true开启新轮，续页无需重复该标记。文件未完整核验时返回正文；不会恢复截断原文。", schema({
-        "memory_id": NONEMPTY, "context_handle": NONEMPTY,
-        "expected_revision": {"type": "integer", "minimum": 1},
-        "offset": {"type": "integer", "minimum": 0},
-        "max_chars": {"type": "integer", "minimum": 1024, "maximum": 50000},
-        "reread": {"type": "boolean"},
-        "section": {"type": "string", "enum": ["summary", "evidence"]}}, ["memory_id"])),
-    ("session_context", "读取已验证的宿主会话与任务版本；未绑定时只返回项目状态，不推断其他会话。", schema({"context_handle": NONEMPTY})),
-    ("task_update", "保存当前明确的任务范围和状态；不增加执行权限。", schema({
-        "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "goal": NONEMPTY,
-        "scope": TASK_SCOPE, "expected_revision": {"type": "integer", "minimum": 0},
-        "status": {"type": "string", "enum": sorted(TASK_STATUSES)},
-        "new_task": {"type": "boolean"},
-        "expected_task_id": NONEMPTY, "expected_write_version": {"type": "integer", "minimum": 0},
-        "resume": {"type": "boolean"},
+    ("candidate_reference_read", "Read a policy-allowed UNPUBLISHED candidate as an unverified lead, not a formal solution or permission. Requires a bound context/current assignment and a known reference version. Returns versioned section text and pagination; records exposure. If its version/sources change, stop the old read and obtain a current reference; if published, use the mapped formal knowledge instead.", schema({
+        "candidate_id": parameter(NONEMPTY, "Known project candidate_id paired with its current reference_version, usually from a [待定参考] card; read does not require prior exposure. Not a knowledge_id."),
+        "context_handle": CONTEXT_HANDLE,
+        "expected_version": parameter({"type": "string", "minLength": 64, "maxLength": 64}, "Copy the card/read result's 64-character reference_version unchanged; do not construct a version."),
+        "section": parameter({"type": "string", "enum": ["content", "applicability", "limitations", "evidence"]}, "Section to expand; keep it unchanged during pagination.", default="content"),
+        "offset": parameter({"type": "integer", "minimum": 0}, "Start at 0; continue using the returned next_offset and the same expected_version.", default=0),
+        "max_chars": parameter({"type": "integer", "minimum": 512, "maximum": 4000}, "Response JSON character budget, not tokens.", default=2000)}, ["candidate_id", "expected_version"])),
+    ("candidate_reference_feedback", "Report a concern about the exact unpublished candidate version displayed to this context. Supply the task id/revision when a task/current assignment exists. Writes a reported case, an unresolved dispute and a retry receipt, suspending automatic reference; does not prove falsity, publish, or launch review. Returns candidate_id/reference_version/problem_id, state=disputed and published=false. Retry lost replies with identical arguments/key. Changed versions require fresh evidence; published candidates must be reported against formal knowledge.", schema({
+        "candidate_id": parameter(NONEMPTY, "candidate_id actually displayed to this context; an arbitrary candidate ID is insufficient."),
+        "context_handle": CONTEXT_HANDLE,
+        "expected_version": parameter({"type": "string", "minLength": 64, "maxLength": 64}, "Exact reference_version from that displayed card/read; stale or undisplayed versions are rejected."),
+        "summary": parameter({"type": "string", "minLength": 1, "maxLength": 2000}, "Observed concern or inapplicability and its basis; do not claim unverified falsity."),
+        "expected_task_id": TASK_ID, "expected_task_revision": TASK_REVISION,
+        "idempotency_key": IDEMPOTENCY_KEY, "event_refs": EVENT_REFS}, ["candidate_id", "expected_version", "summary", "idempotency_key"])),
+    ("knowledge_search", "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted.", schema({
+        "query": parameter(S, "Current concrete problem, error code or technical identifier; avoid repeating an unchanged search without new need."),
+        "limit": parameter({"type": "integer", "minimum": 1, "maximum": 10}, "Maximum result count, subject to the response budget.", default=5),
+        "filters": parameter(KNOWLEDGE_FILTERS, "Optional exact metadata/category filters; omit unknown fields."),
+        "context_handle": CONTEXT_HANDLE,
+        "max_chars": parameter({"type": "integer", "minimum": 512, "maximum": 20000}, "Response JSON character budget, not tokens.", default=6000)}, ["query"])),
+    ("knowledge_read", "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge.", schema({
+        "knowledge_id": parameter(NONEMPTY, "knowledge_id from formal search/injection; never a candidate_id or memory_id."),
+        "context_handle": CONTEXT_HANDLE,
+        "max_chars": parameter({"type": "integer", "minimum": 1024, "maximum": 50000}, "Response JSON character budget, not tokens.", default=12000),
+        "expected_revision": parameter({"type": "integer", "minimum": 1}, "Copy the returned formal revision; required when offset>0, recommended on the first page."),
+        "section": parameter({"type": "string", "enum": ["content", "applicability", "limitations"]}, "Section to read; retain during pagination.", default="content"),
+        "offset": parameter({"type": "integer", "minimum": 0}, "First page is 0; subsequent pages use next_offset without increasing it manually.", default=0)}, ["knowledge_id"])),
+    ("work_memory_search", "Find observed work/file-history indexes, not formal solutions or execution authority. Returns items with memory_id/revision, source state, summaries and file links; use work_memory_read only for relevant missing detail. Does not read project file contents or rewrite original history. Bound calls write exposure receipts, so this is not a database-write-free operation. No matches or disabled history need not be retried.", schema({
+        "query": parameter({"type": "string", "maxLength": 8000}, "Current work topic; omit for an unqualified/file-only index query.", default=""),
+        "file_path": parameter({"type": "string", "minLength": 1, "maxLength": 4096, "pattern": r"\S"}, "Optional path in this installed workspace to filter recorded file associations; not permission to scan files."),
+        "context_handle": CONTEXT_HANDLE,
+        "limit": parameter({"type": "integer", "minimum": 1, "maximum": 10}, "Maximum index items, subject to budget.", default=5),
+        "max_chars": parameter({"type": "integer", "minimum": 512, "maximum": 20000}, "Response JSON character budget, not tokens.", default=3000)})),
+    ("work_memory_read", "Expand relevant observed history in a verified context. Returns revision, section, pagination, source/file checks; previously complete reads may return already_read instead of the body. Keep section/revision and use next_offset on continuation. Revision changes require a fresh first page. Writes exposure/read tracking, not original history. file_check.complete=false means unknown file state; truncated original evidence cannot be reconstructed.", schema({
+        "memory_id": parameter(NONEMPTY, "memory_id from work search/injection, not a knowledge_id or event ID."),
+        "context_handle": CONTEXT_HANDLE,
+        "expected_revision": parameter({"type": "integer", "minimum": 1}, "Copy this memory's returned revision; required when offset>0."),
+        "offset": parameter({"type": "integer", "minimum": 0}, "0 for the first page; continue using next_offset with the same section/revision.", default=0),
+        "max_chars": parameter({"type": "integer", "minimum": 1024, "maximum": 50000}, "Response JSON character budget, not tokens.", default=6000),
+        "reread": parameter({"type": "boolean"}, "Set true only to deliberately re-present an already read version; starts a new read round. Normal continuation pages omit it.", default=False),
+        "section": parameter({"type": "string", "enum": ["summary", "evidence"]}, "Select summary or visible evidence; keep the section unchanged while paging.", default="summary")}, ["memory_id"])),
+    ("session_context", "Inspect the current verified binding before task writes. Returns context_bound/rebind_required, host_epoch, task (id/revision/write_version/status), and any assignment. Without a handle/bound connection it returns only project state, not another chat. A child sees its assignment and cannot overwrite the parent task. If reconnect_required is returned, reload the host connection for a new Hook-issued handle; never borrow one.", schema({"context_handle": CONTEXT_HANDLE})),
+    ("task_update", "Persist the parent's current user-authorized task before writes/execution/delegation; this grants no execution rights. Returns task id/revision/write_version/status. If a task exists, ALWAYS supply its id and write_version from session_context, even for new_task=true; revision is not a substitute. Children cannot overwrite it. No idempotency key: after a lost reply or stale version, read session_context and compare the state before deciding to write again; never blindly repeat new_task.", schema({
+        "context_handle": CONTEXT_HANDLE, "conversation_id": CONVERSATION_ID,
+        "goal": parameter(NONEMPTY, "Current user-authorized goal; ordinary questions do not need a synthetic task."),
+        "scope": parameter(TASK_SCOPE, "Task boundaries and acceptance checks. Omit to retain existing scope; a new task defaults to {}. This cannot approve execution."),
+        "expected_revision": parameter({"type": "integer", "minimum": 0}, "Optional extra task.revision check; never replaces expected_task_id and expected_write_version."),
+        "status": parameter({"type": "string", "enum": sorted(TASK_STATUSES)}, "Omit to retain existing status (new task: active). Use delivered only for completed work; resuming requires resume=true."),
+        "new_task": parameter({"type": "boolean"}, "True for genuinely different work: creates a new task identity. Existing-task CAS fields remain required; false updates the current task.", default=False),
+        "expected_task_id": TASK_ID,
+        "expected_write_version": parameter({"type": "integer", "minimum": 0}, "Copy task.write_version from the latest context/result; required with expected_task_id whenever a task exists."),
+        "resume": parameter({"type": "boolean"}, "Explicitly reactivate an existing inactive task; incompatible with new_task=true or non-active status. Does not restore execution approval.", default=False),
     }, ["goal"])),
-    ("case_feedback", "补充专业问题、用户纠正或关键依据；常规工具事件由Hook采集。", schema({
-        "context_handle": NONEMPTY, "conversation_id": NONEMPTY, "summary": NONEMPTY,
-        "category": CATEGORY, "event_refs": STRINGS, "resolution": S, "knowledge_id": NONEMPTY,
-        "knowledge_revision": {"type": "integer", "minimum": 1},
-        "feedback_kind": {"type": "string", "enum": ["observation", "counterexample"]},
-        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
-        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
+    ("case_feedback", "Record a material issue, correction or resolution observation; routine tool events are captured by Hooks. Writes a reported Feedback event and problem/evidence records. With knowledge_id the default is an unresolved counterexample against that revision, which may suspend automatic reference; it is not a mere note or proof of falsity. Returns a problem (id/revision/status). Parent task identity/revision are required when a task exists; children use their fixed assignment. Retry lost replies only with the same idempotency_key and identical original arguments.", schema({
+        "context_handle": CONTEXT_HANDLE, "conversation_id": CONVERSATION_ID,
+        "summary": parameter(NONEMPTY, "Concise observed issue/correction and its basis; distinguish report, tool evidence and user acceptance."),
+        "category": parameter(CATEGORY, "Issue category; does not imply a validation level.", default="unknown"),
+        "event_refs": EVENT_REFS,
+        "resolution": parameter(S, "Observed resolution, if any. Text alone never marks the issue resolved or user-accepted.", default=""),
+        "knowledge_id": parameter(NONEMPTY, "Optional formal knowledge being questioned; supplying it defaults feedback_kind to counterexample."),
+        "knowledge_revision": parameter({"type": "integer", "minimum": 1}, "Exact displayed formal revision; requires knowledge_id. Omission selects the active revision if available, so prefer the explicit observed revision."),
+        "feedback_kind": parameter({"type": "string", "enum": ["observation", "counterexample"]}, "Default: counterexample when knowledge_id is supplied, otherwise observation. Counterexample requires knowledge_id."),
+        "idempotency_key": parameter(IDEMPOTENCY_KEY, "Optional stable key. Omission creates no replay receipt: do not blindly retry a lost reply. With a key, preserve it and all original arguments on retry."),
+        "expected_task_id": TASK_ID, "expected_task_revision": TASK_REVISION,
     }, ["summary"])),
-    ("knowledge_use", "简短声明实际采用的知识修订，可关联本任务工具操作；声明和工具观察不证明因果或用户验收。", schema({
-        "context_handle": NONEMPTY, "knowledge_id": NONEMPTY,
-        "knowledge_revision": {"type": "integer", "minimum": 1},
-        "expected_task_id": NONEMPTY, "expected_task_revision": {"type": "integer", "minimum": 1},
-        "expected_write_version": {"type": "integer", "minimum": 1},
-        "operation_id": NONEMPTY,
-        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+    ("knowledge_use", "Record ACTUAL use of a formal revision previously returned to this exact task/agent/write version; merely seeing it is insufficient. Requires current task/assignment and active knowledge. Writes an adoption receipt; returns reported adoption_id, knowledge_state and operation_observation, not causality or user acceptance. Same-key identical retries return the receipt; a key reused with different arguments is rejected. On task/exposure conflict, inspect current context before attempting new work.", schema({
+        "context_handle": CONTEXT_HANDLE,
+        "knowledge_id": parameter(NONEMPTY, "Formal knowledge_id actually adopted; never a candidate_id or memory_id."),
+        "knowledge_revision": parameter({"type": "integer", "minimum": 1}, "Exact active revision displayed to this task/agent before the claimed use."),
+        "expected_task_id": TASK_ID, "expected_task_revision": TASK_REVISION,
+        "expected_write_version": parameter({"type": "integer", "minimum": 1}, "Copy the task.write_version for the exposure and use; different task writes are not interchangeable."),
+        "operation_id": parameter(NONEMPTY, "Optional observed operation ID in this exact task/agent scope; needs matching PreToolUse starting no earlier than the knowledge exposure. Omit if unlinked."),
+        "idempotency_key": parameter(IDEMPOTENCY_KEY, "Optional stable request key; defaults to the request fingerprint. Identical retry arguments must be preserved, including task versions."),
     }, ["knowledge_id", "knowledge_revision", "expected_task_id", "expected_task_revision", "expected_write_version"])),
-    ("learning_status", "查看本项目状态；调试用view=summary的有界摘要，省略view或full保留完整状态。",
-     schema({"view": {"type": "string", "enum": ["summary", "full"]}})),
+    ("learning_status", "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for bounded diagnostics; full may be large. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
+     schema({"view": parameter({"type": "string", "enum": ["summary", "full"]}, "summary for routine diagnostics; omit or use full only when detailed status is needed.", default="full")})),
 ]
 ADMIN_TOOLS = [
     ("problem_list", "获取本项目待治理增量。", schema({"limit": {"type": "integer", "minimum": 1, "maximum": 100}})),
