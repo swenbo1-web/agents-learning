@@ -103,10 +103,10 @@ class WorkNoticeEdgeTests(unittest.TestCase):
         self.context()
         self.change("alpha.py", "alpha first change\n")
         self.assertIn(source["memory_id"], self.context())
-        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery").fetchone()[0], 1)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery WHERE path_key NOT LIKE 'version:%'").fetchone()[0], 1)
         self.change("beta.py", "beta first change\n")
         self.assertIn(source["memory_id"], self.context(1))
-        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery").fetchone()[0], 2)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery WHERE path_key NOT LIKE 'version:%'").fetchone()[0], 2)
         self.change("alpha.py", "alpha second change\n")
         self.assertNotIn(source["memory_id"], self.context(2))
 
@@ -241,7 +241,7 @@ class WorkNoticeEdgeTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         identities = {warnings[0]["memory_id"], *[item["memory_id"] for item in warnings[0]["related_memories"]]}
         self.assertEqual(identities, {first["memory_id"], second["memory_id"]})
-        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery").fetchone()[0], 2)
+        self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM work_notice_delivery WHERE path_key NOT LIKE 'version:%'").fetchone()[0], 2)
         self.change("alpha.py", "alpha changed again\n")
         self.assertFalse(any(card.get("file_state_changed") for card in self.cards(self.context(1))))
 

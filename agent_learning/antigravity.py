@@ -1225,6 +1225,17 @@ class AntigravityAdapter:
                              (encode(output), project, conversation, event_key))
         if event == "Stop" and observed["fullyIdle"]:
             self._schedule(project, governance_epoch, phase_guard)
+        elif event == "PreInvocation" and len(mounted) == 1 and not trajectory["ambiguous"]:
+            # Native invocations do not pass through Runtime's prompt Hook.
+            # Recover only a persisted hint in this exact host/account scope;
+            # the normal native phase guard still controls the launcher.
+            from .scheduler_wakeup import pending
+            try:
+                wake = pending(r, project)
+                if wake is not None and wake["next_try"] <= time.time():
+                    self._schedule(project, governance_epoch, phase_guard)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                pass
         if event == "PreInvocation" and r.config["software_updates"]["enabled"]:
             # Keep update prose out of the persisted native replay receipt. A new
             # safe event can deliver a newly cached version; replaying this event

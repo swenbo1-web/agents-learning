@@ -162,6 +162,14 @@ class FileNoticeGate:
             return False
         now = time.time()
         try:
+            # Different old memories may all describe the same changed file.
+            # This covers only an actually displayed file/version fact, never
+            # the other memories' contents, source risks or exposure receipts.
+            versions = self._version_keys(item)
+            version_scope = self._index_scope() if versions else None
+            if version_scope is not None and all(self._covered(key, version_scope, now)
+                                                  for key in versions.values()):
+                return True
             for key in keys:
                 row = self.r.db.execute("SELECT created FROM work_notice_delivery WHERE project=? AND scope=? AND path_key=?",
                                         (self.project, self.scope, key)).fetchone()
@@ -172,14 +180,54 @@ class FileNoticeGate:
         except sqlite3.Error:
             return False
 
-    def record(self, item):
+    def _version_keys(self, item):
+        from .runtime import digest
+        if not file_notice(item) or item.get("file_projection_incomplete"):
+            return {}
+        result = {}
+        for member in item.get("_notice_members", [item]):
+            if not file_notice(member) or member.get("file_projection_incomplete"):
+                return {}
+            files = {file.get("relative_path"): file for file in member.get("files", ())
+                     if isinstance(file, dict)}
+            for path in member.get("_changed_file_paths", member["file_state"]):
+                version = member["file_state"].get(path)
+                if (not isinstance(path, str) or not isinstance(version, str) or not version
+                        or files.get(path, {}).get("current_version", {}).get("status") != "stat_observed"):
+                    return {}  # Unknown observations never establish coverage.
+                result[path] = "version:" + digest(path) + ":" + digest(version)
+        return result
+
+    def _covered(self, key, scope, now):
+        row = self.r.db.execute("SELECT created FROM work_notice_delivery WHERE project=? AND scope=? AND path_key=?",
+                                (self.project, scope, key)).fetchone()
+        return bool(row and type(row[0]) in (int, float) and math.isfinite(row[0]) and row[0] <= now)
+
+    def record(self, item, card=None):
         if self.delivery != "persistent":
             return
         keys = self._keys(item)
-        if not keys:
-            return
         try:
-            self._record_keys(keys, self.scope)
+            if keys:
+                self._record_keys(keys, self.scope)
+            versions = self._version_keys(item)
+            visible = {file.get("path") for file in (card or {}).get("files", ()) if isinstance(file, dict)}
+            # Any actually shown observation supersedes an older version fact,
+            # including restoration, missing files and source-risk cards. Such
+            # cards invalidate coverage but never establish ordinary coverage.
+            observed = {path for member in item.get("_notice_members", [item])
+                        for path in (member.get("file_state") or {})}
+            version_scope = self._index_scope() if visible & observed else None
+            if version_scope is not None:
+                from .runtime import digest
+                for path in visible & observed:
+                    # Only the current communicated version is covered. A
+                    # return to an earlier version remains a fresh transition.
+                    prefix = "version:" + digest(path) + ":"
+                    self.r.db.execute("DELETE FROM work_notice_delivery WHERE project=? AND scope=? AND path_key LIKE ?",
+                                      (self.project, version_scope, prefix + "%"))
+                    if path in versions:
+                        self._record_keys([versions[path]], version_scope)
         except sqlite3.Error:
             pass  # Optional cache failure keeps normal warnings available.
 

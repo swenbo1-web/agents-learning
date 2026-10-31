@@ -205,7 +205,7 @@ def arm(runtime, project, conversation, previous, task, *, result_only=False):
          start, runtime.session_epoch(), runtime.host_epoch(), time.time()))
 
 
-def seal(runtime, project, conversation, event_id):
+def seal(runtime, project, conversation, event_id, *, defer_prepare=False):
     if scope(runtime, project) is None:
         return
     task = runtime.task(project, conversation)
@@ -228,7 +228,8 @@ def seal(runtime, project, conversation, event_id):
             return
     if seal_phase(runtime, project, row, event_id):
         complete(runtime, project, row["id"], event_id)
-        prepare(runtime, project)
+        if not defer_prepare:
+            prepare(runtime, project)
 
 
 def seal_phase(runtime, project, phase, event_id):

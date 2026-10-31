@@ -1538,6 +1538,13 @@ class WorkMemoryMixin:
                 if current.get("file_projection_incomplete"):
                     continue
                 body = _body_projection(row)
+                coverage = body.get("coverage", {})
+                if (isinstance(coverage, dict) and not coverage.get("truncated")
+                        and coverage.get("full_original_available") is True
+                        and _metadata_only_write(body)):
+                    # Internal renderer hint, based on the complete stored
+                    # source rather than a possibly shortened card preview.
+                    current["_file_receipt_only"] = True
                 if item.get("reference_role") == "task_handoff":
                     scope = item.get("_handoff_scope")
                     if (not isinstance(scope, dict) or not self._work_handoff_usable(current)

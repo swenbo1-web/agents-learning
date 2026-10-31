@@ -626,7 +626,7 @@ class KnowledgeContextMixin:
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     conclusion_used = False
-                    from .work_notice_delivery import FileNoticeGate, coalesce, protocol_only_file_summary
+                    from .work_notice_delivery import FileNoticeGate, coalesce, file_notice, protocol_only_file_summary
                     notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
                     validated = self.work_validate_items(project, work_items, workspace=workspace,
                                                          conclusion_max_chars=240, applicability_query=effective,
@@ -672,6 +672,11 @@ class KnowledgeContextMixin:
                             card["title"] = "关联来源或文件状态变化"
                             card["reference_role"] = "source_update"
                             card["recheck"] = "来源或文件已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            if (file_notice(work_item) and all(member.get("_file_receipt_only")
+                                    for member in work_item.get("_notice_members", [work_item]))):
+                                card["read_required"] = False
+                                card["title"] = "关联文件版本变化"
+                                card["recheck"] = "文件已变化；先核对当前文件，勿直接沿用旧记录。"
                             if work_item.get("published_knowledge_risk"):
                                 card["published_knowledge_risk"] = work_item["published_knowledge_risk"][:1]
                                 if any(risk.get("reason", "").startswith("publication_")
@@ -702,6 +707,23 @@ class KnowledgeContextMixin:
                                 without_files = {key: value for key, value in card.items() if key != "files"}
                                 if dedup.repeated(dedup.prepare("work", work_item, without_files)):
                                     continue  # Extra room for unchanged files is not new conclusion content.
+                        if cost > work_budget - work_used and file_notice(work_item):
+                            # A complete file path carries the actionable fact.
+                            # Related source IDs are optional; do not ack IDs
+                            # removed to keep that fact inside the shared pool.
+                            members = work_item.get("_notice_members", [work_item])
+                            while card.get("related_memories") and cost > work_budget - work_used:
+                                card["related_memories"].pop()
+                                members = members[:-1]
+                                if not card["related_memories"]:
+                                    card.pop("related_memories")
+                                work_item = dict(work_item, _notice_members=members)
+                                note = "[工作历史] " + encode(card)
+                                cost = len(note) + 1 + prefix_cost
+                            while len(card.get("files", [])) > 1 and cost > work_budget - work_used:
+                                card["files"].pop()
+                                note = "[工作历史] " + encode(card)
+                                cost = len(note) + 1 + prefix_cost
                         if cost > work_budget - work_used:
                             # Prefer a whole conclusion to optional file decoration.
                             card.pop("files", None)
@@ -731,7 +753,7 @@ class KnowledgeContextMixin:
                         lines.append(note)
                         work_used += cost
                         work_delivered.append(work_item)
-                        notices.record(work_item)
+                        notices.record(work_item, card)
                         notices.record_index(work_item, card)
                         if expanded and card.get("summary") == expanded:
                             conclusion_used = True

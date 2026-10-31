@@ -1122,7 +1122,15 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                    and raw.get("source") in {None, "startup", "resume"}))
         if update_notice_event and kind == "SessionStart":
             schedule_warning = self._schedule_software_update(raw["cwd"])
-        if fresh and kind in {"Stop", "SessionStart"} and self.config["scheduler"]["enabled"]:
+        from .scheduler_wakeup import pending as pending_scheduler_wake
+        recover_wake = False
+        if not agent_id and kind in {"UserPromptSubmit", "Stop", "SessionStart"}:
+            try:
+                recover_wake = pending_scheduler_wake(self, project) is not None
+            except (ValueError, TypeError, sqlite3.Error):
+                pass  # Optional recovery cannot discard this event or context.
+        if ((fresh and kind in {"Stop", "SessionStart"} or recover_wake)
+                and self.config["scheduler"]["enabled"]):
             token = None
             try:
                 if self.scheduler_wake(project):
@@ -1287,6 +1295,18 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         """派生功能故障不回滚已记录的任务、事件或执行决定；可选摘要排队与普通工作记录采集彼此隔离。"""
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
+        if summarize and conversation:
+            # Keep the wake hint in the same transaction as the original Stop,
+            # even if optional capture/prepare or the later launcher fails.
+            self.db.execute("SAVEPOINT scheduler_wake_registration")
+            try:
+                from .scheduler_wakeup import request as request_scheduler_wake
+                request_scheduler_wake(self, project, event_id, workspace, conversation)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                self.db.execute("ROLLBACK TO scheduler_wake_registration")
+                self._metric(project, "scheduler_wake_registration_failed")
+            finally:
+                self.db.execute("RELEASE scheduler_wake_registration")
         self._work_repair_safely(project, exclude_event=event_id)
         from .work_recovery import register, complete, failed
         self.db.execute("SAVEPOINT work_capture_identity")
@@ -1346,7 +1366,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             try:
                 from .phase_review import seal, scope
                 if scope(self, project) is not None:
-                    seal(self, project, conversation, event_id)
+                    seal(self, project, conversation, event_id,
+                         defer_prepare=self.config["scheduler"]["enabled"])
                 else:
                     self._work_queue_summary(project, conversation, workspace, expected_epoch=self.host_epoch())
             except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):

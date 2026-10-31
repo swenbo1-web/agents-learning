@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current `main` v1.4.51 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current `main` v1.4.52 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.51 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.52 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1821,7 +1821,17 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.51</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.52</summary>
+
+## Stage wakeup recovery and file-notice coverage (1.4.52)
+
+- **Keep durable stage wakeup intent:** when scheduling is enabled, the original Stop stores a request bound to its project, host and account epochs. The existing bounded background runner prepares batches and checks executors; synchronous Hooks avoid repeating this preparation. Later supported events can recover unacknowledged requests while retaining administrator controls, budgets, concurrency and protected-call checks.
+- **Reduce repeated notices for one file version:** in a verified persistent context, only file paths and current versions actually displayed by a complete card establish ordinary notice coverage. Other old records pointing to that same observed version can be deferred without inventing their exposure receipts. Compaction, task and host boundaries revalidate coverage; source risks, counterexamples, revocations and restoration corrections remain separate.
+- **Distinguish acknowledgements from useful reference:** an ordinary file notice containing only a complete, clearly identified write-success acknowledgement no longer directs the agent to empty reference material. Truncated sources do not qualify as complete acknowledgements, and originals remain explicitly readable.
+
+Schema/publication protocol remain 25 and indexes 7/3/1. A pending wakeup or queued stage does not mean model review has started. This adds no resident service or offline wakeup guarantee and never unlocks failed or unknown paid calls automatically.
+
+Isolated acceptance: all 471 checks across 29 affected modules pass on the final source; Python 3.10 and 3.12 each pass 77 checks, and 13 offline packaging checks pass. Three-host sandbox installations, actual stdio MCP entries and a synthetic Hook pass. The 3,992-check frozen full-suite run found an unnecessary ordinary-Stop wakeup, which was fixed and its complete module rerun in the final checks. Four packaging skips were covered separately; nine native symlink checks remain unverified due to Windows privileges. No live reviewer models or existing installations were used; live-host recovery still requires deployment acceptance.
 
 ## Tool-contract guidance and concurrent cold startup (1.4.51)
 

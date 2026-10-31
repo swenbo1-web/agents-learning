@@ -90,6 +90,8 @@ class SchedulerMixin:
         self.db.execute("""CREATE TABLE IF NOT EXISTS scheduler_worker(
             id INTEGER PRIMARY KEY CHECK(id=1),token TEXT NOT NULL,host_epoch INTEGER NOT NULL,
             state TEXT NOT NULL CHECK(state IN ('reserved','running')),lease_until REAL NOT NULL,created REAL NOT NULL)""")
+        from .scheduler_wakeup import install
+        install(self)
 
     def _scheduler_config(self):
         return validate_scheduler_config(self.config.get("scheduler", {}))
@@ -149,10 +151,13 @@ class SchedulerMixin:
         finally:
             self.host, self.host_instance, self.host_scope = old_host, old_instance, old_scope
 
-    def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope):
+    def _scheduler_eval_admin_for_scope(self, project, cfg, target_scope, *, acknowledge_wakeups=False):
         from .admin_queue import eligible_query, scan_signatures, ready_executor, dispatch_diagnostic, routing_scan_pending
         from .admin_usage import admin_admission_status
         from .runtime import digest
+        if acknowledge_wakeups and not self.db.in_transaction:
+            from .runtime import ContractError
+            raise ContractError("wake acknowledgement requires the scheduler refresh transaction")
         with self._scheduler_host_scope(target_scope):
             # Only a scheduler write entry may advance local source scans.
             # Read-only status remains a view of the durable queue.
@@ -160,6 +165,11 @@ class SchedulerMixin:
                     and self.admin_effective_config(project)["enabled"]):
                 from .phase_review import prepare as prepare_phases
                 prepare_phases(self, project)
+            if acknowledge_wakeups:
+                # The enclosing refresh commits this acknowledgement together
+                # with the derived job state, or rolls both back on failure.
+                from .scheduler_wakeup import acknowledge
+                acknowledge(self, project)
             scan, preflight = scan_signatures(self, project)
             signature = digest({"scan": scan, "host_epoch": self.host_epoch(),
                 "problems": list(self.db.execute("SELECT COUNT(*),COALESCE(SUM(revision),0),MAX(rowid) "
@@ -208,15 +218,17 @@ class SchedulerMixin:
                 return signature, "waiting", due, admission
             return signature, "ready", now, ""
 
-    def _scheduler_admin_selection(self, project, cfg):
+    def _scheduler_admin_selection(self, project, cfg, *, acknowledge_wakeups=False):
         scopes = self._scheduler_admin_scopes(project)
-        primary = self._scheduler_eval_admin_for_scope(project, cfg, scopes[0])
+        primary = self._scheduler_eval_admin_for_scope(project, cfg, scopes[0],
+            acknowledge_wakeups=acknowledge_wakeups)
         if not cfg["enabled"] or primary[1] == "ready" or len(scopes) == 1:
             return (*primary, scopes[0])
         best, best_scope = primary, scopes[0]
         rank = {"ready": 3, "waiting": 2, "idle": 1, "disabled": 0}
         for scope in scopes[1:]:
-            candidate = self._scheduler_eval_admin_for_scope(project, cfg, scope)
+            candidate = self._scheduler_eval_admin_for_scope(project, cfg, scope,
+                acknowledge_wakeups=acknowledge_wakeups)
             if candidate[1] == "ready":
                 return (*candidate, scope)
             if rank[candidate[1]] > rank[best[1]]:
@@ -226,10 +238,11 @@ class SchedulerMixin:
                     best, best_scope = candidate, scope
         return (*best, best_scope)
 
-    def _scheduler_admin_state(self, project, cfg):
+    def _scheduler_admin_state(self, project, cfg, *, acknowledge_wakeups=False):
         # The shared job reports aggregate readiness; execution must retain the
         # exact scope selected in its claim transaction.
-        return self._scheduler_admin_selection(project, cfg)[:4]
+        return self._scheduler_admin_selection(project, cfg,
+            acknowledge_wakeups=acknowledge_wakeups)[:4]
 
     def _scheduler_release_state(self, project, cfg, prior):
         from .runtime import digest
@@ -271,13 +284,13 @@ class SchedulerMixin:
         blocked = self.db.execute("SELECT 1 FROM outbox WHERE project=? AND state='blocked' LIMIT 1", (project,)).fetchone()
         return signature, "waiting" if blocked else "idle", None, "sync_review_required" if blocked else "no_sync_increment"
 
-    def _scheduler_refresh(self, project, cfg):
+    def _scheduler_refresh(self, project, cfg, *, acknowledge_wakeups=False):
         now = time.time()
         for kind in KINDS:
             prior = self.db.execute("SELECT * FROM scheduler_jobs WHERE project=? AND kind=?", (project, kind)).fetchone()
             if prior and prior["state"] == "running":
                 continue
-            result = (self._scheduler_admin_state(project, cfg) if kind == "admin" else
+            result = (self._scheduler_admin_state(project, cfg, acknowledge_wakeups=acknowledge_wakeups) if kind == "admin" else
                       self._scheduler_release_state(project, cfg, prior) if kind == "release" else
                       self._scheduler_sync_state(project, cfg))
             signature, state, due, reason = result
@@ -305,6 +318,12 @@ class SchedulerMixin:
             self.assert_host_epoch(expected_epoch)
             if _phase_guard:
                 _phase_guard()
+            from .scheduler_wakeup import reserve_attempt
+            hinted = reserve_attempt(self, project)
+            if hinted is not None:
+                # Heavy source scans, routing and budgets run in the existing
+                # finite runner, rather than consuming a synchronous Hook.
+                return hinted
             self._scheduler_recover()
             self._scheduler_refresh(project, cfg)
             return bool(self.db.execute("SELECT 1 FROM scheduler_jobs WHERE project=? AND state IN ('ready','waiting') "
@@ -318,7 +337,10 @@ class SchedulerMixin:
             self.assert_host_epoch(expected_epoch)
             if _phase_guard:
                 _phase_guard()
-            self._scheduler_recover()
+            # Claiming a local launcher does not need to recover every model
+            # call or refresh project queues. The runner does that before work.
+            self.db.execute("DELETE FROM scheduler_worker WHERE lease_until<=? OR host_epoch!=?",
+                            (time.time(), self.host_epoch()))
             if self.db.execute("SELECT 1 FROM scheduler_worker").fetchone():
                 return None
             now, token = time.time(), str(uuid.uuid4())
@@ -375,7 +397,7 @@ class SchedulerMixin:
                 raise ContractError("scheduler worker ownership changed")
             self._scheduler_recover()
             for identifier in self._scheduler_projects(project):
-                self._scheduler_refresh(identifier, cfg)
+                self._scheduler_refresh(identifier, cfg, acknowledge_wakeups=True)
         attempted = set()
         while len(items) < max_jobs:
             remaining = deadline - time.monotonic()
@@ -401,7 +423,7 @@ class SchedulerMixin:
                             # A wake-up is only a hint. Do not invoke the current
                             # host when the ready scope disappeared meanwhile.
                             attempted.add(key)
-                            self._scheduler_refresh(candidate["project"], cfg)
+                            self._scheduler_refresh(candidate["project"], cfg, acknowledge_wakeups=True)
                             continue
                         run_deadline = self._scheduler_admin_run_deadline(candidate["project"], selection[4], run_limits)
                         if run_deadline <= time.monotonic():
@@ -457,7 +479,7 @@ class SchedulerMixin:
                 now = time.time()
                 self.db.execute("UPDATE scheduler_jobs SET state='idle',owner=NULL,lease_until=NULL,last_run=?,updated=?,summary=?,wait_reason='' "
                                 "WHERE project=? AND kind=? AND owner=?", (now, now, encode(summary), identifier, kind, owner))
-                self._scheduler_refresh(identifier, cfg)
+                self._scheduler_refresh(identifier, cfg, acknowledge_wakeups=True)
                 if kind == "admin" and result.get("reason") == "insufficient_call_window":
                     with self._scheduler_host_scope(admin_plan["host_scope"]):
                         outer_deadline = min(project_deadline, _run_deadline if _run_deadline is not None else deadline)
@@ -571,8 +593,22 @@ class SchedulerMixin:
             item["summary"] = json.loads(item["summary"])
             items.append(item)
         worker = self.db.execute("SELECT state,host_epoch,lease_until,created FROM scheduler_worker").fetchone()
+        now = time.time()
+        wakeups = [dict(row) for row in self.db.execute(
+            "SELECT w.project,w.host_scope,w.created,w.next_try,w.attempts FROM scheduler_wake_requests w "
+            "JOIN host_scopes h ON h.scope=w.host_scope AND h.epoch=w.session_epoch "
+            "WHERE w.governance_epoch=? AND (? IS NULL OR w.project=?) "
+            "ORDER BY w.created,w.project,w.host_scope LIMIT 100", (self.host_epoch(), project, project))]
+        for hint in wakeups:
+            from .scheduler_wakeup import _enabled
+            with self._scheduler_host_scope(hint["host_scope"]):
+                enabled = _enabled(self, hint["project"])
+            hint["state"] = ("paused" if not enabled else
+                "waiting_worker" if worker and worker["lease_until"] > now and worker["host_epoch"] == self.host_epoch()
+                else "retry_wait" if hint["next_try"] > now else "wake_pending")
         dirty = self.db.execute("SELECT COUNT(*) FROM knowledge_sync_dirty WHERE (? IS NULL OR project=?)", (project, project)).fetchone()[0]
         return {"enabled": self._scheduler_config()["enabled"], "items": items, "worker": dict(worker) if worker else None,
+                "pending_wakeups": wakeups,
                 "sync_dirty_count": dirty, "total_jobs": self.db.execute("SELECT COUNT(*) FROM scheduler_jobs "
                     "WHERE (? IS NULL OR project=?)", (project, project)).fetchone()[0],
                 "continuous_service_installed": False}
