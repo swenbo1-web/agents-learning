@@ -15,7 +15,9 @@ class StartupGuard1451Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Runtime resolves its home. Windows CI may provide an 8.3 temporary
+        # path, so compare the same physical directory using its canonical form.
+        self.root = Path(self.temp.name).resolve()
         self.runtime = SimpleNamespace(home=self.root)
 
     def clock_and_lock(self, release_at):
