@@ -623,19 +623,29 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
 
     def session_context(self, project, context_handle=None, expected_epoch=None):
         # 压缩恢复只读已验证的身份；不能从“最新会话”猜本次归属。
-        with self.transaction():
+        from .admin_routing import _read_snapshot
+
+        owns_snapshot = not self.db.in_transaction
+        with _read_snapshot(self):
             epoch = self.assert_session_epoch(expected_epoch)
             if context_handle is None:
-                return {"project_id": project, "host_epoch": epoch, "context_bound": False, "rebind_required": True}
-            result = self.access_context(project, context_handle, expected_epoch=epoch)
-            parent = self.task(project, result["conversation_id"])
-            assignment = self.assignment_context(project, result["conversation_id"], result["agent_id"], context_handle) if result["agent_id"] else None
-            task = self.task_snapshot(project, assignment["task_id"], assignment["task_revision"],
-                                      assignment["task_write_version"]) if assignment and assignment["task_id"] else None
-            return dict(result, context_bound=True, rebind_required=False, task=task if result["agent_id"] else parent,
-                        assignment=assignment, parent_task=parent if result["agent_id"] else None,
-                        execution=self.execution_status(project, result["conversation_id"]),
-                        task_access="parent_read_only" if result["agent_id"] else "read_write")
+                result = {"project_id": project, "host_epoch": epoch, "context_bound": False, "rebind_required": True}
+            else:
+                access = self.access_context(project, context_handle, expected_epoch=epoch)
+                parent = self.task(project, access["conversation_id"])
+                assignment = self.assignment_context(project, access["conversation_id"], access["agent_id"], context_handle) if access["agent_id"] else None
+                task = self.task_snapshot(project, assignment["task_id"], assignment["task_revision"],
+                                          assignment["task_write_version"]) if assignment and assignment["task_id"] else None
+                result = dict(access, context_bound=True, rebind_required=False, task=task if access["agent_id"] else parent,
+                              assignment=assignment, parent_task=parent if access["agent_id"] else None,
+                              execution=self.execution_status(project, access["conversation_id"]),
+                              task_access="parent_read_only" if access["agent_id"] else "read_write")
+        if owns_snapshot:
+            # A WAL writer may change accounts while these consistent reads
+            # run. Recheck outside our snapshot before returning a binding.
+            # A caller-owned transaction keeps its own snapshot and lifetime.
+            self.assert_session_epoch(epoch)
+        return result
 
     def account_changed(self, notification_id=None):
         """宿主/操作者通知换号；不读取凭证，不按登录账户拆分项目知识。"""
