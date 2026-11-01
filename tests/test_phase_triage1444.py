@@ -10,6 +10,7 @@ from agent_learning.admin import _fingerprint
 from agent_learning.admin_decisions import review_signature
 from agent_learning.phase_local_triage import comparison_queries
 from agent_learning.phase_review import configure, seal
+from agent_learning.review_evidence import raw_packet
 from agent_learning.review_packet import review_instruction
 from agent_learning.runtime import Runtime
 
@@ -165,13 +166,27 @@ class PhaseTriage1444Tests(unittest.TestCase):
         problem = self.phase(goal="Checkpoint recovery")
         baseline = self.r.review_packet(self.p, problem, max_chars=5000)
         self.assertTrue(baseline["related_knowledge"])
+        primary_ids = [event["id"] for event in baseline["events"]]
+        # Aliases yield before actual comparison sources: the wire preview's
+        # optional decoration must not force a source out of a raw-fit packet.
         extra = 5000 - len(review_instruction(baseline)) + 100
+        with patch("agent_learning.phase_tool_evidence.packet_selection", return_value={"note": "x" * extra}):
+            retained = self.r.review_packet(self.p, problem, max_chars=5000)
+        self.assertIn("phase_tool_context", retained)
+        self.assertEqual(retained["related_knowledge"], baseline["related_knowledge"])
+        self.assertEqual(retained["comparison_retrieval"]["visible"], {"knowledge": 1, "candidates": 0})
+        self.assertEqual([event["id"] for event in retained["events"]], primary_ids)
+        self.assertLessEqual(len(review_instruction(retained)), 5000)
+        # Exceed the actual raw packing threshold so this branch still covers
+        # reference removal and refreshed visibility under the same 5000 cap.
+        extra = 5000 - len(review_instruction(raw_packet(baseline))) + 100
         with patch("agent_learning.phase_tool_evidence.packet_selection", return_value={"note": "x" * extra}):
             packet = self.r.review_packet(self.p, problem, max_chars=5000)
         self.assertIn("phase_tool_context", packet)
         self.assertEqual(packet["related_knowledge"], [])
         self.assertEqual(packet["comparison_retrieval"]["returned"]["knowledge"], 1)
         self.assertEqual(packet["comparison_retrieval"]["visible"], {"knowledge": 0, "candidates": 0})
+        self.assertEqual([event["id"] for event in packet["events"]], primary_ids)
         self.assertLessEqual(len(review_instruction(packet)), 5000)
 
     def test_diagnostics_do_not_change_evidence_or_review_reuse_identity(self):

@@ -496,6 +496,7 @@ def _scan_progress(runtime, project, phase, cfg):
 
 def prepare(runtime, project, *, force=False, _page_budget=3):
     """Called only in a writer transaction; viewing status never creates jobs."""
+    from .review_evidence import prefer_short_refs, raw_packet
     from .admin import _fingerprint, _review_configuration, _executor_semantics
     from .admin_decisions import find_receipt, review_signature, dependency_signature
     from .admin_review_flow import evidence_readiness
@@ -735,6 +736,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             candidate_body = batch_packet(parent, ids, items + [packet], executor_conversation, char_limit,
                 omitted=omitted, reused=reused, prior_deferred=prior_deferred,
                 continuation=bool(scanned_remainder), omitted_sources=sum(p["omitted_sources"] for p in phases))
+            candidate_body = raw_packet(candidate_body)
             from .admin_usage import estimate_reservation
             visible_instruction = instruction(candidate_body)
             estimate = estimate_reservation(runtime, project, visible_instruction, phase=True)
@@ -770,6 +772,7 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
         prior_deferred=prior_deferred, continuation=bool(scanned_remainder),
         omitted_sources=sum(p["omitted_sources"] for p in phases),
         complete=not omitted and not prior_deferred and not scanned_remainder and not any(p["omitted_sources"] for p in phases))
+    body = raw_packet(body)
     for identity, scan in scan_updates.items():
         runtime.db.execute("UPDATE phase_scan_progress SET cursor=?,deferred=?,exhausted=? WHERE phase_id=?",
             (encode(scan["cursor"]), scan["deferred"], int(not scan["more"]), identity))
@@ -811,6 +814,8 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             runtime.db.execute("DELETE FROM phase_scan_progress WHERE phase_id=?", (identity,))
     # batch_packet owns its list. Only the final admitted members may receive
     # pending rows; a removed case must remain available to a later scan.
+    body = prefer_short_refs(body, lambda value: len(instruction(value)) <= maximum
+        and estimate_reservation(runtime, project, instruction(value), phase=True)["admitted"])
     items = body["items"]
     duplicates = supported_duplicates
     for identity in held_fresh:

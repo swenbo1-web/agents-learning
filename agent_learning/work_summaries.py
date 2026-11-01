@@ -386,6 +386,7 @@ class WorkSummaryMixin:
         """Frozen visible projections have their own coverage contract, never formal publication evidence."""
         from .runtime import ContractError
         from .review_packet import review_instruction
+        from .review_evidence import prefer_short_refs, raw_packet
         limit = self.config["admin"]["max_input_chars"] if max_chars is None else max_chars
         if type(limit) is not int or not 1000 <= limit <= 200000:
             raise ContractError("invalid work summary input budget")
@@ -405,6 +406,7 @@ class WorkSummaryMixin:
         supplementation = self._work_summary_supplementation(project, problem_id)
         if supplementation:
             packet["supplementation"] = supplementation
+        packet = raw_packet(packet)
         for snapshot in snapshots:
             projection = snapshot.get("projection")
             if projection is None:
@@ -426,7 +428,7 @@ class WorkSummaryMixin:
                 packet["incomplete"] = True
                 break
         packet["omitted_count"] = len(snapshots) - len(packet["events"])
-        return packet
+        return prefer_short_refs(packet, lambda value: len(SUMMARY_PREFIX + review_instruction(value)) <= limit)
 
     def work_summary_select(self, project, problem_id):
         """扫描阶段只本地检查；失效批次退出队列，禁用或异宿主批次仍保留。"""

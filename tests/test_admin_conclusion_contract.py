@@ -9,6 +9,7 @@ from unittest.mock import patch
 from agent_learning import review_packet as prompts
 from agent_learning.admin import _fingerprint
 from agent_learning.admin_decisions import find_receipt, persist_receipt, review_signature
+from agent_learning.review_evidence import project_packet, source_packet
 from agent_learning.mcp import CANDIDATE, validate
 from agent_learning.phase_review import instruction as phase_instruction
 from agent_learning.runtime import Runtime
@@ -43,7 +44,8 @@ class AdminConclusionPromptTests(unittest.TestCase):
                     self.assertEqual(rendered.count(prompts.CONTENT_LAYOUT_PREFIX), 1)
                     self.assertLess(rendered.index(prompts.CONTENT_LAYOUT_PREFIX), rendered.index("<untrusted_evidence>"))
                     visible = rendered.split("<untrusted_evidence>", 1)[1].rsplit("</untrusted_evidence>", 1)[0]
-                    self.assertEqual(json.loads(visible), source)
+                    self.assertEqual(json.loads(visible), project_packet(source))
+                    self.assertEqual(source_packet(json.loads(visible)), source)
                     self.assertEqual(source, frozen, "format guidance must not rewrite the frozen sources")
 
 class AdminConclusionCompatibilityTests(unittest.TestCase):

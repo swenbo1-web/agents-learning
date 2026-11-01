@@ -159,6 +159,7 @@ def _related_item(source, events, total, matched, score):
 def enrich_history_packet(runtime, project, packet, job_id, *, max_chars=None):
     """Add at most two sources/four whole events without trimming the packet."""
     from .review_packet import review_instruction
+    from .review_evidence import prefer_short_refs, raw_packet
     from .runtime import ContractError, encode
 
     limit = runtime.config["admin"]["max_input_chars"] if max_chars is None else max_chars
@@ -166,14 +167,14 @@ def enrich_history_packet(runtime, project, packet, job_id, *, max_chars=None):
         raise ContractError("history context budget must be an integer from 1000 to 200000")
     if not isinstance(packet, dict):
         raise ContractError("history context requires a packet object")
-    result = deepcopy(packet)
+    result = raw_packet(packet)
     result["purpose"] = "history_review"
     result.pop("related_history", None)
     with _transaction(runtime):
         primary = _primary(runtime, project, result, job_id)
         query = _tokens(primary["summary"])
         if not query or len(review_instruction(result)) >= limit:
-            return result
+            return prefer_short_refs(result, lambda value: len(review_instruction(value)) <= limit)
         denominator = sum(_weight(word) for word in query)
         ranked = []
         for row in _source_rows(runtime, project, primary, job_id):
@@ -221,7 +222,7 @@ def enrich_history_packet(runtime, project, packet, job_id, *, max_chars=None):
                     break
         if selected:
             result["related_history"] = selected
-    return result
+    return prefer_short_refs(result, lambda value: len(review_instruction(value)) <= limit)
 
 
 def _source_snapshot(runtime, project, job_id, item):

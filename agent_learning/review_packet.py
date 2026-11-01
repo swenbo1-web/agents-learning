@@ -37,21 +37,22 @@ HISTORY_REVIEW_PREFIX = (
 CONTENT_LAYOUT_PREFIX = (
     "candidate正文先写有据“结论：”，保留条件限制。\n"
 )
-PACKET_FORMAT = 9
+PACKET_FORMAT = 10
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
 
 def review_instruction(packet):
     from .review_transport import TRANSPORT_KEY, TRANSPORT_PREFIX, compact_packet
-    from .review_evidence import REFERENCE_PREFIX, project_packet
+    from .review_evidence import REFERENCE_PREFIX, has_short_refs, project_packet
     from .runtime import encode
     history = HISTORY_REVIEW_PREFIX if packet.get("purpose") == "history_review" else ""
     projected = project_packet(packet)
+    references = REFERENCE_PREFIX if has_short_refs(projected) else ""
     visible = compact_packet(projected)
     transport = TRANSPORT_PREFIX if visible is not projected and TRANSPORT_KEY in visible else ""
     # 补充规则放在不可信资料块之前，保持原有公共资料包边界。
-    return CONTENT_LAYOUT_PREFIX + history + REFERENCE_PREFIX + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
+    return CONTENT_LAYOUT_PREFIX + history + references + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
 
 
 def _fits(packet, limit):
@@ -83,6 +84,8 @@ class ReviewPacketMixin:
         try:
             self.history_guard(project, problem_id)
             result = self._review_packet_snapshot(project, problem_id, offset, expected_revision, limit, section)
+            from .review_evidence import prefer_short_refs
+            result = prefer_short_refs(result, lambda value: _fits(value, limit))
             if owned:
                 self.db.execute("COMMIT")
             return result
@@ -93,6 +96,7 @@ class ReviewPacketMixin:
 
     def _review_packet_snapshot(self, project, problem_id, offset, expected_revision, limit, section):
         from .runtime import ContractError, clean, clip, digest, encode
+        from .review_evidence import raw_packet
 
         problem_row = self.db.execute("SELECT * FROM problems WHERE id=? AND project=?",
                                       (problem_id, project)).fetchone()
@@ -162,6 +166,7 @@ class ReviewPacketMixin:
                                             (project, problem_id)).fetchone()
         if context_revision:
             packet["review_context_revision"] = context_revision[0]
+        packet = raw_packet(packet)
         if target_required:
             packet.update(target_required=True, target_knowledge=None,
                           target_omitted="budget" if target is not None else "missing")
@@ -293,6 +298,7 @@ class ReviewPacketMixin:
                 packet.update(target_required=True, target_knowledge=None,
                               target_omitted="budget" if target is not None else "missing")
                 packet["omission_reasons"].append("target_knowledge_" + packet["target_omitted"])
+            packet = raw_packet(packet)
         if tool_context:
             # Optional selection diagnostics must not displace actual evidence
             # or turn a previously reviewable public case into an incomplete one.
