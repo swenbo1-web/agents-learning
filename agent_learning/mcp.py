@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 import sys
 from . import __version__
 from .runtime import CATEGORIES, KNOWLEDGE_KINDS, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
@@ -101,13 +102,13 @@ WORKER_TOOLS = [
         "summary": parameter({"type": "string", "minLength": 1, "maxLength": 2000}, "Observed concern or inapplicability and its basis; do not claim unverified falsity."),
         "expected_task_id": TASK_ID, "expected_task_revision": TASK_REVISION,
         "idempotency_key": IDEMPOTENCY_KEY, "event_refs": EVENT_REFS}, ["candidate_id", "expected_version", "summary", "idempotency_key"])),
-    ("knowledge_search", "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted.", schema({
+    ("knowledge_search", "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted. A database_busy tool error delivers no knowledge; retry this read later after the write finishes, without rapid repeated retries.", schema({
         "query": parameter(S, "Current concrete problem, error code or technical identifier; avoid repeating an unchanged search without new need."),
         "limit": parameter({"type": "integer", "minimum": 1, "maximum": 10}, "Maximum result count, subject to the response budget.", default=5),
         "filters": parameter(KNOWLEDGE_FILTERS, "Optional exact metadata/category filters; omit unknown fields."),
         "context_handle": CONTEXT_HANDLE,
         "max_chars": parameter({"type": "integer", "minimum": 512, "maximum": 20000}, "Response JSON character budget, not tokens.", default=6000)}, ["query"])),
-    ("knowledge_read", "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge.", schema({
+    ("knowledge_read", "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge. A database_busy tool error delivers no knowledge; retry the same page later after the write finishes, without rapid repeated retries.", schema({
         "knowledge_id": parameter(NONEMPTY, "knowledge_id from formal search/injection; never a candidate_id or memory_id."),
         "context_handle": CONTEXT_HANDLE,
         "max_chars": parameter({"type": "integer", "minimum": 1024, "maximum": 50000}, "Response JSON character budget, not tokens.", default=12000),
@@ -161,7 +162,7 @@ WORKER_TOOLS = [
         "operation_id": parameter(NONEMPTY, "Optional observed operation ID in this exact task/agent scope; needs matching PreToolUse starting no earlier than the knowledge exposure. Omit if unlinked."),
         "idempotency_key": parameter(IDEMPOTENCY_KEY, "Optional stable request key; defaults to the request fingerprint. Identical retry arguments must be preserved, including task versions."),
     }, ["knowledge_id", "knowledge_revision", "expected_task_id", "expected_task_revision", "expected_write_version"])),
-    ("learning_status", "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for bounded diagnostics; full may be large. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
+    ("learning_status", "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for lightweight identity, routing and usage; it does not evaluate queue eligibility (queue_checked=false). Use full for detailed queue/history status. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
      schema({"view": parameter({"type": "string", "enum": ["summary", "full"]}, "summary for routine diagnostics; omit or use full only when detailed status is needed.", default="full")})),
 ]
 ADMIN_TOOLS = [
@@ -532,8 +533,9 @@ class Server:
             if name == "task_update": return r.task_update(p, **body)
             return r.feedback(p, **body)
         if name == "learning_status":
-            status = r.status(p)
-            return status_summary(status) if args.get("view") == "summary" else status
+            if args.get("view") == "summary":
+                return status_summary(r.status_light(p))
+            return r.status(p)
         if name == "knowledge_use":
             handle = self._handle(args)
             body = {key: value for key, value in args.items() if key != "context_handle"}
@@ -676,6 +678,17 @@ class Server:
                             "visible": False, "scope": "project", "reason": str(exc)}}}
                     else:
                         result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+                except sqlite3.OperationalError as exc:
+                    from .sqlite_policy import knowledge_busy_response
+                    # Read results are returned only after their display
+                    # receipt commits. Other tools may have side effects and
+                    # must not acquire a blanket retry promise here.
+                    body = knowledge_busy_response(params["name"], exc)
+                    if body is None:
+                        raise
+                    result = {"content": [{"type": "text", "text": encode(body)}], "isError": True}
+                    if self.protocol_version in {"2025-06-18", "2025-11-25"}:
+                        result["structuredContent"] = body
             else:
                 raise ProtocolError(-32601, "method not found")
             return {"jsonrpc": "2.0", "id": ident, "result": result}

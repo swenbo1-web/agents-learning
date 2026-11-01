@@ -9,18 +9,25 @@ import uuid
 
 # A known executor failure must not permanently pin the oldest problem at the
 # head of every bounded scan. Unknown/paid calls remain excluded by eligibility.
+# CROSS JOIN keeps each evidence lookup rooted at this problem's event links.
+# An ordinary JOIN can instead scan every project event for every queued case;
+# LIMIT bounds the result, but the complete ordering still evaluates all cases.
 REVIEW_ORDER = ("ORDER BY COALESCE((SELECT MAX(c.finished) FROM admin_calls c WHERE c.project=p.project "
                 "AND c.problem=p.id AND c.revision=p.revision AND c.state='not_started'),0),"
                 "CASE WHEN p.knowledge_id IS NOT NULL THEN 0 "
                 "WHEN p.resolution_status='recovery_observed' THEN 1 "
-                "WHEN EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
-                "WHERE pe.problem=p.id AND e.project=p.project AND e.type='PostToolUse' AND e.outcome='succeeded') THEN 2 "
-                "WHEN EXISTS(SELECT 1 FROM problem_events pe JOIN events e ON e.id=pe.event "
-                "WHERE pe.problem=p.id AND e.project=p.project AND e.type NOT IN ('PreToolUse','PostToolUse')) THEN 3 "
+                "WHEN EXISTS(SELECT 1 FROM problem_events pe CROSS JOIN events e "
+                "WHERE pe.problem=p.id AND e.id=pe.event AND e.project=p.project AND e.type='PostToolUse' AND e.outcome='succeeded') THEN 2 "
+                "WHEN EXISTS(SELECT 1 FROM problem_events pe CROSS JOIN events e "
+                "WHERE pe.problem=p.id AND e.id=pe.event AND e.project=p.project AND e.type NOT IN ('PreToolUse','PostToolUse')) THEN 3 "
                 "ELSE 4 END,p.created,p.id ")
 
 
 def install_queue(runtime):
+    # Derived access paths only; existing records and schema versions stay put.
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS events_project_type ON events(project,type)")
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS candidates_problem_status "
+                       "ON candidates(project,problem,problem_revision,status)")
     runtime.db.execute("CREATE TABLE IF NOT EXISTS admin_review_checks("
                        "project TEXT NOT NULL,problem TEXT NOT NULL,revision INTEGER NOT NULL,"
                        "signature TEXT NOT NULL,task_updated REAL,updated REAL NOT NULL,"

@@ -79,6 +79,11 @@ def status_summary(status):
     dispatch = _object(status.get("admin_dispatch_diagnostic"))
     public["admin_dispatch_diagnostic"] = fields(dispatch,
         ("phase", "reason", "blocking_scope", "next_due", "blocked_review_scope"))
+    if "queue_checked" in dispatch:
+        checked = dispatch["queue_checked"]
+        public["admin_dispatch_diagnostic"]["queue_checked"] = checked if isinstance(checked, bool) else None
+    queue_fact = ({"queue_checked": public["admin_dispatch_diagnostic"]["queue_checked"]}
+                  if "queue_checked" in dispatch else {})
     if "queue_blocked_by_protected_calls" in dispatch:
         blocked = dispatch["queue_blocked_by_protected_calls"]
         public["admin_dispatch_diagnostic"]["queue_blocked_by_protected_calls"] = (
@@ -99,10 +104,11 @@ def status_summary(status):
         # Missing project statistics must not silently inherit global figures.
         public[name] = usage(status.get(name))
     public["admission"] = fields(status.get("admission"), ("admission_status", "blocking_scope"))
-    workload = _object(status.get("workload"))
-    public["workload"] = {"scope": "project", **fields(workload, ("available",)),
-        "stages": fields(workload.get("stages"),
-                         ("pending_review", "awaiting_evidence", "awaiting_approval", "blocked"))}
+    if "workload" in status:
+        workload = _object(status.get("workload"))
+        public["workload"] = {"scope": "project", **fields(workload, ("available",)),
+            "stages": fields(workload.get("stages"),
+                             ("pending_review", "awaiting_evidence", "awaiting_approval", "blocked"))}
     public["work_summary_policy"] = fields(status.get("work_summary_policy"), ("enabled",))
     memory = _object(status.get("work_memory"))
     public["work_memory"] = fields(memory, ("index_version", "index_rebuild_pending", "capture_repair_pending"))
@@ -133,6 +139,8 @@ def status_summary(status):
             if isinstance(reason, str) and reason in DELIVERY_RECOVERY_REASONS:
                 public["host_capture"]["delivery_recovery_reason"] = reason
     public["full_view"] = {"tool": "learning_status", "arguments": {"view": "full"}}
+    if status.get("details_omitted") is True:
+        public["details_omitted"] = True
     if truncated:
         public["strings_truncated"] = True
 
@@ -178,6 +186,8 @@ def status_summary(status):
                 "admission", "full_view", "strings_truncated")
         ledgers = {name: public[name] for name in ("project_usage", "global_usage")}
         public = StatusSummary({name: public[name] for name in keep if name in public})
+        if queue_fact:
+            public["admin_dispatch_diagnostic"] = queue_fact
         for name in ("project_usage", "global_usage"):
             # Use bounded values from the projection, not fresh long strings.
             public[name] = {key: value for key, value in ledgers[name].items() if key in {
@@ -195,4 +205,6 @@ def status_summary(status):
             admin_admission_enabled=public["admin_admission_enabled"],
             project_usage=public["project_usage"], global_usage=public["global_usage"],
             full_view=public["full_view"], details_omitted=True, budget_fallback=True)
+        if queue_fact:
+            public["admin_dispatch_diagnostic"] = queue_fact
     return public

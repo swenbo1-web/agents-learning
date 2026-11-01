@@ -147,7 +147,8 @@ class MCPProtocolTests(unittest.TestCase):
         from agent_learning.status_output import MAX_MODEL_CHARS
         full = fixture()
         for protocol in Server.SUPPORTED_VERSIONS:
-            with self.subTest(protocol=protocol), patch.object(self.runtime, "status", return_value=full):
+            with self.subTest(protocol=protocol), patch.object(self.runtime, "status", return_value=full), \
+                    patch.object(self.runtime, "status_light", return_value=full):
                 server = self.ready(version=protocol)
                 self.assertIs(server.call("learning_status", {}), full)
                 self.assertIs(server.call("learning_status", {"view": "full"}), full)

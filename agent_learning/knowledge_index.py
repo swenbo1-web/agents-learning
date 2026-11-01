@@ -692,15 +692,15 @@ class KnowledgeIndexMixin(SemanticRetrievalMixin):
             self._metric(project, "search_matches", int(bool(items)))
 
         if owns_snapshot:
+            from .sqlite_policy import busy_timeout, is_busy_error
             try:
-                with self.transaction():
-                    write_derived()
+                # Optional accounting must not consume the wait reserved for
+                # the authoritative display receipt that follows this read.
+                with busy_timeout(self.db, 0):
+                    with self.transaction():
+                        write_derived()
             except sqlite3.OperationalError as exc:
-                code = getattr(exc, "sqlite_errorcode", None)
-                # Python 3.10 的异常没有 sqlite_errorcode，仍兼容声明的最低运行版本。
-                busy = (code & 255 in {5, 6}) if code is not None else str(exc).lower().startswith(
-                    ("database is locked", "database table is locked"))
-                if not busy:
+                if not is_busy_error(exc):
                     raise
                 # 结果已经按完整快照获得，派生缓存/计数锁竞争不能阻断检索。
         else:

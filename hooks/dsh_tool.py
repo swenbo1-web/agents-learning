@@ -279,6 +279,7 @@ def main():
         return 0
 
     runtime = None
+    tool_name = payload.get("tool") if isinstance(payload.get("tool"), str) else None
     try:
         from agent_learning.mcp import Server
         from agent_learning.runtime import Runtime
@@ -397,7 +398,13 @@ def main():
         result = server.call(tool_name, tool_args)
         _emit({"ok": True, "result": result})
     except Exception as exc:
-        _emit({"ok": False, "error": str(exc)})
+        from agent_learning.sqlite_policy import knowledge_busy_response
+        body = knowledge_busy_response(tool_name, exc)
+        if body is not None:
+            from agent_learning.runtime import encode
+            _emit({"ok": False, "error": encode(body)})
+        else:
+            _emit({"ok": False, "error": str(exc)})
     finally:
         if runtime is not None:
             runtime.close()

@@ -67,6 +67,11 @@ class KnowledgeContextMixin:
     def record_exposure(self, project, context_handle, items, expected_epoch=None, file_observations=None):
         """MCP仅登记实际返回资料；未绑定查询不猜测会话归属。"""
         from .runtime import ContractError
+        if not items:
+            # An empty result has no exposure to persist, but still closes the
+            # account/context change window before a bound read can succeed.
+            self.access_context(project, context_handle, expected_epoch=expected_epoch)
+            return
         with self.transaction():
             access = self.access_context(project, context_handle, expected_epoch=expected_epoch)
             for item in items:

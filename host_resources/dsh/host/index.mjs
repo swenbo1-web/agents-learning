@@ -250,7 +250,7 @@ const STATUS_JSON_OUTPUT = {
 const WORKER_TOOL_SPECS = [
   {
     "name": "knowledge_search",
-    "description": "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted.",
+    "description": "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted. A database_busy tool error delivers no knowledge; retry this read later after the write finishes, without rapid repeated retries.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -329,7 +329,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "knowledge_read",
-    "description": "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge.",
+    "description": "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge. A database_busy tool error delivers no knowledge; retry the same page later after the write finishes, without rapid repeated retries.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -667,7 +667,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "learning_status",
-    "description": "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for bounded diagnostics; full may be large. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
+    "description": "Inspect this project's connection/storage, administrator routing, budgets and queue status without starting review or history import. Use view=summary for lightweight identity, routing and usage; it does not evaluate queue eligibility (queue_checked=false). Use full for detailed queue/history status. Returns version/project/host status and usage completeness. Shared project counts are not per-host output, and administrator usage is not worker-chat token usage; missing usage is unknown, not zero.",
     "parameters": {
       "type": "object",
       "properties": {

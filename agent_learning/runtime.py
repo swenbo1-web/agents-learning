@@ -784,6 +784,49 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         self.db.execute("INSERT INTO metrics VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET value=value+excluded.value",
                         (project, name, value))
 
+    def status_light(self, project):
+        """Read routine diagnostics without scanning event history or the review queue.
+
+        Omitted queue/workload counts remain unknown. Routing and admission are
+        observations only; neither means a dispatcher has started a model.
+        """
+        from .admin_control import admission_enabled
+        from .admin_queue import dispatch_diagnostic
+        from .admin_routing import _read_snapshot
+        from .admin_usage import admin_admission_status
+        from .work_memory import WORK_INDEX_VERSION
+
+        with _read_snapshot(self):
+            try:
+                admission = admin_admission_status(self, project)
+                budget, project_usage = admission["global_usage"], admission["project_usage"]
+                dispatch = dispatch_diagnostic(self, project, check_queue=False)
+            except ContractError:
+                budget = {"admission_status": "invalid_configuration"}
+                project_usage = {"admission_status": "invalid_configuration"}
+                admission = {"admission_status": "invalid_configuration", "blocking_scope": None,
+                             "project_usage": project_usage, "global_usage": budget}
+                dispatch = {"phase": "idle", "reason": "invalid_configuration", "next_due": None}
+            dispatch["queue_checked"] = False
+            capture = {}
+            if self.host == "antigravity":
+                from .antigravity_health import capture_status
+                capture["host_capture"] = capture_status(self, project)
+            return {"project_id": project, "home": str(self.home), "host_epoch": self.session_epoch(),
+                    **capture, "host_scope": self.host_scope, "knowledge_scope": "shared_project",
+                    "storage_schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+                    "admin_enabled": self.admin_policy(project)["enabled"],
+                    "admin_admission_enabled": bool(self.admin_policy(project)["enabled"] and admission_enabled(self, project)),
+                    "admin_routing": self.admin_routing_status(project),
+                    "admin_dispatch_diagnostic": dispatch, "work_summary_policy": self.work_summary_policy(project),
+                    "project_usage": project_usage, "global_usage": budget, "admission": admission,
+                    "work_memory": {"index_version": WORK_INDEX_VERSION,
+                                    "settings": {key: self.config["work_memory"][key]
+                                                 for key in ("enabled", "automatic_context", "summary_enabled")}},
+                    "scheduler": {"enabled": self.config["scheduler"]["enabled"],
+                                  "continuous_service_installed": False},
+                    "hindsight_enabled": bool(self.config["hindsight"]["enabled"]), "details_omitted": True}
+
     def status(self, project):
         from .knowledge_health import report as knowledge_health_report
         from .antigravity_health import capture_status
