@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current source v1.4.56 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current source v1.4.57 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1152,7 +1152,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.56 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.57 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1821,7 +1821,14 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.56</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.57</summary>
+
+## Work-history notices and output observations (1.4.57)
+
+- Machine-generated file-tool titles gain readable projections from observed file links. Original text, source fingerprints, retrieval matching and unknown/protocol-complete/tool-success grades stay intact; a file operation is not a validated solution.
+- Ordinary notices sharing the changed paths and current versions can merge despite different unchanged companion files. Source risks, evidence grades and restorations remain independent. Complete changed paths take priority; omitted paths and member IDs are not acknowledged. Initial observation baselines still detect later changes without proving that the source was read.
+- Local `context_output_observations` retains the latest 256 newly assembled outputs per project/chat/agent: host, task and context boundaries, character counts, card kinds and fingerprints. It stores no prompt, title or body, invokes no model and adds nothing to model input. It does not determine recall or publication eligibility.
+- Observation writes share the optional cache's short transaction. Missing tables, write failures or lock contention cannot undo authoritative exposure or risk notices. These records prove Runtime assembly only, not host acceptance, model reading/adoption, tokens or semantic relevance. Native AG/DSH receipt replays are outside the count; missing observations remain unknown.
 
 ## Read-only session snapshots (1.4.56)
 

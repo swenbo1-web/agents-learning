@@ -70,20 +70,45 @@ def file_notice(item):
 
 
 def coalesce(items):
-    """Only identical current file observations share a warning; keep every ID."""
-    result, groups = [], {}
+    """Identical changed-file facts share a warning; keep each visible ID.
+
+    Unchanged companion files do not create a different fact. Source risks,
+    restorations and incomplete observations keep their independent notices.
+    """
+    result = []
     for item in items:
         if not file_notice(item):
             result.append(item)
             continue
-        key = (tuple(sorted(item["file_state"].items())), item.get("state"), item.get("validation_level"))
-        old = groups.get(key)
-        if old is not None and len(old["_notice_members"]) < 4:
+        facts = {path: item["file_state"][path] for path in item.get("_changed_file_paths", item["file_state"])}
+        old = next((group for group in result if group.get("_notice_members")
+            and len(group["_notice_members"]) < 4
+            and group.get("state") == item.get("state")
+            and group.get("validation_level") == item.get("validation_level")
+            and (group["file_state"] == item["file_state"] or facts == {
+                path: group["file_state"][path] for path in group.get("_changed_file_paths", group["file_state"])})), None)
+        if old is not None:
             old["_notice_members"].append(item)
+            old["_changed_file_paths"] = sorted(set(old.get("_changed_file_paths", old["file_state"])) | set(facts))
         else:
             copy = dict(item, _notice_members=[item])
-            groups[key] = copy
             result.append(copy)
+    return result
+
+
+def visible_exposures(items):
+    """A card acknowledges only its complete visible file paths and member IDs."""
+    result = []
+    for item in items:
+        for member in item.get("_notice_members", [item]):
+            files = member.get("file_state")
+            # A first ordinary index retains its observed baseline so later
+            # edits can invalidate the summary even when decoration did not
+            # fit. A change notice acknowledges only the paths it displayed.
+            changed = bool(item.get("source_changed") or item.get("file_state_changed"))
+            visible = ({path: version for path, version in files.items()
+                        if not changed or path in item["_visible_file_paths"]} if isinstance(files, dict) else None)
+            result.append(dict(member, file_state=visible))
     return result
 
 
@@ -227,11 +252,14 @@ class FileNoticeGate:
         if self.delivery != "persistent":
             return
         keys = self._keys(item)
+        visible = {file.get("path") for file in (card or {}).get("files", ()) if isinstance(file, dict)}
+        if card is not None:
+            from .runtime import digest
+            keys = [key for key in keys if key in {digest(path) for path in visible}]
         try:
             if keys:
                 self._record_keys(keys, self.scope)
             versions = self._version_keys(item)
-            visible = {file.get("path") for file in (card or {}).get("files", ()) if isinstance(file, dict)}
             # Any actually shown observation supersedes an older version fact,
             # including restoration, missing files and source-risk cards. Such
             # cards invalidate coverage but never establish ordinary coverage.

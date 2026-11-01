@@ -631,7 +631,8 @@ class KnowledgeContextMixin:
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     conclusion_used = False
-                    from .work_notice_delivery import FileNoticeGate, coalesce, file_notice, protocol_only_file_summary
+                    from .work_notice_delivery import (FileNoticeGate, coalesce, file_notice,
+                                                       protocol_only_file_summary, visible_exposures)
                     notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
                     validated = self.work_validate_items(project, work_items, workspace=workspace,
                                                          conclusion_max_chars=240, applicability_query=effective,
@@ -707,10 +708,16 @@ class KnowledgeContextMixin:
                                                              "revision": member["revision"]}
                                                             for member in members[1:]]
                         files = work_item.get("files", [])
+                        if file_notice(work_item):
+                            # A version warning describes the changed paths,
+                            # not whichever unchanged companion sorted first.
+                            changed_paths = set(work_item.get("_changed_file_paths", work_item["file_state"]))
+                            files = [file for file in files if file.get("relative_path") in changed_paths]
                         if files:
                             if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
                                 card["file_version_changed"] = True
-                            card["files"] = [{"path": clip(file.get("relative_path", ""), 100),
+                            card["files"] = [{"path": (file.get("relative_path", "") if file_notice(work_item)
+                                                       else clip(file.get("relative_path", ""), 100)),
                                               "relation": file.get("relation", "observed_target"),
                                               "version_changed": file.get("version_changed", "unknown")}
                                              for file in files[:2] if isinstance(file, dict)]
@@ -771,11 +778,17 @@ class KnowledgeContextMixin:
                             continue
                         if notices.index_repeated(work_item, card):
                             continue
+                        visible_paths = {file["path"] for file in card.get("files", ())}
+                        if file_notice(work_item) and not visible_paths.intersection(
+                                work_item.get("_changed_file_paths", work_item["file_state"])):
+                            continue  # An omitted/clipped path cannot acknowledge a file fact.
                         if not work_delivered:
                             lines.append(work_header)
                         lines.append(note)
                         work_used += cost
-                        work_delivered.append(work_item)
+                        # Preserve pending observations for paths omitted by
+                        # the shared budget, including secondary merged IDs.
+                        work_delivered.append(dict(work_item, _visible_file_paths=visible_paths))
                         notices.record(work_item, card)
                         notices.record_index(work_item, card)
                         if expanded and card.get("summary") == expanded:
@@ -783,8 +796,7 @@ class KnowledgeContextMixin:
                         dedup.record(delivery_entry)
                     if work_delivered:
                         self.work_record_exposure(
-                            project, conversation, [member for item in work_delivered
-                                for member in item.get("_notice_members", [item])], agent_id=agent_id, delivery=delivery,
+                            project, conversation, visible_exposures(work_delivered), agent_id=agent_id, delivery=delivery,
                             task_state=task_state, compact=compact, context_epoch=work_context_epoch,
                             method="hook", context_handle=context_handle, expected_epoch=epoch)
                         self._metric(project, "work_indices_delivered", len(work_delivered))
@@ -853,5 +865,5 @@ class KnowledgeContextMixin:
             output = "\n".join(lines)
         # Cache failures cannot roll back notification acknowledgements or
         # authoritative exposure bookkeeping for the complete rendered output.
-        dedup.flush()
+        dedup.flush(output=output)
         return output

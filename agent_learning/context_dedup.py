@@ -31,6 +31,8 @@ def _migrate(runtime):
                        "context_delivery_cache(project,scope,material_key)")
     from .work_notice_delivery import install
     install(runtime)
+    from .context_observations import install as install_observations
+    install_observations(runtime)
 
 
 def _text(value):
@@ -115,6 +117,12 @@ class ContextDedup:
         self.r, self.project, self.conversation = runtime, project, conversation
         self.agent, self.workspace, self.delivery = agent_id or "", workspace, delivery
         self.scope = scope_key(runtime, conversation, agent_id, workspace, task_state, context_epoch, environment)
+        self.observed_host_scope = runtime.host_scope
+        self.observed_session_epoch = runtime.session_epoch()
+        self.observed_task_id = (task_state or {}).get("id") or ""
+        self.observed_task_revision = (task_state or {}).get("revision") or 0
+        self.observed_assignment_id = (task_state or {}).get("assignment_id") or ""
+        self.observed_context_epoch = context_epoch
         self.entries = []
         self.pending = []
         self.validity = {}
@@ -302,9 +310,14 @@ class ContextDedup:
             return
         self.pending.append(entry)
 
-    def flush(self):
+    def flush(self, *, output=None):
         """Best-effort cache writes occur only after authoritative delivery commits."""
-        if not self.pending or self.r.db.in_transaction:
+        from .context_observations import describe, record
+        try:
+            observation = describe(output)
+        except (ValueError, TypeError, KeyError):
+            observation = None  # Diagnostics cannot change the context result.
+        if (not self.pending and observation is None) or self.r.db.in_transaction:
             return
         previous_timeout = None
         try:
@@ -312,15 +325,32 @@ class ContextDedup:
             # Optional cache contention must not consume the host's Hook window.
             self.r.db.execute("PRAGMA busy_timeout=25")
             with self.r.transaction():
-                for entry in self.pending:
-                    self.r.db.execute("INSERT OR REPLACE INTO context_delivery_cache VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (self.project, self.conversation, self.agent, self.scope, POLICY_VERSION,
-                         entry["channel"], entry["item_id"], entry["revision"], entry["source_version"],
-                         entry["material_key"], entry["text_key"], time.time()))
-                self.r.db.execute("DELETE FROM context_delivery_cache WHERE project=? AND conversation=? AND agent=? "
-                    "AND rowid NOT IN (SELECT rowid FROM context_delivery_cache WHERE project=? AND conversation=? "
-                    "AND agent=? ORDER BY created DESC,rowid DESC LIMIT ?)",
-                    (self.project, self.conversation, self.agent, self.project, self.conversation, self.agent, MAX_ENTRIES))
+                self.r.db.execute("SAVEPOINT context_cache_flush")
+                try:
+                    if self.pending:
+                        for entry in self.pending:
+                            self.r.db.execute("INSERT OR REPLACE INTO context_delivery_cache VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (self.project, self.conversation, self.agent, self.scope, POLICY_VERSION,
+                                 entry["channel"], entry["item_id"], entry["revision"], entry["source_version"],
+                                 entry["material_key"], entry["text_key"], time.time()))
+                        self.r.db.execute("DELETE FROM context_delivery_cache WHERE project=? AND conversation=? AND agent=? "
+                            "AND rowid NOT IN (SELECT rowid FROM context_delivery_cache WHERE project=? AND conversation=? "
+                            "AND agent=? ORDER BY created DESC,rowid DESC LIMIT ?)",
+                            (self.project, self.conversation, self.agent, self.project, self.conversation, self.agent, MAX_ENTRIES))
+                except sqlite3.Error:
+                    if not self.r.db.in_transaction:
+                        return  # A RAISE(ROLLBACK) must not start an implicit write.
+                    self.r.db.execute("ROLLBACK TO context_cache_flush")
+                self.r.db.execute("RELEASE context_cache_flush")
+                if observation is not None:
+                    self.r.db.execute("SAVEPOINT context_observation_flush")
+                    try:
+                        record(self, observation)
+                    except sqlite3.Error:
+                        if not self.r.db.in_transaction:
+                            return
+                        self.r.db.execute("ROLLBACK TO context_observation_flush")
+                    self.r.db.execute("RELEASE context_observation_flush")
         except sqlite3.Error:
             pass
         finally:

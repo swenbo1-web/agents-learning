@@ -276,6 +276,29 @@ def _metadata_only_write(body):
             and (response.get("written") is True or response.get("success") is True))
 
 
+def _work_display_title(body, files):
+    """Describe a known file observation without rewriting the source or its grade."""
+    title = body.get("title", "")
+    if body.get("type") != "file_change":
+        return title
+    generated = re.fullmatch(r"([\w./:-]+): (?:unknown|running|reported|call_completed|succeeded)", title)
+    if generated is None:
+        return title
+    tool = re.split(r"__|[./:]", generated[1].casefold())[-1]
+    if tool not in {"apply_patch", "write", "write_file", "write_to_file", "writefile",
+                    "edit", "edit_file", "editfile", "replace_file_content", "multi_replace_file_content",
+                    "create_file"} and not _metadata_only_write(body):
+        return title
+    paths = list(dict.fromkeys(file["relative_path"] for file in files
+        if file.get("relation") == "write_target" and isinstance(file.get("relative_path"), str)))
+    if not paths:
+        return title
+    # The source outcome remains in state; a path association does not prove
+    # that a write succeeded, the solution is correct or the user accepted it.
+    suffix = f"（另{len(paths) - 1}个文件）" if len(paths) > 1 else ""
+    return "文件操作记录：" + paths[0][:160 - len("文件操作记录：") - len(suffix)] + suffix
+
+
 def _write_receipt_query(plan):
     """Keep acknowledgements discoverable when the user explicitly asks for them."""
     text = plan["meaningful"].casefold().replace("\\", "/")
@@ -796,7 +819,7 @@ class WorkMemoryMixin:
                    if body.get("coverage", {}).get("file_projection_complete") is False else {}),
                 **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
                 **({"published_knowledge_risk": publication_risks, "automatic_eligible": False} if publication_risks else {}),
-                "type": body["type"], "title": body["title"],
+                "type": body["type"], "title": _work_display_title(body, files),
                 "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
                 "completion": body.get("completion", "complete"), "execution_authority": False,
                 "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
