@@ -652,6 +652,18 @@ class KnowledgeContextMixin:
                             card["summary"] = expanded
                         if handoff:
                             card["reference_role"] = "task_handoff"
+                        if work_item.get("_file_receipt_preview"):
+                            # Keep incomplete sources available without replaying
+                            # their low-information acknowledgement as a result.
+                            card.pop("summary", None)
+                            card["title"] = "文件修改索引"
+                            expanded = None
+                            coverage = work_item.get("coverage")
+                            coverage = coverage if isinstance(coverage, dict) else {}
+                            if coverage.get("truncated") or coverage.get("full_original_available") is False:
+                                card["source_coverage"] = "partial"
+                            elif coverage.get("full_original_available") is not True:
+                                card["source_coverage"] = "unknown"
                         if protocol_only_file_summary(work_item):
                             card.pop("summary", None)
                         if work_item.get("completion", "complete") != "complete":
@@ -700,6 +712,12 @@ class KnowledgeContextMixin:
                         note = "[工作历史] " + encode(card)
                         prefix_cost = len(work_header) + 1 if not work_delivered else 0
                         cost = len(note) + 1 + prefix_cost
+                        if cost > work_budget - work_used and "source_coverage" in card:
+                            # This optional label cannot displace a previously
+                            # fitting file path, source warning or read contract.
+                            card.pop("source_coverage")
+                            note = "[工作历史] " + encode(card)
+                            cost = len(note) + 1 + prefix_cost
                         if expanded:
                             if dedup.repeated(dedup.prepare("work", work_item, card)):
                                 continue  # Do not downgrade an already-covered whole conclusion to an index.

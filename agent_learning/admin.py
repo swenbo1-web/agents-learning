@@ -63,11 +63,20 @@ def _strict_schema(contract):
     return result
 
 
+def _review_candidate_schema():
+    result = _strict_schema(CANDIDATE)
+    result["properties"]["evidence_refs"]["description"] = (
+        "Prefer the current case's events[].evidence_ref verbatim; full raw events[].id is also accepted. "
+        "Never shorten, concatenate, or borrow another case's reference. Keep problem_id and "
+        "problem_revision separate; history related sources must be explicitly visible and authorized.")
+    return result
+
+
 RESPONSE_SCHEMA = _strict_schema({
     "type": "object", "properties": {
         "decision": {"type": "string", "enum": ["candidate", "needs_evidence", "skip", "governance"]},
         "reason": {"type": "string"},
-        "candidate": {"anyOf": [CANDIDATE, {"type": "null"}]},
+        "candidate": {"anyOf": [_review_candidate_schema(), {"type": "null"}]},
         "missing_evidence": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 1000}},
         "proposal": {"anyOf": [{"type": "object", "properties": {
             "action": {"type": "string", "enum": ["publish", "update", "attach", "revoke", "dismiss_counterexample"]},
@@ -80,7 +89,7 @@ RESPONSE_SCHEMA = _strict_schema({
 # 历史与阶段明细允许多条输出；逐案审核与工作摘要保持单条契约。
 HISTORY_RESPONSE_SCHEMA = copy.deepcopy(RESPONSE_SCHEMA)
 HISTORY_RESPONSE_SCHEMA["properties"]["candidates"] = {
-    "type": "array", "maxItems": 5, "items": _strict_schema(CANDIDATE)}
+    "type": "array", "maxItems": 5, "items": _review_candidate_schema()}
 HISTORY_RESPONSE_SCHEMA["required"].append("candidates")
 
 
@@ -111,6 +120,8 @@ def _review_configuration(cfg, provider_plan):
 
 def _fingerprint(packet):
     # 去掉传输身份而非业务参数；业务对象中的 id/version 等字段仍参与比较。
+    from .review_evidence import source_packet
+    packet = source_packet(packet)
     from .event_capture import business_evidence_digest, normalize_business_payload, projected_evidence
     events, seen, actors, assignments = [], set(), {}, {}
     for event in packet["events"]:
@@ -594,14 +605,16 @@ def _select_review(runtime, project, problem_id, scan_limit, timeout, expected_e
 def _canonical_candidate_evidence(packet, body):
     """Normalize exact current-case qualifications without granting source access.
 
-    Only visible primary event IDs are mapped. Raw IDs (including explicitly
-    offered related history) and all unknown strings retain their spelling for
-    the existing source/authorization checks. Never mutate the archived reply.
+    Short aliases map only within this frozen case's visible source slots;
+    legacy qualifications map only visible primary events. Raw IDs and unknown
+    spellings still pass the original authorization checks. Keep the reply intact.
     """
     problem = packet["problem"]
+    from .review_evidence import canonical_refs
     qualified = {f"{problem['id']}@{problem['revision']}:{event['id']}": event["id"]
                  for event in packet["events"]}
-    return dict(body, evidence_refs=[qualified.get(ref, ref) for ref in body["evidence_refs"]])
+    return dict(body, evidence_refs=[qualified.get(ref, ref)
+                                    for ref in canonical_refs(packet, body["evidence_refs"])])
 
 
 def _accept_history_candidates(runtime, project, reserved, bodies, reason):
@@ -622,7 +635,8 @@ def _accept_history_candidates(runtime, project, reserved, bodies, reason):
         if job_id and body["validation_level"] != "reported":
             raise ContractError("historical public text must remain reported")
         if not job_id and set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
-            raise ContractError("candidate references evidence outside the review packet")
+            raise ResponseRejected("candidate_evidence_outside_packet",
+                                   "response.candidates[" + str(index) + "].evidence_refs")
         if packet.get("evidence_truncated"):
             body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
         prepared.append(body)
@@ -749,7 +763,7 @@ def _accept_response(runtime, project, reserved, response):
                 raise ContractError("historical public text must remain reported")
             link_history_evidence(runtime, project, packet, body["evidence_refs"], history_job_id)
         elif set(body["evidence_refs"]) - {e["id"] for e in packet["events"]}:
-            raise ContractError("candidate references evidence outside the review packet")
+            raise ResponseRejected("candidate_evidence_outside_packet", "response.candidate.evidence_refs")
         if packet.get("evidence_truncated"):
             body = dict(body, limitations=body["limitations"] + "\n" + _TRUNCATION_NOTE)
         if summary_context:

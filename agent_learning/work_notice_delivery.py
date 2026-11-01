@@ -3,10 +3,30 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 import time
 
 DEFER_SECONDS = 30
+
+
+def patch_receipt_text(text):
+    """Recognize a known acknowledgement in visible text, not source coverage.
+
+    This classifier has no success, read-completeness or suppression meaning.
+    A stored projection may match while its unobserved original has more text.
+    """
+    if not isinstance(text, str):
+        return False
+    lines = text.strip().splitlines()
+    if lines and lines[0] == "Exit code: 0":
+        lines.pop(0)
+        if lines and re.fullmatch(r"Wall time: \d+(?:\.\d+)? seconds?", lines[0]):
+            lines.pop(0)
+        if lines and lines[0] == "Output:":
+            lines.pop(0)
+    return bool(len(lines) >= 2 and lines[0] == "Success. Updated the following files:"
+                and all(re.fullmatch(r"[ADM] [^\r\n]+", line) for line in lines[1:]))
 
 
 def install(runtime):

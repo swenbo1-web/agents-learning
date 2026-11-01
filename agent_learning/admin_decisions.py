@@ -56,6 +56,8 @@ def _business_reference(item, candidate=False):
 
 def dependencies(packet, evidence_signature=None):
     """只跟踪本次实际比较资料，避免全库发布唤醒全部旧案例。"""
+    from .review_evidence import source_packet
+    packet = source_packet(packet)
     from .runtime import encode
 
     result = {}

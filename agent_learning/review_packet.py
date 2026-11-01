@@ -37,19 +37,21 @@ HISTORY_REVIEW_PREFIX = (
 CONTENT_LAYOUT_PREFIX = (
     "candidate正文先写有据“结论：”，保留条件限制。\n"
 )
-PACKET_FORMAT = 8
+PACKET_FORMAT = 9
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
 
 def review_instruction(packet):
     from .review_transport import TRANSPORT_KEY, TRANSPORT_PREFIX, compact_packet
+    from .review_evidence import REFERENCE_PREFIX, project_packet
     from .runtime import encode
     history = HISTORY_REVIEW_PREFIX if packet.get("purpose") == "history_review" else ""
-    visible = compact_packet(packet)
-    transport = TRANSPORT_PREFIX if visible is not packet and TRANSPORT_KEY in visible else ""
+    projected = project_packet(packet)
+    visible = compact_packet(projected)
+    transport = TRANSPORT_PREFIX if visible is not projected and TRANSPORT_KEY in visible else ""
     # 补充规则放在不可信资料块之前，保持原有公共资料包边界。
-    return CONTENT_LAYOUT_PREFIX + history + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
+    return CONTENT_LAYOUT_PREFIX + history + REFERENCE_PREFIX + transport + REVIEW_PREFIX + encode(visible) + REVIEW_SUFFIX
 
 
 def _fits(packet, limit):

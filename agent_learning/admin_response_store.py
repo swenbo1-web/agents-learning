@@ -26,7 +26,8 @@ _CANDIDATE = {"problem_id", "problem_revision", "title", "content", "category", 
 _PUBLIC = {"decision", "reason", "candidate", "candidates", "missing_evidence", "proposal", "items"}
 _PROPOSAL = {"action", "knowledge_id", "expected_revision"}
 _CODES = {"candidate_batch_ambiguous", "candidate_schema_invalid", "phase_aggregate_ambiguous",
-          "response_schema_invalid", "execution_plan_changed", "reservation_too_large", "response_identity_changed"}
+          "response_schema_invalid", "execution_plan_changed", "reservation_too_large", "response_identity_changed",
+          "candidate_evidence_outside_packet"}
 _PATH = re.compile(r"^(?:response(?:\.(?:items|candidate|candidates|problem_id|evidence_refs|validation_level|proposal|action|knowledge_id|missing_evidence|reason)(?:\[[0-9]{1,2}\])?)*|context(?:\.(?:phase|sources|executor))?)$")
 
 

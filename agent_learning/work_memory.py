@@ -251,17 +251,9 @@ def _metadata_only_write(body):
         # Known patch acknowledgements are strings on several hosts. Require
         # the whole visible result to contain only the success envelope and
         # changed paths: warnings, errors and substantive explanations stay.
-        lines = response.strip().splitlines()
-        if lines and lines[0] == "Exit code: 0":
-            lines.pop(0)
-            if lines and re.fullmatch(r"Wall time: \d+(?:\.\d+)? seconds?", lines[0]):
-                lines.pop(0)
-            if lines and lines[0] == "Output:":
-                lines.pop(0)
+        from .work_notice_delivery import patch_receipt_text
         coverage = body.get("coverage", {})
-        return bool(isinstance(coverage, dict) and len(lines) >= 2
-                    and lines[0] == "Success. Updated the following files:"
-                    and all(re.fullmatch(r"[ADM] [^\r\n]+", line) for line in lines[1:])
+        return bool(isinstance(coverage, dict) and patch_receipt_text(response)
                     and not coverage.get("truncated") and coverage.get("full_original_available") is not False)
     if not isinstance(response, dict) or not response:
         return False
@@ -1539,6 +1531,17 @@ class WorkMemoryMixin:
                     continue
                 body = _body_projection(row)
                 coverage = body.get("coverage", {})
+                if body.get("type") == "file_change":
+                    from .work_notice_delivery import patch_receipt_text
+                    visible = body.get("summary", "")
+                    try:
+                        visible = json.loads(visible)
+                    except (ValueError, TypeError):
+                        pass
+                    if patch_receipt_text(visible):
+                        # Presentation only: a partial visible receipt does not
+                        # prove what the original contained or justify a read ack.
+                        current["_file_receipt_preview"] = True
                 if (isinstance(coverage, dict) and not coverage.get("truncated")
                         and coverage.get("full_original_available") is True
                         and _metadata_only_write(body)):

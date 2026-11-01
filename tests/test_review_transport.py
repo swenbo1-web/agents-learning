@@ -84,7 +84,8 @@ class ReviewTransportTests(unittest.TestCase):
         self.assertEqual(instruction.count(TRANSPORT_PREFIX), 1)
         self.assertLess(instruction.index(TRANSPORT_PREFIX), instruction.index("<untrusted_evidence>"))
         visible = json.loads(instruction.split("<untrusted_evidence>", 1)[1].rsplit("</untrusted_evidence>", 1)[0])
-        self.assertEqual(restore_packet(visible), packet)
+        from agent_learning.review_evidence import project_packet
+        self.assertEqual(restore_packet(visible), project_packet(packet))
 
     def test_different_task_revisions_scopes_and_counterexamples_never_merge(self):
         packet = batch()
