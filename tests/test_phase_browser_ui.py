@@ -9,7 +9,7 @@ from tests.test_browser_reader_ui import HARNESS as READER_HARNESS
 
 
 HARNESS = READER_HARNESS.split("(async()=>{")[0] + r'''
-const phaseIds=['phase-mode','phase-every','phase-daily','phase-input','phase-output'];
+const phaseIds=['phase-mode','phase-every','phase-wait','phase-daily','phase-input','phase-output'];
 const legacyIds=['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'];
 const limits={max_calls_per_day:100,max_calls_per_batch:5,max_batch_seconds:300,max_run_seconds:600,timeout_seconds:120,max_reported_tokens_per_day:1000000};
 const clone=value=>JSON.parse(JSON.stringify(value));
@@ -24,7 +24,7 @@ let latest={project_id:'project',host_scope:'codex:default',session_epoch:1,gove
  global_usage:{counted_attempts:2,remaining_calls:98},admission:{admission_status:'available'},
  publication_policy:{enabled:true,mode:'tiered'},work_summary:{enabled:false},details_separate:true,
  runner:{running:false},effective_run_seconds:180,
- phase_review:{host_scope:'codex:default',policy:{mode:'phase',configured:true,version:4,every_phases:2,daily_tokens:1000000,max_input_tokens:40000,max_output_tokens:4000},
+ phase_review:{host_scope:'codex:default',policy:{mode:'phase',configured:true,version:4,every_phases:2,max_wait_seconds:0,daily_tokens:1000000,max_input_tokens:40000,max_output_tokens:4000},
   phases:{awaiting_stop:1,sealed:3,queued:2,partial:1,completed:4},historical_boundary_phases:7,source_scan_omitted:9,
   recent_batches:[{id:'pending-batch-id',state:'pending',coverage_complete:null,items:[]},
    {id:'partial-batch-id',state:'completed',coverage_complete:false,
@@ -62,7 +62,7 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
 (async()=>{
  await run('loadAdminState()');await flush();await flush();
  if(scenario==='hydrate_and_tokens'){
-  assert.deepEqual(phaseIds.map(id=>get(id).value),['phase','2','1000000','40000','4000']);
+  assert.deepEqual(phaseIds.map(id=>get(id).value),['phase','2','0','1000000','40000','4000']);
   const cards=textOfTree(get('admin-status-cards'));
   assert(cards.includes('Reported project tokens today'));assert(cards.includes('1200'));
   assert(cards.includes('Estimated tokens remaining'));assert(cards.includes('978800'));
@@ -72,6 +72,64 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert.match(get('phase-progress').textContent,/unsettled reservations: 20000/);
   assert(legacyIds.every(id=>get(id).disabled));assert(phaseIds.every(id=>!get(id).disabled));
   assert.equal(get('admin-save').disabled,false);
+ }else if(scenario==='selection_diagnostics'){
+  const value=clone(latest);const metric=value.phase_review.recent_batches[1].metrics;
+  metric.cached_input_tokens=8704;
+  metric.selection_diagnostics={selection_reason:'visible_material_selected',selected_cases:2,phase_count:2,reused_cases:3,uncovered_cases:4,packet_chars:5010,related_knowledge_refs:1,related_candidate_refs:0};
+  mount(value);language('en');let text=textOfTree(get('phase-results'));
+  assert(text.includes('Visible material was selected for review'));
+  assert(text.includes('2 cases from 2 stages; 3 reused, 4 uncovered'));
+  assert(text.includes('Packet 5010 characters'));assert(text.includes('reference occurrences across cases'));
+  assert(text.includes('not a replay of historical admission'));assert(text.includes('not a failed or free call'));
+  assert(text.includes('Cached input 8704 tokens is a subset of input'));
+  language('zh-CN');text=textOfTree(get('phase-results'));
+  assert(text.includes('已选择可见材料供审核'));assert(text.includes('复用 3 个，未覆盖 4 个'));
+  assert(text.includes('未记录的触发原因保持未知'));assert(text.includes('缓存输入 8704 token 已包含在输入量内'));
+  metric.selection_diagnostics.selection_reason='local_reuse_only';mount(value);language('en');
+  assert(textOfTree(get('phase-results')).includes('No new cases were submitted; local reuse was recorded'));
+  mount(clone(latest));text=textOfTree(get('phase-results'));
+  assert(!text.includes('Frozen selection'));assert(text.includes('Cached input Unknown'));
+ }else if(scenario==='admission_trigger'){
+  const value=clone(latest);value.phase_review.policy.every_phases=20;
+  const metric=value.phase_review.recent_batches[1].metrics;
+  metric.selection_diagnostics={trigger_reason:'phase_count',policy_at_selection:{every_phases:2,max_wait_seconds:300}};
+  for(const [code,en,zh] of [['phase_count','Completed-stage frequency reached','已达到阶段频率'],['max_wait','Undersized group reached its optional wait','未满频率分组已达到可选等待时限'],['continuation','Continue remaining material','继续处理未覆盖材料'],['explicit_request','Explicit request to prepare a batch','显式请求组批'],['not_recorded','Not recorded','未记录']]){
+   metric.selection_diagnostics.trigger_reason=code;mount(value);language('en');
+   let text=textOfTree(get('phase-results'));assert(text.includes('Recorded selection trigger: '+en));
+   assert(text.includes('every 2 stages; maximum wait 300s'));assert(text.includes('not current settings'));
+   language('zh-CN');text=textOfTree(get('phase-results'));assert(text.includes('本地记录的选材触发原因：'+zh));
+   assert(text.includes('每 2 个阶段；最长等待 300 秒'));assert(text.includes('不是当前设置'));
+  }
+  metric.selection_diagnostics={trigger_reason:'not_recorded',policy_at_selection:null};mount(value);language('en');
+  let text=textOfTree(get('phase-results'));assert(text.includes('Recorded selection trigger: Not recorded'));
+  assert(!text.includes('Policy at selection:'));
+ }else if(scenario==='wait_policy'){
+  assert.equal(get('phase-wait').value,'0');
+  for(const seconds of [1,86400]){
+   fire('phase-wait',seconds);const payload=run("adminConfiguration('save')");
+   assert.equal(payload.phase_review.max_wait_seconds,seconds);
+  }
+  fire('phase-wait',86401);assert.throws(()=>run("adminConfiguration('save')"));
+  language('zh-CN');fire('phase-wait',-1);assert.throws(()=>run("adminConfiguration('save')"),/阶段频率、最长等待或 token 预算/);
+  fire('phase-wait',0);const disabled=run("adminConfiguration('disable')");assert.equal(disabled.phase_review,undefined);
+  latest.phase_review.policy.max_wait_seconds=3600;mount(latest);assert.equal(get('phase-wait').value,'3600');
+  delete latest.phase_review.policy.max_wait_seconds;mount(latest);assert.equal(get('phase-wait').value,'0');
+ }else if(scenario==='old_wait_capability'){
+  assert.equal(get('phase-wait').disabled,false);
+  delete latest.phase_review.policy.max_wait_seconds;mount(latest);language('en');
+  assert.equal(get('phase-wait').value,'0');assert.equal(get('phase-wait').disabled,true);
+  assert.equal(get('phase-wait-upgrade').hidden,false);
+  assert(get('phase-wait-upgrade').textContent.includes('Upgrade it before enabling this option'));
+  fire('phase-every',3);let payload=run("adminConfiguration('save')");
+  assert.equal(payload.phase_review.every_phases,3);assert(!Object.hasOwn(payload.phase_review,'max_wait_seconds'));
+  fire('phase-wait',60);assert.throws(()=>run("adminConfiguration('save')"),/Upgrade it before enabling this option/);
+  language('zh-CN');assert(get('phase-wait-upgrade').textContent.includes('其他设置仍可正常保存'));
+  assert.throws(()=>run("adminConfiguration('save')"),/请升级后再开启此项/);
+  fire('phase-wait',0);fire('phase-mode','legacy');payload=run("adminConfiguration('save')");
+  assert(!Object.hasOwn(payload.phase_review,'max_wait_seconds'));assert.equal(get('phase-wait').disabled,true);
+  latest.phase_review.policy.max_wait_seconds=0;mount(latest);assert.equal(get('phase-wait').disabled,false);
+  assert.equal(get('phase-wait-upgrade').hidden,true);payload=run("adminConfiguration('save')");
+  assert.equal(payload.phase_review.max_wait_seconds,0);
  }else if(scenario==='tool_context_metrics'){
   const value=clone(latest);value.phase_review.recent_batches[1].metrics.tool_context={selected_observations:2,selection_limited:true};
   mount(value);language('en');let text=textOfTree(get('phase-results'));
@@ -122,7 +180,7 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   await run("saveAdminConfiguration('save')");await flush();
   const writes=calls.filter(call=>call.options.method==='POST');assert.equal(writes.length,1);
   const payload=JSON.parse(writes[0].options.body);
-  assert.deepEqual(payload.phase_review,{mode:'phase',every_phases:3,daily_tokens:750000,max_input_tokens:48000,max_output_tokens:6000});
+  assert.deepEqual(payload.phase_review,{mode:'phase',every_phases:3,max_wait_seconds:0,daily_tokens:750000,max_input_tokens:48000,max_output_tokens:6000});
   assert.equal(payload.expected_phase_version,4);assert.equal(payload.project_limits.max_reported_tokens_per_day,750000);
   assert.equal(payload.expected_settings_version,1);assert.equal(payload.expected_project_budget_version,1);
   assert.equal(payload.start,false);assert.equal(payload.auto_publish,true);assert.equal(payload.publication_mode,'tiered');
@@ -205,6 +263,10 @@ class PhaseBrowserUITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ok", result.stdout)
 
+    def test_recorded_admission_reasons_and_frozen_policy_are_localized(self): self.scenario("admission_trigger")
+    def test_frozen_selection_and_cache_usage_are_localized_and_compatible(self): self.scenario("selection_diagnostics")
+    def test_optional_wait_policy_is_explicit_bounded_and_defaults_off(self): self.scenario("wait_policy")
+    def test_old_core_omits_unsupported_wait_field_and_rejects_nonzero_request(self): self.scenario("old_wait_capability")
     def test_hydration_and_token_status_replace_call_allowance_cards(self): self.scenario("hydrate_and_tokens")
     def test_local_deferral_is_separate_localized_and_compatible_with_old_responses(self): self.scenario("locally_deferred_language_and_old_response")
     def test_local_seal_and_executor_waits_are_localized_and_optional(self): self.scenario("local_recovery_notes")

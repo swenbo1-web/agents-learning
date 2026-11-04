@@ -26,6 +26,52 @@ def _number(value):
             and math.isfinite(value) and value >= 0)
 
 
+def _selection_diagnostics(packet, packet_chars):
+    """Describe frozen selection, never reconstruct its historical trigger.
+
+    Related-reference counts are occurrences across cases, not unique knowledge.
+    This projection does not re-run triage, retrieval, readiness or model work.
+    """
+    if not isinstance(packet, dict) or not isinstance(packet.get("items"), list):
+        return None
+    items = packet["items"]
+    if any(not isinstance(item, dict) for item in items):
+        return None
+
+    def count(key):
+        value = packet.get(key)
+        return value if type(value) is int and value >= 0 else None
+
+    # ID previews are bounded; their length cannot replace an absent total.
+    reused = count("reused_problem_count")
+    omitted = count("omitted_problem_count")
+    related = {}
+    for key in ("related_knowledge", "related_candidates"):
+        lists = [item.get(key) for item in items]
+        related[key] = sum(map(len, lists)) if all(isinstance(value, list) for value in lists) else None
+    phases = packet.get("phase_ids")
+    snapshot = packet.get("_local_admission")
+    trigger, selection_policy = "not_recorded", None
+    if isinstance(snapshot, dict):
+        version, reason = snapshot.get("version"), snapshot.get("trigger_reason")
+        frequency, wait = snapshot.get("every_phases"), snapshot.get("max_wait_seconds")
+        if (type(version) is int and version == 1 and isinstance(reason, str)
+                and reason in {"phase_count", "max_wait", "continuation", "explicit_request"}
+                and type(frequency) is int and 1 <= frequency <= 20
+                and type(wait) is int and 0 <= wait <= 86400
+                and (reason != "max_wait" or wait > 0)):
+            trigger = reason
+            selection_policy = {"every_phases": frequency, "max_wait_seconds": wait}
+    return {"scope": "frozen_batch_selection", "trigger_reason": trigger,
+        "policy_at_selection": selection_policy,
+        "selection_reason": "visible_material_selected" if items else "local_reuse_only" if reused
+            else "uncovered_material" if omitted else "no_visible_material",
+        "packet_chars": packet_chars, "phase_count": len(phases) if isinstance(phases, list) else None,
+        "selected_cases": len(items), "reused_cases": reused, "uncovered_cases": omitted,
+        "related_knowledge_refs": related["related_knowledge"],
+        "related_candidate_refs": related["related_candidates"]}
+
+
 def _outcomes(result, state):
     items = result.get("items") if result else None
     if not isinstance(items, list):
@@ -105,7 +151,7 @@ def batch_metrics(runtime, project, batch_id):
             tokens.append(None)
     complete = bool(tokens) and not truncated and all(value and value["completeness"] == "complete" for value in tokens)
     totals = {}
-    for key in ("input_tokens", "output_tokens", "total_tokens"):
+    for key in ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens"):
         values = [value["token_totals"].get(key) if value else None for value in tokens]
         if key == "total_tokens":
             values = [value["token_totals"].get(key,
@@ -126,6 +172,7 @@ def batch_metrics(runtime, project, batch_id):
         if recovered and _number(local[1]):
             completed_at = max(completed_at or 0, local[1])
     return {"submitted_cases": submitted, "evidence_records": evidence, "result_cases": result_cases,
+        "selection_diagnostics": _selection_diagnostics(packet, len(row[2]) if packet else None),
         "tool_context": tool_context,
         "candidate_count": candidates, "published_count": published, "call_count": call_count,
         "call_records": count_row[0], "call_count_scope": "recorded_execution_attempts",

@@ -46,6 +46,10 @@ def review_instruction(packet):
     from .review_transport import TRANSPORT_KEY, TRANSPORT_PREFIX, compact_packet
     from .review_evidence import REFERENCE_PREFIX, has_short_refs, project_packet
     from .runtime import encode
+    # Server-owned selection metadata is for the local UI, never review
+    # evidence or model context. Keep diagnostics out of token budgets too.
+    if "_local_admission" in packet:
+        packet = {key: value for key, value in packet.items() if key != "_local_admission"}
     history = HISTORY_REVIEW_PREFIX if packet.get("purpose") == "history_review" else ""
     projected = project_packet(packet)
     references = REFERENCE_PREFIX if has_short_refs(projected) else ""
@@ -235,11 +239,12 @@ class ReviewPacketMixin:
             from .phase_local_triage import comparison_queries
             queries = comparison_queries(problem, task, packet["events"])
             if queries["fallback_reason"] != "not_stage":
-                # The bounded packet window may retain an earlier Stop while
-                # the real latest source is omitted. Never recall from that
+                # The bounded window may retain an earlier public delivery while
+                # the real latest Stop or segment is omitted. Never recall from that
                 # stale conclusion merely because it fits the packet budget.
                 latest = self.db.execute("SELECT e.id FROM problem_events p JOIN events e ON e.id=p.event "
-                    "WHERE p.problem=? AND p.role!='history_related' AND e.project=? AND e.type='Stop' "
+                    "WHERE p.problem=? AND p.role!='history_related' AND e.project=? AND (e.type='Stop' OR "
+                    "(e.type='PublicMessageSegment' AND json_extract(e.payload,'$.memory_type')='public_summary')) "
                     "ORDER BY e.created DESC,e.id DESC LIMIT 1", (problem_id, project)).fetchone()
                 queries = comparison_queries(problem, task, packet["events"],
                                              latest_delivery_id=latest["id"] if latest else None)

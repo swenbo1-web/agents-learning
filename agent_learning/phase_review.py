@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 
-DEFAULT_POLICY = {"mode": "legacy", "every_phases": 1, "max_input_tokens": 40000,
+DEFAULT_POLICY = {"mode": "legacy", "every_phases": 1, "max_wait_seconds": 0, "max_input_tokens": 40000,
                   "max_output_tokens": 4000, "daily_tokens": 1000000}
 PHASE_PREFIX = (
     "本次是阶段集中审核。items各自属于独立任务和来源，不得互相借用成功证据。"
@@ -98,7 +98,7 @@ def configure(runtime, project, values, expected_version):
     merged = {**{key: current[key] for key in DEFAULT_POLICY}, **values}
     if merged["mode"] not in {"legacy", "phase"}:
         raise ContractError("invalid phase review mode")
-    for key, low, high in (("every_phases", 1, 20), ("max_input_tokens", 16000, 1000000),
+    for key, low, high in (("every_phases", 1, 20), ("max_wait_seconds", 0, 86400), ("max_input_tokens", 16000, 1000000),
                            ("max_output_tokens", 256, 40000), ("daily_tokens", 0, 1000000000)):
         if type(merged[key]) is not int or not low <= merged[key] <= high:
             raise ContractError("invalid phase review " + key)
@@ -494,6 +494,27 @@ def _scan_progress(runtime, project, phase, cfg):
     return dict(row), changed
 
 
+def _batch_trigger(phases, cfg, routine_ids, now):
+    """A bounded tail flush is opt-in and never wakes a routine-only group.
+
+    This is evaluated only by an already-authorized scheduler invocation. It
+    starts no timer, merges no executor identities and grants no retry rights.
+    """
+    if not any(phase["id"] not in routine_ids for phase in phases):
+        return None
+    fresh = [phase for phase in phases if phase["state"] in {"sealed", "routine_deferred"}]
+    if len(fresh) >= cfg["every_phases"]:
+        return "phase_count"
+    maximum = cfg.get("max_wait_seconds", 0)
+    if maximum and any(phase["id"] not in routine_ids
+                       and now - (phase["ready_since"] if "ready_since" in phase.keys() else phase["created"])
+                       >= maximum for phase in fresh):
+        return "max_wait"
+    if any(phase["state"] == "continuing" for phase in phases):
+        return "continuation"
+    return None
+
+
 def prepare(runtime, project, *, force=False, _page_budget=3):
     """Called only in a writer transaction; viewing status never creates jobs."""
     from .review_evidence import prefer_short_refs, raw_packet
@@ -564,7 +585,9 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
                 ("pending" if ready else "executor_waiting", old["problem_id"]))
     # Retained evidence-wait stages may remain partial indefinitely. Rotate the
     # bounded check window so their first page cannot hide later real updates.
-    phases = runtime.db.execute("SELECT p.* FROM review_phases p LEFT JOIN phase_scan_progress scan ON scan.phase_id=p.id "
+    phases = runtime.db.execute("SELECT p.*,MAX(p.created,COALESCE(terminal.created,p.created)) ready_since "
+        "FROM review_phases p LEFT JOIN phase_scan_progress scan ON scan.phase_id=p.id "
+        "LEFT JOIN events terminal ON terminal.project=p.project AND terminal.id=p.event_id "
         "WHERE p.project=? AND p.host_scope=? AND p.state IN ('sealed','partial','continuing','routine_deferred') "
         "AND p.session_epoch=? AND p.governance_epoch=? "
         "ORDER BY COALESCE(scan.last_checked,0),(p.state='sealed') DESC,p.created,p.id LIMIT 100",
@@ -603,14 +626,16 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
             continue
         key = digest(_executor_semantics(plan))
         groups.setdefault(key, []).append(phase)
+    now = time.time()
     phases = next((group for group in groups.values() if force or
-        (any(r["id"] not in routine_ids for r in group) and
-         (any(r["state"] == "continuing" for r in group) or
-          sum(r["state"] in {"sealed", "routine_deferred"} for r in group) >= cfg["every_phases"]))), [])
+                   _batch_trigger(group, cfg, routine_ids, now)), [])
+    trigger_reason = "explicit_request" if force else _batch_trigger(phases, cfg, routine_ids, now)
     fresh = [row for row in phases if row["state"] in {"sealed", "routine_deferred"}]
-    fresh_requires_continuation = not force and len(fresh) < cfg["every_phases"]
+    tail_due = trigger_reason == "max_wait"
+    fresh_requires_continuation = not force and not tail_due and len(fresh) < cfg["every_phases"]
     fresh_ids = {row["id"] for row in fresh}
-    if not phases or len(fresh) < cfg["every_phases"] and not force and not any(r["state"] == "continuing" for r in phases):
+    if not phases or (len(fresh) < cfg["every_phases"] and not force and not tail_due
+                      and not any(r["state"] == "continuing" for r in phases)):
         return
     if runtime.db.execute("SELECT 1 FROM phase_review_batches WHERE project=? AND host_scope=? AND state='pending' "
                           "AND session_epoch=? AND governance_epoch=?",
@@ -816,6 +841,12 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
     # pending rows; a removed case must remain available to a later scan.
     body = prefer_short_refs(body, lambda value: len(instruction(value)) <= maximum
         and estimate_reservation(runtime, project, instruction(value), phase=True)["admitted"])
+    # Freeze the actual selector cause without sending it to the model. It
+    # shares the authoritative batch write, needs no extra event/query, and
+    # must never be reconstructed from a later policy or a model's verdict.
+    body["_local_admission"] = {"version": 1,
+        "trigger_reason": trigger_reason,
+        "every_phases": cfg["every_phases"], "max_wait_seconds": cfg["max_wait_seconds"]}
     items = body["items"]
     duplicates = supported_duplicates
     for identity in held_fresh:

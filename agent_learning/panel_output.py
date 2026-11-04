@@ -52,7 +52,7 @@ def model_panel_result(result):
         if isinstance(phase, dict):
             small["phase_review"] = _fields(phase, ("blocked_phase_count", "waiting_phase_count",
                 "executor_waiting_batch_count", "local_seal_pending_count", "historical_imports_included"))
-            small["phase_review"]["policy"] = _fields(phase.get("policy"), ("mode", "every_phases"))
+            small["phase_review"]["policy"] = _fields(phase.get("policy"), ("mode", "every_phases", "max_wait_seconds"))
         public["summary"] = small
     history = result.get("history")
     if isinstance(history, dict):

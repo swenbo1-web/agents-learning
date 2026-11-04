@@ -13,6 +13,101 @@ import unicodedata
 _STAGE_SUMMARY = re.compile(r"\A阶段公开记录：(.*) \[[a-f0-9]{32}\] part [0-9]+\Z", re.S)
 
 
+def _comparison_delivery(problem, events, latest_delivery_id):
+    """Read a complete public delivery from the already bounded evidence page.
+
+    Segments are a lossless projection of one public message, not new success
+    evidence. An omitted/newer or ambiguous message must never revive an older
+    conclusion just because that earlier text would be useful for retrieval.
+    """
+    from .public_observations import observed_public
+
+    deliveries = [event for event in events if event.get("role") != "history_related" and (
+        event.get("type") == "Stop" or event.get("type") == "PublicMessageSegment"
+        and isinstance(event.get("payload"), dict)
+        and event["payload"].get("memory_type") == "public_summary")]
+    if latest_delivery_id is not None:
+        chosen = [event for event in deliveries if event.get("id") == latest_delivery_id]
+        if not chosen:
+            # A parent Stop preview may have yielded to its complete segments.
+            chosen = [event for event in deliveries if event.get("type") == "PublicMessageSegment"
+                      and event["payload"].get("public_message_id") == latest_delivery_id]
+        if not chosen:
+            return None, "delivery_omitted"
+    else:
+        chosen = deliveries
+    if not chosen:
+        return None, "no_delivery"
+    latest = max(chosen, key=lambda event: (event.get("created") or 0, event.get("id", "")))
+    parent = latest.get("id") if latest["type"] == "Stop" else latest["payload"].get("public_message_id")
+    segments = [event for event in deliveries if event.get("type") == "PublicMessageSegment"
+                and event["payload"].get("public_message_id") == parent]
+
+    def eligible(event):
+        return (event.get("health", "valid") == "valid" and not event.get("agent")
+                and not event.get("assignment_id") and event.get("outcome") in {"reported", "unknown"}
+                and all(event.get(key) in (None, problem.get(key)) for key in
+                        ("project", "conversation", "task_id", "task_revision") if problem.get(key) is not None))
+
+    def complete(event):
+        return eligible(event) and observed_public(event["type"], event.get("payload"), require_complete=True)
+
+    if not segments:
+        if latest["type"] != "Stop" or not complete(latest):
+            return None, "incomplete_delivery"
+        return latest["payload"]["last_assistant_message"], "complete_public_delivery"
+    # Event ids are opaque: native callbacks use digests, local legacy events
+    # may use UUIDs. Their exact identity, not a particular spelling, binds parts.
+    if not isinstance(parent, str) or not parent or len(parent) > 200:
+        return None, "incomplete_delivery"
+    first = segments[0]["payload"]
+    count, chars = first.get("segments"), first.get("message_chars")
+    if (type(count) is not int or not 1 <= count <= 64 or len(segments) != count
+            or type(chars) is not int or chars < 1):
+        return None, "incomplete_delivery"
+    if chars > 2048:
+        return None, "delivery_too_long"
+    pieces = {}
+    identities = ("project", "conversation", "task_id", "task_revision", "task_write_version",
+                  "execution_epoch", "agent", "assignment_id")
+    identity = tuple(segments[0].get(key) for key in identities)
+    for event in segments:
+        body = event["payload"]
+        index = body.get("segment")
+        if (not complete(event) or type(index) is not int or not 0 <= index < count or index in pieces
+                or body.get("segments") != count or type(body.get("segments")) is not int
+                or body.get("message_chars") != chars or type(body.get("message_chars")) is not int
+                or body.get("capture_coverage", {}) != first.get("capture_coverage", {})
+                or body.get("execution_authority") is not False
+                or tuple(event.get(key) for key in identities) != identity):
+            return None, "incomplete_delivery"
+        pieces[index] = body["text"]
+    text = "".join(pieces[index] for index in range(count))
+    if len(text) != chars:
+        return None, "incomplete_delivery"
+    # The existing producer binds every part id to the complete visible text.
+    # Same parent/count/length alone cannot exclude mixing equal-length versions.
+    from .runtime import digest
+    project = problem.get("project")
+    text_digest = digest(text)
+    if not project or any(event.get("id") != digest([project, ["public-message", parent, text_digest,
+                                                             event["payload"]["segment"]]]) for event in segments):
+        return None, "incomplete_delivery"
+    # If both forms are visible they must agree, unless the parent explicitly
+    # records only a truncated projection. Never repair a conflicting source.
+    parents = [event for event in deliveries if event.get("type") == "Stop" and event.get("id") == parent]
+    if any(not complete(event) or event["payload"]["last_assistant_message"] != text for event in parents
+           if observed_public("Stop", event.get("payload"), require_complete=True)):
+        return None, "incomplete_delivery"
+    if any(not eligible(event) or not observed_public("Stop", event.get("payload"))
+           or event["payload"].get("completion", "complete") != "complete"
+           or event["payload"].get("capture_coverage", {}) != first.get("capture_coverage", {})
+           or any(event.get(key) is not None and segments[0].get(key) is not None
+                  and event[key] != segments[0][key] for key in identities) for event in parents):
+        return None, "incomplete_delivery"
+    return text, "complete_public_segments"
+
+
 def comparison_queries(problem, task, events, *, latest_delivery_id=None):
     """Keep generated labels out of recall, without inventing a business topic.
 
@@ -21,8 +116,6 @@ def comparison_queries(problem, task, events, *, latest_delivery_id=None):
     Negation, versions and paths stay visible to the comparator;
     these queries never classify a project report as routine or grant release.
     """
-    from .public_observations import observed_public
-
     summary = problem.get("summary", "")
     goal = (task or {}).get("goal", "")
     match = _STAGE_SUMMARY.fullmatch(summary) if isinstance(summary, str) else None
@@ -31,29 +124,16 @@ def comparison_queries(problem, task, events, *, latest_delivery_id=None):
     primary = goal or match[1]
     if len(primary) > 1024:
         return {"primary": primary, "fallback": None, "fallback_reason": "goal_too_long"}
-    deliveries = [event for event in events if event.get("type") == "Stop"]
-    if latest_delivery_id is not None:
-        deliveries = [event for event in deliveries if event.get("id") == latest_delivery_id]
-        if not deliveries:
-            return {"primary": primary, "fallback": None, "fallback_reason": "delivery_omitted"}
-    if not deliveries:
-        return {"primary": primary, "fallback": None, "fallback_reason": "no_delivery"}
-    # The latest source cannot be replaced with an earlier, easier-to-match
-    # conclusion when its real final statement is incomplete or over budget.
-    delivery = max(deliveries, key=lambda event: (event.get("created") or 0, event.get("id", "")))
-    body = delivery.get("payload")
-    if (delivery.get("health", "valid") != "valid" or delivery.get("agent")
-            or delivery.get("outcome") not in {"reported", "unknown"}
-            or not observed_public("Stop", body, require_complete=True)):
-        return {"primary": primary, "fallback": None, "fallback_reason": "incomplete_delivery"}
-    text = body["last_assistant_message"]
+    text, reason = _comparison_delivery(problem, events, latest_delivery_id)
+    if text is None:
+        return {"primary": primary, "fallback": None, "fallback_reason": reason}
     if len(text) > 2048:
         return {"primary": primary, "fallback": None, "fallback_reason": "delivery_too_long"}
     if _text(text) == _text(primary):
         return {"primary": primary, "fallback": None, "fallback_reason": "same_material"}
     context = "" if _text(primary) in {"继续", "继续推进", "继续执行", "continue", "proceed"} else primary
     return {"primary": primary, "fallback": (context + "\n" if context else "") + text,
-            "fallback_reason": "complete_public_delivery"}
+            "fallback_reason": reason}
 
 
 def _text(value):
