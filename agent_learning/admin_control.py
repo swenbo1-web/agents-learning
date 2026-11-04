@@ -137,8 +137,10 @@ def control_detail(runtime, project, section):
         data = _control_queue(runtime, project, include_history=False)
         if phase_scope(runtime, project) is not None:
             from .phase_review import protected_backlog, delivery_registration
+            from .phase_boundary_diagnostics import delivery_boundary_diagnostics
             data["phase_health"] = {"protected_backlog": protected_backlog(runtime, project),
-                                    "latest_delivery_registration": delivery_registration(runtime, project)}
+                                    "latest_delivery_registration": delivery_registration(runtime, project),
+                                    "delivery_boundary_diagnostics": delivery_boundary_diagnostics(runtime, project)}
     elif section == "recovery":
         from .admin_recovery import recovery_status
         data = recovery_status(runtime, project, include_history=False)

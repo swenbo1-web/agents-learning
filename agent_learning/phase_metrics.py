@@ -217,7 +217,9 @@ def batch_metrics(runtime, project, batch_id):
             completed_at = max(completed_at, local[1]) if _number(completed_at) else local[1]
     batch_elapsed = completed_at - row[1] if (_number(completed_at) and _number(row[1]) and completed_at >= row[1]) else None
     call_elapsed = _sum(elapsed) if not truncated else None
+    from .review_input_cost import cost_from_packet
     return {"submitted_cases": submitted, "evidence_records": evidence, "result_cases": result_cases,
+        "input_cost": cost_from_packet(packet),
         "selection_diagnostics": _selection_diagnostics(packet, len(row[2]) if packet else None),
         "tool_context": tool_context,
         "candidate_count": candidates, "published_count": published, "call_count": call_count,

@@ -381,6 +381,7 @@ def delivery_registration(runtime, project):
 
 def status(runtime, project, *, include_health=True):
     from .phase_metrics import batch_metrics
+    from .phase_boundary_diagnostics import delivery_boundary_diagnostics
     cfg = policy(runtime, project)
     exists = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='review_phases'").fetchone()
     current = (project, runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch())
@@ -408,7 +409,8 @@ def status(runtime, project, *, include_health=True):
     counts = {r[0]: r[1] for r in rows}
     return {"policy": cfg, "host_scope": runtime._session_scope(), "phases": counts,
             **({"protected_backlog": protected_backlog(runtime, project),
-                "latest_delivery_registration": delivery_registration(runtime, project)} if include_health else {}),
+                "latest_delivery_registration": delivery_registration(runtime, project),
+                "delivery_boundary_diagnostics": delivery_boundary_diagnostics(runtime, project)} if include_health else {}),
             "locally_deferred_phase_count": counts.get("routine_deferred", 0),
             "local_seal_pending_count": local_seal_pending,
             "executor_waiting_batch_count": executor_waiting,
@@ -880,6 +882,9 @@ def prepare(runtime, project, *, force=False, _page_budget=3):
         del scan_updates[identity]
     phases = [phase for phase in phases if phase["id"] not in held_fresh]
     ids = body["phase_ids"]
+    from .review_input_cost import input_cost_snapshot
+    body["_local_admission"]["input_cost"] = input_cost_snapshot(
+        body, outer_prefix=PHASE_PREFIX, schema=response_schema())
     runtime.db.execute("INSERT INTO phase_review_batches VALUES(?,?,?,?,?,?,?,?,'pending',?,NULL)",
         (project, parent["id"], runtime._session_scope(), runtime.session_epoch(), runtime.host_epoch(), cfg["version"],
          encode(ids), encode(body), time.time()))

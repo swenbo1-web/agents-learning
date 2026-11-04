@@ -47,10 +47,10 @@ _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
 
-def review_instruction(packet):
+def _instruction_parts(packet):
+    """One model projection for rendering and optional local cost snapshots."""
     from .review_transport import TRANSPORT_KEY, TRANSPORT_PREFIX, compact_packet
     from .review_evidence import REFERENCE_PREFIX, has_short_refs, project_packet
-    from .runtime import encode
     # Server-owned selection metadata is for the local UI, never review
     # evidence or model context. Keep diagnostics out of token budgets too.
     if "_local_admission" in packet:
@@ -69,7 +69,13 @@ def review_instruction(packet):
                       for case in packet["items"])
     rules = REVIEW_PREFIX if covered else REVIEW_PREFIX.replace(PUBLIC_DELIVERY_RULE, "", 1)
     # 补充规则放在不可信资料块之前，保持原有公共资料包边界。
-    return CONTENT_LAYOUT_PREFIX + history + references + transport + rules + encode(visible) + REVIEW_SUFFIX
+    return CONTENT_LAYOUT_PREFIX + history + references + transport + rules, projected, visible
+
+
+def review_instruction(packet):
+    from .runtime import encode
+    prefix, _, visible = _instruction_parts(packet)
+    return prefix + encode(visible) + REVIEW_SUFFIX
 
 
 def _fits(packet, limit):

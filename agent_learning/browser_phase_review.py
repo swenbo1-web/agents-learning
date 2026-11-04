@@ -74,7 +74,50 @@ for(const id of PHASE_FIELDS)$(id).addEventListener('change',()=>{state.adminDir
 const basePhaseControls=controls;
 controls=function(){basePhaseControls();const waitSupported=phaseWaitSupported(state.adminFormBase??state.adminData);$('phase-wait').disabled=!waitSupported||$('phase-wait').disabled;$('phase-wait-upgrade').hidden=waitSupported;$('phase-wait-upgrade').textContent=t('phaseWaitUpgrade');if(!state.adminData?.phase_review||$('phase-mode').value!=='phase')return;for(const id of ['admin-frequency-preset','admin-daily-calls','admin-batch-calls','admin-summary-enabled'])$(id).disabled=true;};
 const basePhaseRecoveryRender=renderAdminState;
+Object.assign(strings,{
+phaseBoundarySample:['Delivery receipts: {n} sampled stages (limit {limit})','交付回执：抽样 {n} 个阶段（上限 {limit}）'],
+phaseBoundaryItem:['Stage {id} · task {task} · revision {revision} · delivery {delivery}','阶段 {id} · 任务 {task} · 修订 {revision} · 交付版本 {delivery}'],
+phaseBoundaryWaiting:['The current delivery is still waiting for its host Stop receipt.','当前交付仍等待宿主 Stop 回执。'],
+phaseBoundaryMissing:['The task boundary has changed; the original matching Stop receipt was not found within the checked range.','任务边界已变化；已检查范围内未找到原交付对应的 Stop 回执。'],
+phaseBoundarySeal:['The matching Stop receipt exists; local sealing is pending.','已存在匹配 Stop 回执，等待本地封存。'],
+phaseBoundaryRetry:['The original receipt is retained; local sealing needs recovery.','原始回执已保留，本地封存待恢复。'],
+phaseBoundaryHistorical:['This stage belongs to an earlier host or session boundary.','该阶段属于较早的宿主或会话边界。'],
+phaseBoundaryUnknown:['The bounded check cannot confirm the original delivery receipt.','有界检查尚不能确认原交付回执。'],
+phaseBoundaryUnavailable:['Delivery receipt diagnostics are unavailable; pending stages remain unverified. Basic settings remain usable.','交付回执诊断暂不可用，待处理阶段仍未核实；基本设置仍可操作。'],
+phaseBoundaryLimited:['Only a bounded sample was checked; these counts are not all pending stages.','仅检查有界样本；此数量不代表全部待处理阶段。'],
+phaseBoundaryNote:['Read-only receipt diagnostics. A new task’s Stop cannot complete an older delivery; this view starts no review or retry.','这里只读核对回执；新任务的 Stop 不能补结旧交付，查看不会启动审核或重试。'],
+phaseInputCost:['Visible review input: {n} characters','可见审核输入：{n} 字符'],
+phaseInputCostUnknown:['Input composition was not recorded or cannot be verified for this batch.','本批未记录输入构成，或当前无法核验。'],
+phaseInputCostParts:['Instructions {instructions} · source evidence {source_events} · task {task_context} · governance target {governance_target} · history {related_history} · formal knowledge {related_knowledge} · candidates {related_candidates} · shared context {shared_context} · packet metadata {packet_metadata}','指令 {instructions} · 来源证据 {source_events} · 任务 {task_context} · 治理目标 {governance_target} · 历史 {related_history} · 正式知识 {related_knowledge} · 候选 {related_candidates} · 共享内容 {shared_context} · 包元数据 {packet_metadata}'],
+phaseInputCostSchema:['Response schema: {n} characters (separate from the visible instruction).','响应结构：{n} 字符（与可见指令分别计量）。'],
+phaseInputCostSaved:['Existing lossless sharing removed {n} characters from this visible instruction.','现有无损共享为本次可见指令减少 {n} 字符。'],
+phaseInputCostNote:['Frozen local character counts, not provider tokens or billing. Hidden provider overhead is excluded; viewing adds no model call.','这是冻结时的本地字符统计，不是平台 token 或计费量；不含提供方隐藏开销，查看不新增模型调用。']
+});
+function renderPhaseBoundary(root,diagnostic){
+ if(!diagnostic)return;
+ if(diagnostic.checked!==true){root.append(node('p',t('phaseBoundaryUnavailable'),'note'));return;}
+ if(!(diagnostic.sampled>0))return;
+ const detail=document.createElement('details'),title=document.createElement('summary');
+ title.textContent=t('phaseBoundarySample',{n:diagnostic.sampled,limit:diagnostic.sample_limit});detail.append(title);
+ const reasons={awaiting_host_stop:'phaseBoundaryWaiting',missing_host_stop_after_boundary:'phaseBoundaryMissing',awaiting_local_seal:'phaseBoundarySeal',local_seal_retry:'phaseBoundaryRetry',historical_boundary:'phaseBoundaryHistorical'};
+ for(const item of (Array.isArray(diagnostic.items)?diagnostic.items:[]).slice(0,8)){
+  const identity=t('phaseBoundaryItem',{id:String(item.phase_id??'?').slice(0,10),task:String(item.task_id??'?').slice(0,10),revision:item.task_revision??'?',delivery:item.delivery_version??'?'});
+  detail.append(node('p',identity+' · '+t(reasons[item.reason]||'phaseBoundaryUnknown'),'note'));
+ }
+ if(diagnostic.truncated||diagnostic.unknown_count>0)detail.append(node('p',t('phaseBoundaryLimited'),'muted'));
+ detail.append(node('p',t('phaseBoundaryNote'),'muted'));root.append(detail);
+}
+function renderPhaseInputCost(root,cost){
+ if(!cost)return;
+ if(cost.status!=='recorded'){root.append(node('p',t('phaseInputCostUnknown'),'muted'));return;}
+ const detail=document.createElement('details'),title=document.createElement('summary');
+ title.textContent=t('phaseInputCost',{n:cost.instruction_chars});detail.append(title);
+ detail.append(node('p',t('phaseInputCostParts',cost.components||{}),'muted'));
+ if(cost.schema_chars!==null&&cost.schema_chars!==undefined)detail.append(node('p',t('phaseInputCostSchema',{n:cost.schema_chars}),'muted'));
+ if(cost.transport_saved_chars>0)detail.append(node('p',t('phaseInputCostSaved',{n:cost.transport_saved_chars}),'muted'));
+ detail.append(node('p',t('phaseInputCostNote'),'note'));root.append(detail);
+}
 const basePhaseToolMetrics=phaseBatchMetrics;
-phaseBatchMetrics=function(detail,batch){basePhaseToolMetrics(detail,batch);const view=batch.metrics?.tool_context;if(!view)return;detail.append(node('p',t('phaseBatchTools',{n:view.selected_observations}),'note'));if(view.selection_limited)detail.append(node('p',t('phaseBatchToolsLimited'),'note'));};
-renderAdminState=function(){basePhaseRecoveryRender();const view=state.adminData?.phase_review;if(!view)return;const area=$('phase-results');if(view.local_seal_pending_count>0)area.append(node('p',t('phaseSealPending',{n:view.local_seal_pending_count}),'note'));if(view.executor_waiting_batch_count>0)area.append(node('p',t('phaseExecutorWaiting',{n:view.executor_waiting_batch_count}),'note'));};
+phaseBatchMetrics=function(detail,batch){basePhaseToolMetrics(detail,batch);renderPhaseInputCost(detail,batch.metrics?.input_cost);const view=batch.metrics?.tool_context;if(!view)return;detail.append(node('p',t('phaseBatchTools',{n:view.selected_observations}),'note'));if(view.selection_limited)detail.append(node('p',t('phaseBatchToolsLimited'),'note'));};
+renderAdminState=function(){basePhaseRecoveryRender();const view=state.adminData?.phase_review;if(!view)return;const area=$('phase-results');if(view.local_seal_pending_count>0)area.append(node('p',t('phaseSealPending',{n:view.local_seal_pending_count}),'note'));if(view.executor_waiting_batch_count>0)area.append(node('p',t('phaseExecutorWaiting',{n:view.executor_waiting_batch_count}),'note'));renderPhaseBoundary(area,view.delivery_boundary_diagnostics??state.adminData.queue?.phase_health?.delivery_boundary_diagnostics);};
 '''
