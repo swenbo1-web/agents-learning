@@ -19,6 +19,8 @@ REVIEW_PREFIX = (
     "revoke/dismiss_counterexample用decision=governance且candidate=null；新candidate默认publish，无治理提议proposal=null。"
     "有来源项目约定可为project/fact、reported；失败、流水、猜测不是项目事实。"
     "candidate_reference_provenance仅表示公开说明可能受已展示候选影响，不代表采用；复述或重复引用不是独立验证。"
+    "public_delivery_coverage仅描述可见公开回复的语义覆盖；read_required=true时仅见部分或未确认完整，"
+    "不得当作整条完整说明，提炼时limitations必须保留这一范围及未见条件。"
     "发现既有知识错误/冲突须指出准确ID/修订、证据和范围并提治理建议，不另起新条绕过争议。"
     "程序按用户策略决定发布。仅返回schema要求的JSON。\n<untrusted_evidence>\n"
 )
@@ -37,7 +39,7 @@ HISTORY_REVIEW_PREFIX = (
 CONTENT_LAYOUT_PREFIX = (
     "candidate正文先写有据“结论：”，保留条件限制。\n"
 )
-PACKET_FORMAT = 10
+PACKET_FORMAT = 11
 _EVENT_WINDOW = 512
 _REFERENCE_LIMIT = 6
 
@@ -176,6 +178,10 @@ class ReviewPacketMixin:
                           target_omitted="budget" if target is not None else "missing")
         if problem["task_id"] and task is None:
             packet["task_snapshot_missing"] = True
+        from .phase_delivery_groups import parent_events
+        from .phase_local_triage import _STAGE_SUMMARY
+        delivery_parents = (parent_events(self, project, events)
+                            if _STAGE_SUMMARY.fullmatch(problem.get("summary", "")) else [])
         from .phase_tool_evidence import packet_selection
         tool_context = packet_selection(self, project, problem)
 
@@ -196,16 +202,16 @@ class ReviewPacketMixin:
         priority = self._review_priority(events) if offset == 0 else list(range(len(events)))
         for index in priority:
             proposal = selected + [index]
-            self._review_layout(packet, events, proposal, count, offset, window_count)
+            self._review_layout(packet, events, proposal, count, offset, window_count, delivery_parents)
             if _fits(packet, limit):
                 selected = proposal
             elif offset or index == 0:
                 # 后续页使用连续前缀；不跳过当前大事件造成不可察觉的分页缺口。
                 break
-        self._review_layout(packet, events, selected, count, offset, window_count)
+        self._review_layout(packet, events, selected, count, offset, window_count, delivery_parents)
         if events and 0 not in selected:
             required = dict(packet, missing_refs=[])
-            self._review_layout(required, events, [0], count, offset, window_count)
+            self._review_layout(required, events, [0], count, offset, window_count, delivery_parents)
             packet["pagination_blocked"] = "increase_max_chars"
             packet["required_chars"] = len(review_instruction(required))
 
@@ -223,11 +229,11 @@ class ReviewPacketMixin:
         if target_required and target is not None:
             packet["target_knowledge"] = target
             packet.pop("target_omitted", None)
-            self._review_layout(packet, events, selected, count, offset, window_count)
+            self._review_layout(packet, events, selected, count, offset, window_count, delivery_parents)
             if not _fits(packet, limit):
                 packet["target_knowledge"] = None
                 packet["target_omitted"] = "budget"
-                self._review_layout(packet, events, selected, count, offset, window_count)
+                self._review_layout(packet, events, selected, count, offset, window_count, delivery_parents)
                 packet["target_required_chars"] = len(review_instruction(dict(
                     packet, target_knowledge=target, target_omitted=None)))
                 if not _fits(packet, limit):
@@ -237,7 +243,7 @@ class ReviewPacketMixin:
         remaining = limit - len(review_instruction(packet))
         if remaining >= 300:
             from .phase_local_triage import comparison_queries
-            queries = comparison_queries(problem, task, packet["events"])
+            queries = comparison_queries(problem, task, packet["events"], parent_context=delivery_parents)
             if queries["fallback_reason"] != "not_stage":
                 # The bounded window may retain an earlier public delivery while
                 # the real latest Stop or segment is omitted. Never recall from that
@@ -247,7 +253,8 @@ class ReviewPacketMixin:
                     "(e.type='PublicMessageSegment' AND json_extract(e.payload,'$.memory_type')='public_summary')) "
                     "ORDER BY e.created DESC,e.id DESC LIMIT 1", (problem_id, project)).fetchone()
                 queries = comparison_queries(problem, task, packet["events"],
-                                             latest_delivery_id=latest["id"] if latest else None)
+                                             latest_delivery_id=latest["id"] if latest else None,
+                                             parent_context=delivery_parents)
             knowledge, candidates = self._review_related(project, problem_id, queries["primary"])
             primary_counts = {"knowledge": len(knowledge), "candidates": len(candidates)}
             fallback = "not_needed" if knowledge else queries["fallback_reason"]
@@ -286,7 +293,7 @@ class ReviewPacketMixin:
                                          "candidates": len(packet["related_candidates"])}
         else:
             from .phase_local_triage import comparison_queries
-            if comparison_queries(problem, task, packet["events"])["fallback_reason"] != "not_stage":
+            if comparison_queries(problem, task, packet["events"], parent_context=delivery_parents)["fallback_reason"] != "not_stage":
                 packet["comparison_retrieval"] = {"primary": "not_attempted", "fallback": "comparison_budget"}
                 if not _fits(packet, limit):
                     packet.pop("comparison_retrieval")
@@ -372,10 +379,16 @@ class ReviewPacketMixin:
         return list(dict.fromkeys(priority + list(range(len(events)))))
 
     @staticmethod
-    def _review_layout(packet, events, selected, count, offset, window_count):
+    def _review_layout(packet, events, selected, count, offset, window_count, delivery_parents=()):
         selected_set = set(selected)
         packet["events"] = sorted((events[index] for index in selected_set),
                                   key=lambda event: (event["created"] or 0, event["id"]))
+        from .phase_delivery_groups import coverage
+        delivery = coverage(packet["problem"], packet["events"], delivery_parents)
+        if delivery is None:
+            packet.pop("public_delivery_coverage", None)
+        else:
+            packet["public_delivery_coverage"] = delivery
         packet["omitted_count"] = count - len(selected_set)
         task_missing = bool(packet.get("task_truncated") or packet.get("problem_summary_truncated")
                             or packet.get("task_snapshot_missing"))

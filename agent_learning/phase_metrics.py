@@ -9,6 +9,9 @@ _PACKET_LIMIT = 1_000_000
 _RESULT_LIMIT = 60_000
 _USAGE_LIMIT = 24_000
 _CALL_LIMIT = 32
+_SQLITE_INTEGER_MAX = 2 ** 63 - 1
+_JSON_DEPTH_LIMIT = 64
+_JSON_NODE_LIMIT = 100_000
 
 
 def _object(value, limit):
@@ -16,14 +19,44 @@ def _object(value, limit):
         return None
     try:
         body = json.loads(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError, OverflowError):
         return None
-    return body if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        return None
+    # Stored records are bounded projections, not arbitrary JSON documents.
+    # An iterative walk also works on interpreters whose decoder accepts deep
+    # nesting; it never needs a second recursive serialization to inspect it.
+    pending, nodes = [(iter((body,)), 0)], 0
+    while pending:
+        values, depth = pending[-1]
+        try:
+            item = next(values)
+        except StopIteration:
+            pending.pop()
+            continue
+        nodes += 1
+        if nodes > _JSON_NODE_LIMIT:
+            return None
+        if isinstance(item, (dict, list)):
+            if depth >= _JSON_DEPTH_LIMIT:
+                return None
+            pending.append((iter(item.values() if isinstance(item, dict) else item), depth + 1))
+    return body
 
 
 def _number(value):
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value >= 0)
+    # Avoid converting an arbitrary Python integer to float. Normal ledger
+    # values fit SQLite's signed integer range; corrupt larger values are not
+    # useful display estimates and must not turn an unknown total into zero.
+    return (type(value) is int and 0 <= value <= _SQLITE_INTEGER_MAX
+            or type(value) is float and math.isfinite(value) and 0 <= value <= _SQLITE_INTEGER_MAX)
+
+
+def _sum(values):
+    if not values or not all(_number(value) for value in values):
+        return None
+    total = sum(values)
+    return total if _number(total) else None
 
 
 def _selection_diagnostics(packet, packet_chars):
@@ -40,7 +73,7 @@ def _selection_diagnostics(packet, packet_chars):
 
     def count(key):
         value = packet.get(key)
-        return value if type(value) is int and value >= 0 else None
+        return value if type(value) is int and _number(value) else None
 
     # ID previews are bounded; their length cannot replace an absent total.
     reused = count("reused_problem_count")
@@ -139,6 +172,7 @@ def batch_metrics(runtime, project, batch_id):
         "MIN(created),MAX(finished),COALESCE(SUM(finished IS NULL),0) "
         "FROM admin_calls WHERE project=? AND problem=? AND state!='deduplicated'", (project, batch_id)).fetchone()
     call_count, elapsed, tokens = count_row[1], [], []
+    usage_conflict, consistency_errors = False, set()
     for call in calls[:_CALL_LIMIT]:
         if call[1] == "not_started" or call[3] is None and call[4] is None:
             continue
@@ -146,8 +180,12 @@ def batch_metrics(runtime, project, batch_id):
         elapsed.append(usage.get("elapsed_seconds") if usage else None)
         try:
             from .admin_usage import normalize_usage
-            tokens.append(normalize_usage(usage) if usage else None)
-        except (ValueError, TypeError):
+            value = normalize_usage(usage) if usage else None
+            if value:
+                usage_conflict |= value.get("conflict") is True
+                consistency_errors.update(value.get("consistency_errors", []))
+            tokens.append(value if value and all(_number(number) for number in value["token_totals"].values()) else None)
+        except (ValueError, TypeError, RecursionError, OverflowError):
             tokens.append(None)
     complete = bool(tokens) and not truncated and all(value and value["completeness"] == "complete" for value in tokens)
     totals = {}
@@ -158,7 +196,13 @@ def batch_metrics(runtime, project, batch_id):
                 value["token_totals"]["input_tokens"] + value["token_totals"]["output_tokens"]
                 if {"input_tokens", "output_tokens"} <= value["token_totals"].keys() else None)
                 if value else None for value in tokens]
-        totals[key] = sum(values) if values and not truncated and all(_number(value) for value in values) else None
+        totals[key] = _sum(values) if not truncated else None
+    complete &= all(totals[key] is not None for key in ("input_tokens", "output_tokens", "total_tokens"))
+    if usage_conflict:
+        # Preserve the original ledger and its conservative accounting. A
+        # conflicted cache figure must not be presented as an exact subset of
+        # input; other observable counters remain useful with partial status.
+        totals["cached_input_tokens"] = None
     reported = any(value and value["token_totals"] for value in tokens)
     # A recovered decision can finish much later than its original paid process.
     # Preserve provider timing/usage while including that wait in batch timing.
@@ -170,18 +214,20 @@ def batch_metrics(runtime, project, batch_id):
             (project, runtime._session_scope(), batch_id)).fetchone()
         recovered = local[0]
         if recovered and _number(local[1]):
-            completed_at = max(completed_at or 0, local[1])
+            completed_at = max(completed_at, local[1]) if _number(completed_at) else local[1]
+    batch_elapsed = completed_at - row[1] if (_number(completed_at) and _number(row[1]) and completed_at >= row[1]) else None
+    call_elapsed = _sum(elapsed) if not truncated else None
     return {"submitted_cases": submitted, "evidence_records": evidence, "result_cases": result_cases,
         "selection_diagnostics": _selection_diagnostics(packet, len(row[2]) if packet else None),
         "tool_context": tool_context,
         "candidate_count": candidates, "published_count": published, "call_count": call_count,
         "call_records": count_row[0], "call_count_scope": "recorded_execution_attempts",
-        "batch_elapsed_seconds": round(completed_at - row[1], 3)
-            if count_row[0] and not count_row[4] and _number(completed_at) and completed_at >= row[1] else None,
+        "batch_elapsed_seconds": round(batch_elapsed, 3)
+            if count_row[0] and not count_row[4] and _number(batch_elapsed) else None,
         "local_recheck_count": recovered,
-        "call_elapsed_seconds": round(sum(elapsed), 3)
-            if elapsed and not truncated and all(_number(value) for value in elapsed) else None,
+        "call_elapsed_seconds": round(call_elapsed, 3) if _number(call_elapsed) else None,
         "call_elapsed_scope": "execution_and_local_processing", "usage_scope": "host_reported_per_call",
         "usage_completeness": "complete" if complete else "partial" if reported else "unknown",
+        "usage_conflict": usage_conflict, "usage_consistency_errors": sorted(consistency_errors),
         **totals, "call_details_truncated": truncated,
         "material_counts_complete": packet is not None, "result_counts_complete": result is not None}

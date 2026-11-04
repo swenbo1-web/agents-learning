@@ -89,6 +89,15 @@ run("state.view='admin-control';state.session={admin_control_enabled:true};state
   assert(textOfTree(get('phase-results')).includes('No new cases were submitted; local reuse was recorded'));
   mount(clone(latest));text=textOfTree(get('phase-results'));
   assert(!text.includes('Frozen selection'));assert(text.includes('Cached input Unknown'));
+ }else if(scenario==='usage_conflict'){
+  const value=clone(latest),metric=value.phase_review.recent_batches[1].metrics;
+  Object.assign(metric,{usage_conflict:true,input_tokens:100,output_tokens:20,total_tokens:120,cached_input_tokens:null,usage_completeness:'partial'});
+  mount(value);language('en');let text=textOfTree(get('phase-results'));
+  assert(text.includes('Usage records are inconsistent'));assert(text.includes('conservative reservations are retained'));
+  assert(text.includes('Cached input Unknown'));assert(!text.includes('Cached input 150'));
+  language('zh-CN');text=textOfTree(get('phase-results'));
+  assert(text.includes('用量记录存在不一致'));assert(text.includes('用量下界与保守预留'));
+  delete metric.usage_conflict;mount(value);assert(!textOfTree(get('phase-results')).includes('用量记录存在不一致'));
  }else if(scenario==='admission_trigger'){
   const value=clone(latest);value.phase_review.policy.every_phases=20;
   const metric=value.phase_review.recent_batches[1].metrics;
@@ -263,6 +272,7 @@ class PhaseBrowserUITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ok", result.stdout)
 
+    def test_inconsistent_usage_cache_is_unknown_with_localized_notice(self): self.scenario("usage_conflict")
     def test_recorded_admission_reasons_and_frozen_policy_are_localized(self): self.scenario("admission_trigger")
     def test_frozen_selection_and_cache_usage_are_localized_and_compatible(self): self.scenario("selection_diagnostics")
     def test_optional_wait_policy_is_explicit_bounded_and_defaults_off(self): self.scenario("wait_policy")

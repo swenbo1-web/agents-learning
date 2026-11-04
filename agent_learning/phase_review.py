@@ -264,17 +264,14 @@ def seal_phase(runtime, project, phase, event_id):
         "AND e.type IN ('UserPromptSubmit','PhaseRequestContext','PublicMessageSegment','Stop') " + _PUBLIC_PREVIEW_FILTER)
     params = (project, row["conversation"], task["id"], task["revision"], row["start_time"], stop["created"],
               first_sequence, stop_sequence, first_write, row["delivery_version"])
-    refs = runtime.db.execute("SELECT e.id,length(e.payload) AS chars" + sources +
+    from .phase_delivery_groups import chunk_sources, _FIELDS
+    fields = ",".join("e." + key for key in _FIELDS)
+    refs = runtime.db.execute("SELECT " + fields + ",length(e.payload) AS chars,"
+        "CASE WHEN e.type='PublicMessageSegment' THEN substr(e.payload,1,6001) END public_payload,"
+        "(SELECT conflict FROM operations WHERE project=e.project AND id=e.operation) operation_conflict,"
+        "(SELECT decision FROM operations WHERE project=e.project AND id=e.operation) operation_decision" + sources +
         " ORDER BY COALESCE(origin.created,e.created),e.created,e.rowid LIMIT 2000", params).fetchall()
-    chunks, chunk, chars = [], [], 0
-    for ref in refs:
-        if chunk and (len(chunk) >= 6 or chars + ref["chars"] > 4000):
-            chunks.append(chunk)
-            chunk, chars = [], 0
-        chunk.append(ref["id"])
-        chars += ref["chars"]
-    if chunk:
-        chunks.append(chunk)
+    chunks = chunk_sources(runtime, project, task, refs)
     cases = []
     for index, chunk in enumerate(chunks):
         problem = runtime._problem(project, row["conversation"], "阶段公开记录：" + task["goal"][:240] + " [" + row["id"] + "] part " + str(index),
@@ -429,9 +426,32 @@ def status(runtime, project, *, include_health=True):
 def _result(value):
     try:
         body = json.loads(value or "{}")
-        return body if isinstance(body, dict) and isinstance(body.get("items", []), list) else {}
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError, OverflowError):
         return {}
+    if not isinstance(body, dict) or not isinstance(body.get("items", []), list):
+        return {}
+
+    def identity(value):
+        return value if isinstance(value, str) and 0 < len(value) <= 200 else None
+
+    # This is a display projection, not recovery or acceptance of a decision.
+    # A malformed historical row must not break the whole settings view or
+    # leak arbitrary nested structures into its public response.
+    items = []
+    for raw in body.get("items", [])[:8]:
+        if not isinstance(raw, dict):
+            continue
+        values = raw.get("candidate_ids")
+        if not isinstance(values, list) or not values:
+            values = [raw.get("candidate_id")]
+        candidates = [value for value in values[:5] if identity(value)]
+        reason, state = raw.get("reason"), raw.get("status")
+        items.append({"problem_id": identity(raw.get("problem_id")),
+                      "status": state if isinstance(state, str) and len(state) <= 80 else None,
+                      "reason": reason[:250] if isinstance(reason, str) else "",
+                      "candidate_ids": candidates})
+    complete = body.get("coverage_complete")
+    return {"coverage_complete": complete if type(complete) is bool else None, "items": items}
 
 
 def source_conversation(runtime, project, problem_id, fallback):

@@ -8,6 +8,8 @@ import time
 from .runtime import ContractError, digest, encode
 
 TOKEN_FIELDS = {"input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"}
+_CONSISTENCY_ERRORS = frozenset({"cached_input_exceeds_input", "turn_cached_input_exceeds_input",
+    "total_tokens_mismatch", "turn_total_tokens_mismatch", "token_totals_records_mismatch"})
 RESERVATION_ESTIMATE_VERSION = 2
 ADMIN_BUDGET_DEFAULTS = {
     "max_calls_per_day": 100, "max_calls_per_batch": 5, "max_cases_per_batch": 40,
@@ -176,6 +178,18 @@ def budget_settings(runtime):
     return values
 
 
+def _token_consistency_errors(values, *, per_turn=False):
+    """Check token relationships without counting cached input a second time."""
+    errors = set()
+    prefix = "turn_" if per_turn else ""
+    if {"input_tokens", "cached_input_tokens"} <= values.keys() and values["cached_input_tokens"] > values["input_tokens"]:
+        errors.add(prefix + "cached_input_exceeds_input")
+    if ({"input_tokens", "output_tokens", "total_tokens"} <= values.keys()
+            and values["total_tokens"] != values["input_tokens"] + values["output_tokens"]):
+        errors.add(prefix + "total_tokens_mismatch")
+    return errors
+
+
 def normalize_usage(usage):
     """兼容旧预览记录；完整报告才允许实际结算，空补量不意味着零。"""
     if not isinstance(usage, dict):
@@ -184,20 +198,27 @@ def normalize_usage(usage):
     records = usage.get("token_usage", [])
     if not isinstance(records, list):
         raise ContractError("invalid administrator token usage")
+    errors = usage.get("consistency_errors", [])
+    if (not isinstance(errors, list) or len(errors) > len(_CONSISTENCY_ERRORS)
+            or any(not isinstance(value, str) or value not in _CONSISTENCY_ERRORS for value in errors)):
+        raise ContractError("invalid administrator usage consistency errors")
+    errors = set(errors)
+    record_totals, records_complete = {}, bool(records)
+    for record in records:
+        if not isinstance(record, dict):
+            records_complete = False
+            continue
+        numbers = {key: value for key, value in record.items() if key in TOKEN_FIELDS
+                   and type(value) is int and value >= 0}
+        records_complete &= {"input_tokens", "output_tokens"} <= numbers.keys()
+        records_complete &= not any(key in TOKEN_FIELDS and key not in numbers for key in record)
+        errors.update(_token_consistency_errors(numbers, per_turn=True))
+        for key, value in numbers.items():
+            record_totals[key] = record_totals.get(key, 0) + value
     totals = usage.get("token_totals")
     if totals is None:
-        totals = {}
-        complete = bool(records)
-        for record in records:
-            if not isinstance(record, dict):
-                complete = False
-                continue
-            numbers = {k: v for k, v in record.items() if k in TOKEN_FIELDS
-                       and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
-            complete &= {"input_tokens", "output_tokens"} <= numbers.keys()
-            for key, value in numbers.items():
-                totals[key] = totals.get(key, 0) + value
-        completeness = "complete" if complete and not usage.get("log_tail_truncated") else "partial" if totals else "unknown"
+        totals = record_totals
+        completeness = "complete" if records_complete and not usage.get("log_tail_truncated") else "partial" if totals else "unknown"
     else:
         if not isinstance(totals, dict) or set(totals) - TOKEN_FIELDS or any(
                 not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in totals.values()):
@@ -208,11 +229,21 @@ def normalize_usage(usage):
             raise ContractError("invalid administrator usage completeness")
         if completeness == "complete" and not {"input_tokens", "output_tokens"} <= totals.keys():
             completeness = "partial" if totals else "unknown"
-    if ("total_tokens" in totals and {"input_tokens", "output_tokens"} <= totals.keys()
-            and totals["total_tokens"] != totals["input_tokens"] + totals["output_tokens"]):
-        completeness = "partial"
+        # A stream's preview may intentionally contain only its final turns;
+        # its sum is not a substitute for the full cumulative report.
+        if records and not usage.get("preview_truncated"):
+            if any(key in totals and totals[key] != value for key, value in record_totals.items()):
+                errors.add("token_totals_records_mismatch")
+            if not records_complete:
+                completeness = "partial" if totals else "unknown"
+    errors.update(_token_consistency_errors(totals))
     if usage.get("unreported_turns", 0) or usage.get("call_outcome_unknown"):
         completeness = "partial" if totals else "unknown"
+    if errors or usage.get("conflict") is True:
+        completeness = "partial" if totals else "unknown"
+        result["conflict"] = True
+    if errors:
+        result["consistency_errors"] = sorted(errors)
     result.update(token_totals=totals, completeness=completeness)
     return result
 
@@ -276,8 +307,10 @@ def record_usage(runtime, call_id, usage):
     """追加幂等快照，保留冲突；日志快照是累计量，补量不重复相加。"""
     result = normalize_usage(usage)
     totals = result["token_totals"]
-    observation_id = digest({"totals": totals, "completeness": result["completeness"],
-                             "source": result.get("observation_id")})
+    identity = {"totals": totals, "completeness": result["completeness"], "source": result.get("observation_id")}
+    if result.get("consistency_errors"):
+        identity["consistency_errors"] = result["consistency_errors"]
+    observation_id = digest(identity)
     prior = runtime.db.execute("SELECT * FROM admin_call_budgets WHERE call_id=?", (call_id,)).fetchone()
     if prior is None:
         reserve_usage(runtime, call_id)
@@ -289,9 +322,11 @@ def record_usage(runtime, call_id, usage):
     has_numbers = bool(totals)
     # 没数字的观察保留在账中，但不能擦掉先前数字或把未知变为零。
     if not has_numbers and previous and previous["token_totals"]:
-        return previous
+        result = dict(previous, consistency_errors=sorted(set(previous.get("consistency_errors", []))
+                                                        | set(result.get("consistency_errors", []))))
+        totals = result["token_totals"]
     reported = max(totals.get("input_tokens", 0) + totals.get("output_tokens", 0), totals.get("total_tokens", 0))
-    conflict = bool(prior["conflict"])
+    conflict = bool(prior["conflict"]) or result.get("conflict") is True
     if previous and previous["token_totals"] and has_numbers:
         old = previous["token_totals"]
         if inserted:
@@ -302,10 +337,17 @@ def record_usage(runtime, call_id, usage):
             totals[key] = max(value, totals.get(key, 0))
         reported = max(reported, prior["reported_tokens"],
                        totals.get("input_tokens", 0) + totals.get("output_tokens", 0), totals.get("total_tokens", 0))
-    merged = normalize_usage(dict(result, token_totals=totals))
+    errors = set(result.get("consistency_errors", []))
+    if previous:
+        errors.update(previous.get("consistency_errors", []))
+        conflict |= previous.get("conflict") is True
+    merged = normalize_usage(dict(result, token_totals=totals, consistency_errors=sorted(errors)))
+    conflict |= merged.get("conflict") is True
     if {"input_tokens", "output_tokens", "total_tokens"} <= totals.keys():
         conflict |= totals["total_tokens"] != totals["input_tokens"] + totals["output_tokens"]
-    completeness = "partial" if conflict else merged["completeness"]
+    completeness = ("partial" if totals else "unknown") if conflict else merged["completeness"]
+    if merged.get("consistency_errors"):
+        result["consistency_errors"] = merged["consistency_errors"]
     result.update(token_totals=totals, completeness=completeness, conflict=conflict)
     runtime.db.execute("UPDATE admin_call_budgets SET reported_tokens=?,completeness=?,conflict=?,updated=? WHERE call_id=?",
                        (max(reported, prior["reported_tokens"]), completeness, int(conflict), time.time(), call_id))

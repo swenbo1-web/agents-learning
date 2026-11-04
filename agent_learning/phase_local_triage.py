@@ -13,7 +13,7 @@ import unicodedata
 _STAGE_SUMMARY = re.compile(r"\A阶段公开记录：(.*) \[[a-f0-9]{32}\] part [0-9]+\Z", re.S)
 
 
-def _comparison_delivery(problem, events, latest_delivery_id):
+def _comparison_delivery(problem, events, latest_delivery_id, *, max_chars=2048, parent_context=()):
     """Read a complete public delivery from the already bounded evidence page.
 
     Segments are a lossless projection of one public message, not new success
@@ -65,7 +65,7 @@ def _comparison_delivery(problem, events, latest_delivery_id):
     if (type(count) is not int or not 1 <= count <= 64 or len(segments) != count
             or type(chars) is not int or chars < 1):
         return None, "incomplete_delivery"
-    if chars > 2048:
+    if chars > max_chars:
         return None, "delivery_too_long"
     pieces = {}
     identities = ("project", "conversation", "task_id", "task_revision", "task_write_version",
@@ -95,7 +95,8 @@ def _comparison_delivery(problem, events, latest_delivery_id):
         return None, "incomplete_delivery"
     # If both forms are visible they must agree, unless the parent explicitly
     # records only a truncated projection. Never repair a conflicting source.
-    parents = [event for event in deliveries if event.get("type") == "Stop" and event.get("id") == parent]
+    parents = [event for event in [*deliveries, *parent_context]
+               if event.get("type") == "Stop" and event.get("id") == parent]
     if any(not complete(event) or event["payload"]["last_assistant_message"] != text for event in parents
            if observed_public("Stop", event.get("payload"), require_complete=True)):
         return None, "incomplete_delivery"
@@ -108,7 +109,7 @@ def _comparison_delivery(problem, events, latest_delivery_id):
     return text, "complete_public_segments"
 
 
-def comparison_queries(problem, task, events, *, latest_delivery_id=None):
+def comparison_queries(problem, task, events, *, latest_delivery_id=None, parent_context=()):
     """Keep generated labels out of recall, without inventing a business topic.
 
     A fallback is only a complete short public delivery plus the unchanged
@@ -124,7 +125,7 @@ def comparison_queries(problem, task, events, *, latest_delivery_id=None):
     primary = goal or match[1]
     if len(primary) > 1024:
         return {"primary": primary, "fallback": None, "fallback_reason": "goal_too_long"}
-    text, reason = _comparison_delivery(problem, events, latest_delivery_id)
+    text, reason = _comparison_delivery(problem, events, latest_delivery_id, parent_context=parent_context)
     if text is None:
         return {"primary": primary, "fallback": None, "fallback_reason": reason}
     if len(text) > 2048:

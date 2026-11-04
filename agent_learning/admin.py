@@ -173,6 +173,20 @@ def _fingerprint(packet):
         identity["phase_tool_context"] = packet["phase_tool_context"]
     if packet.get("phase_tool_context_omitted"):
         identity["phase_tool_context_omitted"] = True
+    if packet.get("public_delivery_coverage"):
+        coverage = clean(packet["public_delivery_coverage"])
+        if isinstance(coverage, dict) and isinstance(coverage.get("messages"), list):
+            coverage = dict(coverage)
+            slots, messages = {}, []
+            for message in coverage["messages"]:
+                if isinstance(message, dict):
+                    message = dict(message)
+                    parent = message.get("public_message_id")
+                    if isinstance(parent, str):
+                        message["public_message_id"] = slots.setdefault(parent, "message-" + str(len(slots)))
+                messages.append(message)
+            coverage["messages"] = messages
+        identity["public_delivery_coverage"] = coverage
     if packet.get("purpose") == "phase_review":
         identity["items"] = [_fingerprint(item) for item in packet.get("items", [])]
         identity["phase_ids"] = packet.get("phase_ids", [])
@@ -182,7 +196,9 @@ def _fingerprint(packet):
 def _usage(log_path, elapsed):
     """有界流式累计全部可读报告；预览裁剪不丢累计，缺失不写成零。"""
     from .admin_diagnostics import codex_failure, codex_text_failure, merge_codex_diagnostic
+    from .admin_usage import _token_consistency_errors
     records, totals, seen = [], {}, {}
+    consistency_errors = set()
     failure_diagnostic = None
     pending, failed = set(), set()
     anonymous_pending, anonymous_failed, started_turns = 0, 0, 0
@@ -272,6 +288,9 @@ def _usage(log_path, elapsed):
                 numeric = {key: value for key, value in usage.items()
                            if key in _TOKEN_FIELDS and isinstance(value, int)
                            and not isinstance(value, bool) and value >= 0}
+                # Inspect every turn before the bounded preview drops it. A
+                # later large input cannot repair an earlier invalid cache.
+                consistency_errors.update(_token_consistency_errors(numeric, per_turn=True))
                 incomplete |= not {"input_tokens", "output_tokens"} <= numeric.keys()
                 incomplete |= any(key in _TOKEN_FIELDS and key not in numeric for key in usage)
                 incomplete |= ("total_tokens" in numeric and {"input_tokens", "output_tokens"} <= numeric.keys()
@@ -301,7 +320,7 @@ def _usage(log_path, elapsed):
     except OSError:
         truncated = True
     unreported_turns = len(pending) + len(failed) + anonymous_pending + anonymous_failed
-    incomplete |= unreported_turns > 0 or protocol_conflicted
+    incomplete |= unreported_turns > 0 or protocol_conflicted or bool(consistency_errors)
     states = set(protocol_states.values()) | set(anonymous_states)
     protocol_status = ("conflicted" if protocol_conflicted else "unknown"
                        if truncated or protocol_incomplete or pending or anonymous_pending else
@@ -316,6 +335,7 @@ def _usage(log_path, elapsed):
             "log_tail_truncated": truncated,
             "observations": {"protocol_terminal_observed": bool(states),
                              "protocol_terminal_status": protocol_status},
+            **({"consistency_errors": sorted(consistency_errors)} if consistency_errors else {}),
             **({"provider_diagnostic": failure_diagnostic} if failure_diagnostic else {})}
 
 
