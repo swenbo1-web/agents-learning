@@ -632,7 +632,8 @@ class KnowledgeContextMixin:
                     work_used = 0
                     conclusion_used = False
                     from .work_notice_delivery import (FileNoticeGate, coalesce, file_notice,
-                                                       protocol_only_file_summary, visible_exposures)
+                                                       protocol_only_file_summary, visible_exposures,
+                                                       file_state_key, visible_file_keys)
                     notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
                     validated = self.work_validate_items(project, work_items, workspace=workspace,
                                                          conclusion_max_chars=240, applicability_query=effective,
@@ -712,14 +713,16 @@ class KnowledgeContextMixin:
                             # A version warning describes the changed paths,
                             # not whichever unchanged companion sorted first.
                             changed_paths = set(work_item.get("_changed_file_paths", work_item["file_state"]))
-                            files = [file for file in files if file.get("relative_path") in changed_paths]
+                            files = [file for file in files if file_state_key(file, work_item.get("file_state")) in changed_paths]
                         if files:
                             if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
                                 card["file_version_changed"] = True
                             card["files"] = [{"path": (file.get("relative_path", "") if file_notice(work_item)
                                                        else clip(file.get("relative_path", ""), 100)),
                                               "relation": file.get("relation", "observed_target"),
-                                              "version_changed": file.get("version_changed", "unknown")}
+                                              "version_changed": file.get("version_changed", "unknown"),
+                                              **({"checkout_key": file["checkout_key"]}
+                                                 if file_state_key(file, work_item.get("file_state")) != file.get("relative_path", "") else {})}
                                              for file in files[:2] if isinstance(file, dict)]
                         note = "[工作历史] " + encode(card)
                         prefix_cost = len(work_header) + 1 if not work_delivered else 0
@@ -778,7 +781,7 @@ class KnowledgeContextMixin:
                             continue
                         if notices.index_repeated(work_item, card):
                             continue
-                        visible_paths = {file["path"] for file in card.get("files", ())}
+                        visible_paths = visible_file_keys(card)
                         if file_notice(work_item) and not visible_paths.intersection(
                                 work_item.get("_changed_file_paths", work_item["file_state"])):
                             continue  # An omitted/clipped path cannot acknowledge a file fact.

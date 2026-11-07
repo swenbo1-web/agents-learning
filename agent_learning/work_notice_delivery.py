@@ -10,6 +10,24 @@ import time
 DEFER_SECONDS = 30
 
 
+def file_state_key(file, state):
+    """Primary legacy keys stay relative; linked facts retain checkout identity."""
+    path = file.get("relative_path", file.get("path", ""))
+    key = file.get("checkout_key")
+    qualified = key + ":" + path if isinstance(key, str) and isinstance(path, str) else None
+    return qualified if qualified is not None and qualified in (state or {}) else path
+
+
+def visible_file_keys(card):
+    """Only exact, fully displayed paths acknowledge their checkout's fact."""
+    result = set()
+    for file in (card or {}).get("files", ()):
+        if isinstance(file, dict) and isinstance(file.get("path"), str):
+            key = file.get("checkout_key")
+            result.add(key + ":" + file["path"] if isinstance(key, str) else file["path"])
+    return result
+
+
 def patch_receipt_text(text):
     """Recognize a known acknowledgement in visible text, not source coverage.
 
@@ -65,7 +83,7 @@ def file_notice(item):
             and not item.get("_unseen_file_paths")
             and not any(file.get("version_changed") is False for file in item.get("files", ())
                         if isinstance(file, dict) and ("_changed_file_paths" not in item
-                            or file.get("relative_path") in item["_changed_file_paths"]))
+                            or file_state_key(file, item.get("file_state")) in item["_changed_file_paths"]))
             and isinstance(item.get("file_state"), dict) and bool(item["file_state"]))
 
 
@@ -233,7 +251,7 @@ class FileNoticeGate:
         for member in item.get("_notice_members", [item]):
             if not file_notice(member) or member.get("file_projection_incomplete"):
                 return {}
-            files = {file.get("relative_path"): file for file in member.get("files", ())
+            files = {file_state_key(file, member["file_state"]): file for file in member.get("files", ())
                      if isinstance(file, dict)}
             for path in member.get("_changed_file_paths", member["file_state"]):
                 version = member["file_state"].get(path)
@@ -252,7 +270,7 @@ class FileNoticeGate:
         if self.delivery != "persistent":
             return
         keys = self._keys(item)
-        visible = {file.get("path") for file in (card or {}).get("files", ()) if isinstance(file, dict)}
+        visible = visible_file_keys(card)
         if card is not None:
             from .runtime import digest
             keys = [key for key in keys if key in {digest(path) for path in visible}]

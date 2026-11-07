@@ -28,27 +28,70 @@ def checkout_key(workspace):
     return hashlib.sha256(root.encode("utf-8")).hexdigest()
 
 
-def normalize_file_target(value, workspace, *, observe_version=True):
-    """仅接收当前 checkout 内目标；链接不能越过根目录。mtime 不是内容摘要。"""
+def _root_records(workspace, roots=None):
+    if roots is not None:
+        return roots
+    root = checkout_root(workspace)
+    return [{"path": str(root), "checkout_key": checkout_key(root), "primary": True}]
+
+
+def _linked_path(path, root):
+    """Reject links and Windows reparse points before following the target."""
+    current = path
+    while current != root:
+        if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+            return True
+        try:
+            if getattr(current.lstat(), "st_file_attributes", 0) & 0x400:
+                return True
+        except FileNotFoundError:
+            pass
+        if current == current.parent:
+            return True
+        current = current.parent
+    return False
+
+
+def _normalize_file_target(value, workspace, *, observe_version=True, roots=None):
+    """Return a relation and controlled rejection reason; never read file content."""
     if (not isinstance(value, str) or not value.strip() or len(value) > 2000
-            or "\0" in value or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value)):
-        return None
+            or any(ord(char) < 32 for char in value) or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value)):
+        return None, "invalid_target"
     try:
         cwd = Path(workspace).resolve()
-        root = checkout_root(cwd)
         candidate = Path(value.strip())
         if not candidate.is_absolute():
             candidate = cwd / candidate
+        # Lexical containment first: a link from one authorized root into another
+        # still cannot cross their checkout identities.
+        candidate = Path(os.path.abspath(candidate))
+        if os.name == "nt" and ":" in str(candidate)[len(candidate.drive):]:
+            return None, "invalid_target"
+        selected = None
+        for record in _root_records(workspace, roots):
+            root = Path(record["path"])
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            selected = record
+            break
+        if selected is None:
+            return None, "outside_workspace"
+        if relative == Path("."):
+            return None, "invalid_target"
+        from .history_sources import _sensitive
+        if (_sensitive(candidate) or any(part.casefold() in {".git", ".ssh", ".aws", ".gnupg",
+                                       ".gcloud", "secrets", "credentials"} for part in relative.parts)):
+            return None, "sensitive_target"
+        if _linked_path(candidate, root):
+            return None, "symlink_target"
         resolved = candidate.resolve()
         relative = resolved.relative_to(root)
         if relative == Path("."):
-            return None
-        from .history_sources import _sensitive
-        if (_sensitive(resolved) or any(part.casefold() in {".git", ".ssh", ".aws", ".gnupg",
-                                       ".gcloud", "secrets", "credentials"} for part in relative.parts)):
-            return None
+            return None, "invalid_target"
         path = relative.as_posix()
-        result = {"checkout_key": checkout_key(root), "relative_path": path,
+        result = {"checkout_key": selected["checkout_key"], "relative_path": path,
                   "path_key": os.path.normcase(path), "version": {"status": "unknown"}}
         if observe_version:
             try:
@@ -57,9 +100,14 @@ def normalize_file_target(value, workspace, *, observe_version=True):
                                      "mtime_ns": stat.st_mtime_ns, "content_hash": None}
             except OSError:
                 result["version"] = {"status": "unavailable", "content_hash": None}
-        return result
+        return result, None
     except (OSError, ValueError, RuntimeError):
-        return None
+        return None, "invalid_target"
+
+
+def normalize_file_target(value, workspace, *, observe_version=True, roots=None):
+    """Only the primary checkout and explicitly approved roots are eligible."""
+    return _normalize_file_target(value, workspace, observe_version=observe_version, roots=roots)[0]
 
 
 def _single_read_command(command):
@@ -79,26 +127,49 @@ def _single_read_command(command):
     return None
 
 
-def file_links_from_payload(tool_name, payload, workspace, *, observe_version=True):
+def file_links_from_payload(tool_name, payload, workspace, *, observe_version=True, roots=None, diagnostics=None):
     """保守解析支持的结构化目标及 apply_patch 标头，返回最多 16 个关系。"""
     name = str(tool_name or "").lower()
     args = payload if isinstance(payload, dict) else {}
+    reasons = {}
+    def reject(reason, count=1):
+        reasons[reason] = reasons.get(reason, 0) + count
+    def finish(output, total):
+        if diagnostics is not None:
+            diagnostics.update(target_count=total, accepted_count=len(output),
+                               filtered_count=max(0, total - len(output)), reasons=reasons)
+        return output
+    roots = _root_records(workspace, roots)
     shell = any(word in name for word in ("bash", "shell", "pwsh", "powershell", "exec_command", "run_command", "terminal"))
     shell_base = None
     if shell:
         cwd = args.get("cwd", args.get("workdir", args.get("Cwd")))
         if cwd is not None:
             if not isinstance(cwd, str) or not cwd.strip() or "\0" in cwd:
-                return []
+                reject("unsupported_arguments")
+                return finish([], 0)
             try:
                 origin = Path(workspace).resolve()
                 shell_base = Path(cwd)
                 if not shell_base.is_absolute():
                     shell_base = origin / shell_base
+                shell_base = Path(os.path.abspath(shell_base))
+                base_root = next((Path(record["path"]) for record in roots
+                                  if shell_base == Path(record["path"]) or Path(record["path"]) in shell_base.parents), None)
+                if base_root is None:
+                    reject("outside_workspace")
+                    return finish([], 0)
+                if _linked_path(shell_base, base_root):
+                    reject("symlink_target")
+                    return finish([], 0)
                 shell_base = shell_base.resolve()
-                shell_base.relative_to(checkout_root(origin))
+                if not any(shell_base == Path(record["path"]) or Path(record["path"]) in shell_base.parents
+                           for record in roots):
+                    reject("outside_workspace")
+                    return finish([], 0)
             except (OSError, ValueError, RuntimeError):
-                return []
+                reject("unsupported_arguments")
+                return finish([], 0)
     write = any(word in name for word in ("write", "edit", "patch", "replace", "create_file"))
     read = any(word in name for word in ("read", "view_file", "get_content", "cat"))
     relation = "write_target" if write else "read_target" if read else "observed_target"
@@ -119,22 +190,39 @@ def file_links_from_payload(tool_name, payload, workspace, *, observe_version=Tr
         path = _single_read_command(command)
         if path:
             targets.append((path, "read_target"))
+        elif command is not None:
+            reject("unsupported_arguments")
+    if not targets:
+        if not reasons:
+            reject("no_structured_target")
+        return finish([], 0)
     output, seen = [], set()
-    for value, target_relation in targets[:32]:
+    for value, target_relation in targets[:256]:
         if shell_base is not None and not Path(value).is_absolute():
             value = str(shell_base / value)
-        item = normalize_file_target(value, workspace, observe_version=observe_version)
-        if item and (item["path_key"], target_relation) not in seen:
+        # Keep classifying every bounded target after the relation quota fills,
+        # so a 21-header patch outside the workspace reports 21 rejections.
+        item, reason = _normalize_file_target(value, workspace, observe_version=observe_version and len(output) < 16,
+                                               roots=roots)
+        identity = (item["checkout_key"], item["path_key"], target_relation) if item else None
+        if item and identity not in seen and len(output) < 16:
             item["relation"] = target_relation
             output.append(item)
-            seen.add((item["path_key"], target_relation))
-        if len(output) == 16:
-            break
-    return output
+            seen.add(identity)
+        else:
+            reject(reason or ("duplicate_target" if identity in seen else "target_limit"))
+    if len(targets) > 256:
+        reject("target_limit", len(targets) - 256)
+    return finish(output, len(targets))
 
 
-def current_file_version(relative_path, workspace):
-    item = normalize_file_target(relative_path, checkout_root(workspace))
+def current_file_version(relative_path, workspace, *, file_checkout=None, roots=None):
+    records = _root_records(workspace, roots)
+    key = file_checkout or checkout_key(workspace)
+    record = next((record for record in records if record["checkout_key"] == key), None)
+    if record is None:
+        return {"status": "outside_workspace", "content_hash": None}
+    item = normalize_file_target(str(Path(record["path"]) / relative_path), record["path"], roots=[record])
     return item["version"] if item else {"status": "outside_workspace", "content_hash": None}
 
 
@@ -148,10 +236,12 @@ def knowledge_file_observation(runtime, project, item, workspace):
     if not refs:
         return None
     marks = ",".join("?" for _ in refs)
+    from .workspace_links import file_workspace_roots
+    roots = file_workspace_roots(runtime, project, workspace)
     rows = runtime.db.execute(
-        f"SELECT relative_path,version FROM work_file_links WHERE project=? AND checkout_key=? "
+        f"SELECT checkout_key,relative_path,version FROM work_file_links WHERE project=? "
         f"AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
-        (project, checkout_key(workspace), *refs)).fetchall()
+        (project, *refs)).fetchall()
     snapshots, changed = [], False
     for row in rows:
         try:
@@ -160,8 +250,8 @@ def knowledge_file_observation(runtime, project, item, workspace):
             continue
         if not isinstance(recorded, dict) or recorded.get("status") != "stat_observed":
             continue
-        current = current_file_version(row["relative_path"], workspace)
-        snapshots.append([row["relative_path"], recorded, current])
+        current = current_file_version(row["relative_path"], workspace, file_checkout=row["checkout_key"], roots=roots)
+        snapshots.append([row["checkout_key"], row["relative_path"], recorded, current])
         if (current.get("status") != "stat_observed" or current.get("size") != recorded.get("size")
                 or current.get("mtime_ns") != recorded.get("mtime_ns")):
             changed = True

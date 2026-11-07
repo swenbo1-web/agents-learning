@@ -135,6 +135,14 @@ def control_detail(runtime, project, section):
     from .runtime import ContractError
     if section == "queue":
         data = _control_queue(runtime, project, include_history=False)
+        from .workspace_links import initialize_workspace_links, workspace_links_status
+        # The shared browser is bound to a project, not a verified checkout.
+        # Registered aliases must never become file-access authorization.
+        if not hasattr(runtime, "_workspace_links_loaded"):
+            path = Path(os.environ.get("ALP_CONFIG", runtime.home / "config.json"))
+            initialize_workspace_links(runtime, path, runtime.config, from_disk=True)
+            runtime._workspace_links_snapshot_verified = False
+        data["workspace_links"] = workspace_links_status(runtime, project, None)
         if phase_scope(runtime, project) is not None:
             from .phase_review import protected_backlog, delivery_registration
             from .phase_boundary_diagnostics import delivery_boundary_diagnostics
@@ -143,7 +151,9 @@ def control_detail(runtime, project, section):
                                     "delivery_boundary_diagnostics": delivery_boundary_diagnostics(runtime, project)}
     elif section == "recovery":
         from .admin_recovery import recovery_status
+        from .work_file_diagnostics import summary as file_capture_summary
         data = recovery_status(runtime, project, include_history=False)
+        data["file_capture_diagnostics"] = file_capture_summary(runtime, project, host=runtime.host, limit=40)
     elif section == "activity":
         from .admin_review_flow import review_activity
         data = review_activity(runtime, project)

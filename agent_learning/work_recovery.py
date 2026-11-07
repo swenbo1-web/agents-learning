@@ -67,18 +67,24 @@ def original_workspace(runtime, project, event_id):
 def projection_links(event, key, projection):
     """Accept only internal bounded observations bound to the original evidence."""
     from .runtime import ContractError
-    if (not isinstance(projection, dict) or projection.get("version") != 1
+    if (not isinstance(projection, dict) or projection.get("version") not in {1, 2}
             or projection.get("capture_digest") != _capture_digest(event)
             or projection.get("checkout_key") != key or type(projection.get("complete")) is not bool
             or not isinstance(projection.get("links"), list) or len(projection["links"]) > 16):
         raise ContractError("work projection identity changed")
+    keys = projection.get("checkout_keys", [key]) if projection["version"] == 2 else [key]
+    if (not isinstance(keys, list) or not 1 <= len(keys) <= 9 or key not in keys
+            or any(not isinstance(item, str) or len(item) != 64
+                   or any(char not in "0123456789abcdef" for char in item) for item in keys)
+            or len(set(keys)) != len(keys)):
+        raise ContractError("work projection roots changed")
     for link in projection["links"]:
         if not isinstance(link, dict):
             raise ContractError("invalid work projection link")
         path = link.get("relative_path")
         if (not isinstance(path, str) or not path or len(path) > 2000 or "\\" in path or "\0" in path
                 or Path(path).is_absolute() or any(part in {"", ".", ".."} for part in path.split("/"))
-                or link.get("path_key") != os.path.normcase(path) or link.get("checkout_key") != key
+                or link.get("path_key") != os.path.normcase(path) or link.get("checkout_key") not in keys
                 or link.get("relation") not in {"read_target", "write_target", "observed_target"}
                 or not isinstance(link.get("version"), dict)):
             raise ContractError("invalid work projection link")
@@ -96,9 +102,29 @@ def legacy_projection(runtime, project, event, workspace, *, raw=None, infer_tar
         link["version"] = json.loads(link["version"])
     if not links and infer_targets:
         links = runtime._work_file_projection(project, event, workspace, raw=raw, observe_version=False)
-    return {"version": 1, "checkout_key": key, "capture_digest": _capture_digest(event),
+        # Without a frozen original multi-root receipt, newly added bindings
+        # cannot establish old file facts. Only the original checkout is known.
+        links = [link for link in links if link["checkout_key"] == key]
+    return {"version": 2, "checkout_key": key, "checkout_keys": sorted({key, *(link["checkout_key"] for link in links)}),
+            "capture_digest": _capture_digest(event),
             "links": links,
             "complete": event["type"] in {"Stop", "UserPromptSubmit", "PublicMessageSegment"}}
+
+
+def recorded_projection(runtime, project, event, workspace):
+    """Replay only original observations, never reinterpret an old callback."""
+    from .runtime import ContractError
+    job = runtime.db.execute("SELECT capture,capture_digest,checkout_key FROM work_capture_pending "
+                             "WHERE project=? AND event_id=?", (project, event["id"])).fetchone()
+    key = checkout_key(workspace)
+    if job:
+        if job["capture_digest"] != _capture_digest(event) or job["checkout_key"] != key:
+            raise ContractError("work recovery source changed")
+        projection = json.loads(job["capture"]).get("file_projection")
+        if projection is not None:
+            projection_links(event, key, projection)
+            return projection
+    return legacy_projection(runtime, project, event, workspace, infer_targets=False)
 
 
 def register(runtime, project, event_id, workspace, raw=None, *, pending=True, projection=None):
@@ -116,10 +142,14 @@ def register(runtime, project, event_id, workspace, raw=None, *, pending=True, p
                                    (project, event_id)).fetchone()
     if previous and previous[0] != key:
         raise ContractError("work capture checkout changed")
+    if projection is None and previous:
+        projection = recorded_projection(runtime, project, event, workspace)
     runtime.db.execute("INSERT OR IGNORE INTO work_event_checkouts VALUES(?,?,?)", (project, event_id, key))
     if projection is None:
-        projection = {"version": 1, "checkout_key": key, "capture_digest": _capture_digest(event), "complete": True,
-                      "links": runtime._work_file_projection(project, event, workspace, raw=raw)}
+        links = runtime._work_file_projection(project, event, workspace, raw=raw)
+        projection = {"version": 2, "checkout_key": key,
+                      "checkout_keys": sorted({key, *(link["checkout_key"] for link in links)}),
+                      "capture_digest": _capture_digest(event), "complete": True, "links": links}
     projection_links(event, key, projection)
     if not pending:
         return projection

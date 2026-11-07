@@ -48,6 +48,7 @@ METADATA_KEYS = {"tool", "tool_version", "error_code", "environment", "verificat
 DEFAULTS = {
     "injection_max_chars": 2400, "event_max_chars": 6000,
     "enforce_task_policy": False, "capture_deliveries": True, "allowed_tools": [], "project_aliases": {},
+    "linked_workspaces": {},
     "admin": {**ROUTING_DEFAULTS, "enabled": False, "command": ["codex"], "max_calls_per_day": 100,
               "max_input_chars": 16000, "timeout_seconds": 120, "auto_publish": False,
               "max_cases_per_batch": 40, "max_calls_per_batch": 5, "max_batch_seconds": 180,
@@ -272,6 +273,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         if not isinstance(self.config["project_aliases"], dict) or not all(isinstance(k, str) and isinstance(v, str)
                                                                         for k, v in self.config["project_aliases"].items()):
             raise ContractError("project_aliases must map workspace paths to project IDs")
+        from .workspace_links import initialize_workspace_links
+        initialize_workspace_links(self, config_path, supplied, from_disk=config is None)
         self.db = sqlite3.connect(self.home / "runtime.sqlite3", timeout=1.5, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         try:
@@ -1348,6 +1351,18 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         """派生功能故障不回滚已记录的任务、事件或执行决定；可选摘要排队与普通工作记录采集彼此隔离。"""
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
+        self.db.execute("SAVEPOINT work_file_diagnostics")
+        try:
+            from .work_file_diagnostics import observe_event
+            original = self.db.execute("SELECT * FROM events WHERE project=? AND id=?",
+                                       (project, event_id)).fetchone()
+            if original:
+                observe_event(self, project, original, workspace, raw=raw)
+        except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+            self.db.execute("ROLLBACK TO work_file_diagnostics")
+            self._metric(project, "work_file_diagnostics_failed")
+        finally:
+            self.db.execute("RELEASE work_file_diagnostics")
         if summarize and conversation:
             # Keep the wake hint in the same transaction as the original Stop,
             # even if optional capture/prepare or the later launcher fails.

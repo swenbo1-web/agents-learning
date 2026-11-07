@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+from pathlib import Path
 import re
+import sqlite3
 import time
 from .automatic_relevance import has_constraint as _constraint_request
 
 from .work_files import checkout_key, checkout_root, file_links_from_payload, normalize_file_target, current_file_version
+from .workspace_links import file_workspace_roots
 
 
 WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context_chars": 600,
@@ -17,17 +20,27 @@ WORK_INDEX_VERSION = 3
 WORK_READ_FILE_CHECK_LIMIT = 64
 
 
+def _file_focus_key(item):
+    return item["checkout_key"] + ":" + item["relative_path"]
+
+
 def _body_projection(row):
     """Reapply current masking to legacy text without changing source evidence."""
     from .runtime import clean
     return clean(json.loads(row["body"]))
 
 
-def _read_file_version(relative_path, workspace):
+def _read_file_version(relative_path, workspace, *, file_checkout=None, roots=None):
     """Bounded metadata observation; known absence differs from unreadable state."""
     try:
-        root = checkout_root(workspace)
-        target = normalize_file_target(relative_path, root, observe_version=False)
+        if roots is None:
+            root = checkout_root(workspace)
+            roots = [{"path": str(root), "checkout_key": checkout_key(root), "primary": True}]
+        record = next((record for record in roots if record["checkout_key"] == (file_checkout or checkout_key(workspace))), None)
+        if record is None:
+            return {"status": "unavailable"}
+        root = Path(record["path"])
+        target = normalize_file_target(str(root / relative_path), root, observe_version=False, roots=[record])
         if target is None:
             return {"status": "unavailable"}
         stat = (root / target["relative_path"]).stat()
@@ -55,17 +68,19 @@ def _read_file_check(runtime, project, memory_id, workspace):
     if workspace is None:
         return {"complete": False, "reason": "workspace_unavailable"}
     try:
-        current_checkout = checkout_key(workspace)
+        roots = file_workspace_roots(runtime, project, workspace)
+        allowed_keys = {root["checkout_key"] for root in roots}
     except (OSError, ValueError, RuntimeError):
         return {"complete": False, "reason": "workspace_unavailable"}
     versions, observations = {}, []
     for row in rows:
-        if row["checkout_key"] != current_checkout:
+        if row["checkout_key"] not in allowed_keys:
             return {"complete": False, "reason": "checkout_unavailable"}
         path = row["relative_path"]
-        if path not in versions:
-            versions[path] = _read_file_version(path, workspace)
-        current = versions[path]
+        identity = (row["checkout_key"], path)
+        if identity not in versions:
+            versions[identity] = _read_file_version(path, workspace, file_checkout=row["checkout_key"], roots=roots)
+        current = versions[identity]
         if current.get("status") not in {"stat_observed", "missing"}:
             return {"complete": False, "reason": "file_state_unavailable"}
         observations.append([*tuple(row), current])
@@ -172,6 +187,8 @@ def install_work_memory(runtime):
                            (WORK_INDEX_VERSION,))
     from .work_recovery import install
     install(runtime)
+    from .work_file_diagnostics import install as install_diagnostics
+    install_diagnostics(runtime)
 
 
 def _config(runtime):
@@ -528,21 +545,41 @@ class WorkMemoryMixin:
 
     def _work_file_projection(self, project, event, workspace, *, raw=None, observe_version=True):
         """Bounded file observations made once at the original callback boundary."""
-        from .runtime import clean
+        from .runtime import clean, ContractError
         payload = json.loads(event["payload"])
         raw = clean(raw) if isinstance(raw, dict) else payload
         name, args = _tool(raw)
         stored_name, _ = _tool(payload)
         if _learning_tool(name or stored_name):
             return []
-        links = file_links_from_payload(name, args, workspace, observe_version=observe_version)
-        if not links and event.get("operation"):
+        roots = file_workspace_roots(self, project, workspace)
+        from .work_file_diagnostics import observe_event
+        if observe_version:
+            self.db.execute("SAVEPOINT work_projection_diagnostics")
+            try:
+                observe_event(self, project, event, workspace, raw=raw)
+            except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+                self.db.execute("ROLLBACK TO work_projection_diagnostics")
+            finally:
+                self.db.execute("RELEASE work_projection_diagnostics")
+        links = file_links_from_payload(name, args, workspace, observe_version=observe_version, roots=roots)
+        if not links and not args and event["type"] == "PostToolUse" and event.get("operation"):
             links = [dict(row) for row in self.db.execute(
-                "SELECT relative_path,path_key,checkout_key,relation,version FROM work_file_links l "
+                "SELECT relative_path,path_key,checkout_key,relation,version,e.payload AS source_payload FROM work_file_links l "
                 "JOIN events e ON e.id=l.event_id AND e.project=l.project WHERE l.project=? AND e.operation=? "
-                "AND l.checkout_key=? ORDER BY e.created LIMIT 16", (project, event["operation"], checkout_key(workspace)))]
+                "AND e.type='PreToolUse' AND e.rowid<(SELECT rowid FROM events WHERE project=? AND id=?) "
+                "AND e.conversation=? AND e.agent IS ? AND e.task_id IS ? AND e.task_revision IS ? "
+                "AND e.task_write_version IS ? AND e.execution_epoch IS ? AND e.assignment_id IS ? "
+                "AND json_extract(e.payload,'$.host_epoch') IS ? "
+                "ORDER BY e.rowid DESC LIMIT 16", (project, event["operation"], project, event["id"], event["conversation"],
+                event.get("agent"), event.get("task_id"), event.get("task_revision"), event.get("task_write_version"),
+                event.get("execution_epoch"), event.get("assignment_id"), payload.get("host_epoch")))]
+            links = [link for link in links if link["checkout_key"] in {root["checkout_key"] for root in roots}
+                     and _tool(json.loads(link["source_payload"]))[0] == (name or stored_name)]
             for link in links:
-                link["version"] = (current_file_version(link["relative_path"], workspace) if observe_version
+                link.pop("source_payload", None)
+                link["version"] = (current_file_version(link["relative_path"], workspace,
+                                   file_checkout=link["checkout_key"], roots=roots) if observe_version
                                    else {"status": "not_observed", "content_hash": None})
         return links
 
@@ -569,6 +606,9 @@ class WorkMemoryMixin:
         stored_name, stored_args = _tool(payload)
         if _learning_tool(name or stored_name):
             return None
+        if _file_projection is None and recorded_checkout:
+            from .work_recovery import recorded_projection
+            _file_projection = recorded_projection(self, project, event, workspace)
         if _file_projection is None:
             links = self._work_file_projection(project, event, workspace, raw=raw)
             file_projection_complete = True
@@ -787,14 +827,19 @@ class WorkMemoryMixin:
                     files.append(item)
         focus = {str(path) for path in (file_paths or [])[:3]}
         if focus:
-            files.sort(key=lambda item: (item["relative_path"] not in focus, item["checkout_key"], item["relative_path"], item["relation"]))
+            files.sort(key=lambda item: (item["relative_path"] not in focus and _file_focus_key(item) not in focus,
+                                         item["checkout_key"], item["relative_path"], item["relation"]))
         visible_files = files[:3]
         states = {}
+        roots = file_workspace_roots(self, project, workspace) if workspace else []
         for item in visible_files:
-            if workspace and checkout_key(workspace) == item["checkout_key"]:
-                item["current_version"] = current_file_version(item["relative_path"], workspace)
+            if workspace:
+                item["current_version"] = current_file_version(item["relative_path"], workspace,
+                    file_checkout=item["checkout_key"], roots=roots)
                 item["version_changed"] = item["version"] != item["current_version"]
-                states[item["relative_path"]] = digest(item["current_version"])
+                state_key = (item["relative_path"] if item["checkout_key"] == checkout_key(workspace)
+                             else item["checkout_key"] + ":" + item["relative_path"])
+                states[state_key] = digest(item["current_version"])
         file_state = states or None
         from .candidate_references import lineage_risk
         reference_risks = [risk for source in sources
@@ -860,7 +905,8 @@ class WorkMemoryMixin:
         if file_path is not None:
             if workspace is None:
                 raise ContractError("file search requires a workspace")
-            target = normalize_file_target(file_path, workspace, observe_version=False)
+            target = normalize_file_target(file_path, workspace, observe_version=False,
+                                           roots=file_workspace_roots(self, project, workspace))
             if target is None:
                 raise ContractError("file search target must be inside workspace")
             clauses.append("EXISTS(SELECT 1 FROM work_memory_sources s JOIN work_file_links l ON l.project=s.project AND l.event_id=s.event_id WHERE s.project=m.project AND s.memory_id=m.id AND l.checkout_key=? AND l.path_key=?)")
@@ -991,11 +1037,12 @@ class WorkMemoryMixin:
                 return dict(output, status="disabled")
             rows = self._work_search_rows(project, query, file_path=file_path, workspace=workspace, limit=limit)
             for row in rows:
-                target = normalize_file_target(file_path, workspace, observe_version=False) if file_path and workspace else None
+                target = normalize_file_target(file_path, workspace, observe_version=False,
+                    roots=file_workspace_roots(self, project, workspace)) if file_path and workspace else None
                 card = self._work_item(project, row, workspace=workspace,
-                                       file_paths=[target["relative_path"]] if target else None)
+                                       file_paths=[_file_focus_key(target)] if target else None)
                 # 默认检索只给索引；精确 stat、长摘要与完整来源在 read 中展开。
-                card["files"] = [{key: item[key] for key in ("relative_path", "relation", "version_changed") if key in item}
+                card["files"] = [{key: item[key] for key in ("relative_path", "checkout_key", "relation", "version_changed") if key in item}
                                  for item in card["files"]]
                 card["summary"] = card["summary"][:120]
                 card["title"] = card["title"][:100]
@@ -1170,20 +1217,24 @@ class WorkMemoryMixin:
             return []
         with _snapshot(self):
             name, args = _tool(raw or {})
-            links = (file_links_from_payload(name, args, workspace, observe_version=False)
+            roots = file_workspace_roots(self, project, workspace) if workspace else []
+            root_paths = {root["checkout_key"]: root["path"] for root in roots}
+            root_keys = list(root_paths)
+            root_marks = ",".join("?" for _ in root_keys)
+            links = (file_links_from_payload(name, args, workspace, observe_version=False, roots=roots)
                      if workspace and not handoff_only else [])
             result = self.work_exposure_updates(project, conversation, agent_id, limit=limit, workspace=workspace,
                                                 _notice_gate=_notice_gate)
             if not handoff_only and not links and not query.strip() and workspace and not file_only:
                 # AG 下一次 invocation 无工具参数，仅使用本会话/agent近期明确目标。
-                filters, parameters = "", [project, conversation, agent_id, checkout_key(workspace)]
+                filters, parameters = "", [project, conversation, agent_id, *root_keys]
                 if isinstance(task_state, dict) and task_state.get("id"):
                     filters += " AND e.task_id=? AND e.task_revision=?"
                     parameters.extend((task_state["id"], task_state.get("revision")))
                 if isinstance(task_state, dict) and task_state.get("assignment_id"):
                     filters += " AND e.assignment_id=?"
                     parameters.append(task_state["assignment_id"])
-                recent = self.db.execute("SELECT l.* FROM work_file_links l JOIN events e ON e.project=l.project AND e.id=l.event_id WHERE l.project=? AND e.conversation=? AND e.agent IS ? AND l.checkout_key=?" + filters + " ORDER BY e.created DESC LIMIT 3",
+                recent = self.db.execute("SELECT l.* FROM work_file_links l JOIN events e ON e.project=l.project AND e.id=l.event_id WHERE l.project=? AND e.conversation=? AND e.agent IS ? AND l.checkout_key IN (" + root_marks + ")" + filters + " ORDER BY e.created DESC LIMIT 3",
                                          parameters).fetchall()
                 links = [dict(row) for row in recent]
                 if self.host in {"antigravity", "dsh"} and not agent_id:
@@ -1195,10 +1246,10 @@ class WorkMemoryMixin:
                             "SELECT l.* FROM work_file_hints h JOIN work_file_links l ON l.project=h.project "
                             "AND l.event_id=h.event_id AND l.checkout_key=h.checkout_key AND l.path_key=h.path_key "
                             "JOIN events e ON e.project=h.project AND e.id=h.event_id "
-                            "WHERE h.project=? AND e.conversation=? AND e.agent IS NULL AND h.checkout_key=? "
+                            "WHERE h.project=? AND e.conversation=? AND e.agent IS NULL AND h.checkout_key IN (" + root_marks + ") "
                             "AND h.context_task_key=? AND h.session_epoch=? AND h.generation=? "
                             "ORDER BY h.created DESC LIMIT 3",
-                            (project, conversation, checkout_key(workspace), _task_key(task_state),
+                            (project, conversation, *root_keys, _task_key(task_state),
                              self.session_epoch(), trajectory["generation"])).fetchall()
                         links = [dict(row, task_affinity="context_only") for row in hints] + links
             if file_only and not links:
@@ -1207,13 +1258,13 @@ class WorkMemoryMixin:
             if _notice_gate is not None and _notice_gate.delivery == "persistent":
                 def row_gate(row):
                     item = self._work_item(project, row, workspace=workspace,
-                        file_paths=[link["relative_path"] for link in links[:3]])
+                        file_paths=[_file_focus_key(link) for link in links[:3]])
                     _notice_gate.annotate(item)
                     return not item.get("published_knowledge_risk") and not _notice_gate.deferred(item)
             rows = []
             for link in links[:3]:
                 rows.extend(self._work_search_rows(project, query[:8000],
-                    file_path=str(checkout_root(workspace) / link["relative_path"]), workspace=workspace, limit=limit,
+                    file_path=str(Path(root_paths[link["checkout_key"]]) / link["relative_path"]), workspace=workspace, limit=limit,
                     exclude_event_id=exclude_event_id, automatic=True, _row_gate=row_gate))
             if not links and not handoff_only and (query.strip() or allow_unfocused_history):
                 # 缺少当前请求时不猜历史焦点。空查询只恢复本会话；跨会话
@@ -1250,7 +1301,7 @@ class WorkMemoryMixin:
                         rows = [row] + others
                     break
             rows, prepared = self._work_prefer_complete_ag_delivery(project, rows, workspace=workspace,
-                file_paths=[link["relative_path"] for link in links[:3]], query=query,
+                file_paths=[_file_focus_key(link) for link in links[:3]], query=query,
                 handoff_scopes=handoff_scopes)
             seen = {item["memory_id"] for item in result}
             public_messages = set()
@@ -1266,7 +1317,7 @@ class WorkMemoryMixin:
                 item = prepared.get(row["id"])
                 if item is None:
                     item = self._work_item(project, row, workspace=workspace,
-                        file_paths=[link["relative_path"] for link in links[:3]], preview_query=preview_query)
+                        file_paths=[_file_focus_key(link) for link in links[:3]], preview_query=preview_query)
                 if item.get("file_projection_incomplete"):
                     continue
                 if item.get("published_knowledge_risk"):

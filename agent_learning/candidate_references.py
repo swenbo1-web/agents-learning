@@ -601,15 +601,17 @@ def _environment_state(runtime, project, item, workspace):
         return None
     from .knowledge_applicability import project_environment, _manifest_applicability
     from .work_files import checkout_key, current_file_version
+    from .workspace_links import file_workspace_roots
     environment = project_environment(workspace)
+    roots = file_workspace_roots(runtime, project, workspace)
     state = {"checkout": checkout_key(workspace), "environment": environment,
              "applicability": _manifest_applicability(item, environment), "files": []}
     refs = list(dict.fromkeys(item.get("source_event_refs", ())))[:20]
     if refs:
         marks = ",".join("?" for _ in refs)
-        rows = runtime.db.execute(f"SELECT relative_path,version FROM work_file_links WHERE project=? "
-            f"AND checkout_key=? AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
-            (project, state["checkout"], *refs)).fetchall()
+        rows = runtime.db.execute(f"SELECT checkout_key,relative_path,version FROM work_file_links WHERE project=? "
+            f"AND event_id IN ({marks}) ORDER BY event_id,checkout_key,relative_path LIMIT 16",
+            (project, *refs)).fetchall()
         for row in rows:
             try:
                 recorded = json.loads(row["version"])
@@ -617,9 +619,10 @@ def _environment_state(runtime, project, item, workspace):
                 continue
             if not isinstance(recorded, dict) or recorded.get("status") != "stat_observed":
                 continue
-            current = current_file_version(row["relative_path"], workspace)
+            current = current_file_version(row["relative_path"], workspace,
+                file_checkout=row["checkout_key"], roots=roots)
             fields = lambda version: {key: version.get(key) for key in ("status", "size", "mtime_ns")}
-            state["files"].append({"path": row["relative_path"], "recorded": fields(recorded),
+            state["files"].append({"checkout_key": row["checkout_key"], "path": row["relative_path"], "recorded": fields(recorded),
                                    "current": fields(current)})
     return state
 

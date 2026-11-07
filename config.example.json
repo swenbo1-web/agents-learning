@@ -80,5 +80,6 @@
     "strategy": "alp_chunks",
     "timeout_seconds": 10
   },
-  "project_aliases": {}
+  "project_aliases": {},
+  "linked_workspaces": {}
 }

@@ -138,7 +138,8 @@ class ContextDedup:
 
     def _sources(self, item):
         from .runtime import digest
-        from .work_files import checkout_key, current_file_version
+        from .work_files import current_file_version
+        from .workspace_links import file_workspace_roots
         refs = _refs(item)
         if not refs or len(refs) > MAX_SOURCE_REFS:
             return None
@@ -151,14 +152,16 @@ class ContextDedup:
         files = []
         if self.workspace:
             marks = ",".join("?" for _ in refs)
-            rows = self.r.db.execute("SELECT relative_path,relation,version FROM work_file_links "
-                f"WHERE project=? AND checkout_key=? AND event_id IN ({marks}) "
-                "ORDER BY event_id,relative_path,relation LIMIT 17",
-                (self.project, checkout_key(self.workspace), *refs)).fetchall()
+            rows = self.r.db.execute("SELECT checkout_key,relative_path,relation,version FROM work_file_links "
+                f"WHERE project=? AND event_id IN ({marks}) "
+                "ORDER BY event_id,checkout_key,relative_path,relation LIMIT 17",
+                (self.project, *refs)).fetchall()
             if len(rows) > 16:
                 return None
-            files = [(row["relative_path"], row["relation"], row["version"],
-                      current_file_version(row["relative_path"], self.workspace)) for row in rows]
+            roots = file_workspace_roots(self.r, self.project, self.workspace)
+            files = [(row["checkout_key"], row["relative_path"], row["relation"], row["version"],
+                       current_file_version(row["relative_path"], self.workspace,
+                           file_checkout=row["checkout_key"], roots=roots)) for row in rows]
         return digest([snapshots, files])
 
     def prepare(self, channel, item, card):

@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current source v1.4.61 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current source v1.4.62 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1104,6 +1104,19 @@ Merge these defaults into your external configuration as needed. Administrators,
 
 AI summaries are marked `model_reported` and describe visible attempts, results, public notes and unresolved questions. They create no knowledge candidates or governance actions. Published solutions still use the separate review/publication workflow.
 
+### One business project with multiple source checkouts
+
+By default only the current checkout is associated. If a business workspace and its source repositories live in different directories, a local operator can explicitly select up to **eight additional roots**. Use the installation's existing home and configuration, then copy `project_id` and `config_version` from the listing:
+
+```powershell
+python -B scripts/learning.py --home "$learningHome" --workspace "$learningProject" workspace-list
+python -B scripts/learning.py --home "$learningHome" --workspace "$learningProject" workspace-link "D:\Projects\my-source" --project PROJECT_ID --expected-version CONFIG_VERSION --confirm
+```
+
+Keep the installation's `ALP_CONFIG`; add the existing global `--host` for Antigravity or DSH. Reload each host's plugin connection afterward. To unlink, obtain a fresh version with `workspace-list` and replace `workspace-link` with `workspace-unlink`. Existing connections detect changes to this project's root list, restrict themselves to the primary checkout and request a reload.
+
+This extends **future file-metadata associations**. It does not merge another project's knowledge, import old conversations/files or grant execution permissions. Identical relative paths retain distinct checkout identities. Unlinking preserves historical observations and stops checking current files in that directory. Version checks compare size/mtime without reading contents or computing content hashes. Queue details show configured roots and reload status; recovery details show a bounded recent sample of filter counts. Passing a filter does not establish a persisted association or published knowledge.
+
 ### Rebuild indices from already saved records
 
 ```powershell
@@ -1152,7 +1165,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.61 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.62 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1821,7 +1834,14 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.61</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.62</summary>
+
+## Explicit file roots and bounded diagnostics (1.4.62)
+
+- **Explicit roots:** local CLI changes require the current project identity and configuration version. Checkouts retain separate identities across capture, search, reads, candidate references and context coverage. Recovery cannot borrow newly added roots to reconstruct old facts.
+- **Visible filtering:** an optional derived observation stores scoped counts and controlled reasons, never commands or file contents. Diagnostic failures do not roll back tool events or file capture. Missing observations in old databases are unknown, not evidence of zero problems.
+- **Clear review status:** the page separates legacy/phase mode, explicit/default policy, new-review admission, budget admission and actual running state. Displaying status does not enable reviews or change publication policy.
+- **Compatibility:** schema/protocol remain 25 and indexes 7/3/1. Internal recovery snapshots use version 2 while retaining version-1 reads; update shared-database hosts together. Installation adds no roots, backfills no history and calls no models. Real cross-directory use requires explicit root selection and separate acceptance.
 
 ## Delivery receipt diagnostics and visible input composition (1.4.61)
 

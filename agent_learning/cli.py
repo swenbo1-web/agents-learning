@@ -22,6 +22,14 @@ def parser():
     p.add_argument("--host-instance", default="default", help="受信Runtime命令的宿主实例；安装导出当前固定为default")
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    workspaces = sub.add_parser("workspace-list", help="只读列出当前项目明确关联的文件元数据目录；不授予执行权限")
+    workspaces.add_argument("--project", help="可选：核对当前工作区的项目身份")
+    for command_name in ("workspace-link", "workspace-unlink"):
+        workspaces = sub.add_parser(command_name, help="显式关联或撤销项目文件元数据目录；需重载运行端")
+        workspaces.add_argument("root", help="准确的绝对checkout根；不会扩展到父目录")
+        workspaces.add_argument("--project", required=True, help="workspace-list返回的当前项目身份")
+        workspaces.add_argument("--expected-version", required=True, help="workspace-list返回的当前config_version")
+        workspaces.add_argument("--confirm", action="store_true", help="明确保存关联配置；不授予执行权限或合并知识")
     updates = sub.add_parser("update-check", help="检查 GitHub Release 版本，只读取公开元数据，不安装代码")
     updates.add_argument("--force", action="store_true", help="跳过常规检查间隔；仍遵守服务端限流")
     updates.add_argument("--reservation", help=argparse.SUPPRESS)
@@ -453,6 +461,11 @@ def main(argv=None):
                 raise ContractError("history commands require an explicit --workspace; installation cwd is not a project choice")
             if args.command in {"history-prepare", "history-run", "history-defer"} and not args.confirm:
                 raise ContractError("history reading and processing require explicit user selection (--confirm)")
+        if args.command in {"workspace-list", "workspace-link", "workspace-unlink"}:
+            if not args.workspace or not Path(args.workspace).is_absolute():
+                raise ContractError("workspace commands require an explicit absolute --workspace")
+            if args.command != "workspace-list" and not args.confirm:
+                raise ContractError("workspace link changes require --confirm")
         args.workspace = args.workspace or str(Path.cwd())
         if args.command in {"update-check", "update-status", "update-notice", "update-choice"}:
             from .software_updates import (load_config, check_updates, update_status,
@@ -517,6 +530,22 @@ def main(argv=None):
             args.host = "antigravity"
         if args.command in {"dsh-hook", "dsh-session-reset"}:
             args.host = "dsh"
+        if args.command in {"workspace-list", "workspace-link", "workspace-unlink"}:
+            from .workspace_links import (open_workspace_link_view, workspace_project,
+                                          workspace_links_status, set_workspace_link)
+            with open_workspace_link_view(args.home, host=args.host, host_instance=args.host_instance) as view:
+                project = workspace_project(view, args.workspace)
+                if args.project is not None and args.project != project:
+                    raise ContractError("workspace project identity does not match the current project")
+                if args.command == "workspace-list":
+                    result = {"project": project, "project_id": project,
+                              **workspace_links_status(view, project, args.workspace)}
+                else:
+                    result = set_workspace_link(view, project, args.workspace, args.root,
+                        expected_version=args.expected_version, confirm=args.confirm,
+                        remove=args.command == "workspace-unlink")
+            print(encode(result))
+            return 0
         runtime = Runtime(args.home, host=args.host, host_instance=args.host_instance)
         if args.command == "antigravity-session-reset":
             from .antigravity import reset_session
