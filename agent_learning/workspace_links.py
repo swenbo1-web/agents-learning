@@ -13,11 +13,13 @@ from pathlib import Path
 import sqlite3
 import stat
 import tempfile
+import time
 
 
 MAX_LINKED_ROOTS = 8
 MAX_LINKED_PROJECTS = 128
 MAX_CONFIG_BYTES = 1024 * 1024
+CONFIG_IO_RETRY_SECONDS = 1.0
 _SENSITIVE_PARTS = {".git", ".ssh", ".aws", ".gnupg", ".gcloud", ".azure", ".codex",
                     ".gemini", "secrets", "credentials", "runtime-releases"}
 
@@ -80,6 +82,8 @@ def initialize_workspace_links(runtime, config_path, supplied, *, from_disk):
     runtime._workspace_links_snapshot_verified = True
     runtime._workspace_links_loaded = json.loads(json.dumps(runtime.config["linked_workspaces"]))
     runtime._workspace_links_disk_cache = dict(supplied)
+    runtime._workspace_links_disk_error = None
+    runtime._workspace_links_disk_retry_at = None
     # The initial Runtime read and this initializer need not be one atomic
     # operation. Re-read on the first use before trusting any loaded roots.
     runtime._workspace_links_disk_signature = ("not_checked",) if from_disk else None
@@ -134,14 +138,47 @@ def _current_config(runtime):
         return runtime.config
     path = runtime._workspace_links_path
     signature = _config_signature(path)
-    if signature != runtime._workspace_links_disk_signature:
-        # Read once per observed config change. Do not inspect any former roots.
+    if signature == ("unavailable",):
+        # Re-probe stat on every call. An inaccessible path cannot authorize the
+        # previous cache, and restored access yields a fresh readable signature.
+        _config_failure(runtime, signature, "unavailable")
+        _error("workspace configuration is unavailable or invalid; reload and retry")
+    if signature == runtime._workspace_links_disk_signature:
+        if runtime._workspace_links_disk_error is None:
+            return runtime._workspace_links_disk_cache
+        retry = runtime._workspace_links_disk_retry_at
+        if retry is None or time.monotonic() < retry:
+            _error("workspace configuration is unavailable or invalid; reload and retry")
+    # A changed signature always invalidates both positive and negative caches.
+    # Keep no exception text or old approved roots after a failed read.
+    try:
         supplied = _read_config(path)
+    except (OSError, ValueError, RuntimeError) as exc:
         if _config_signature(path) != signature:
-            _error("workspace configuration changed while reading; reload and retry")
-        runtime._workspace_links_disk_cache = supplied
-        runtime._workspace_links_disk_signature = signature
+            _config_failure(runtime, signature, "unstable", retry=True)
+        else:
+            _config_failure(runtime, signature, "io_error" if isinstance(exc, OSError) else "invalid",
+                            retry=isinstance(exc, OSError))
+        _error("workspace configuration is unavailable or invalid; reload and retry")
+    if _config_signature(path) != signature:
+        # Do not poison the new signature with an error about the previous
+        # half-written contents. The next call must validate the new version.
+        _config_failure(runtime, signature, "unstable", retry=True)
+        _error("workspace configuration changed while reading; reload and retry")
+    runtime._workspace_links_disk_cache = supplied
+    runtime._workspace_links_disk_signature = signature
+    runtime._workspace_links_disk_error = None
+    runtime._workspace_links_disk_retry_at = None
     return runtime._workspace_links_disk_cache
+
+
+def _config_failure(runtime, signature, code, *, retry=False):
+    runtime._workspace_links_disk_signature = signature
+    runtime._workspace_links_disk_cache = {}
+    runtime._workspace_links_disk_error = code
+    # A permission restoration need not change Windows file metadata. Transient
+    # I/O failures get a bounded retry even if the signature stays identical.
+    runtime._workspace_links_disk_retry_at = time.monotonic() + CONFIG_IO_RETRY_SECONDS if retry else None
 
 
 def _within(path, parent):

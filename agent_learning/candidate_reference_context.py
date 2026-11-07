@@ -7,6 +7,8 @@ def card(item, max_chars=400):
     body = {"candidate_id": item["candidate_id"], "reference_version": item["reference_version"],
             "publication_state": "unpublished", "validation_level": item.get("validation_level", "reported"),
             "title": clip(item.get("title", ""), 36), "execution_authority": False, "read_required": True}
+    if item.get("source_files_unverified"):
+        body["source_files_unverified"] = True
     note = "[待定参考 / unpublished; 非验证结论] "
     for key, value in (("limitations", clip(item.get("limitations", ""), 48)),
                        ("applicability", clip(item.get("applicability", ""), 48))):

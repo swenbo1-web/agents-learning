@@ -18,6 +18,9 @@ WORK_MEMORY_DEFAULTS = {"enabled": True, "automatic_context": True, "max_context
                         "summary_max_events": 12}
 WORK_INDEX_VERSION = 3
 WORK_READ_FILE_CHECK_LIMIT = 64
+WORK_EXPOSURE_FILE_CHECK_LIMIT = 32
+WORK_EXPOSURE_OWNER_LIMIT = 100
+WORK_EXPOSURE_CALLBACK_FILE_LIMIT = 256
 
 
 def _file_focus_key(item):
@@ -189,6 +192,10 @@ def install_work_memory(runtime):
     install(runtime)
     from .work_file_diagnostics import install as install_diagnostics
     install_diagnostics(runtime)
+    runtime.db.execute("CREATE TABLE IF NOT EXISTS work_file_check_schedule("
+        "project TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,memory_id TEXT NOT NULL,"
+        "last_checked REAL NOT NULL DEFAULT 0,primary_checkout TEXT,file_states TEXT NOT NULL DEFAULT '{}',uncertainty_token TEXT,"
+        "PRIMARY KEY(project,conversation,agent,memory_id))")
 
 
 def _config(runtime):
@@ -802,7 +809,8 @@ class WorkMemoryMixin:
         return {"event_id": event_id, "capture_digest": event.get("capture_digest") or digest(json.loads(event["payload"])),
                 "state": state, "source_version": digest([event["id"], event["payload"], signature])}
 
-    def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None):
+    def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None,
+                   _previous_file_state=None, _file_versions=None, _file_roots=None):
         from .runtime import clean, digest
         row = dict(row)
         original_body = json.loads(row["body"])
@@ -829,17 +837,60 @@ class WorkMemoryMixin:
         if focus:
             files.sort(key=lambda item: (item["relative_path"] not in focus and _file_focus_key(item) not in focus,
                                          item["checkout_key"], item["relative_path"], item["relation"]))
-        visible_files = files[:3]
-        states = {}
-        roots = file_workspace_roots(self, project, workspace) if workspace else []
-        for item in visible_files:
-            if workspace:
-                item["current_version"] = current_file_version(item["relative_path"], workspace,
+        roots = (_file_roots if _file_roots is not None else file_workspace_roots(self, project, workspace)) if workspace else []
+        primary_key = next((root["checkout_key"] for root in roots if root.get("primary")), None)
+        versions = {} if _file_versions is None else _file_versions
+        def state_key(item):
+            return item["relative_path"] if item["checkout_key"] == primary_key else _file_focus_key(item)
+        observed = {}
+        def observe(item):
+            from .work_files import compare_file_versions
+            identity = (item["checkout_key"], item["relative_path"])
+            if identity not in versions:
+                versions[identity] = current_file_version(item["relative_path"], workspace,
                     file_checkout=item["checkout_key"], roots=roots)
-                item["version_changed"] = item["version"] != item["current_version"]
-                state_key = (item["relative_path"] if item["checkout_key"] == checkout_key(workspace)
-                             else item["checkout_key"] + ":" + item["relative_path"])
-                states[state_key] = digest(item["current_version"])
+            item["current_version"] = versions[identity]
+            comparison = compare_file_versions(item["version"], item["current_version"])
+            item["version_changed"] = comparison["changed"]
+            if comparison["unverified"]:
+                item["version_unverified"] = True
+            observed[state_key(item)] = digest(item["current_version"])
+        file_observation = None
+        if isinstance(_previous_file_state, dict) and _previous_file_state and workspace:
+            previous = {key: value for key, value in _previous_file_state.items()
+                        if isinstance(key, str) and isinstance(value, str)}
+            selected_keys = set(list(previous)[:WORK_EXPOSURE_FILE_CHECK_LIMIT])
+            candidates, seen = [], set()
+            for item in files:
+                key = state_key(item)
+                if key in selected_keys and key not in seen:
+                    candidates.append(item)
+                    seen.add(key)
+                    observe(item)
+            changed_keys = {key for key, value in observed.items() if previous[key] != value}
+            # Verification covers bounded previously shown identities. The
+            # three-file card is chosen afterwards, so an unchanged companion
+            # cannot hide a later displayed file's actual transition.
+            candidates.sort(key=lambda item: (state_key(item) not in changed_keys,
+                                              state_key(item), item["relation"]))
+            visible_files = candidates[:3]
+            focus = {_file_focus_key(item) for item in visible_files}
+            unverified = any(item.get("version_unverified") for item in candidates)
+            file_observation = {"complete": len(observed) == len(previous) and not unverified,
+                "checked_count": len(observed), "total_count": len(previous),
+                "limit": WORK_EXPOSURE_FILE_CHECK_LIMIT}
+            if len(previous) > WORK_EXPOSURE_FILE_CHECK_LIMIT:
+                file_observation["reason"] = "file_check_limit"
+            elif len(observed) != len(previous):
+                file_observation["reason"] = "file_association_unavailable"
+            elif unverified:
+                file_observation["reason"] = "file_state_unverified"
+        else:
+            visible_files = files[:3]
+            if workspace:
+                for item in visible_files:
+                    observe(item)
+        states = {state_key(item): observed[state_key(item)] for item in visible_files if state_key(item) in observed}
         file_state = states or None
         from .candidate_references import lineage_risk
         reference_risks = [risk for source in sources
@@ -869,6 +920,8 @@ class WorkMemoryMixin:
                 "completion": body.get("completion", "complete"), "execution_authority": False,
                 "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
                 "files": visible_files, "files_count": len(files), "coverage": body.get("coverage", {}),
+                **({"file_observation": file_observation} if file_observation is not None else {}),
+                **({"source_files_unverified": True} if any(item.get("version_unverified") for item in visible_files) else {}),
                 "created": row["created"], "summary_only": True, "read_required": True,
                 "permission_restored": False, "source_changed": changed,
                 "task_binding_known": row["task_id"] is not None,
@@ -1042,7 +1095,9 @@ class WorkMemoryMixin:
                 card = self._work_item(project, row, workspace=workspace,
                                        file_paths=[_file_focus_key(target)] if target else None)
                 # 默认检索只给索引；精确 stat、长摘要与完整来源在 read 中展开。
-                card["files"] = [{key: item[key] for key in ("relative_path", "checkout_key", "relation", "version_changed") if key in item}
+                card["files"] = [{**{key: item[key] for key in ("relative_path", "checkout_key", "relation", "version_changed", "version_unverified") if key in item},
+                                  **({"current_version_status": item.get("current_version", {}).get("status", "unknown")}
+                                     if item.get("version_unverified") else {})}
                                  for item in card["files"]]
                 card["summary"] = card["summary"][:120]
                 card["title"] = card["title"][:100]
@@ -1163,49 +1218,195 @@ class WorkMemoryMixin:
                 continue
             observed_files = item.get("file_state")
             file_state = None
-            if isinstance(observed_files, dict):
+            self.db.execute("SAVEPOINT work_file_exposure_delivery")
+            try:
                 previous = self.db.execute("SELECT file_state FROM work_exposures WHERE project=? AND conversation=? AND agent=? AND memory_id=?",
                                            (project, conversation, agent_id or "", item["memory_id"])).fetchone()
                 known = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
                 if not isinstance(known, dict):
                     known = {}
-                # 文件提示按具体文件确认，不因标题检索和文件检索选择不同子集而反复报警。
-                for path, version in observed_files.items():
-                    if isinstance(path, str) and isinstance(version, str):
-                        known.pop(path, None)
-                        known[path] = version
-                file_state = _json(dict(list(known.items())[-32:]))
-            self.db.execute("INSERT INTO work_exposures(project,conversation,agent,memory_id,revision,source_version,context_epoch,task_key,delivery,method,created,file_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET revision=excluded.revision,source_version=excluded.source_version,context_epoch=excluded.context_epoch,task_key=excluded.task_key,delivery=excluded.delivery,method=excluded.method,created=excluded.created,file_state=COALESCE(excluded.file_state,work_exposures.file_state)",
-                (project, conversation, agent_id or "", item["memory_id"], item["revision"], item["source_version"],
-                 context_epoch, _exposure_task_key(task_state), delivery, method, now, file_state))
+                schedule = self.db.execute("SELECT primary_checkout,file_states,uncertainty_token FROM work_file_check_schedule "
+                    "WHERE project=? AND conversation=? AND agent=? AND memory_id=?",
+                    (project, conversation, agent_id or "", item["memory_id"])).fetchone()
+                primary = schedule["primary_checkout"] if schedule else None
+                saved = json.loads(schedule["file_states"]) if schedule else {}
+                if not isinstance(saved, dict) or len(saved) > WORK_EXPOSURE_FILE_CHECK_LIMIT:
+                    saved = {}
+                if saved and any(not isinstance(value, dict) or value.get("fingerprint") != known.get(
+                    key[len("legacy:"):] if key.startswith("legacy:") else (
+                        key[65:] if primary and key.startswith(primary + ":") else key)) for key, value in saved.items()):
+                    saved, primary = {}, None
+                if not saved:
+                    for key, fingerprint in known.items():
+                        canonical = key if re.match(r"^[0-9a-f]{64}:.+", key) else "legacy:" + key
+                        saved[canonical] = {"fingerprint": fingerprint, "status": "unknown"}
+                if isinstance(observed_files, dict):
+                    from .work_notice_delivery import file_state_key
+                    for file in item.get("files", ()):
+                        if not isinstance(file, dict) or not isinstance(file.get("checkout_key"), str):
+                            continue
+                        key = file_state_key(file, observed_files)
+                        if key not in observed_files:
+                            continue  # A budget-omitted path cannot establish a new delivered version.
+                        canonical = _file_focus_key(file)
+                        if key == file["relative_path"]:
+                            primary = file["checkout_key"]
+                            saved.pop("legacy:" + key, None)
+                        saved.pop(canonical, None)
+                        saved[canonical] = {"fingerprint": observed_files[key],
+                            "status": file.get("current_version", {}).get("status", file.get("current_version_status",
+                                "stat_observed" if not file.get("version_unverified") and type(file.get("version_changed")) is bool else "unknown"))}
+                    saved = dict(list(saved.items())[-WORK_EXPOSURE_FILE_CHECK_LIMIT:])
+                    # Keep the legacy presentation keys while persisting the
+                    # independent checkout identity in the additive receipt.
+                    projected = {}
+                    for canonical, value in saved.items():
+                        key = canonical[len("legacy:"):] if canonical.startswith("legacy:") else (
+                            canonical[65:] if primary and canonical.startswith(primary + ":") else canonical)
+                        projected[key] = value["fingerprint"]
+                    file_state = _json(projected)
+                self.db.execute("INSERT INTO work_exposures(project,conversation,agent,memory_id,revision,source_version,context_epoch,task_key,delivery,method,created,file_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET revision=excluded.revision,source_version=excluded.source_version,context_epoch=excluded.context_epoch,task_key=excluded.task_key,delivery=excluded.delivery,method=excluded.method,created=excluded.created,file_state=COALESCE(excluded.file_state,work_exposures.file_state)",
+                    (project, conversation, agent_id or "", item["memory_id"], item["revision"], item["source_version"],
+                     context_epoch, _exposure_task_key(task_state), delivery, method, now, file_state))
+                token = item.get("_uncertainty_token") or (schedule["uncertainty_token"] if schedule else None)
+                self.db.execute("INSERT INTO work_file_check_schedule(project,conversation,agent,memory_id,primary_checkout,file_states,uncertainty_token) "
+                    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET "
+                    "primary_checkout=excluded.primary_checkout,file_states=excluded.file_states,uncertainty_token=excluded.uncertainty_token",
+                    (project, conversation, agent_id or "", item["memory_id"], primary, _json(saved), token))
+            except sqlite3.Error:
+                self.db.execute("ROLLBACK TO work_file_exposure_delivery")
+                continue  # Both receipts remain pending; optional failure cannot acknowledge a version.
+            finally:
+                self.db.execute("RELEASE work_file_exposure_delivery")
             count += 1
         # 只保留展示台账；不改变工作记录或现有知识采用状态。
         self.db.execute("DELETE FROM work_exposures WHERE project=? AND conversation=? AND agent=? AND memory_id NOT IN (SELECT memory_id FROM work_exposures WHERE project=? AND conversation=? AND agent=? ORDER BY created DESC,memory_id DESC LIMIT 100)",
             (project, conversation, agent_id or "", project, conversation, agent_id or ""))
+        try:
+            self.db.execute("DELETE FROM work_file_check_schedule WHERE project=? AND conversation=? AND agent=? "
+                "AND memory_id NOT IN (SELECT memory_id FROM work_exposures WHERE project=? AND conversation=? AND agent=?)",
+                (project, conversation, agent_id or "", project, conversation, agent_id or ""))
+        except sqlite3.Error:
+            pass
         return {"recorded": count, "delivery": delivery, "model_read_confirmed": False}
 
     def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None,
                               _notice_gate=None):
-        from .work_notice_delivery import mark_file_transition
+        from .work_notice_delivery import mark_file_transition, canonical_file_states
         result = []
-        with _snapshot(self):
-            rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT 100",
-                                   (project, conversation, agent_id or "")).fetchall()
+        # Scheduling observations commit on direct calls. An outer context
+        # delivery transaction still owns and may roll back the whole round.
+        with _write_snapshot(self):
+            owner = (project, conversation, agent_id or "")
+            failed_owners = set(getattr(self, "_work_file_schedule_failures", ()))
+            cursors = getattr(self, "_work_file_check_fallback", {})
+            rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT ?",
+                                   (project, conversation, agent_id or "", WORK_EXPOSURE_OWNER_LIMIT)).fetchall()
+            try:
+                schedule = {row["memory_id"]: dict(row) for row in self.db.execute(
+                    "SELECT memory_id,last_checked,primary_checkout,file_states,uncertainty_token FROM work_file_check_schedule "
+                    "WHERE project=? AND conversation=? AND agent=?", (project, conversation, agent_id or ""))}
+                rows = sorted(rows, key=lambda row: schedule.get(row["id"], {}).get("last_checked", 0))
+                persistent = owner not in failed_owners
+                if not persistent:
+                    start = cursors.get(owner, 0) % max(1, len(rows))
+                    rows = rows[start:] + rows[:start]
+            except sqlite3.Error:
+                schedule, persistent = {}, False
+                start = cursors.get(owner, 0) % max(1, len(rows))
+                rows = rows[start:] + rows[:start]
+            roots = file_workspace_roots(self, project, workspace) if workspace else []
+            primary = next((root["checkout_key"] for root in roots if root.get("primary")), None)
+            versions = {}
+            checked_rows = 0
+            rotation_failed, rotation_succeeded = False, False
+            rotation_rank = max([0, *(value.get("last_checked", 0) for value in schedule.values()
+                                     if isinstance(value.get("last_checked"), (int, float))
+                                     and 0 <= value["last_checked"] < 10**12)])
+            from .runtime import digest
+            task = self.task(project, conversation)
+            if agent_id:
+                context = self.db.execute("SELECT epoch FROM subagent_contexts WHERE project=? AND conversation=? AND agent=?",
+                                          (project, conversation, agent_id)).fetchone()
+            else:
+                context = self.db.execute("SELECT epoch FROM contexts WHERE project=? AND conversation=?",
+                                          (project, conversation)).fetchone()
+            uncertainty_scope = [_task_key(task), self.session_epoch(), context[0] if context else 0, primary]
             for row in rows:
-                old_files = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
-                item = self._work_item(project, row, workspace=workspace if old_files else None,
-                                       file_paths=list(old_files))
+                fallback = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
+                stored = schedule.get(row["id"], {})
+                states = canonical_file_states(stored.get("file_states"), baseline=fallback,
+                                               primary=stored.get("primary_checkout"))
+                if not states:
+                    states = {key: {"fingerprint": value, "status": "unknown"} for key, value in fallback.items()
+                              if re.match(r"^[0-9a-f]{64}:.+", key)}
+                old_files, old_status = {}, {}
+                for canonical, value in states.items():
+                    key = canonical[65:] if primary and canonical.startswith(primary + ":") else canonical
+                    old_files[key], old_status[key] = value["fingerprint"], value["status"]
+                cost = min(WORK_EXPOSURE_FILE_CHECK_LIMIT, len(old_files))
+                can_check = workspace and cost <= WORK_EXPOSURE_CALLBACK_FILE_LIMIT - len(versions)
+                item = self._work_item(project, row, workspace=workspace if old_files and can_check else None,
+                                       file_paths=list(old_files), _previous_file_state=old_files,
+                                       _file_versions=versions, _file_roots=roots)
+                item["_previous_file_status"] = old_status
+                if fallback and not old_files:
+                    item["file_observation"] = {"complete": False, "checked_count": 0,
+                        "total_count": len(fallback), "reason": "file_identity_unavailable"}
+                    item["files"], item["file_state"] = [], None
+                elif old_files and not can_check:
+                    item["file_observation"] = {"complete": False, "checked_count": 0,
+                        "total_count": len(old_files), "reason": "file_check_budget"}
+                elif len(states) < len(fallback):
+                    item["file_observation"] = {"complete": False, "checked_count": len(states),
+                        "total_count": len(fallback), "reason": "file_identity_unavailable"}
+                if not persistent and item.get("file_observation"):
+                    item["file_observation"].update(complete=False, reason="file_check_schedule_unavailable")
+                if can_check and old_files:
+                    checked_rows += 1
+                    self.db.execute("SAVEPOINT work_file_check_rotation")
+                    try:
+                        self.db.execute("INSERT INTO work_file_check_schedule(project,conversation,agent,memory_id,last_checked) "
+                            "VALUES(?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET last_checked=excluded.last_checked",
+                            (project, conversation, agent_id or "", row["id"], rotation_rank + 1))
+                        rotation_rank += 1
+                        rotation_succeeded = True
+                    except sqlite3.Error:
+                        self.db.execute("ROLLBACK TO work_file_check_rotation")
+                        persistent = False
+                        rotation_failed = True
+                        if item.get("file_observation"):
+                            item["file_observation"].update(complete=False, reason="file_check_schedule_unavailable")
+                    finally:
+                        self.db.execute("RELEASE work_file_check_rotation")
                 mark_file_transition(item, old_files)
+                if item.get("file_observation", {}).get("reason") == "file_identity_unavailable":
+                    covered = {key[65:] if stored.get("primary_checkout") and key.startswith(stored["primary_checkout"] + ":")
+                               else key for key in states}
+                    unresolved = {key: value for key, value in fallback.items() if key not in covered}
+                    item["_uncertainty_token"] = digest([uncertainty_scope, item["source_version"], unresolved,
+                                                        "file_identity_unavailable"])
+                    if stored.get("uncertainty_token") == item["_uncertainty_token"]:
+                        item["_uncertainty_delivered"] = True
                 file_changed = bool(item.get("file_state_changed"))
                 source_changed = item["source_version"] != row["shown_version"]
                 if source_changed:
                     item["source_changed"] = True
                 if source_changed or file_changed:
+                    if item.get("_uncertainty_delivered") and not source_changed and not item.get("_changed_file_paths"):
+                        continue
                     if _notice_gate is not None and _notice_gate.deferred(item):
                         continue  # Deferred ordinary notices cannot occupy a risk update's slot.
                     result.append(item)
                     if len(result) >= limit:
                         break
+            if not persistent:
+                cursors[owner] = cursors.get(owner, 0) + max(1, checked_rows)
+                self._work_file_check_fallback = dict(list(cursors.items())[-100:])
+                failed_owners.add(owner)
+            if rotation_succeeded and not rotation_failed:
+                failed_owners.discard(owner)
+            self._work_file_schedule_failures = set(list(failed_owners)[-100:])
         return result
 
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
@@ -1338,7 +1539,8 @@ class WorkMemoryMixin:
                                             (project, conversation, agent_id or "", item["memory_id"])).fetchone()
                 previous_files = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
                 current_files = item["file_state"] or {}
-                from .work_notice_delivery import mark_file_transition
+                from .work_notice_delivery import mark_file_transition, displayed_file_baseline
+                previous_files = displayed_file_baseline(self, project, conversation, agent_id, item, previous_files)
                 mark_file_transition(item, previous_files)
                 file_changed = bool(item.get("file_state_changed"))
                 file_unseen = bool(current_files) and any(path not in previous_files for path in current_files)
@@ -1601,6 +1803,10 @@ class WorkMemoryMixin:
             if row is not None and row["revision"] == item.get("revision"):
                 current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"),
                                           preview_query=item.get("_preview_query"))
+                if isinstance(item.get("file_observation"), dict):
+                    current["file_observation"] = dict(item["file_observation"])
+                if item.get("_uncertainty_token"):
+                    current["_uncertainty_token"] = item["_uncertainty_token"]
                 if current.get("file_projection_incomplete"):
                     continue
                 body = _body_projection(row)

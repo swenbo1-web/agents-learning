@@ -67,13 +67,24 @@ class ReferenceProvenanceTests(unittest.TestCase):
         self.assertTrue(refs.assess(self.r, self.p, identity)["eligible"])
 
     def test_candidate_file_change_stops_automatic_and_manual_reference(self):
-        identity, _, problem, _, _ = self.candidate()
+        from agent_learning.work_files import normalize_file_target
+        identity, _, _, event, _ = self.candidate()
+        path = self.workspace / "allocator.py"
+        path.write_text("original allocation baseline\n", encoding="utf-8")
+        link = normalize_file_target(str(path), self.workspace)
+        self.assertIsNotNone(link)
+        self.r.db.execute("INSERT INTO work_file_links VALUES(?,?,?,?,?,?,?)", (
+            self.p, event["id"], link["checkout_key"], link["relative_path"], link["path_key"],
+            "read_target", json.dumps(link["version"])))
         self.enable()
         item = refs.assess(self.r, self.p, identity)
-        with patch("agent_learning.work_files.knowledge_file_state", return_value={"source_files_changed": True}):
-            self.assertEqual(refs.search(self.r, self.p, "Python memory leak", context_handle=self.handle, workspace=self.workspace), [])
-            with self.assertRaises(ContractError):
-                refs.read(self.r, self.p, self.handle, identity, item["reference_version"], workspace=self.workspace)
+        before = refs.search(self.r, self.p, "Python memory leak", context_handle=self.handle, workspace=self.workspace)
+        self.assertEqual([entry["candidate_id"] for entry in before], [identity])
+        path.write_text("changed allocation baseline with a different observed size\n", encoding="utf-8")
+        self.assertNotEqual(path.stat().st_size, link["version"]["size"])
+        self.assertEqual(refs.search(self.r, self.p, "Python memory leak", context_handle=self.handle, workspace=self.workspace), [])
+        with self.assertRaises(ContractError):
+            refs.read(self.r, self.p, self.handle, identity, item["reference_version"], workspace=self.workspace)
 
     def test_public_restatement_is_not_independent_source_for_auto_publication(self):
         identity, _, _, _, _ = self.candidate()

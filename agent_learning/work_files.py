@@ -223,7 +223,28 @@ def current_file_version(relative_path, workspace, *, file_checkout=None, roots=
     if record is None:
         return {"status": "outside_workspace", "content_hash": None}
     item = normalize_file_target(str(Path(record["path"]) / relative_path), record["path"], roots=[record])
-    return item["version"] if item else {"status": "outside_workspace", "content_hash": None}
+    # A target rejected inside a known root remains a local availability risk.
+    # It must not be confused with a checkout we were never allowed to inspect.
+    return item["version"] if item else {"status": "unavailable", "content_hash": None}
+
+
+def compare_file_versions(recorded, current):
+    """Separate observed metadata drift, unknown scope and local unavailability."""
+    recorded = recorded if isinstance(recorded, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    def observed(value):
+        return value.get("status") == "stat_observed" and all(
+            type(value.get(key)) is int and value[key] >= 0 for key in ("size", "mtime_ns"))
+    verified = observed(recorded) and observed(current)
+    changed = verified and any(recorded[key] != current[key] for key in ("size", "mtime_ns"))
+    return {"changed": bool(changed), "verified": verified, "unverified": not verified,
+            "blocked": current.get("status") == "unavailable"}
+
+
+def file_observation_state(observation):
+    """Only additive, model-visible qualifiers; neither flag verifies content."""
+    return {**({"source_files_changed": True} if observation and observation.get("changed") else {}),
+            **({"source_files_unverified": True} if observation and observation.get("unverified") else {})}
 
 
 def knowledge_file_observation(runtime, project, item, workspace):
@@ -242,7 +263,7 @@ def knowledge_file_observation(runtime, project, item, workspace):
         f"SELECT checkout_key,relative_path,version FROM work_file_links WHERE project=? "
         f"AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
         (project, *refs)).fetchall()
-    snapshots, changed = [], False
+    snapshots, files, changed, unverified, blocked = [], [], False, False, False
     for row in rows:
         try:
             recorded = json.loads(row["version"])
@@ -252,14 +273,19 @@ def knowledge_file_observation(runtime, project, item, workspace):
             continue
         current = current_file_version(row["relative_path"], workspace, file_checkout=row["checkout_key"], roots=roots)
         snapshots.append([row["checkout_key"], row["relative_path"], recorded, current])
-        if (current.get("status") != "stat_observed" or current.get("size") != recorded.get("size")
-                or current.get("mtime_ns") != recorded.get("mtime_ns")):
-            changed = True
-    return ({"checkout": checkout_key(workspace), "version": digest(snapshots), "changed": changed}
+        comparison = compare_file_versions(recorded, current)
+        changed |= comparison["changed"]
+        unverified |= comparison["unverified"]
+        blocked |= comparison["blocked"]
+        files.append({"checkout": row["checkout_key"], "path": row["relative_path"],
+                      "verified": comparison["verified"],
+                      "scope": current.get("status") not in {"outside_workspace", "outside_scope", "unknown"}})
+    return ({"checkout": checkout_key(workspace), "version": digest(snapshots), "changed": changed,
+             "unverified": unverified, "blocked": blocked, "files": files}
             if snapshots else None)
 
 
 def knowledge_file_state(runtime, project, item, workspace):
     """Compare recorded size/mtime metadata, without claiming content validation."""
     observation = knowledge_file_observation(runtime, project, item, workspace)
-    return {"source_files_changed": True} if observation and observation["changed"] else {}
+    return file_observation_state(observation)

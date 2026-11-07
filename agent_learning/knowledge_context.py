@@ -45,6 +45,14 @@ class KnowledgeContextMixin:
             state = self._source_state(item)
             if file_observations is not None:
                 delivered_state(state, file_observations.get(identity))
+            previous = self.db.execute("SELECT state FROM context_exposures WHERE project=? AND conversation=? "
+                "AND agent=? AND knowledge_id=? AND revision=?", (project, conversation, agent_id or "",
+                item["knowledge_id"], item["revision"])).fetchone()
+            previous_files = json.loads(previous["state"]).get("_files", {}) if previous else {}
+            if previous_files.get("pending_unverified") is True:
+                # A fresh body/page can update its actual observation, but it
+                # cannot acknowledge an unsent owner-specific risk notice.
+                state.setdefault("_files", dict(previous_files))["pending_unverified"] = True
             # 使用返回快照里的来源版本，不把读完后发生的变化误记为已经展示。
             self.db.execute("INSERT INTO context_exposures VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(project,conversation,agent,knowledge_id,revision) DO UPDATE SET "
@@ -490,9 +498,9 @@ class KnowledgeContextMixin:
                                 break
                 if evolving_in_current_session:
                     continue
-                from .work_files import knowledge_file_observation
+                from .work_files import knowledge_file_observation, file_observation_state
                 observation = knowledge_file_observation(self, project, item, workspace)
-                file_state = {"source_files_changed": True} if observation and observation["changed"] else {}
+                file_state = file_observation_state(observation)
                 if identity in prior and file_state:
                     # The independent notice keeps the old card provisional;
                     # do not replay its stale body as fresh task advice.
@@ -683,14 +691,25 @@ class KnowledgeContextMixin:
                             card["source_changed"] = True
                         if work_item.get("file_state_changed"):
                             card["file_state_changed"] = True
+                        if work_item.get("file_state_metadata_changed"):
                             card["file_version_changed"] = True
+                        if work_item.get("file_state_unverified"):
+                            card["source_files_unverified"] = True
                         if changed_work:
                             # A risk update survives duplicate-body suppression,
                             # without replaying the stale statement as advice.
                             card.pop("summary", None)
                             card["title"] = "关联来源或文件状态变化"
                             card["reference_role"] = "source_update"
-                            card["recheck"] = "来源或文件已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            card["recheck"] = "来源或文件状态已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            if work_item.get("file_state_unverified") and not work_item.get("source_changed"):
+                                card["title"] = "关联文件当前无法核实"
+                                card["recheck"] = "已展示关联文件的范围或可用性已变化，当前无法核实；请核对授权范围与来源，不沿用旧结论。"
+                            elif (work_item.get("file_state_changed") and not work_item.get("source_changed")
+                                  and not work_item.get("file_state_metadata_changed")
+                                  and not any(file.get("version_changed") is True for file in work_item.get("files", []))):
+                                card["title"] = "关联文件观察状态变化"
+                                card["recheck"] = "关联文件的可核实状态已变化；请重新核对当前文件与来源。"
                             if (file_notice(work_item) and all(member.get("_file_receipt_only")
                                     for member in work_item.get("_notice_members", [work_item]))):
                                 card["read_required"] = False
@@ -715,12 +734,15 @@ class KnowledgeContextMixin:
                             changed_paths = set(work_item.get("_changed_file_paths", work_item["file_state"]))
                             files = [file for file in files if file_state_key(file, work_item.get("file_state")) in changed_paths]
                         if files:
+                            if any(file.get("version_unverified") is True for file in files if isinstance(file, dict)):
+                                card["source_files_unverified"] = True
                             if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
                                 card["file_version_changed"] = True
                             card["files"] = [{"path": (file.get("relative_path", "") if file_notice(work_item)
                                                        else clip(file.get("relative_path", ""), 100)),
                                               "relation": file.get("relation", "observed_target"),
                                               "version_changed": file.get("version_changed", "unknown"),
+                                              **({"version_unverified": True} if file.get("version_unverified") is True else {}),
                                               **({"checkout_key": file["checkout_key"]}
                                                  if file_state_key(file, work_item.get("file_state")) != file.get("relative_path", "") else {})}
                                              for file in files[:2] if isinstance(file, dict)]

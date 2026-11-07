@@ -485,12 +485,11 @@ class Server:
             if name == "knowledge_search":
                 body = {key: value for key, value in args.items() if key not in {"context_handle", "max_chars"}}
                 found = r.search(p, **body)
-                from .work_files import knowledge_file_observation
+                from .work_files import knowledge_file_observation, file_observation_state
                 for item in found.get("items", []):
                     observation = knowledge_file_observation(r, p, item, self.workspace)
                     file_observations[f"{item['knowledge_id']}@{item['revision']}"] = observation
-                    if observation and observation["changed"]:
-                        item["source_files_changed"] = True
+                    item.update(file_observation_state(observation))
                 result = search_preview(found, args.get("max_chars", 6000))
                 items = result["items"]
             else:
@@ -498,11 +497,10 @@ class Server:
                     raise ContractError("expected_revision is required to continue a section page")
                 try:
                     current = r.read(p, args["knowledge_id"])
-                    from .work_files import knowledge_file_observation
+                    from .work_files import knowledge_file_observation, file_observation_state
                     observation = knowledge_file_observation(r, p, current, self.workspace)
                     file_observations[f"{current['knowledge_id']}@{current['revision']}"] = observation
-                    if observation and observation["changed"]:
-                        current["source_files_changed"] = True
+                    current.update(file_observation_state(observation))
                     if "expected_revision" in args and current["revision"] != args["expected_revision"]:
                         raise ContractError("knowledge revision changed; restart reading from offset 0")
                     result = read_page(current, args.get("max_chars", 12000), args.get("offset", 0),

@@ -66,7 +66,8 @@ class WorkNoticeVisibilityTests(unittest.TestCase):
 
     def saved_delivery(self):
         return {name: [dict(row) for row in self.r.db.execute("SELECT * FROM " + name + " WHERE project=?",
-                      (self.p,))] for name in ("work_exposures", "work_notice_delivery", "context_delivery_cache")}
+                      (self.p,))] for name in ("work_exposures", "work_notice_delivery", "context_delivery_cache",
+                                               "work_file_check_schedule")}
 
     def restore_delivery(self, saved):
         for name, rows in saved.items():

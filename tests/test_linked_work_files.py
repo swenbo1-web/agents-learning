@@ -100,8 +100,10 @@ class LinkedWorkFileTests(unittest.TestCase):
         with patch.object(Path, "stat", guarded):
             check = _read_file_check(self.r, self.project, result["memory_id"], self.primary)
             self.assertFalse(check["complete"])
-            self.assertTrue(knowledge_file_observation(self.r, self.project,
-                {"evidence": [{"event_id": event["id"]}]}, self.primary)["changed"])
+            observation = knowledge_file_observation(self.r, self.project,
+                {"evidence": [{"event_id": event["id"]}]}, self.primary)
+            self.assertFalse(observation["changed"])
+            self.assertTrue(observation["unverified"])
             roots = file_workspace_roots(self.r, self.project, self.primary)
             self.assertEqual(current_file_version("same.py", self.primary,
                 file_checkout=checkout_key(self.outside), roots=roots)["status"], "outside_workspace")

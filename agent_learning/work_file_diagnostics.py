@@ -22,6 +22,8 @@ def install(runtime):
         "ON work_file_observations(project,created DESC)")
     runtime.db.execute("CREATE INDEX IF NOT EXISTS work_file_observation_host "
         "ON work_file_observations(project,host,created DESC)")
+    runtime.db.execute("CREATE INDEX IF NOT EXISTS work_file_observation_conversation "
+        "ON work_file_observations(project,conversation,created DESC)")
 
 
 def observe_event(runtime, project, event, workspace, *, raw=None):

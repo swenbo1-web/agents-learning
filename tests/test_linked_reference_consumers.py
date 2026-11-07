@@ -73,7 +73,10 @@ class LinkedReferenceConsumerTests(unittest.TestCase):
             return original(path, *args, **kwargs)
         with patch.object(Path, "stat", guarded):
             state = _environment_state(self.r, self.project, self.item, self.primary)
-            self.assertTrue(_environment_blocked(state))
+            # Loss of observation scope is unknown, not an observed file change.
+            # Delivery-specific scope-loss notices are checked separately.
+            self.assertFalse(_environment_blocked(state))
+            self.assertTrue(any(file["current"]["status"] == "outside_workspace" for file in state["files"]))
             self.assertNotEqual(before, self.dedup()._sources(self.item))
 
 

@@ -10,6 +10,47 @@ import time
 DEFER_SECONDS = 30
 
 
+def canonical_file_states(value, *, baseline=None, primary=None):
+    try:
+        states = json.loads(value) if isinstance(value, str) else value
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(states, dict) or len(states) > 32:
+        return {}
+    return {key: state for key, state in states.items()
+            if isinstance(key, str) and re.match(r"^[0-9a-f]{64}:.+", key)
+            and isinstance(state, dict) and isinstance(state.get("fingerprint"), str)
+            and isinstance(state.get("status"), str)
+            and (baseline is None or state["fingerprint"] == baseline.get(
+                key[65:] if primary and key.startswith(primary + ":") else key))}
+
+
+def displayed_file_baseline(runtime, project, conversation, agent, item, fallback):
+    """Read checkout identities actually retained at delivery, never infer a root."""
+    try:
+        row = runtime.db.execute("SELECT file_states,primary_checkout FROM work_file_check_schedule WHERE project=? "
+            "AND conversation=? AND agent=? AND memory_id=?", (project, conversation, agent or "", item["memory_id"])).fetchone()
+    except sqlite3.Error:
+        row = None
+    states = canonical_file_states(row[0], baseline=fallback, primary=row[1]) if row else {}
+    if not states:
+        # Explicit qualified legacy keys retain their own identity. Relative
+        # keys without a recorded original primary cannot be reinterpreted.
+        return {key: value for key, value in (fallback or {}).items()
+                if isinstance(key, str) and re.match(r"^[0-9a-f]{64}:.+", key)}
+    previous, statuses = {}, {}
+    for file in item.get("files", ()):
+        if not isinstance(file, dict) or not file.get("checkout_key"):
+            continue
+        canonical = file["checkout_key"] + ":" + file.get("relative_path", "")
+        state = states.get(canonical)
+        if state:
+            key = file_state_key(file, item.get("file_state"))
+            previous[key], statuses[key] = state["fingerprint"], state["status"]
+    item["_previous_file_status"] = statuses
+    return previous
+
+
 def file_state_key(file, state):
     """Primary legacy keys stay relative; linked facts retain checkout identity."""
     path = file.get("relative_path", file.get("path", ""))
@@ -59,9 +100,15 @@ def install(runtime):
 def mark_file_transition(item, previous_files):
     """Compare the current observation with files actually shown to this owner."""
     item["_changed_file_paths"] = []
+    item.pop("file_state_unverified", None)
+    item.pop("_unverified_file_paths", None)
+    item.pop("file_state_metadata_changed", None)
+    item.pop("file_state_restored", None)
     item.pop("_unseen_file_paths", None)
     current = item.get("file_state")
     if not isinstance(previous_files, dict) or not previous_files or not isinstance(current, dict):
+        if item.get("file_observation", {}).get("reason") == "file_identity_unavailable":
+            item.update(file_state_changed=True, file_state_unverified=True, source_files_unverified=True)
         return item  # Missing observations cannot establish a restoration.
     changed = sorted(path for path, version in current.items()
                      if path in previous_files and previous_files[path] != version)
@@ -69,8 +116,27 @@ def mark_file_transition(item, previous_files):
     item["_unseen_file_paths"] = sorted(path for path in current if path not in previous_files)
     if changed:
         item["file_state_changed"] = True
+        unverified = [file_state_key(file, current) for file in item.get("files", ())
+                      if isinstance(file, dict) and file.get("version_unverified")
+                      and file_state_key(file, current) in changed]
+        if unverified:
+            item["file_state_unverified"] = True
+            item["_unverified_file_paths"] = sorted(set(unverified))
+        from .runtime import digest
+        unknown = {digest(version) for status in ("outside_workspace", "outside_scope", "unknown", "unavailable", "not_observed")
+                   for version in ({"status": status}, {"status": status, "content_hash": None})}
+        for file in item.get("files", ()):
+            key = file_state_key(file, current)
+            if key in changed and file.get("current_version", {}).get("status") == "stat_observed":
+                prior_status = item.get("_previous_file_status", {}).get(key)
+                if prior_status in {"outside_workspace", "outside_scope", "unknown", "unavailable", "not_observed"} or (prior_status is None and previous_files[key] in unknown):
+                    item["file_state_restored"] = True
+                elif prior_status in {None, "stat_observed"}:
+                    item["file_state_metadata_changed"] = True
     else:
         item.pop("file_state_changed", None)
+    if item.get("file_observation", {}).get("reason") == "file_identity_unavailable":
+        item.update(file_state_changed=True, file_state_unverified=True, source_files_unverified=True)
     return item
 
 
@@ -120,13 +186,18 @@ def visible_exposures(items):
     for item in items:
         for member in item.get("_notice_members", [item]):
             files = member.get("file_state")
-            # A first ordinary index retains its observed baseline so later
-            # edits can invalidate the summary even when decoration did not
-            # fit. A change notice acknowledges only the paths it displayed.
+            # An ordinary source index depends on its bounded observed files,
+            # even when the preview decoration is omitted by the budget.
+            # Change notices acknowledge only their complete displayed paths.
+            visible_keys = item.get("_visible_file_paths")
             changed = bool(item.get("source_changed") or item.get("file_state_changed"))
             visible = ({path: version for path, version in files.items()
-                        if not changed or path in item["_visible_file_paths"]} if isinstance(files, dict) else None)
-            result.append(dict(member, file_state=visible))
+                        if not changed or visible_keys is None or path in visible_keys} if isinstance(files, dict) else None)
+            selected_files = member.get("files", ())
+            if changed and visible_keys is not None:
+                selected_files = [file for file in selected_files if isinstance(file, dict)
+                                  and file_state_key(file, files) in visible]
+            result.append(dict(member, file_state=visible, files=list(selected_files)))
     return result
 
 
@@ -203,7 +274,9 @@ class FileNoticeGate:
         if previous is not None:
             if previous["source_version"] != item["source_version"]:
                 item["source_changed"] = True
-        mark_file_transition(item, json.loads(previous["file_state"]) if previous and previous["file_state"] else {})
+        fallback = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
+        mark_file_transition(item, displayed_file_baseline(self.r, self.project, self.conversation,
+                                                         self.agent, item, fallback))
         return item
 
     def _keys(self, item):
@@ -220,6 +293,8 @@ class FileNoticeGate:
         return [digest(path) for path in sorted(paths)]
 
     def deferred(self, item):
+        if item.get("_uncertainty_delivered") and self.delivery == "persistent":
+            return True
         keys = self._keys(item)
         if not keys or self.delivery != "persistent":
             return False

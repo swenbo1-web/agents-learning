@@ -628,13 +628,15 @@ def _environment_state(runtime, project, item, workspace):
 
 
 def _environment_blocked(state):
+    from .work_files import compare_file_versions
     return bool(state and (state["applicability"]["status"] == "incompatible" or
-        any(item["recorded"] != item["current"] for item in state["files"])))
+        any(comparison["changed"] or comparison["blocked"] for item in state["files"]
+            for comparison in [compare_file_versions(item["recorded"], item["current"])])))
 
 
 def _environment_check(runtime, project, item, workspace, *, query=""):
     from .knowledge_applicability import project_environment, automatic_applicability, _manifest_applicability
-    from .work_files import knowledge_file_state
+    from .work_files import knowledge_file_observation, file_observation_state
     comparison = item
     if query:
         # Assessment previews are intentionally short. A condition beyond that
@@ -652,8 +654,10 @@ def _environment_check(runtime, project, item, workspace, *, query=""):
     if workspace is None:
         return item
     evidence = {"evidence": [{"event_id": ref} for ref in item.get("source_event_refs", ())]}
-    if knowledge_file_state(runtime, project, evidence, workspace).get("source_files_changed"):
+    observation = knowledge_file_observation(runtime, project, evidence, workspace)
+    if observation and (observation["changed"] or observation.get("blocked")):
         return None
+    item.update(file_observation_state(observation))
     return item
 
 
@@ -743,6 +747,8 @@ def read(runtime, project, context_handle, candidate_id, expected_version, secti
             "reference_only": True, "execution_authority": False, "validation_level": item["validation_level"], "source_health": "valid",
             "warning": "Unpublished; verify before use.", "section": section, "offset": offset,
             "total_chars": len(content), "content": "", "next_offset": offset}
+        if item.get("source_files_unverified"):
+            result["source_files_unverified"] = True
         remaining = max(0, len(content) - offset)
         low, high = 0, min(remaining, max_chars)
         while low < high:
@@ -770,7 +776,10 @@ def _notification_state(runtime, project, row, item, workspace):
         prior_environment is not None and environment != prior_environment or
         prior_environment is None and _environment_blocked(environment)))
     changed = item["reference_version"] != row["reference_version"] or environmental_change
-    reason = item["reason"] or ("reference_environment_or_files_changed" if environmental_change else "reference_source_changed")
+    unverified = bool(environment and any(file.get("current", {}).get("status") != "stat_observed"
+                                         for file in environment["files"]))
+    reason = item["reason"] or (("reference_files_unverified" if unverified else "reference_environment_or_files_changed")
+                               if environmental_change else "reference_source_changed")
     # An older/non-file caller must not manufacture a second notice merely
     # because it cannot re-observe the workspace captured by a Hook.
     token_environment = environment if environment is not None else prior_environment
@@ -795,7 +804,9 @@ def notifications(runtime, project, context_handle, *, workspace=None):
                 pending = {"id": notice, "notice_version": notice, "candidate_id": row["candidate_id"],
                     "reference_version": item["reference_version"], "previous_version": row["reference_version"],
                     "reason": reason, "eligible": item["eligible"],
-                    "text": f"待定参考 {row['candidate_id']} 状态、来源或文件环境已变化（{reason}）；请停止依据旧摘要执行，重新检索。"}
+                    "text": (f"待定参考 {row['candidate_id']} 关联文件当前无法核实（范围或可用性已变化）；请停止依据旧摘要执行，重新检索。"
+                             if reason == "reference_files_unverified" else
+                             f"待定参考 {row['candidate_id']} 状态、来源或文件环境已变化（{reason}）；请停止依据旧摘要执行，重新检索。")}
                 runtime.db.execute("UPDATE candidate_reference_exposures SET pending_notice=? WHERE project=? AND conversation=? "
                     "AND agent=? AND host_epoch=? AND candidate_id=?", (json.dumps(pending, ensure_ascii=False, sort_keys=True),
                     project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], row["candidate_id"]))
@@ -827,7 +838,7 @@ def ack_notifications(runtime, project, context_handle, items, *, workspace=None
             pending = json.loads(row["pending_notice"]) if row["pending_notice"] else None
             changed, _, expected, environment = _notification_state(runtime, project, row, current, workspace)
             identity = item.get("id", item.get("notice_version"))
-            if pending and pending.get("reason") == "reference_environment_or_files_changed" and workspace is None:
+            if pending and pending.get("reason") in {"reference_environment_or_files_changed", "reference_files_unverified"} and workspace is None:
                 continue  # No current file observation means no environment acknowledgement.
             if not pending or pending.get("id") != identity or changed and identity != expected:
                 continue

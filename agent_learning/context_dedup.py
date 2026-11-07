@@ -227,12 +227,15 @@ class ContextDedup:
             # Keep original-text ranges, not just lengths: equally sized
             # summaries can describe different query-selected passages.
             base = {"source_files_changed": bool(card.get("source_files_changed"))}
+            if card.get("source_files_unverified"):
+                base["source_files_unverified"] = True
             ranges = [] if card.get("read_required") else _formal_ranges(item, card)
             if ranges is not None:
                 entry["material_key"] = "formal:" + digest([
                     channel, str(comparison_revision), material, body.get("content", ""), sources, base
                 ]) + ":" + json.dumps(ranges, separators=(",", ":"))
         if channel == "formal" and (item.get("knowledge_kind") == "fact"
+                and not card.get("source_files_unverified")
                 and item.get("knowledge_tier", "source_reference") == "source_reference"
                 and item.get("validation_level") == "reported"
                 and _text(card.get("content_summary")) == full
@@ -242,6 +245,7 @@ class ContextDedup:
             # reported public statement; a title, prefix or verified solution cannot.
             entry["text_key"] = digest([full, sources, "reported"])
         if channel == "work" and (item.get("type") == "public_summary"
+                and not any(file.get("version_unverified") for file in item.get("files", ()))
                 and item.get("validation_level") == "reported"
                 and item.get("completion") == "complete" and not item.get("coverage", {}).get("truncated")):
             entry["text_key"] = digest([full, sources, "reported"])
