@@ -677,7 +677,7 @@ def revalidate(runtime, project, item, context_handle=None, *, workspace=None, q
 
 def record_exposure(runtime, project, context_handle, item, *, delivery="persistent", context_epoch=0,
                     task_state=None, method="mcp", workspace=None):
-    """Record only a complete response actually returned by the caller."""
+    """Record returned reference material; never acknowledge a queued notice."""
     with _transaction(runtime):
         access, task, assignment = _access(runtime, project, context_handle)
         error, _, _, _ = _helpers()
@@ -698,7 +698,10 @@ def record_exposure(runtime, project, context_handle, item, *, delivery="persist
             "reference_version=excluded.reference_version,body_digest=excluded.body_digest,task_id=excluded.task_id,"
             "task_revision=excluded.task_revision,assignment_id=excluded.assignment_id,notified_version='',checked=excluded.checked,updated=excluded.updated,"
             "delivery=excluded.delivery,context_epoch=excluded.context_epoch,method=excluded.method,"
-            "environment_state=excluded.environment_state,pending_notice=''",
+            # This owner may still have a notice about an earlier display.
+            # Even a fresh reference version or a fully returned page does not
+            # deliver that notice; only ack_notifications may clear it.
+            "environment_state=excluded.environment_state",
             (project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], current["candidate_id"],
              current["reference_version"], current["body_digest"], task["id"] if task else None,
              task["revision"] if task else None, assignment["assignment_id"] if assignment else None, now, now,
@@ -807,6 +810,17 @@ def notifications(runtime, project, context_handle, *, workspace=None):
                     "text": (f"待定参考 {row['candidate_id']} 关联文件当前无法核实（范围或可用性已变化）；请停止依据旧摘要执行，重新检索。"
                              if reason == "reference_files_unverified" else
                              f"待定参考 {row['candidate_id']} 状态、来源或文件环境已变化（{reason}）；请停止依据旧摘要执行，重新检索。")}
+                runtime.db.execute("UPDATE candidate_reference_exposures SET pending_notice=? WHERE project=? AND conversation=? "
+                    "AND agent=? AND host_epoch=? AND candidate_id=?", (json.dumps(pending, ensure_ascii=False, sort_keys=True),
+                    project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], row["candidate_id"]))
+            if (pending and pending.get("reason") == "reference_files_unverified"
+                    and environment and environment.get("files")
+                    and all(file.get("current", {}).get("status") == "stat_observed" for file in environment["files"])):
+                # The queued risk belongs to the earlier display/version. A
+                # later read can restore observation without delivering it.
+                # Keep its exact token, but describe the current state honestly.
+                pending = dict(pending, text=f"曾展示的待定参考 {row['candidate_id']} 关联文件核验范围或可用性曾变化，"
+                    "当前已恢复可核验；请重新核对来源与版本，不直接沿用旧摘要。")
                 runtime.db.execute("UPDATE candidate_reference_exposures SET pending_notice=? WHERE project=? AND conversation=? "
                     "AND agent=? AND host_epoch=? AND candidate_id=?", (json.dumps(pending, ensure_ascii=False, sort_keys=True),
                     project, access["conversation_id"], access["agent_id"] or "", access["host_epoch"], row["candidate_id"]))

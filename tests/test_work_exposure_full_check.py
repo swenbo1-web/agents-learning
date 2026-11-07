@@ -237,7 +237,11 @@ class WorkExposureFullCheckTests(unittest.TestCase):
     def test_version_62_receipt_reopens_and_installs_optional_schedule(self):
         self.expose_all()
         self.r.db.execute('DROP TABLE work_file_check_schedule')
-        self.r.db.execute("UPDATE runtime_storage_receipt SET signature=replace(signature,'1.4.63','1.4.62')")
+        from agent_learning import __version__
+        current = self.r.db.execute('SELECT signature FROM runtime_storage_receipt').fetchone()[0]
+        legacy = current.replace(__version__, '1.4.62')
+        self.assertNotEqual(current, legacy)
+        self.r.db.execute('UPDATE runtime_storage_receipt SET signature=?', (legacy,))
         before = self.exposure()
         reopened = Runtime(self.home, config=self.r.config)
         try:

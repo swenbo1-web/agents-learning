@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -21,10 +22,16 @@ WORK_READ_FILE_CHECK_LIMIT = 64
 WORK_EXPOSURE_FILE_CHECK_LIMIT = 32
 WORK_EXPOSURE_OWNER_LIMIT = 100
 WORK_EXPOSURE_CALLBACK_FILE_LIMIT = 256
+WORK_CHECK_RANK_REBASE = 10**9
 
 
 def _file_focus_key(item):
     return item["checkout_key"] + ":" + item["relative_path"]
+
+
+def _file_check_rank(value):
+    """An invalid optional rank is due now; finite old ranks retain order."""
+    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else 0
 
 
 def _body_projection(row):
@@ -1229,15 +1236,17 @@ class WorkMemoryMixin:
                     "WHERE project=? AND conversation=? AND agent=? AND memory_id=?",
                     (project, conversation, agent_id or "", item["memory_id"])).fetchone()
                 primary = schedule["primary_checkout"] if schedule else None
-                saved = json.loads(schedule["file_states"]) if schedule else {}
-                if not isinstance(saved, dict) or len(saved) > WORK_EXPOSURE_FILE_CHECK_LIMIT:
-                    saved = {}
-                if saved and any(not isinstance(value, dict) or value.get("fingerprint") != known.get(
-                    key[len("legacy:"):] if key.startswith("legacy:") else (
-                        key[65:] if primary and key.startswith(primary + ":") else key)) for key, value in saved.items()):
-                    saved, primary = {}, None
-                if not saved:
-                    for key, fingerprint in known.items():
+                if not isinstance(primary, str) or not re.fullmatch(r"[0-9a-f]{64}", primary):
+                    primary = None
+                from .work_notice_delivery import canonical_file_states
+                saved = canonical_file_states(schedule["file_states"] if schedule else None,
+                                              baseline=known, primary=primary)
+                covered = {key[65:] if primary and key.startswith(primary + ":") else key for key in saved}
+                # A malformed or partial auxiliary receipt cannot delete an
+                # already displayed core baseline. Unknown identity stays
+                # unknown until that exact path is actually shown again.
+                for key, fingerprint in known.items():
+                    if key not in covered:
                         canonical = key if re.match(r"^[0-9a-f]{64}:.+", key) else "legacy:" + key
                         saved[canonical] = {"fingerprint": fingerprint, "status": "unknown"}
                 if isinstance(observed_files, dict):
@@ -1302,12 +1311,35 @@ class WorkMemoryMixin:
             cursors = getattr(self, "_work_file_check_fallback", {})
             rows = self.db.execute("SELECT m.*,x.source_version AS shown_version,x.file_state AS shown_file_state FROM work_exposures x JOIN work_memories m ON m.project=x.project AND m.id=x.memory_id WHERE x.project=? AND x.conversation=? AND x.agent=? ORDER BY x.created DESC LIMIT ?",
                                    (project, conversation, agent_id or "", WORK_EXPOSURE_OWNER_LIMIT)).fetchall()
+            rebase_failed = False
             try:
+                ids = [row["id"] for row in rows]
+                marks = ",".join("?" for _ in ids)
                 schedule = {row["memory_id"]: dict(row) for row in self.db.execute(
                     "SELECT memory_id,last_checked,primary_checkout,file_states,uncertainty_token FROM work_file_check_schedule "
-                    "WHERE project=? AND conversation=? AND agent=?", (project, conversation, agent_id or ""))}
-                rows = sorted(rows, key=lambda row: schedule.get(row["id"], {}).get("last_checked", 0))
-                persistent = owner not in failed_owners
+                    "WHERE project=? AND conversation=? AND agent=? AND memory_id IN (" + marks + ")",
+                    (project, conversation, agent_id or "", *ids))} if ids else {}
+                ranks = {row["id"]: _file_check_rank(schedule.get(row["id"], {}).get("last_checked", 0)) for row in rows}
+                rows = sorted(rows, key=lambda row: ranks[row["id"]])
+                if any(value.get("last_checked", 0) != _file_check_rank(value.get("last_checked", 0))
+                       or _file_check_rank(value.get("last_checked", 0)) >= WORK_CHECK_RANK_REBASE for value in schedule.values()):
+                    # Rebase only the retained owner's bounded set, preserving
+                    # order. Huge finite ranks then become due after at most
+                    # one pass, and ordinary counters never lose float precision.
+                    self.db.execute("SAVEPOINT work_file_check_rebase")
+                    try:
+                        for rank, row in enumerate(rows):
+                            self.db.execute("INSERT INTO work_file_check_schedule(project,conversation,agent,memory_id,last_checked) "
+                                "VALUES(?,?,?,?,?) ON CONFLICT(project,conversation,agent,memory_id) DO UPDATE SET last_checked=excluded.last_checked",
+                                (project, conversation, agent_id or "", row["id"], rank))
+                    except sqlite3.Error:
+                        self.db.execute("ROLLBACK TO work_file_check_rebase")
+                        rebase_failed = True
+                    finally:
+                        self.db.execute("RELEASE work_file_check_rebase")
+                    for rank, row in enumerate(rows):
+                        schedule.setdefault(row["id"], {})["last_checked"] = rank
+                persistent = owner not in failed_owners and not rebase_failed
                 if not persistent:
                     start = cursors.get(owner, 0) % max(1, len(rows))
                     rows = rows[start:] + rows[:start]
@@ -1319,10 +1351,8 @@ class WorkMemoryMixin:
             primary = next((root["checkout_key"] for root in roots if root.get("primary")), None)
             versions = {}
             checked_rows = 0
-            rotation_failed, rotation_succeeded = False, False
-            rotation_rank = max([0, *(value.get("last_checked", 0) for value in schedule.values()
-                                     if isinstance(value.get("last_checked"), (int, float))
-                                     and 0 <= value["last_checked"] < 10**12)])
+            rotation_failed, rotation_succeeded = rebase_failed, False
+            rotation_rank = max([0, *(_file_check_rank(value.get("last_checked", 0)) for value in schedule.values())])
             from .runtime import digest
             task = self.task(project, conversation)
             if agent_id:

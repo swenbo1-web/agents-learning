@@ -706,8 +706,7 @@ class KnowledgeContextMixin:
                                 card["title"] = "关联文件当前无法核实"
                                 card["recheck"] = "已展示关联文件的范围或可用性已变化，当前无法核实；请核对授权范围与来源，不沿用旧结论。"
                             elif (work_item.get("file_state_changed") and not work_item.get("source_changed")
-                                  and not work_item.get("file_state_metadata_changed")
-                                  and not any(file.get("version_changed") is True for file in work_item.get("files", []))):
+                                  and not work_item.get("file_state_metadata_changed")):
                                 card["title"] = "关联文件观察状态变化"
                                 card["recheck"] = "关联文件的可核实状态已变化；请重新核对当前文件与来源。"
                             if (file_notice(work_item) and all(member.get("_file_receipt_only")
@@ -728,20 +727,23 @@ class KnowledgeContextMixin:
                                                              "revision": member["revision"]}
                                                             for member in members[1:]]
                         files = work_item.get("files", [])
-                        if file_notice(work_item):
-                            # A version warning describes the changed paths,
-                            # not whichever unchanged companion sorted first.
+                        if work_item.get("file_state_changed") and work_item.get("_changed_file_paths"):
+                            # A source update describes this delivery transition,
+                            # including scope loss/restoration. A companion's
+                            # old capture drift cannot select or label this card.
                             changed_paths = set(work_item.get("_changed_file_paths", work_item["file_state"]))
                             files = [file for file in files if file_state_key(file, work_item.get("file_state")) in changed_paths]
                         if files:
                             if any(file.get("version_unverified") is True for file in files if isinstance(file, dict)):
                                 card["source_files_unverified"] = True
-                            if any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
+                            if not changed_work and any(file.get("version_changed") is True for file in files if isinstance(file, dict)):
                                 card["file_version_changed"] = True
+                            metadata_changed = set(work_item.get("_metadata_changed_file_paths", ()))
                             card["files"] = [{"path": (file.get("relative_path", "") if file_notice(work_item)
                                                        else clip(file.get("relative_path", ""), 100)),
                                               "relation": file.get("relation", "observed_target"),
-                                              "version_changed": file.get("version_changed", "unknown"),
+                                              "version_changed": (file_state_key(file, work_item.get("file_state")) in metadata_changed
+                                                                  if changed_work else file.get("version_changed", "unknown")),
                                               **({"version_unverified": True} if file.get("version_unverified") is True else {}),
                                               **({"checkout_key": file["checkout_key"]}
                                                  if file_state_key(file, work_item.get("file_state")) != file.get("relative_path", "") else {})}

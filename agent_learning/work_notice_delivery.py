@@ -2,12 +2,31 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import math
 import re
 import sqlite3
 import time
 
 DEFER_SECONDS = 30
+
+
+@lru_cache(maxsize=1)
+def _unknown_file_fingerprints():
+    from .runtime import digest
+    return {digest(version): status
+            for status in ("outside_workspace", "outside_scope", "unknown", "unavailable", "not_observed")
+            for version in ({"status": status}, {"status": status, "content_hash": None})}
+
+
+def _coherent_file_status(fingerprint, status, *, legacy=False):
+    """A label cannot upgrade a fingerprint known to represent unknown scope."""
+    known = _unknown_file_fingerprints().get(fingerprint) if isinstance(fingerprint, str) else None
+    if known is not None:
+        return known
+    if status == "stat_observed":
+        return status
+    return None if legacy and status is None else "unknown"
 
 
 def canonical_file_states(value, *, baseline=None, primary=None):
@@ -17,10 +36,14 @@ def canonical_file_states(value, *, baseline=None, primary=None):
         return {}
     if not isinstance(states, dict) or len(states) > 32:
         return {}
-    return {key: state for key, state in states.items()
+    if baseline is not None and not isinstance(baseline, dict):
+        return {}
+    primary = primary if isinstance(primary, str) and re.fullmatch(r"[0-9a-f]{64}", primary) else None
+    return {key: {"fingerprint": state["fingerprint"],
+                  "status": _coherent_file_status(state["fingerprint"], state.get("status"))}
+            for key, state in states.items()
             if isinstance(key, str) and re.match(r"^[0-9a-f]{64}:.+", key)
             and isinstance(state, dict) and isinstance(state.get("fingerprint"), str)
-            and isinstance(state.get("status"), str)
             and (baseline is None or state["fingerprint"] == baseline.get(
                 key[65:] if primary and key.startswith(primary + ":") else key))}
 
@@ -104,6 +127,8 @@ def mark_file_transition(item, previous_files):
     item.pop("_unverified_file_paths", None)
     item.pop("file_state_metadata_changed", None)
     item.pop("file_state_restored", None)
+    item["_metadata_changed_file_paths"] = []
+    item["_restored_file_paths"] = []
     item.pop("_unseen_file_paths", None)
     current = item.get("file_state")
     if not isinstance(previous_files, dict) or not previous_files or not isinstance(current, dict):
@@ -122,17 +147,20 @@ def mark_file_transition(item, previous_files):
         if unverified:
             item["file_state_unverified"] = True
             item["_unverified_file_paths"] = sorted(set(unverified))
-        from .runtime import digest
-        unknown = {digest(version) for status in ("outside_workspace", "outside_scope", "unknown", "unavailable", "not_observed")
-                   for version in ({"status": status}, {"status": status, "content_hash": None})}
         for file in item.get("files", ()):
+            if not isinstance(file, dict):
+                continue
             key = file_state_key(file, current)
-            if key in changed and file.get("current_version", {}).get("status") == "stat_observed":
-                prior_status = item.get("_previous_file_status", {}).get(key)
-                if prior_status in {"outside_workspace", "outside_scope", "unknown", "unavailable", "not_observed"} or (prior_status is None and previous_files[key] in unknown):
+            version = file.get("current_version", {})
+            if (key in changed and version.get("status") == "stat_observed"
+                    and all(type(version.get(field)) is int and version[field] >= 0 for field in ("size", "mtime_ns"))):
+                prior_status = _coherent_file_status(previous_files[key], item.get("_previous_file_status", {}).get(key), legacy=True)
+                if prior_status not in {None, "stat_observed"}:
                     item["file_state_restored"] = True
-                elif prior_status in {None, "stat_observed"}:
+                    item["_restored_file_paths"].append(key)
+                else:
                     item["file_state_metadata_changed"] = True
+                    item["_metadata_changed_file_paths"].append(key)
     else:
         item.pop("file_state_changed", None)
     if item.get("file_observation", {}).get("reason") == "file_identity_unavailable":
@@ -174,6 +202,8 @@ def coalesce(items):
         if old is not None:
             old["_notice_members"].append(item)
             old["_changed_file_paths"] = sorted(set(old.get("_changed_file_paths", old["file_state"])) | set(facts))
+            for field in ("_metadata_changed_file_paths", "_restored_file_paths"):
+                old[field] = sorted(set(old.get(field, ())) | set(item.get(field, ())))
         else:
             copy = dict(item, _notice_members=[item])
             result.append(copy)

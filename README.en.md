@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current source v1.4.63 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current source v1.4.64 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1165,7 +1165,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.63 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.64 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1834,7 +1834,14 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.63</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.64</summary>
+
+## Pending notices and resilient file-check scheduling (1.4.64)
+
+- **Reading does not acknowledge a notice:** candidate pagination, search and rereads retain queued risk notices until the complete notice is returned and acknowledged. Restored scope receives an accurate state-transition notice; version and owner checks still apply.
+- **Describe this transition:** work source updates compare file states with the last actual display. A restored file is not mislabeled by a companion's already-acknowledged difference from original capture. Contradictory derived status and fingerprints receive conservative classification.
+- **Bounded recovery:** malformed auxiliary file state degrades safely, invalid rotation ranks recover, and scheduling reads only auxiliary rows belonging to the current at-most-100 retained exposures. The 256-file scan cap and undelivered baselines remain.
+- **Compatibility:** schema/protocol remain 25 and indexes 7/3/1. Updating changes no administrator, publication or directory policy, rewrites no historical text and starts no model calls. Live-host acceptance remains separate.
 
 ## File verification states and displayed-file checks (1.4.63)
 
