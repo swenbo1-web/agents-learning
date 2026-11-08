@@ -816,15 +816,20 @@ class WorkMemoryMixin:
         return {"event_id": event_id, "capture_digest": event.get("capture_digest") or digest(json.loads(event["payload"])),
                 "state": state, "source_version": digest([event["id"], event["payload"], signature])}
 
-    def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None,
-                   _previous_file_state=None, _file_versions=None, _file_roots=None):
+    def _work_source_item(self, project, row, *, preview_query=None, _source_cache=None):
         from .runtime import clean, digest
         row = dict(row)
         original_body = json.loads(row["body"])
         body = clean(original_body)
         sources = self.db.execute("SELECT event_id,source_hash,source_version FROM work_memory_sources WHERE project=? AND memory_id=? ORDER BY event_id",
                                   (project, row["id"])).fetchall()
-        snapshots = [self.work_source_snapshot(project, source["event_id"]) for source in sources]
+        cache = {} if _source_cache is None else _source_cache
+        snapshot_cache = cache.setdefault("snapshots", {})
+        snapshots = []
+        for source in sources:
+            if source["event_id"] not in snapshot_cache:
+                snapshot_cache[source["event_id"]] = self.work_source_snapshot(project, source["event_id"])
+            snapshots.append(snapshot_cache[source["event_id"]])
         mismatch = any(snapshot.get("capture_digest") != source["source_hash"] for source, snapshot in zip(sources, snapshots))
         changed = any(snapshot["source_version"] != source["source_version"] for source, snapshot in zip(sources, snapshots))
         state = ("missing" if any(s["state"] == "missing" for s in snapshots) else "source_changed" if mismatch else
@@ -833,13 +838,73 @@ class WorkMemoryMixin:
                  "source_changed" if row["event_id"] is None and changed else
                  snapshots[0]["state"] if row["event_id"] is not None and len(snapshots) == 1 else "model_reported")
         files = []
+        link_cache = cache.setdefault("file_links", {})
         for source in sources:
-            for file in self.db.execute("SELECT * FROM work_file_links WHERE project=? AND event_id=? ORDER BY checkout_key,path_key,relation LIMIT 16",
-                                        (project, source["event_id"])):
+            if source["event_id"] not in link_cache:
+                link_cache[source["event_id"]] = [dict(file) for file in self.db.execute(
+                    "SELECT * FROM work_file_links WHERE project=? AND event_id=? ORDER BY checkout_key,path_key,relation LIMIT 16",
+                    (project, source["event_id"]))]
+            for file in link_cache[source["event_id"]]:
                 item = {"relative_path": file["relative_path"], "checkout_key": file["checkout_key"],
                         "relation": file["relation"], "version": json.loads(file["version"])}
                 if item not in files:
                     files.append(item)
+        from .candidate_references import lineage_risk
+        lineage_cache = cache.setdefault("lineage", {})
+        reference_risks = []
+        for source in sources:
+            if source["event_id"] not in lineage_cache:
+                lineage_cache[source["event_id"]] = lineage_risk(self, project, source["event_id"])
+            risk = lineage_cache[source["event_id"]]
+            if risk and risk.get("blocked", True):
+                reference_risks.append(risk)
+        from .work_publication_risk import assess
+        publication_cache = cache.setdefault("publication", {})
+        material_key = (original_body.get("summary", ""), tuple(source["event_id"] for source in sources))
+        if material_key not in publication_cache:
+            publication_cache[material_key] = assess(self, project, material_key[0], list(material_key[1]))
+        publication_risks = publication_cache[material_key]
+        source_identity = [row["revision"], row["body"], snapshots, reference_risks]
+        if publication_risks:
+            source_identity.append({"published_knowledge_risk": publication_risks})
+        if body != original_body:
+            # Refresh affected display receipts, not the authority hash or
+            # evidence grade. Unaffected historical identities stay stable.
+            source_identity.append({"masked_projection": digest(body)})
+        # Capture mismatch can change health without changing the live snapshot.
+        # Keep healthy legacy fingerprints stable; only append the missing risk.
+        if mismatch:
+            source_identity.append({"capture_state": state})
+        risk_kind = ("source_missing" if any(snapshot["state"] == "missing" for snapshot in snapshots) else
+                     "capture_mismatch" if mismatch else
+                     "operation_conflict" if any(snapshot["state"] == "conflicted" for snapshot in snapshots) else
+                     "operation_denied" if any(snapshot["state"] == "denied" for snapshot in snapshots) else
+                     "source_failed" if any(snapshot["state"] == "failed" for snapshot in snapshots) else
+                     "candidate_reference_risk" if reference_risks else
+                     "published_knowledge_risk" if publication_risks else None)
+        return ({"memory_id": row["id"], "revision": row["revision"],
+                "source_version": digest(source_identity), "state": state,
+                **({"automatic_eligible": False, "file_projection_incomplete": True}
+                   if body.get("coverage", {}).get("file_projection_complete") is False else {}),
+                **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
+                **({"published_knowledge_risk": publication_risks, "automatic_eligible": False} if publication_risks else {}),
+                "type": body["type"], "title": _work_display_title(body, files),
+                "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
+                "completion": body.get("completion", "complete"), "execution_authority": False,
+                "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
+                "files_count": len(files), "coverage": body.get("coverage", {}),
+                "created": row["created"], "summary_only": True, "read_required": True,
+                "permission_restored": False, "source_changed": changed,
+                "task_binding_known": row["task_id"] is not None,
+                }, files, risk_kind)
+
+    def _work_item(self, project, row, *, workspace=None, file_paths=None, preview_query=None,
+                   _previous_file_state=None, _file_versions=None, _file_roots=None,
+                   _source_projection=None, _include_source_risk=False):
+        from .runtime import digest
+        source_item, source_files, risk_kind = (_source_projection if _source_projection is not None else
+            self._work_source_item(project, row, preview_query=preview_query))
+        files = [dict(file) for file in source_files]
         focus = {str(path) for path in (file_paths or [])[:3]}
         if focus:
             files.sort(key=lambda item: (item["relative_path"] not in focus and _file_focus_key(item) not in focus,
@@ -899,40 +964,17 @@ class WorkMemoryMixin:
                     observe(item)
         states = {state_key(item): observed[state_key(item)] for item in visible_files if state_key(item) in observed}
         file_state = states or None
-        from .candidate_references import lineage_risk
-        reference_risks = [risk for source in sources
-                           if (risk := lineage_risk(self, project, source["event_id"])) and risk.get("blocked", True)]
-        from .work_publication_risk import assess
-        publication_risks = assess(self, project, original_body.get("summary", ""),
-                                   [source["event_id"] for source in sources])
-        source_identity = [row["revision"], row["body"], snapshots, reference_risks]
-        if publication_risks:
-            source_identity.append({"published_knowledge_risk": publication_risks})
-        if body != original_body:
-            # Refresh affected display receipts, not the authority hash or
-            # evidence grade. Unaffected historical identities stay stable.
-            source_identity.append({"masked_projection": digest(body)})
-        # Capture mismatch can change health without changing the live snapshot.
-        # Keep healthy legacy fingerprints stable; only append the missing risk.
-        if mismatch:
-            source_identity.append({"capture_state": state})
-        return {"memory_id": row["id"], "revision": row["revision"],
-                "source_version": digest(source_identity), "state": state,
-                **({"automatic_eligible": False, "file_projection_incomplete": True}
-                   if body.get("coverage", {}).get("file_projection_complete") is False else {}),
-                **({"candidate_reference_risk": reference_risks, "automatic_eligible": False} if reference_risks else {}),
-                **({"published_knowledge_risk": publication_risks, "automatic_eligible": False} if publication_risks else {}),
-                "type": body["type"], "title": _work_display_title(body, files),
-                "summary": (_work_preview(body["summary"], preview_query) if preview_query is not None else body["summary"][:240]),
-                "completion": body.get("completion", "complete"), "execution_authority": False,
-                "validation_level": body["validation_level"], "source_event_refs": [source["event_id"] for source in sources],
-                "files": visible_files, "files_count": len(files), "coverage": body.get("coverage", {}),
-                **({"file_observation": file_observation} if file_observation is not None else {}),
-                **({"source_files_unverified": True} if any(item.get("version_unverified") for item in visible_files) else {}),
-                "created": row["created"], "summary_only": True, "read_required": True,
-                "permission_restored": False, "source_changed": changed,
-                "task_binding_known": row["task_id"] is not None,
-                "file_state": file_state, "file_focus": sorted(focus)}
+        result = dict(source_item, files=visible_files, file_state=file_state, file_focus=sorted(focus))
+        # The source identity is cached, but a filename-focused index keeps
+        # the same title ordering as its visible file relationship preview.
+        result["title"] = _work_display_title(_body_projection(row), files)
+        if file_observation is not None:
+            result["file_observation"] = file_observation
+        if any(item.get("version_unverified") for item in visible_files):
+            result["source_files_unverified"] = True
+        if _include_source_risk and risk_kind:
+            result["_source_risk_kind"] = risk_kind
+        return result
 
     def _work_search_rows(self, project, query, *, file_path=None, workspace=None, limit=5,
                           conversation=None, agent_id=None, task_state=None, exclude_event_id=None,
@@ -1301,8 +1343,8 @@ class WorkMemoryMixin:
 
     def work_exposure_updates(self, project, conversation, agent_id=None, limit=3, *, workspace=None,
                               _notice_gate=None):
-        from .work_notice_delivery import mark_file_transition, canonical_file_states
-        result = []
+        from .work_notice_delivery import mark_file_transition, canonical_file_states, pending_source_risk
+        result, risks, ordinary = [], [], []
         # Scheduling observations commit on direct calls. An outer context
         # delivery transaction still owns and may roll back the whole round.
         with _write_snapshot(self):
@@ -1347,6 +1389,15 @@ class WorkMemoryMixin:
                 schedule, persistent = {}, False
                 start = cursors.get(owner, 0) % max(1, len(rows))
                 rows = rows[start:] + rows[:start]
+            # Source validity is checked for the retained owner before file
+            # rotation or result limits. Cache only this SQLite snapshot;
+            # final delivery independently revalidates the selected items.
+            source_cache = {}
+            projections = {row["id"]: self._work_source_item(project, row, _source_cache=source_cache) for row in rows}
+            pending = {row["id"] for row in rows if projections[row["id"]][2]
+                       and projections[row["id"]][0]["source_version"] != row["shown_version"]}
+            rows = sorted(rows, key=lambda row: row["id"] not in pending)
+            risk_slots = min(len(pending), max(1, limit - 1)) if pending else 0
             roots = file_workspace_roots(self, project, workspace) if workspace else []
             primary = next((root["checkout_key"] for root in roots if root.get("primary")), None)
             versions = {}
@@ -1363,6 +1414,9 @@ class WorkMemoryMixin:
                                           (project, conversation)).fetchone()
             uncertainty_scope = [_task_key(task), self.session_epoch(), context[0] if context else 0, primary]
             for row in rows:
+                source_risk = row["id"] in pending
+                if source_risk and len(risks) >= limit:
+                    continue
                 fallback = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
                 stored = schedule.get(row["id"], {})
                 states = canonical_file_states(stored.get("file_states"), baseline=fallback,
@@ -1375,10 +1429,11 @@ class WorkMemoryMixin:
                     key = canonical[65:] if primary and canonical.startswith(primary + ":") else canonical
                     old_files[key], old_status[key] = value["fingerprint"], value["status"]
                 cost = min(WORK_EXPOSURE_FILE_CHECK_LIMIT, len(old_files))
-                can_check = workspace and cost <= WORK_EXPOSURE_CALLBACK_FILE_LIMIT - len(versions)
+                can_check = workspace and not source_risk and cost <= WORK_EXPOSURE_CALLBACK_FILE_LIMIT - len(versions)
                 item = self._work_item(project, row, workspace=workspace if old_files and can_check else None,
                                        file_paths=list(old_files), _previous_file_state=old_files,
-                                       _file_versions=versions, _file_roots=roots)
+                                       _file_versions=versions, _file_roots=roots,
+                                       _source_projection=projections[row["id"]], _include_source_risk=True)
                 item["_previous_file_status"] = old_status
                 if fallback and not old_files:
                     item["file_observation"] = {"complete": False, "checked_count": 0,
@@ -1386,7 +1441,7 @@ class WorkMemoryMixin:
                     item["files"], item["file_state"] = [], None
                 elif old_files and not can_check:
                     item["file_observation"] = {"complete": False, "checked_count": 0,
-                        "total_count": len(old_files), "reason": "file_check_budget"}
+                        "total_count": len(old_files), "reason": "source_risk_notice" if source_risk else "file_check_budget"}
                 elif len(states) < len(fallback):
                     item["file_observation"] = {"complete": False, "checked_count": len(states),
                         "total_count": len(fallback), "reason": "file_identity_unavailable"}
@@ -1420,6 +1475,7 @@ class WorkMemoryMixin:
                         item["_uncertainty_delivered"] = True
                 file_changed = bool(item.get("file_state_changed"))
                 source_changed = item["source_version"] != row["shown_version"]
+                item["_pending_source_risk"] = source_risk and source_changed
                 if source_changed:
                     item["source_changed"] = True
                 if source_changed or file_changed:
@@ -1427,8 +1483,13 @@ class WorkMemoryMixin:
                         continue
                     if _notice_gate is not None and _notice_gate.deferred(item):
                         continue  # Deferred ordinary notices cannot occupy a risk update's slot.
-                    result.append(item)
-                    if len(result) >= limit:
+                    if pending_source_risk(item):
+                        risks.append(item)
+                    else:
+                        ordinary.append(item)
+                    if ((not pending and len(ordinary) >= limit)
+                            or (pending and len(risks) >= risk_slots and len(ordinary) >= limit - risk_slots)
+                            or (limit == 1 and risks)):
                         break
             if not persistent:
                 cursors[owner] = cursors.get(owner, 0) + max(1, checked_rows)
@@ -1437,7 +1498,10 @@ class WorkMemoryMixin:
             if rotation_succeeded and not rotation_failed:
                 failed_owners.discard(owner)
             self._work_file_schedule_failures = set(list(failed_owners)[-100:])
-        return result
+        if ordinary and risks and limit > 1:
+            selected = risks[:risk_slots]
+            return selected + ordinary[:limit - len(selected)]
+        return (risks + ordinary)[:limit]
 
     def work_context_items(self, project, conversation, query="", *, workspace=None, raw=None,
                            agent_id=None, limit=3, task_state=None, delivery="persistent", compact=False,
@@ -1594,7 +1658,8 @@ class WorkMemoryMixin:
                     public_messages.add(parent)
                 if len(result) >= limit:
                     break
-            return result[:limit]
+            from .work_notice_delivery import pending_source_risk
+            return sorted(result, key=lambda item: not pending_source_risk(item))[:limit]
 
     def _work_prefer_complete_ag_delivery(self, project, rows, *, workspace, file_paths, query, handoff_scopes):
         """Deduplicate a proven short Post/Stop pair inside the existing recall pool.
@@ -1832,13 +1897,11 @@ class WorkMemoryMixin:
             row = self.db.execute("SELECT * FROM work_memories WHERE project=? AND id=?", (project, item.get("memory_id"))).fetchone()
             if row is not None and row["revision"] == item.get("revision"):
                 current = self._work_item(project, row, workspace=workspace, file_paths=item.get("file_focus"),
-                                          preview_query=item.get("_preview_query"))
+                                          preview_query=item.get("_preview_query"), _include_source_risk=True)
                 if isinstance(item.get("file_observation"), dict):
                     current["file_observation"] = dict(item["file_observation"])
                 if item.get("_uncertainty_token"):
                     current["_uncertainty_token"] = item["_uncertainty_token"]
-                if current.get("file_projection_incomplete"):
-                    continue
                 body = _body_projection(row)
                 coverage = body.get("coverage", {})
                 if body.get("type") == "file_change":
@@ -1878,6 +1941,12 @@ class WorkMemoryMixin:
                     # Files may have changed again since recall. Recompute the
                     # transition against current exposure, not recalled paths.
                     _notice_gate.annotate(current)
+                elif (item.get("_pending_source_risk") and current.get("_source_risk_kind")
+                      and current["source_version"] == item["source_version"]):
+                    current["_pending_source_risk"] = True
+                from .work_notice_delivery import pending_source_risk
+                if current.get("file_projection_incomplete") and not pending_source_risk(current):
+                    continue
                 if current.get("published_knowledge_risk") and not current.get("source_changed"):
                     continue
                 if (not current.get("source_changed") and not current.get("file_state_changed")

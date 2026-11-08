@@ -582,8 +582,33 @@ class KnowledgeContextMixin:
             # Candidate references and work history use one optional pool. A
             # candidate fault must not remove formal cards or task boundaries.
             optional_budget = min(max(0, remaining()), work_settings.get("max_context_chars", 600))
+            from .work_notice_delivery import pending_source_risk
+            validated, notices = [], None
+            if work_items:
+                self.db.execute("SAVEPOINT optional_work_validation")
+                try:
+                    notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
+                    # Refresh once in the final transaction. The same objects
+                    # drive priority and rendering; recall snapshots cannot
+                    # reserve budget or acknowledge a source warning.
+                    validated = self.work_validate_items(project, work_items, workspace=workspace,
+                        conclusion_max_chars=240, applicability_query=effective, _notice_gate=notices)
+                    validated.sort(key=lambda item: not pending_source_risk(item))
+                except ContractError:
+                    self.db.execute("ROLLBACK TO optional_work_validation")
+                    self.db.execute("RELEASE optional_work_validation")
+                    raise
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    self.db.execute("ROLLBACK TO optional_work_validation")
+                    self.db.execute("RELEASE optional_work_validation")
+                    validated = []
+                    work_context_failed = True
+                else:
+                    self.db.execute("RELEASE optional_work_validation")
             candidate_delivered, candidate_used = [], 0
-            if candidate_items and context_handle:
+            # Already displayed source-validity risks use the existing optional
+            # pool before a new reference. An unfitting warning stays pending.
+            if candidate_items and context_handle and not any(pending_source_risk(item) for item in validated):
                 from .candidate_references import revalidate, record_exposure
                 from .candidate_reference_context import card
                 self.db.execute("SAVEPOINT optional_candidate_context")
@@ -627,7 +652,7 @@ class KnowledgeContextMixin:
                 else:
                     self.db.execute("RELEASE optional_candidate_context")
             work_delivered = []
-            if work_items:
+            if validated:
                 work_line_start = len(lines)
                 self.db.execute("SAVEPOINT optional_work_context")
                 work_coverage = list(dedup.entries)
@@ -642,16 +667,13 @@ class KnowledgeContextMixin:
                     from .work_notice_delivery import (FileNoticeGate, coalesce, file_notice,
                                                        protocol_only_file_summary, visible_exposures,
                                                        file_state_key, visible_file_keys)
-                    notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
-                    validated = self.work_validate_items(project, work_items, workspace=workspace,
-                                                         conclusion_max_chars=240, applicability_query=effective,
-                                                         _notice_gate=notices)
                     for work_item in coalesce(validated):
-                        if notices.deferred(work_item):
+                        source_risk = pending_source_risk(work_item)
+                        if not source_risk and notices.deferred(work_item):
                             continue  # No exposure acknowledgement; retry latest state at a later supported event.
                         from .candidate_reference_context import suppress_work
                         changed_work = bool(work_item.get("source_changed") or work_item.get("file_state_changed"))
-                        if (suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
+                        if (not source_risk and suppress_work(self, project, work_item, [*delivered, *candidate_delivered])
                                 and (not changed_work or work_item.get("candidate_reference_risk"))):
                             continue
                         handoff = work_item.get("reference_role") == "task_handoff"

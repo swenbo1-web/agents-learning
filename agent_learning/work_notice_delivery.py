@@ -9,6 +9,13 @@ import sqlite3
 import time
 
 DEFER_SECONDS = 30
+SOURCE_RISK_KINDS = frozenset({"capture_mismatch", "source_missing", "operation_conflict", "operation_denied",
+                               "source_failed", "candidate_reference_risk", "published_knowledge_risk"})
+
+
+def pending_source_risk(item):
+    """Only a fresh, unacknowledged validity change reserves the risk lane."""
+    return (item.get("_pending_source_risk") is True and item.get("_source_risk_kind") in SOURCE_RISK_KINDS)
 
 
 @lru_cache(maxsize=1)
@@ -304,6 +311,8 @@ class FileNoticeGate:
         if previous is not None:
             if previous["source_version"] != item["source_version"]:
                 item["source_changed"] = True
+        item["_pending_source_risk"] = bool(previous and item.get("_source_risk_kind") in SOURCE_RISK_KINDS
+                                             and previous["source_version"] != item["source_version"])
         fallback = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
         mark_file_transition(item, displayed_file_baseline(self.r, self.project, self.conversation,
                                                          self.agent, item, fallback))
@@ -323,6 +332,8 @@ class FileNoticeGate:
         return [digest(path) for path in sorted(paths)]
 
     def deferred(self, item):
+        if pending_source_risk(item):
+            return False  # Ordinary file cooldowns cannot suppress a new validity warning.
         if item.get("_uncertainty_delivered") and self.delivery == "persistent":
             return True
         keys = self._keys(item)

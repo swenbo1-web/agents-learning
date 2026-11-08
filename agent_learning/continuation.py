@@ -47,6 +47,18 @@ _EN_FOLLOWUP = re.compile(
 _ZH_PROGRESS = re.compile(
     r"(?:请|麻烦)?(?:按你说的|按此|按上述方案|按原计划)?"
     r"(?:继续|接着)(?:推进|进行|执行|完成)?(?:一下|下去)?(?:吧)?\Z")
+# Generic plan references preserve the existing subject only when the entire
+# prompt remains action-only. A named/numbered/new plan, object or negation is
+# deliberately outside this grammar; no plan text or identifier is stripped.
+_ZH_PLAN_PROGRESS = re.compile(
+    r"(?:请|麻烦)?(?:继续|接着)?(?:按照|按|照)(?:原|既定|上述|当前|这个|此)?(?:计划|方案|安排)"
+    r"(?:(?:继续|接着)(?:推进|进行|执行|完成)?|推进|进行|执行|完成|落实|实施)"
+    r"(?:(?:并且|然后|并|和|及|再|、|，|,)" + _ZH_FOLLOWUP_ACTION + r")*"
+    r"(?:一下|下去)?(?:吧)?\Z")
+_EN_PLAN_PROGRESS = re.compile(
+    r"(?:please )?(?:proceed|continue|carry on|go on) "
+    r"(?:as planned|according to (?:the |our )?(?:existing |current |agreed )?plan"
+    r"|with (?:the |our )(?:existing |current |agreed )?plan)\Z")
 _ZH_ACK_PREFIX = re.compile(r"^(?:是的|好的|没问题|可以|同意|确认|确定|好)[，,、;；]*")
 _ZH_RESUMED_PREFIX = re.compile(
     r"^(?:(?:已经|已)(?:重启|重载|重连|重新连接|刷新)(?:完成|好了|了)?"
@@ -71,6 +83,8 @@ def is_continuation_query(value):
     return not value or any(phrase in _CONTINUATION_ACKS
                or bool(_ZH_CONTINUATION.fullmatch(phrase))
                or bool(_ZH_PROGRESS.fullmatch(phrase))
+               or bool(_ZH_PLAN_PROGRESS.fullmatch(phrase))
+               or bool(_EN_PLAN_PROGRESS.fullmatch(phrase))
                or bool(_EN_CONTINUATION.fullmatch(phrase))
                or bool(_ZH_FOLLOWUP.fullmatch(phrase))
                or bool(_EN_FOLLOWUP.fullmatch(phrase)) for phrase in candidates)
