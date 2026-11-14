@@ -8,6 +8,7 @@ Access, review and administrator tokens stay in memory, never browser storage.
 from .browser_admin_flow import FLOW_HTML, FLOW_JAVASCRIPT
 from .browser_workload_ui import WORKLOAD_HTML, WORKLOAD_JAVASCRIPT
 from .browser_reader_ui import READER_CSS, READER_JAVASCRIPT
+from .browser_theme import BROWSER_THEME_CSS
 from .browser_errors import ERROR_JAVASCRIPT
 from .browser_admin_loading import LOADING_JAVASCRIPT
 from .browser_phase_review import PHASE_HTML, PHASE_JAVASCRIPT
@@ -23,9 +24,9 @@ HTML = """<!doctype html>
 <label for="review-token" data-i18n="reviewCode">Review code (only for a review-enabled session)</label><input id="review-token" type="password" autocomplete="off" spellcheck="false">
 <label for="admin-token" data-i18n="adminCode">Administrator control code (only for a control-enabled session)</label><input id="admin-token" type="password" autocomplete="off" spellcheck="false"><button id="connect" class="primary" data-i18n="connect">Connect</button></section>
 <div id="loading" role="status" hidden data-i18n="loading">Reading local data…</div><div id="error" role="alert" hidden></div>
-<section id="application" hidden><div class="project-line"><div><span class="eyebrow" data-i18n="currentProject">CURRENT PROJECT</span><strong id="project"></strong></div><div class="button-row"><button id="refresh" data-i18n="refresh">Refresh</button><button id="disconnect" data-i18n="disconnect">Disconnect</button></div></div>
+<section id="application" hidden><div class="project-line"><div><span class="eyebrow" data-i18n="currentProject">CURRENT PROJECT</span><strong id="project"></strong><p id="project-context"></p></div><div class="button-row"><button id="refresh" data-i18n="refresh">Refresh</button><button id="disconnect" data-i18n="disconnect">Disconnect</button></div></div>
 <div id="stats" class="stats"></div><p id="mode-note" class="note"></p>
-<details id="knowledge-health" class="panel"><summary data-i18n="healthHeading">Knowledge check</summary><p class="note" data-i18n="healthNote">A local check of active knowledge after upgrading. Hosts share its progress; viewing this report does not run models or change knowledge. Missing fields are suggestions, not proof of an incorrect conclusion.</p><div id="health-result" aria-live="polite"></div><p id="health-error" class="note" role="status" hidden></p><div class="button-row"><button id="health-refresh" data-i18n="healthRefresh">Refresh report</button><button id="health-previous" data-i18n="previous">Previous</button><button id="health-next" data-i18n="next">Next</button></div></details>
+<details id="knowledge-health" class="panel"><summary><span data-i18n="healthHeading">Knowledge check</span><span id="health-state" class="badge"></span></summary><p class="note" data-i18n="healthNote">A local check of active knowledge after upgrading. Hosts share its progress; viewing this report does not run models or change knowledge. Missing fields are suggestions, not proof of an incorrect conclusion.</p><div id="health-result" aria-live="polite"></div><p id="health-error" class="note" role="status" hidden></p><div class="button-row"><button id="health-refresh" data-i18n="healthRefresh">Refresh report</button><button id="health-previous" data-i18n="previous">Previous</button><button id="health-next" data-i18n="next">Next</button></div></details>
 <section id="unresolved" class="panel" hidden aria-live="polite"><h2 data-i18n="unresolvedHeading">A decision is awaiting its receipt</h2><p class="note" data-i18n="unknownResult">The result is not confirmed. Retry the same decision to retrieve its receipt; do not create another one.</p><button id="resume-plan" data-i18n="recoverDecision">Retrieve the previous decision</button></section>
 <nav aria-label="Views" data-i18n-aria="views"><button data-view="knowledge" class="selected" data-i18n="knowledge">Knowledge</button><button data-view="candidates" data-i18n="candidates">Candidate review</button><button data-view="events" data-i18n="events">Event timeline</button><button data-view="admin" data-i18n="admin">Administrator queue</button><button id="admin-control-tab" data-view="admin-control" data-i18n="adminControl" hidden>Administrator settings</button></nav>
 <section id="admin-control-panel" class="panel" hidden aria-labelledby="admin-control-heading"><div class="page-line"><div><span class="eyebrow" data-i18n="adminControlEyebrow">PROJECT / HOST ADMINISTRATOR</span><h2 id="admin-control-heading" data-i18n="adminControl">Administrator settings</h2></div><span id="admin-state" class="badge"></span></div>
@@ -42,15 +43,16 @@ __REFERENCE_HTML__
 <section id="admin-recovery" class="admin-details" aria-live="polite"></section>
 __ADMIN_FLOW_HTML__
 <details class="admin-details"><summary data-i18n="adminStatusDetails">Queue, usage and blocked work</summary><div id="admin-queue-details"></div><div id="admin-usage-details"></div><p class="note" data-i18n="adminHistorySeparate">Historical import cases are excluded from this automatic queue. Failed or unknown calls require explicit review before retry.</p></details></section>
-<section id="browser-list-panel" class="panel"><div id="filters" class="filters"><label for="query" class="sr-only" data-i18n="searchLabel">Search titles and content</label><input id="query" data-i18n-placeholder="searchPlaceholder" placeholder="Error code, tool, or keyword" maxlength="200">
-<select id="state" aria-label="Publication state" data-i18n-aria="publicationState"><option value="active" data-i18n="active">Active</option><option value="all" data-i18n="allStates">All states</option><option value="revoked" data-i18n="revoked">Revoked</option></select>
-<select id="category" aria-label="Category" data-i18n-aria="category"><option value="" data-i18n="allCategories">All categories</option><option value="project" data-i18n="projectCategory">Project</option><option value="operation" data-i18n="operation">Operation</option><option value="professional" data-i18n="professional">Professional</option><option value="mixed" data-i18n="mixed">Mixed</option><option value="unknown" data-i18n="unknown">Unknown</option></select><button id="search" data-i18n="search">Search</button></div>
+<section id="browser-list-panel" class="panel" aria-labelledby="view-heading"><div class="view-intro"><div><h2 id="view-heading"></h2><p id="view-description" class="muted"></p></div></div>
+<div id="filters" class="filters"><div class="filter-field search-field"><label for="query" data-i18n="searchLabel">Search titles and content</label><input id="query" data-i18n-placeholder="searchPlaceholder" placeholder="Error code, tool, or keyword" maxlength="200"></div>
+<div class="filter-field"><label for="state" data-i18n="publicationState">Publication state</label><select id="state" aria-label="Publication state" data-i18n-aria="publicationState"><option value="active" data-i18n="active">Active</option><option value="all" data-i18n="allStates">All states</option><option value="revoked" data-i18n="revoked">Revoked</option></select></div>
+<div class="filter-field"><label for="category" data-i18n="category">Category</label><select id="category" aria-label="Category" data-i18n-aria="category"><option value="" data-i18n="allCategories">All categories</option><option value="project" data-i18n="projectCategory">Project</option><option value="operation" data-i18n="operation">Operation</option><option value="professional" data-i18n="professional">Professional</option><option value="mixed" data-i18n="mixed">Mixed</option><option value="unknown" data-i18n="unknown">Unknown</option></select></div><button id="search" class="primary" data-i18n="search">Search</button><button id="clear-filters" class="quiet" data-i18n="clearFilters">Reset filters</button></div>
 __WORKLOAD_HTML__
 <div id="candidate-tools" hidden><div class="page-line"><div><h2 data-i18n="reviewHeading">Turn useful candidates into knowledge</h2><p class="muted" data-i18n="reviewHint">Inspect the content and evidence. A preview fixes the exact items before you confirm.</p></div><select id="candidate-status" aria-label="Candidate state" data-i18n-aria="candidateState"><option value="pending" data-i18n="pending">Pending</option><option value="candidate" data-i18n="candidate">Candidates</option><option value="deferred" data-i18n="deferred">Deferred</option><option value="rejected" data-i18n="rejected">Rejected</option><option value="published" data-i18n="published">Published</option><option value="all" data-i18n="allStates">All states</option></select></div>
 <div class="selection-bar"><label class="check-label"><input id="select-page" type="checkbox"><span data-i18n="selectPage">Select this page</span></label><strong id="selection-count"></strong><button id="clear-selection" class="quiet" data-i18n="clear">Clear</button></div>
 <label for="review-reason" data-i18n="reasonLabel">Review note (optional)</label><textarea id="review-reason" maxlength="2000" rows="2" data-i18n-placeholder="reasonPlaceholder" placeholder="Reason for this decision"></textarea>
 <div class="button-row review-actions"><button id="approve-selected" data-review="approve" class="primary" data-i18n="previewApprove">Preview approval</button><button id="defer-selected" data-review="defer" data-i18n="previewDefer">Preview deferral</button><button id="reject-selected" data-review="reject" class="danger-quiet" data-i18n="previewReject">Preview rejection</button></div><p id="review-access-note" class="note"></p><button id="view-receipt" data-i18n="viewReceipt" hidden>View last decision result</button></div>
-<div class="page-line"><span id="page-label" class="muted"></span><div class="button-row"><button id="previous" data-i18n="previous">Previous</button><button id="next" data-i18n="next">Next</button></div></div><div id="list" tabindex="-1"></div></section>
+<div class="page-line"><span id="page-label" class="muted" role="status" aria-live="polite"></span><div class="button-row"><button id="previous" data-i18n="previous">Previous</button><button id="next" data-i18n="next">Next</button></div></div><div id="list" tabindex="-1"></div></section>
 <dialog id="receipt-dialog" aria-labelledby="receipt-heading"><section id="receipt" class="panel receipt" hidden aria-live="polite"><div class="page-line receipt-heading"><h2 id="receipt-heading" data-i18n="receipt">Decision receipt</h2><button id="close-receipt" data-i18n="close">Close</button></div><div id="receipt-error" role="alert" hidden></div><div id="receipt-summary"></div><div id="receipt-items"></div></section></dialog>
 <dialog id="detail-dialog" aria-labelledby="detail-title"><section id="detail" class="panel" hidden><div class="reader-heading"><div class="page-line"><div><span id="detail-kind" class="eyebrow"></span><h2 id="detail-title" tabindex="-1"></h2></div><button id="close-detail" data-i18n="closeDetail">Close details</button></div><div id="detail-review-actions" class="button-row" hidden><button data-single-review="approve" class="primary" data-i18n="previewApprove">Preview approval</button><button data-single-review="defer" data-i18n="previewDefer">Preview deferral</button><button data-single-review="reject" class="danger-quiet" data-i18n="previewReject">Preview rejection</button></div><div id="detail-error" role="alert" hidden></div><div id="detail-receipt-host"></div></div><p class="note" data-i18n="detailReading">Read content and evidence here. Closing returns to the same list position.</p><div id="detail-meta" class="tags"></div><div id="detail-context"></div><div id="preflight"></div>
 
@@ -62,7 +64,126 @@ __WORKLOAD_HTML__
 <dialog id="review-dialog" aria-labelledby="plan-heading"><div class="dialog-heading"><div><span class="eyebrow" data-i18n="decisionPreview">DECISION PREVIEW</span><h2 id="plan-heading"></h2></div><button id="close-plan" data-i18n="cancel">Cancel</button></div><p class="note" data-i18n="fixedPlan">This preview is a fixed selection. The server rechecks every item when you confirm; evidence levels remain unchanged.</p><p id="plan-meta" class="muted"></p><p id="plan-reason" translate="no"></p><div id="plan-items"></div><div id="plan-error" role="alert" hidden></div><div class="dialog-footer"><button id="confirm-plan" class="primary"></button><button id="cancel-plan" data-i18n="cancel">Cancel</button></div></dialog>
 </body></html>"""
 
-CSS = """.admin-form-grid .admin-summary-switch{display:flex;align-items:center;gap:8px}.admin-form-grid .admin-summary-switch input[type=checkbox]{display:inline-block;width:17px;margin:0}*{box-sizing:border-box}body{margin:0;background:#f3f5f3;color:#1d3029;font:15px/1.6 system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}header,main,footer{max-width:1200px;margin:auto;padding:26px 36px}header{padding-top:36px;display:flex;align-items:flex-start;justify-content:space-between;gap:28px}h1{font-size:34px;line-height:1.2;font-weight:650;letter-spacing:-1px;margin:12px 0}h2{font-size:21px;line-height:1.35;margin:0 0 10px}h3{font-size:17px;margin:26px 0 12px}p{margin:8px 0}.eyebrow{display:block;font-size:11px;font-weight:700;letter-spacing:1.8px;color:#697e71}header p{color:#63766b;max-width:640px}.header-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}.header-controls label{font-size:12px}.badge,.tag{display:inline-block;border-radius:18px;padding:4px 11px;background:#e3ebe5;color:#3e6450;font-size:12px;white-space:nowrap}.badge.review{background:#1d6146;color:#fff}.panel{background:#fff;border:1px solid #dce4dd;border-radius:14px;padding:24px;margin:20px 0;box-shadow:0 3px 12px #1d302904}.login{max-width:650px;margin:20px auto}.login label{display:block;margin-top:18px}.login input{display:block;width:100%;margin:6px 0 18px}button,input,select,textarea{font:inherit;color:inherit;border:1px solid #cbd7ce;border-radius:7px;padding:9px 12px;background:#fff}button{cursor:pointer;font-weight:550;line-height:1.4;transition:background .15s,border-color .15s}button:hover{background:#eef4ef;border-color:#8aa694}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #80b5a3;outline-offset:2px}button.primary{background:#236649;border-color:#236649;color:#fff}button.primary:hover{background:#164c35}button.danger-quiet{color:#a64537}button.quiet{border-color:transparent;background:transparent}button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cursor:default}input,textarea{max-width:100%}textarea{display:block;width:100%;resize:vertical;min-height:66px;margin:6px 0 12px}input[type=checkbox]{width:17px;height:17px;accent-color:#236649;flex-shrink:0}.project-line,.page-line,.button-row,.filters,.selection-bar,.dialog-heading,.dialog-footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.project-line,.page-line,.dialog-heading{justify-content:space-between}.project-line strong{display:block;font-size:18px;margin-top:3px;overflow-wrap:anywhere}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:24px}.stat{border:1px solid #dce4dd;border-radius:12px;padding:18px;background:#fff}.stat strong{display:block;font-size:30px;font-weight:650;line-height:1.4}.stat span{color:#718176;font-size:13px}.note,.muted,footer{color:#6c7b72;font-size:13px}.note{margin:15px 0}nav{display:flex;gap:7px;padding:5px;background:#e6ece7;border-radius:10px;max-width:100%;flex-wrap:wrap}nav button{background:transparent;border-color:transparent;color:#566a5e;padding:10px 17px}nav button.selected{background:#fff;color:#1d5238;box-shadow:0 1px 4px #1d302915}.filters{gap:10px}#query{flex:1;min-width:200px}.page-line{margin:17px 0}.selection-bar{background:#f2f6f3;border:1px solid #e0e9e2;border-radius:8px;padding:11px 13px;margin:16px 0}.check-label{display:flex;align-items:center;gap:9px;cursor:pointer}.selection-bar strong{margin-left:auto;font-size:13px}.review-actions{margin-top:12px}.card{padding:20px 0;border-top:1px solid #e5ebe6;overflow-wrap:anywhere}.card:first-child{border-top:0}.candidate-card{display:flex;align-items:flex-start;gap:12px}.candidate-card>input{margin-top:7px}.card-body{min-width:0;flex:1}.card-title{font-size:17px;text-align:left;border:0;background:transparent;padding:2px 0;color:#214f39}.card-title:hover{text-decoration:underline;background:transparent}.tags{color:#577161;font-size:12px;margin:7px 0}.card p{margin:8px 0}.checks{border-left:3px solid #aabeb0;padding:12px 15px;margin:16px 0;background:#f5f8f5;border-radius:0 8px 8px 0}.checks.ready{border-color:#438363}.checks.blocked{border-color:#ba725d;background:#fcf6f2}.checks ul{margin:8px 0;padding-left:22px}.checks .warning{color:#8e6632}.section-tabs{display:flex;gap:7px;margin-top:22px;flex-wrap:wrap}.section-tabs button.selected{background:#e5efe8;border-color:#8cae96}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7f9f7;border:1px solid #e1e8e2;border-radius:8px;padding:17px;max-height:70vh;overflow:auto}.history-item{padding:13px 0;border-bottom:1px solid #e5ebe6;overflow-wrap:anywhere}.history-item:last-child{border-bottom:0}.evidence-item{border:1px solid #e1e8e2;border-radius:8px;padding:14px;margin:12px 0}.evidence-item pre{margin-bottom:0;max-height:360px}.admin-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:30px;border-top:1px solid #e1e8e2;margin-top:24px}.admin-form-grid label{display:block;margin-top:12px}.admin-form-grid input,.admin-form-grid select{display:block;width:100%;margin-top:6px}.admin-limit-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.admin-model p{max-width:460px}.budget-scope{background:#f4efe2;border:1px solid #e6d9b6;color:#806129;padding:11px 13px;border-radius:8px;font-size:13px}.admin-command-row{padding-top:15px;border-top:1px solid #e1e8e2}.admin-details{margin-top:25px}.admin-details summary{cursor:pointer;font-weight:600}.admin-status-line{display:flex;justify-content:space-between;gap:15px;overflow-wrap:anywhere;padding:8px 0;border-bottom:1px solid #e8eee9}.admin-stats{margin-top:20px}.admin-stats .stat strong{font-size:26px}@media(max-width:700px){.admin-form-grid{grid-template-columns:1fr;gap:0}.admin-limit-grid{gap:10px}.admin-command-row button{flex:1}}.receipt{border-color:#8eb49b}.receipt-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.receipt-line .tag{margin-left:auto}#error,#plan-error{background:#fff1eb;border:1px solid #e0b5a7;color:#8b3d29;padding:13px 16px;border-radius:8px;overflow-wrap:anywhere}#loading{font-size:13px;color:#567863;padding:8px 0}label{font-size:13px;color:#5c7163}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[hidden]{display:none!important}dialog{width:min(760px,calc(100% - 32px));max-height:85vh;padding:25px;border:1px solid #c9d7cd;border-radius:16px;color:inherit;box-shadow:0 25px 90px #152a2840}dialog::backdrop{background:#142b254d;backdrop-filter:blur(2px)}.dialog-heading{align-items:flex-start}.dialog-footer{justify-content:flex-end;position:sticky;bottom:-25px;background:#fff;padding:20px 0 8px;margin-top:15px;border-top:1px solid #e0e8e2}#plan-items{max-height:42vh;overflow:auto}footer{padding-top:7px;padding-bottom:30px;border-top:1px solid #dce4dd;margin-top:30px}#detail{scroll-margin-top:16px}#detail-review-actions{margin:16px 0}@media(max-width:700px){header,main,footer{padding:21px 18px}header{display:block;padding-top:26px}h1{font-size:28px}.header-controls{justify-content:flex-start;margin-top:20px}.stats{grid-template-columns:repeat(2,1fr);gap:10px}.stat{padding:14px}.panel{padding:17px}.filters>*{flex:1}.project-line{align-items:flex-start}nav button{padding:9px 11px;font-size:13px}.selection-bar strong{margin-left:0}.dialog-footer button{flex:1}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}"""
+CSS = """.admin-form-grid .admin-summary-switch{display:flex;align-items:center;gap:8px}
+.admin-form-grid .admin-summary-switch input[type=checkbox]{display:inline-block;width:17px;margin:0}
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5f3;color:#1d3029;font:15px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header,main,footer{max-width:1200px;margin:auto;padding:26px 36px}
+header{padding-top:36px;display:flex;align-items:flex-start;justify-content:space-between;gap:28px}
+h1{font-size:34px;line-height:1.2;font-weight:650;letter-spacing:-1px;margin:12px 0}
+h2{font-size:21px;line-height:1.35;margin:0 0 10px}
+h3{font-size:17px;margin:26px 0 12px}
+p{margin:8px 0}
+.eyebrow{display:block;font-size:11px;font-weight:700;letter-spacing:1.8px;color:#697e71}
+header p{color:#63766b;max-width:640px}
+.header-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.header-controls label{font-size:12px}
+.badge,.tag{display:inline-block;border-radius:18px;padding:4px 11px;background:#e3ebe5;color:#3e6450;font-size:12px;white-space:nowrap}
+.badge.review{background:#1d6146;color:#fff}
+.panel{background:#fff;border:1px solid #dce4dd;border-radius:14px;padding:24px;margin:20px 0;box-shadow:0 3px 12px #1d302904}
+.login{max-width:650px;margin:20px auto}
+.login label{display:block;margin-top:18px}
+.login input{display:block;width:100%;margin:6px 0 18px}
+button,input,select,textarea{font:inherit;color:inherit;border:1px solid #cbd7ce;border-radius:7px;padding:9px 12px;background:#fff}
+button{cursor:pointer;font-weight:550;line-height:1.4;transition:background .15s,border-color .15s}
+button:hover{background:#eef4ef;border-color:#8aa694}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #80b5a3;outline-offset:2px}
+button.primary{background:#236649;border-color:#236649;color:#fff}
+button.primary:hover{background:#164c35}
+button.danger-quiet{color:#a64537}
+button.quiet{border-color:transparent;background:transparent}
+button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cursor:default}
+input,textarea{max-width:100%}
+textarea{display:block;width:100%;resize:vertical;min-height:66px;margin:6px 0 12px}
+input[type=checkbox]{width:17px;height:17px;accent-color:#236649;flex-shrink:0}
+.project-line,.page-line,.button-row,.filters,.selection-bar,.dialog-heading,.dialog-footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.project-line,.page-line,.dialog-heading{justify-content:space-between}
+.project-line strong{display:block;font-size:18px;margin-top:3px;overflow-wrap:anywhere}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:24px}
+.stat{border:1px solid #dce4dd;border-radius:12px;padding:18px;background:#fff}
+.stat strong{display:block;font-size:30px;font-weight:650;line-height:1.4}
+.stat span{color:#718176;font-size:13px}
+.note,.muted,footer{color:#6c7b72;font-size:13px}
+.note{margin:15px 0}
+nav{display:flex;gap:7px;padding:5px;background:#e6ece7;border-radius:10px;max-width:100%;flex-wrap:wrap}
+nav button{background:transparent;border-color:transparent;color:#566a5e;padding:10px 17px}
+nav button.selected{background:#fff;color:#1d5238;box-shadow:0 1px 4px #1d302915}
+.filters{gap:10px}
+#query{flex:1;min-width:200px}
+.page-line{margin:17px 0}
+.selection-bar{background:#f2f6f3;border:1px solid #e0e9e2;border-radius:8px;padding:11px 13px;margin:16px 0}
+.check-label{display:flex;align-items:center;gap:9px;cursor:pointer}
+.selection-bar strong{margin-left:auto;font-size:13px}
+.review-actions{margin-top:12px}
+.card{padding:20px 0;border-top:1px solid #e5ebe6;overflow-wrap:anywhere}
+.card:first-child{border-top:0}
+.candidate-card{display:flex;align-items:flex-start;gap:12px}
+.candidate-card>input{margin-top:7px}
+.card-body{min-width:0;flex:1}
+.card-title{font-size:17px;text-align:left;border:0;background:transparent;padding:2px 0;color:#214f39}
+.card-title:hover{text-decoration:underline;background:transparent}
+.tags{color:#577161;font-size:12px;margin:7px 0}
+.card p{margin:8px 0}
+.checks{border-left:3px solid #aabeb0;padding:12px 15px;margin:16px 0;background:#f5f8f5;border-radius:0 8px 8px 0}
+.checks.ready{border-color:#438363}
+.checks.blocked{border-color:#ba725d;background:#fcf6f2}
+.checks ul{margin:8px 0;padding-left:22px}
+.checks .warning{color:#8e6632}
+.section-tabs{display:flex;gap:7px;margin-top:22px;flex-wrap:wrap}
+.section-tabs button.selected{background:#e5efe8;border-color:#8cae96}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7f9f7;border:1px solid #e1e8e2;border-radius:8px;padding:17px;max-height:70vh;overflow:auto}
+.history-item{padding:13px 0;border-bottom:1px solid #e5ebe6;overflow-wrap:anywhere}
+.history-item:last-child{border-bottom:0}
+.evidence-item{border:1px solid #e1e8e2;border-radius:8px;padding:14px;margin:12px 0}
+.evidence-item pre{margin-bottom:0;max-height:360px}
+.admin-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:30px;border-top:1px solid #e1e8e2;margin-top:24px}
+.admin-form-grid label{display:block;margin-top:12px}
+.admin-form-grid input,.admin-form-grid select{display:block;width:100%;margin-top:6px}
+.admin-limit-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.admin-model p{max-width:460px}
+.budget-scope{background:#f4efe2;border:1px solid #e6d9b6;color:#806129;padding:11px 13px;border-radius:8px;font-size:13px}
+.admin-command-row{padding-top:15px;border-top:1px solid #e1e8e2}
+.admin-details{margin-top:25px}
+.admin-details summary{cursor:pointer;font-weight:600}
+.admin-status-line{display:flex;justify-content:space-between;gap:15px;overflow-wrap:anywhere;padding:8px 0;border-bottom:1px solid #e8eee9}
+.admin-stats{margin-top:20px}
+.admin-stats .stat strong{font-size:26px}
+@media(max-width:700px){.admin-form-grid{grid-template-columns:1fr;gap:0}
+.admin-limit-grid{gap:10px}
+.admin-command-row button{flex:1}
+}
+.receipt{border-color:#8eb49b}
+.receipt-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.receipt-line .tag{margin-left:auto}
+#error,#plan-error{background:#fff1eb;border:1px solid #e0b5a7;color:#8b3d29;padding:13px 16px;border-radius:8px;overflow-wrap:anywhere}
+#loading{font-size:13px;color:#567863;padding:8px 0}
+label{font-size:13px;color:#5c7163}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+[hidden]{display:none!important}
+dialog{width:min(760px,calc(100% - 32px));max-height:85vh;padding:25px;border:1px solid #c9d7cd;border-radius:16px;color:inherit;box-shadow:0 25px 90px #152a2840}
+dialog::backdrop{background:#142b254d;backdrop-filter:blur(2px)}
+.dialog-heading{align-items:flex-start}
+.dialog-footer{justify-content:flex-end;position:sticky;bottom:-25px;background:#fff;padding:20px 0 8px;margin-top:15px;border-top:1px solid #e0e8e2}
+#plan-items{max-height:42vh;overflow:auto}
+footer{padding-top:7px;padding-bottom:30px;border-top:1px solid #dce4dd;margin-top:30px}
+#detail{scroll-margin-top:16px}
+#detail-review-actions{margin:16px 0}
+@media(max-width:700px){header,main,footer{padding:21px 18px}
+header{display:block;padding-top:26px}
+h1{font-size:28px}
+.header-controls{justify-content:flex-start;margin-top:20px}
+.stats{grid-template-columns:repeat(2,1fr);gap:10px}
+.stat{padding:14px}
+.panel{padding:17px}
+.filters>*{flex:1}
+.project-line{align-items:flex-start}
+nav button{padding:9px 11px;font-size:13px}
+.selection-bar strong{margin-left:0}
+.dialog-footer button{flex:1}
+}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}
+}
+"""
 
 JAVASCRIPT = r"""'use strict';
 // Translations cover interface strings only, never project data or evidence.
@@ -116,6 +237,19 @@ provider_quota_exceeded:['The provider reported a rate or quota limit','提供�
 invalid_credential:['The provider reported an authentication failure','提供方报告认证失败'],
 invalid_response_schema:['The review output schema was rejected','审核输出格式约定被拒绝'],
 invalid_arguments:['The review launcher rejected its arguments','审核启动程序拒绝了参数']});
+Object.assign(strings,{
+ heading:['Project knowledge','项目知识库'],subtitle:['Find the conclusion. Check its context. Keep the evidence in reach.','先找到结论，再核对适用条件与证据。'],
+ reviewMode:['Candidate review access','可审批候选'],adminGateNote:['Administrator controls available','可访问管理设置'],
+ adminConsent:['Enabling review uses your host model quota. Publication follows your saved policy; historical imports remain separately authorized.','开启整理会使用宿主模型额度；发布遵循已保存的策略，历史吸收仍需单独授权。'],
+ clearFilters:['Reset filters','重置筛选'],
+ viewKnowledgeHint:['Search published records, then open a title to inspect content, applicability and source health.','搜索已发布记录，点击标题核对正文、适用条件与来源健康。'],
+ viewCandidatesHint:['Unpublished proposals are not established knowledge. Inspect evidence before previewing a decision.','候选尚非正式知识。先查看来源证据，再预览并确认审批决定。'],
+ viewEventsHint:['Observable messages and tool events, not internal model reasoning or proof of acceptance.','查看可观察消息与工具事件；这些记录不是模型内部思考，也不代表用户验收。'],
+ viewAdminHint:['Reviewable cases, evidence waits and protected attempts stay separate. Historical imports need their own authorization.','待审、待补证与受保护调用分别查看；历史批次不自动续审。'],
+ emptyViewTitle:['No records in this view','当前视图暂无记录'],emptyViewHint:['Try another view, or return after more work has been recorded.','可切换视图，或在产生更多工作记录后刷新。'],
+ emptySearchTitle:['No matching knowledge','没有匹配的知识'],emptySearchHint:['Try a shorter keyword, another category, or reset the filters. Search does not run a model.','可缩短关键词、调整分类或重置筛选；搜索不会调用模型。'],
+ healthOnDemand:['Read on demand','按需读取'],healthStale:['Snapshot out of date','体检快照已过期'],healthCurrent:['Publication snapshot matches','发布清单一致'],healthSnapshotUnknown:['Snapshot freshness unknown','快照新鲜度未知']
+});
 function executionObservationText(value){
  const v=value&&typeof value==='object'?value:{},flag=x=>x===true?t('observationYes'):x===false?t('observationNo'):t('unknown');
  const status=['completed','failed','cancelled','conflicted','unknown'].includes(v.protocol_terminal_status)?v.protocol_terminal_status:'unknown';
@@ -230,12 +364,13 @@ const healthView={data:null,offset:0,error:null};
 function healthControls(){for(const button of document.querySelectorAll("[data-health-current]"))button.disabled=state.busy||button.dataset.healthCurrent==="false";const next=healthView.data?.next_offset;$('health-previous').disabled=state.busy||healthView.offset===0;$('health-next').disabled=state.busy||next===null||next===undefined;}
 function renderHealth(){
  const box=$('health-result'),data=healthView.data;box.replaceChildren();
+ const badge=$('health-state');badge.textContent=t(!data?'healthOnDemand':data.snapshot_current===false?'healthStale':data.snapshot_current===true?'healthCurrent':'healthSnapshotUnknown');badge.setAttribute('data-tone',data?.snapshot_current===false?'warning':'neutral');
  $('health-error').textContent=healthView.error?errorText(healthView.error):'';$('health-error').hidden=!healthView.error;
  if(!data){box.append(node('p',t('healthUnloaded'),'muted'));healthControls();return;}
  box.append(node('strong',t('healthState_'+(strings['healthState_'+data.state]?data.state:'unavailable'))));
  if(data.state!=='not_started'&&data.state!=='unavailable'){
   box.append(node('p',t('healthSummary',{scanned:data.scanned,affected:data.affected,version:data.rule_version})),node('p',t('healthSnapshot'),'note'));
-  if(data.snapshot_current===false)box.append(node('p',t('healthChanged'),'note'));
+  if(data.snapshot_current===false)box.append(node('p',t('healthChanged'),'health-stale'));
   if(data.rule_version<data.expected_rule_version)box.append(node('p',t('healthOldRules'),'note'));
   if(data.completed)box.append(node('p',t('healthFinished',{time:stamp(data.completed)}),'muted'));
   const counts=Object.entries(data.issue_counts||{});if(counts.length)box.append(node('p',counts.map(([code,count])=>t(strings['healthIssue_'+code]?'healthIssue_'+code:'healthOther')+': '+count).join(' · '),'muted'));
@@ -295,12 +430,30 @@ function controls(){for(const b of document.querySelectorAll('button,input,selec
 function busy(value){state.busy=value;$('loading').hidden=!value;document.body.setAttribute('aria-busy',String(value));controls();}
 async function run(action){if(state.busy)return;busy(true);setError('');try{await action();}catch(e){if(e.uiKey!=='readCancelled')setError(e);}finally{busy(false);}}
 function renderMode(){const review=canReview(),admin=canAdmin();$('footer-note').textContent=t(state.view==='admin-control'&&admin?'adminFooter':'footer');$('admin-control-tab').hidden=!admin;$('mode').textContent=t(review?'reviewMode':admin?'adminGateNote':'readOnly');$('mode').classList.toggle('review',review||admin);$('mode-note').textContent=t(review?'modeReviewNote':admin?'adminModeNote':'modeReadNote');$('review-access-note').textContent=t(review?'readyAccess':state.session?.review_enabled?'noReviewToken':'modeReadNote');if(!admin){$('admin-control-panel').hidden=true;if(state.view==='admin-control'){state.view='knowledge';$('browser-list-panel').hidden=false;}}}
-function renderStats(){const data=state.statsData;if(!data)return;const pid=data.project_id||state.session?.project||'';const pname=data.project_name||'';const ppath=data.project_path||'';$('project').textContent=pname?(ppath?pname+' ('+ppath+') · '+pid:pname+' · '+pid):pid;$('stats').replaceChildren();for(const [title,value]of [['activeKnowledge',data.knowledge_active],['revokedKnowledge',data.knowledge_revoked],['observations',data.events],['stage_pending_review',data.workload?.stages?.pending_review??'—']]){const card=node('div',undefined,'stat');card.append(node('span',t(title)),node('strong',value||0));$('stats').append(card);}}
+function renderStats(){
+ const data=state.statsData;if(!data)return;
+ const pid=data.project_id||state.session?.project||'';
+ $('project').textContent=data.project_name||pid;
+ $('project-context').textContent=[data.project_path,pid].filter(Boolean).join(' · ');
+ $('stats').replaceChildren();
+ for(const [title,value]of [['activeKnowledge',data.knowledge_active],['revokedKnowledge',data.knowledge_revoked],['observations',data.events],['stage_pending_review',data.workload?.stages?.pending_review]]){
+  const card=node('div',undefined,'stat');card.append(node('span',t(title)),node('strong',value??t('unknown')));$('stats').append(card);
+ }
+}
+function renderViewIntro(){
+ const key={knowledge:'viewKnowledgeHint',candidates:'viewCandidatesHint',events:'viewEventsHint',admin:'viewAdminHint'}[state.view];
+ $('view-heading').textContent=t(state.view==='admin-control'?'adminControl':state.view);
+ $('view-description').textContent=key?t(key):'';
+}
+function appendCardTags(root,values){
+ const tags=node('div',undefined,'tags');for(const value of values.filter(Boolean))tags.append(node('span',value,'tag'));root.append(tags);
+}
 function renderPager(data){state.next=data.next_offset??null;$('page-label').textContent=t('pageLabel',{total:data.total,from:data.items.length?(data.offset??state.offset)+1:0,to:(data.offset??state.offset)+data.items.length});}
 function eventCard(item){const card=node('article',undefined,'card');card.append(node('strong',(item.type||'')+' · '+label(item.outcome)),node('div',stamp(item.created)+' '+(item.tool_name||''),'muted'),node('p',item.summary||''),node('div',item.id||item.event_id||'','muted'));return card;}
 function preflightNode(preflight,status){const published=status==='published';const currentIssues=(preflight?.issues||[]).filter(item=>!(published&&item.code==='candidate_state'));const healthy=Boolean(preflight&&(published?!currentIssues.length:preflight.publishable));const box=node('div',undefined,'checks '+(healthy?'ready':'blocked'));box.append(node('strong',t(!preflight?'noChecks':published?healthy?'publishedResult':'publishedNeedsReview':healthy?'publishable':'blocked')));for(const [kind,key]of [['issues','issues'],['warnings','warnings']]){const items=(kind==='issues'?currentIssues:preflight?.[kind]||[]).filter(item=>!(published&&item.code==='equivalent_active'));if(!items.length)continue;box.append(node('div',t(key),'muted'));const list=node('ul');for(const item of items){const key='check_'+item.code;const entry=node('li',strings[key]?t(key):item.message||item.code||textOf(item),kind==='warnings'?'warning':'');if(['source_invalid','history_blocked'].includes(item.code)&&item.message){const details=node('details');details.append(node('summary',t('originalCheck')),node('pre',item.message));entry.append(details);}list.append(entry);}box.append(list);}if(preflight?.history_budget_paused)box.append(node('p',t('budgetPaused'),'muted'));return box;}
 function renderSelection(){$('selection-count').textContent=t('selection',{count:state.selected.size,max:MAX_SELECTION});}
 function renderList(){
+ renderViewIntro();
  $('workload-tools').hidden=state.view!=='admin';
  if(state.view==='admin-control'){renderAdminState();return;}
  const target=$('list');target.replaceChildren();$('filters').hidden=state.view!=='knowledge';$('candidate-tools').hidden=state.view!=='candidates';
@@ -308,8 +461,21 @@ function renderList(){
  if(state.view==='admin'){renderWorkload(data);return;}
  for(const item of data.items){if(state.view==='events'){target.append(eventCard(item));continue;}
 const candidate=state.view==='candidates';const card=node('article',undefined,'card'+(candidate?' candidate-card':''));const body=node('div',undefined,'card-body');if(candidate){const check=node('input');check.type='checkbox';check.dataset.candidateCheck=candidateId(item);check.checked=state.selected.has(candidateId(item));check.setAttribute('aria-label',item.title||candidateId(item));check.addEventListener('change',()=>{const id=candidateId(item);if(check.checked){if(state.selected.size>=MAX_SELECTION){check.checked=false;setError(t('selectionLimit',{max:MAX_SELECTION}));return;}state.selected.set(id,{title:item.title});}else state.selected.delete(id);renderSelection();controls();});card.append(check);}
-const title=node('button',item.title||candidateId(item),'card-title');title.dataset.detailKey=(candidate?'candidate':'knowledge')+':'+(candidate?candidateId(item):item.knowledge_id);title.addEventListener('click',()=>run(()=>showDetail(candidate?'candidate':'knowledge',candidate?candidateId(item):item.knowledge_id,item.revision,title)));body.append(title,node('div',[label(candidate?item.status:item.state),!candidate?'r'+item.revision:'',label(item.category==='project'?'projectCategory':item.category),label(item.knowledge_kind),label(item.validation_level),item.knowledge_tier?label(item.knowledge_tier):'',!candidate?label(item.source_health):''].filter(Boolean).join(' · '),'tags'));if(item.preview)body.append(node('p',item.preview));body.append(node('div',stamp(item.created)+' · '+(candidate?candidateId(item):item.knowledge_id),'muted'));if(!candidate)knowledgeNotice(body,item);if(item.problem_changed)body.append(node('p',t('sourceChanged'),'tags'));if(candidate)body.append(preflightNode(item.preflight,item.status));card.append(body);target.append(card);}
-if(!data.items.length)target.append(node('p',t('empty'),'muted'));renderPager(data);renderSelection();}
+ const title=node('button',item.title||candidateId(item),'card-title');title.dataset.detailKey=(candidate?'candidate':'knowledge')+':'+(candidate?candidateId(item):item.knowledge_id);
+ title.addEventListener('click',()=>run(()=>showDetail(candidate?'candidate':'knowledge',candidate?candidateId(item):item.knowledge_id,item.revision,title)));body.append(title);
+ appendCardTags(body,[label(candidate?item.status:item.state),!candidate?'r'+item.revision:'',label(item.category==='project'?'projectCategory':item.category),label(item.knowledge_kind),label(item.validation_level),item.knowledge_tier?label(item.knowledge_tier):'',!candidate?label(item.source_health):'']);
+ if(item.preview)body.append(node('p',item.preview,'card-preview'));
+ if(!candidate)knowledgeNotice(body,item);
+ if(item.problem_changed)body.append(node('p',t('sourceChanged'),'note'));
+ if(candidate)body.append(preflightNode(item.preflight,item.status));
+ body.append(node('div',stamp(item.created)+' · '+(candidate?candidateId(item):item.knowledge_id),'card-footer'));card.append(body);target.append(card);
+ }
+ if(!data.items.length){
+  const filtered=state.view==='knowledge'&&($('query').value.trim()||$('category').value||$('state').value!=='active');
+  const empty=node('div',undefined,'empty-state');empty.append(node('strong',t(filtered?'emptySearchTitle':'emptyViewTitle')),node('p',t(filtered?'emptySearchHint':'emptyViewHint'),'muted'));target.append(empty);
+ }
+ renderPager(data);renderSelection();}
+
 async function loadStats(){state.statsData=await api('stats');renderStats();}
 async function loadList(){renderMode();const managing=state.view==='admin-control'&&canAdmin();$('browser-list-panel').hidden=managing;$('admin-control-panel').hidden=!managing;if(managing){$('detail').hidden=true;$('receipt').hidden=true;await loadAdminState();scheduleAdminPoll();return;}scheduleAdminPoll();const params={offset:state.offset,limit:20};let route=state.view;if(route==='knowledge'){route='knowledge-list';Object.assign(params,{q:$('query').value,state:$('state').value,category:$('category').value});}if(route==='candidates')params.status=$('candidate-status').value;if(route==='admin'){route='admin-groups';Object.assign(params,{view:workloadGroup?'cases':$('workload-view').value||'groups',stage:$('workload-stage').value||'pending_review',group_id:workloadGroup});}state.listData=await api(route,params);renderList();}
 function renderEvidence(data){const evidence=data.evidence||{items:[],total:0,offset:0,next_offset:null};const target=$('evidence-items');target.replaceChildren();for(const item of evidence.items){const box=node('article',undefined,'evidence-item');box.append(node('strong',item.type||item.event_type||item.event_id||item.id||''),node('div',[item.event_id||item.id,label(item.outcome),label(item.health),stamp(item.created)].filter(Boolean).join(' · '),'muted'));if(item.payload_text!==undefined)box.append(node('pre',item.payload_text));else if(item.payload!==undefined)box.append(node('pre',textOf(item.payload)));else box.append(node('pre',textOf(item)));if(item.truncated||item.payload_truncated)box.append(node('p',t('truncatedEvidence'),'muted'));target.append(box);}if(!evidence.items.length)target.append(node('p',t('noEvidence'),'muted'));state.evidenceNext=evidence.next_offset??null;$('evidence-label').textContent=t('pageLabel',{total:evidence.total,from:evidence.items.length?evidence.offset+1:0,to:evidence.offset+evidence.items.length});}
@@ -403,11 +569,12 @@ $('admin-observed-models').addEventListener('change',()=>{if($('admin-observed-m
 $('admin-global-calls').addEventListener('input',()=>{if(!adminGlobalDraft)adminGlobalDraft={version:state.adminData?.global_budget_policy?.version};});$('admin-global-save').addEventListener('click',()=>run(()=>{const payload=adminGlobalConfiguration();if(!window.confirm(t('adminGlobalConfirm',{limit:payload.limits.max_calls_per_day})))return;return sendAdminRequest('admin-control/configure',payload);}));
 $('admin-enable').addEventListener('click',()=>run(()=>saveAdminConfiguration('enable')));$('admin-save').addEventListener('click',()=>run(()=>saveAdminConfiguration('save')));$('admin-disable').addEventListener('click',()=>run(()=>saveAdminConfiguration('disable')));$('admin-wake').addEventListener('click',()=>run(()=>{if(state.adminDirty)throw new Error(t('adminSaveBeforeWake'));return sendAdminRequest('admin-control/wake',adminExpected(state.adminData));}));$('admin-reset').addEventListener('click',()=>run(()=>{adminGlobalDraft=null;return loadAdminState(true);}));$('admin-retry').addEventListener('click',()=>run(retryAdminRequest));$('admin-read-retry').addEventListener('click',()=>run(async()=>{state.adminPollFailures=0;await loadAdminState(true);}));document.addEventListener('visibilitychange',scheduleAdminPoll);
 async function connect(){state.token=$('token').value.trim()||state.token;state.reviewToken=$('review-token').value.trim()||state.reviewToken;state.adminToken=$('admin-token').value.trim()||state.adminToken;if(!state.token)throw new Error(t('noAccessCode'));state.session=await api('session');if(!state.languageChosen&&['en','zh-CN'].includes(state.session.language))state.language=state.session.language;staticLanguage();renderMode();await loadStats();$('token').value='';$('review-token').value='';$('admin-token').value='';$('login').hidden=true;$('application').hidden=false;await loadList();}
-function disconnect(){resetHealth();cancelBrowserReads();resetAdminReads();adminHistoryPage=null;adminHistoryError="";adminHistoryOffset=0;adminHistoryUpdated=0;adminHistoryReadOffset=null;adminHistoryInFlight=null;adminHistorySerial++;browserErrors.poll=null;resetReadingDialogs();$('view-receipt').hidden=true;workloadGroup='';historyReviewDrafts.clear();adminGlobalDraft=null;state.epoch++;clearTimeout(state.adminTimer);state.adminTimer=null;state.adminToken='';state.adminData=null;state.adminFormBase=null;state.adminDirty=false;state.adminStale=false;state.adminPending=null;state.adminResult=null;$('admin-token').value='';for(const id of ['admin-model','admin-daily-calls','admin-batch-calls','admin-batch-seconds','admin-run-seconds'])$(id).value='';$('admin-observed-models').replaceChildren();for(const id of ['admin-scope','admin-first-binding','admin-model-help','admin-edit-note','admin-state','admin-poll-error'])$(id).textContent='';$('admin-control-panel').hidden=true;$('browser-list-panel').hidden=false;state.token='';state.reviewToken='';state.session=null;state.selected.clear();state.detail=null;state.detailData=null;state.plan=null;state.planRequest=null;state.receipt=null;state.statsData=null;state.listData=null;state.history={};state.pages={};state.uncertain=false;$('token').value='';$('review-token').value='';$('application').hidden=true;$('login').hidden=false;$('detail').hidden=true;$('receipt').hidden=true;$('unresolved').hidden=true;for(const id of ['list','stats','workload-counts','workload-bound','sources','revisions','actions','source-events','evidence-items','plan-items','receipt-items','admin-status-cards','admin-readiness','admin-result','admin-queue-details','admin-usage-details'])$(id).replaceChildren();for(const id of ['project','detail-title','detail-meta','detail-text','field-label','page-label','plan-reason','plan-meta','receipt-summary'])$(id).textContent='';setError('');planError('');renderMode();controls();}
+function disconnect(){resetHealth();cancelBrowserReads();resetAdminReads();adminHistoryPage=null;adminHistoryError="";adminHistoryOffset=0;adminHistoryUpdated=0;adminHistoryReadOffset=null;adminHistoryInFlight=null;adminHistorySerial++;browserErrors.poll=null;resetReadingDialogs();$('view-receipt').hidden=true;workloadGroup='';historyReviewDrafts.clear();adminGlobalDraft=null;state.epoch++;clearTimeout(state.adminTimer);state.adminTimer=null;state.adminToken='';state.adminData=null;state.adminFormBase=null;state.adminDirty=false;state.adminStale=false;state.adminPending=null;state.adminResult=null;$('admin-token').value='';for(const id of ['admin-model','admin-daily-calls','admin-batch-calls','admin-batch-seconds','admin-run-seconds'])$(id).value='';$('admin-observed-models').replaceChildren();for(const id of ['admin-scope','admin-first-binding','admin-model-help','admin-edit-note','admin-state','admin-poll-error'])$(id).textContent='';$('admin-control-panel').hidden=true;$('browser-list-panel').hidden=false;state.token='';state.reviewToken='';state.session=null;state.selected.clear();state.detail=null;state.detailData=null;state.plan=null;state.planRequest=null;state.receipt=null;state.statsData=null;state.listData=null;state.history={};state.pages={};state.uncertain=false;$('token').value='';$('review-token').value='';$('application').hidden=true;$('login').hidden=false;$('detail').hidden=true;$('receipt').hidden=true;$('unresolved').hidden=true;for(const id of ['list','stats','workload-counts','workload-bound','sources','revisions','actions','source-events','evidence-items','plan-items','receipt-items','admin-status-cards','admin-readiness','admin-result','admin-queue-details','admin-usage-details'])$(id).replaceChildren();for(const id of ['project','project-context','view-heading','view-description','detail-title','detail-meta','detail-text','field-label','page-label','plan-reason','plan-meta','receipt-summary'])$(id).textContent='';setError('');planError('');renderMode();controls();}
 __WORKLOAD_JAVASCRIPT__
 __READER_JAVASCRIPT__
 $('connect').addEventListener('click',()=>run(connect));for(const id of ['token','review-token','admin-token'])$(id).addEventListener('keydown',e=>{if(e.key==='Enter')run(connect);});$('disconnect').addEventListener('click',disconnect);
 $('language').addEventListener('change',()=>{state.language=$('language').value;state.languageChosen=true;staticLanguage();renderMode();renderStats();renderHealth();renderList();renderDetail();for(const kind of Object.keys(state.history))renderHistory(kind);renderPlan();renderReceipt();renderAdminState();controls();});
+$('clear-filters').addEventListener('click',()=>run(async()=>{$('query').value='';$('category').value='';$('state').value='active';state.offset=0;await loadList();}));
 $('refresh').addEventListener('click',()=>run(async()=>{await loadStats();await loadList();if($('knowledge-health').open)await loadHealth(healthView.offset);if(state.detail){await loadField();if(state.detail.kind==='knowledge')for(const kind of ['revisions','actions','events'])await loadHistory(kind);}}));$('search').addEventListener('click',()=>run(async()=>{state.offset=0;await loadList();}));$('query').addEventListener('keydown',e=>{if(e.key==='Enter')$('search').click();});$('candidate-status').addEventListener('change',()=>run(async()=>{state.offset=0;await loadList();}));$('previous').addEventListener('click',()=>run(async()=>{state.offset=Math.max(0,state.offset-20);await loadList();}));$('next').addEventListener('click',()=>run(async()=>{if(state.next!==null){state.offset=state.next;await loadList();}}));
 for(const b of document.querySelectorAll('[data-view]'))b.addEventListener('click',()=>run(async()=>{changeBrowserView(b.dataset.view);state.offset=0;for(const x of document.querySelectorAll('[data-view]')){x.classList.toggle('selected',x===b);x.setAttribute('aria-current',x===b?'page':'false');}await loadList();}));
 $('clear-selection').addEventListener('click',()=>{state.selected.clear();renderList();controls();});$('select-page').addEventListener('change',()=>{const checked=$('select-page').checked;for(const item of (state.listData?.items||[]).filter(actionable)){const id=candidateId(item);if(checked){if(!state.selected.has(id)&&state.selected.size>=MAX_SELECTION){setError(t('selectionLimit',{max:MAX_SELECTION}));break;}state.selected.set(id,{title:item.title});}else state.selected.delete(id);}renderList();controls();});
@@ -421,7 +588,7 @@ __PHASE_JAVASCRIPT__
 """
 
 
-CSS += READER_CSS
+CSS += READER_CSS + BROWSER_THEME_CSS
 JAVASCRIPT = JAVASCRIPT.replace("__PHASE_JAVASCRIPT__", PHASE_JAVASCRIPT + REFERENCE_JAVASCRIPT)
 HTML = HTML.replace("__PHASE_HTML__", PHASE_HTML)
 HTML = HTML.replace("__REFERENCE_HTML__", REFERENCE_HTML)

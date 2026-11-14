@@ -230,7 +230,8 @@ window.__ModuleLoader__.load({
     }
 
     function currentPresetOf(summary) {
-      if (!summary || !summary.admin_admission_enabled) return "off";
+      if (summary?.admin_admission_enabled === false) return "off";
+      if (summary?.admin_admission_enabled !== true) return "custom";
       if (stageReview(summary)) return "custom";
       var daily = summary.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage.max_calls_per_day : null;
       if (daily === 5) return "minimal";
@@ -243,6 +244,95 @@ window.__ModuleLoader__.load({
     function installedProject(summary) {
       return !!summary && summary.ok === true && summary.installed === true &&
         typeof summary.project_id === "string" && summary.project_id.trim().length > 0;
+    }
+
+
+    Object.assign(TEXT.zh, {
+      title: "项目知识库", subtitle: "本地记忆 · 按需检索 · 可追溯证据",
+      openBrowser: "浏览知识库（只读）", openReview: "审批与管理设置", historyPending: "历史待办（需独立授权）",
+      overview: "项目概览", awaitingApproval: "待批准", reviewStatus: "自动整理状态",
+      admissionOn: "允许新审核", admissionOff: "新审核已暂停", policy: "策略开关",
+      route: "模型路由", budget: "预算准入", reviewMode: "审核方式", execution: "执行状态",
+      ready: "已就绪", notReady: "未就绪", available: "可用", unavailable: "受限",
+      phaseMode: "阶段集中审核", legacyMode: "逐案审核（兼容）", defaultPolicy: "默认策略",
+      idle: "空闲", worker_reserved: "已请求工作器", worker_claimed: "工作器已启动",
+      model_reserved: "模型调用已预留", model_launching: "模型进程启动中", model_started: "模型进程已启动",
+      today: "今日审核", usageDetails: "用量与队列详情", reviewSettings: "审核设置与频率",
+      maintenance: "维护与诊断", queueNote: "待审、待补证、待批准分别统计，不等于立即可运行的调用数。",
+      awaitingEvidence: "待补证 / 本地暂缓", observedAt: "状态读取于", staleStatus: "读取失败，保留上次成功状态",
+      refreshHint: "打开时读取一次；刷新不会启动审核。", safetyNote: "打开面板不会启用管理员、归档历史或发布知识。",
+      close: "关闭知识库面板", version: "插件版本", technical: "项目与安装信息",
+      dispatch_dsh_profile_unavailable: "当前查询环境没有可用的 DSH 模型配置快照。",
+      dispatch_dsh_profile_source_unbound: "来源会话尚未绑定 DSH profile，等待后续受信事件。",
+      dispatch_dsh_profile_source_mismatch: "DSH profile 与来源会话不一致，不能借用其他配置。",
+      dispatch_disabled: "新审核准入已关闭；已有工作记录仍可检索。",
+      dispatch_no_increment: "当前没有新的可审核材料。", dispatch_queue_not_checked: "本次未检查审核队列。",
+      dispatch_model_missing: "等待可确认的模型选择。", dispatch_available: "预算可用",
+      dispatch_concurrency_limited: "已有审核占用并发额度。", dispatch_token_budget_exhausted: "今日 token 预算不足。"
+    });
+    Object.assign(TEXT.en, {
+      title: "Project knowledge", subtitle: "Local memory · On-demand retrieval · Traceable evidence",
+      openBrowser: "Browse knowledge (read-only)", openReview: "Review and settings", historyPending: "Historical units (separate authorization)",
+      overview: "Project overview", awaitingApproval: "Awaiting approval", reviewStatus: "Automatic review",
+      admissionOn: "New reviews allowed", admissionOff: "New reviews paused", policy: "Policy switch",
+      route: "Model routing", budget: "Budget admission", reviewMode: "Review method", execution: "Execution",
+      ready: "Ready", notReady: "Not ready", available: "Available", unavailable: "Limited",
+      phaseMode: "Stage batches", legacyMode: "Case review (legacy)", defaultPolicy: "Default policy",
+      idle: "Idle", worker_reserved: "Worker requested", worker_claimed: "Worker started",
+      model_reserved: "Model call reserved", model_launching: "Model process starting", model_started: "Model process started",
+      today: "Reviews today", usageDetails: "Usage and queue details", reviewSettings: "Review settings and frequency",
+      maintenance: "Maintenance and diagnostics", queueNote: "Review, evidence and approval waits are separate, not immediately runnable calls.",
+      awaitingEvidence: "Evidence wait / locally deferred", observedAt: "Status read at", staleStatus: "Read failed; showing the last successful status",
+      refreshHint: "Read once on open; refreshing starts no review.", safetyNote: "Opening this panel enables no reviewer, history import or publication.",
+      close: "Close knowledge panel", version: "Plugin version", technical: "Project and installation",
+      dispatch_dsh_profile_unavailable: "This query environment has no available DSH model configuration snapshot.",
+      dispatch_dsh_profile_source_unbound: "The source chat has no DSH profile binding yet; waiting for a trusted event.",
+      dispatch_dsh_profile_source_mismatch: "The DSH profile differs from the source chat; another profile cannot be borrowed.",
+      dispatch_disabled: "New review admission is off; recorded work remains searchable.",
+      dispatch_no_increment: "No new reviewable material.", dispatch_queue_not_checked: "The review queue was not checked.",
+      dispatch_model_missing: "Waiting for a confirmed model selection.", dispatch_available: "Budget available",
+      dispatch_concurrency_limited: "Another review occupies the concurrency allowance.", dispatch_token_budget_exhausted: "The daily token budget is insufficient."
+    });
+
+    var PANEL_CSS = `
+.al-panel{display:flex;flex-direction:column;gap:16px;min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5;font-family:inherit}
+.al-panel *{box-sizing:border-box}.al-panel button{font:inherit;cursor:pointer;color:var(--dsw-alias-label-primary)}
+.al-panel button:disabled{opacity:.55;cursor:default}.al-panel button:focus-visible,.al-panel summary:focus-visible,.al-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}
+.al-panel-head,.al-section-head,.al-status-row,.al-actions button{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.al-panel-title{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:650}.al-caption{font-size:11.5px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.al-head-actions{display:flex;gap:6px;flex-shrink:0}.al-panel .al-quiet{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:7px;padding:4px 8px;font-size:11.5px}
+.al-panel .al-quiet:hover,.al-actions button:hover{background:var(--dsw-alias-bg-layer-2)}
+.al-project{border-left:3px solid var(--dsw-alias-brand-primary);padding-left:10px;min-width:0}.al-project strong{display:block;font-size:14px;overflow-wrap:anywhere}.al-project-path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.al-section-head{font-size:12px;font-weight:600;margin-bottom:8px}.al-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.al-stat{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:10px 8px;background:var(--dsw-alias-bg-layer-1);min-width:0}.al-stat span{display:block;font-size:10.5px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.al-stat strong{display:block;font-size:21px;line-height:1.4;font-weight:650;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.al-review{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:12px;background:var(--dsw-alias-bg-layer-1)}
+.al-status-row{padding:4px 0;font-size:12px;align-items:baseline}.al-status-row>span:first-child{color:var(--dsw-alias-label-secondary);flex-shrink:0}.al-status-row>span:last-child{text-align:right;overflow-wrap:anywhere;min-width:0}
+.al-badge{display:inline-flex;align-items:center;border:1px solid var(--dsw-alias-border-l1);border-radius:20px;padding:2px 8px;font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);max-width:100%;overflow-wrap:anywhere}
+.al-badge[data-tone=ready]{color:var(--dsw-alias-state-success-primary)}.al-badge[data-tone=warn]{color:var(--dsw-alias-state-warn-primary)}
+.al-notice{border-left:2px solid var(--dsw-alias-state-warn-primary);padding:5px 9px;margin-top:8px;font-size:11.5px;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--dsw-alias-label-secondary)}
+.al-usage-line{display:flex;flex-wrap:wrap;gap:5px 14px;font-size:12px;font-variant-numeric:tabular-nums}.al-usage-line strong{font-weight:650}.al-panel details{border-top:1px solid var(--dsw-alias-border-l1);padding-top:10px;min-width:0}.al-panel summary{font-size:12px;font-weight:550;cursor:pointer;color:var(--dsw-alias-label-secondary)}.al-details-body{padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.al-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.al-actions button{appearance:none;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:10px;font-size:12px;text-align:left;line-height:1.5}.al-actions .al-primary{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);border-color:var(--dsw-alias-brand-primary)}.al-actions .al-primary:hover{opacity:.9}.al-actions.al-maintenance{grid-template-columns:1fr}
+.al-presets{display:flex;gap:5px;flex-wrap:wrap}.al-presets button{appearance:none;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);padding:5px 8px;border-radius:7px;font-size:11px}.al-presets button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-2);font-weight:600}
+.al-panel-foot{font-size:10.5px;color:var(--dsw-alias-label-secondary)}.al-panel-note{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;border-left:2px solid var(--dsw-alias-brand-primary);padding-left:9px}
+.al-trigger{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12.5px;cursor:pointer}.al-trigger:hover,.al-trigger[aria-expanded=true]{background:var(--dsw-alias-bg-layer-2)}
+.al-dialog{width:min(460px,calc(100vw - 24px));max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);margin:auto;overflow:auto;overscroll-behavior:contain;padding:20px;border-radius:14px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);font:inherit}.al-dialog::backdrop{background:color-mix(in srgb,var(--dsw-alias-bg-base) 70%,transparent)}
+@media(max-width:380px){.al-dialog{padding:14px}.al-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.al-actions{grid-template-columns:1fr}}
+`;
+
+    function reviewRows(summary, t) {
+      var a = summary?.administrator || {}, admitted = a.admission_enabled ?? summary?.admin_admission_enabled;
+      var binary = function (value, yes, no) { return value === true ? yes : value === false ? no : t.unknown; };
+      var budget = summary?.admission?.admission_status;
+      var mode = a.review_mode || summary?.phase_review?.policy?.mode || summary?.panel_snapshot?.phase_review?.policy?.mode;
+      var rows = [
+        [t.policy, binary(a.policy_enabled, t.adminOn, t.adminOff)],
+        [t.route, binary(a.routing_ready, t.ready, t.notReady)],
+        [t.budget, budget === 'available' ? t.available : budget ? t.unavailable : t.unknown],
+        [t.reviewMode, mode === 'phase' ? t.phaseMode : mode === 'legacy' ? t.legacyMode : t.unknown],
+        [t.execution, t[a.phase] || (a.phase ? a.phase : t.unknown)]
+      ];
+      return { admitted: admitted, label: binary(admitted, t.admissionOn, t.admissionOff), rows: rows,
+        reason: a.routing_reason, model: a.model, configured: a.review_configured };
     }
 
     function buildControlPanel(react, localeRef) {
@@ -259,13 +349,17 @@ window.__ModuleLoader__.load({
         var statePair = react.useState(initialSummary || null);
         var notePair = react.useState("");
         var busyPair = react.useState(false);
-        var requestCell = react.useState({ current: null, busy: false })[0];
+        var localRequestCell = react.useState({ current: null, busy: false })[0];
+        var requestCell = props.requestCell || localRequestCell;
         var statusCell = react.useState({ scope: scopeKey, summaryScope: initialSummary ? scopeKey : null, request: 0, failed: false, failedScope: null })[0];
         var noteScopePair = react.useState(null);
+        var refreshPair = react.useState(false);
+        var refreshing = refreshPair[0], setRefreshing = refreshPair[1];
         statusCell.scope = scopeKey;
         var summary = statusCell.summaryScope === scopeKey ? statePair[0] : null;
         var setSummary = statePair[1];
         var note = noteScopePair[0] === scopeKey ? notePair[0] : "";
+        if (!note && requestCell.current) note = t.unresolved;
         var setNote = function (value) {
           if (statusCell.scope !== scopeKey) return;
           noteScopePair[1](scopeKey);
@@ -273,10 +367,12 @@ window.__ModuleLoader__.load({
         };
         var busy = busyPair[0];
         var setBusy = busyPair[1];
+        var pendingSettings = !!requestCell.current;
 
         var reload = react.useCallback(
           function () {
             var request = ++statusCell.request;
+            setRefreshing(true);
             return fetchStatus(cwd, sessionId)
               .then(function (data) {
                 if (statusCell.scope !== scopeKey || statusCell.request !== request) return;
@@ -291,6 +387,8 @@ window.__ModuleLoader__.load({
                 statusCell.failed = true;
                 statusCell.failedScope = scopeKey;
                 setNote(statusError(err, t));
+              }).finally(function () {
+                if (statusCell.scope === scopeKey && statusCell.request === request) setRefreshing(false);
               });
           },
           [cwd, sessionId, t.failed]
@@ -323,12 +421,14 @@ window.__ModuleLoader__.load({
             }
           }
           requestCell.busy = true;
+          if (props.onLockChange) props.onLockChange(true);
           setBusy(true);
           setNote(startMsg);
           postAction(action, cwd, sessionId, extra)
             .then(function (res) {
               requestCell.busy = false;
-              if (action === "set_admin_preset") requestCell.current = null;
+              if (action === "set_admin_preset" && requestCell.current?.request_id === extra.request_id) requestCell.current = null;
+              if (props.onLockChange) props.onLockChange(false);
               setBusy(false);
               setNote(doneFn(res));
               reload();
@@ -337,500 +437,188 @@ window.__ModuleLoader__.load({
               requestCell.busy = false;
               setBusy(false);
               setNote(actionError(err, t));
+              if (props.onLockChange) props.onLockChange(false);
               if (action === "set_admin_preset") {
                 postAction("admin_receipt", cwd, sessionId, {project_id: extra.project_id,
                   installation_id: extra.installation_id, request_id: extra.request_id})
                   .then(function (receipt) {
-                    if (receipt.found) { requestCell.current = null; setNote(doneFn(receipt.response)); reload(); }
+                    if (receipt.found) {
+                      if (requestCell.current?.request_id === extra.request_id) requestCell.current = null;
+                      setNote(doneFn(receipt.response)); reload();
+                    }
                     else if (err.status === 400 || err.status === 409) {
-                      requestCell.current = null; setNote(actionError(err, t)); reload();
+                      if (requestCell.current?.request_id === extra.request_id) requestCell.current = null;
+                      setNote(actionError(err, t)); reload();
                     } else { setNote(t.unresolved); reload(); }
                   }).catch(function () { setNote(t.unresolved); });
               }
             });
         }
 
-        var btnStyle = function (primary) {
-          return {
-            appearance: "none",
-            font: "inherit",
-            fontSize: "12.5px",
-            lineHeight: 1.4,
-            cursor: busy ? "default" : "pointer",
-            borderRadius: "8px",
-            padding: "7px 11px",
-            textAlign: "left",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "8px",
-            width: "100%",
-            border: primary
-              ? "1px solid transparent"
-              : "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.3))",
-            background: primary
-              ? "var(--dsw-alias-label-primary, #1f6feb)"
-              : "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.08))",
-            color: primary
-              ? "var(--dsw-alias-bg-layer-1, #ffffff)"
-              : "var(--dsw-alias-label-primary, inherit)",
-            opacity: busy ? 0.6 : 1,
-          };
-        };
 
-        var statCell = function (label, val) {
-          return h(
-            "div",
-            {
-              style: {
-                padding: "6px 8px",
-                borderRadius: "6px",
-                background: "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.07))",
-                fontSize: "12px",
-              },
-            },
-            h(
-              "div",
-              { style: { color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.85))", fontSize: "11px" } },
-              label
-            ),
-            h("div", { style: { fontWeight: 600, marginTop: "2px" } }, String(val))
-          );
+        var display = function (value) { return value ?? t.unknown; };
+        var statCell = function (label, value) {
+          return h("div", {className: "al-stat"}, h("span", null, label), h("strong", null, String(display(value))));
         };
-
+        var row = function (label, value, key) {
+          return h("div", {className: "al-status-row", key: key || label}, h("span", null, label), h("span", null, String(display(value))));
+        };
+        var actionButton = function (label, action, done, primary) {
+          return h("button", {type: "button", "data-action": action, disabled: busy || pendingSettings, className: primary ? "al-primary" : undefined,
+            onClick: function () { trigger(action, action === "archive_history" ? t.archiving : t.opening, done); }},
+            h("span", null, label), h("span", {"aria-hidden": true}, action === "stop_browser" ? "■" : "↗"));
+        };
         var projectUsage = summary?.project_usage?.scope === "project" && summary.project_usage.project_id === summary.project_id ? summary.project_usage : null;
         var globalUsage = summary?.global_usage || {};
-        var display = function (value) { return value ?? t.unknown; };
-        var staged = stageReview(summary);
-        var tokenMode = !!staged || projectUsage?.budget_mode === "tokens";
-        var activePreset = currentPresetOf(summary);
-        var presetChips = [
-          ["off", t.freqOff],
-          ["minimal", t.freqMinimal],
-          ["light", t.freqLight],
-          ["balanced", t.freqBalanced],
-          ["active", t.freqActive],
+        var staged = stageReview(summary), tokenMode = !!staged || projectUsage?.budget_mode === "tokens";
+        var activePreset = currentPresetOf(summary), review = reviewRows(summary, t);
+        var presetChips = staged ? [["off", t.freqOff]] : [
+          ["off", t.freqOff], ["minimal", t.freqMinimal], ["light", t.freqLight], ["balanced", t.freqBalanced], ["active", t.freqActive]
         ];
-        if (staged) presetChips = [["off", t.freqOff]];
-        var phaseNote = "";
+        var phaseNotes = [];
         if (staged) {
           var phases = staged.phases || {}, latest = staged.recent_batches?.[0];
-          phaseNote = t.stageFrequency.replace("{n}", staged.policy.every_phases) + "\n" + t.stageQueue + ": " + ["awaiting_stop","sealed","queued","partial","completed"].map(function (key) { return phases[key] || 0; }).join(" / ");
+          phaseNotes.push(t.stageFrequency.replace("{n}", staged.policy.every_phases));
+          phaseNotes.push(t.stageQueue + ": " + ["awaiting_stop","sealed","queued","partial","completed"].map(function (key) { return phases[key] ?? t.unknown; }).join(" / "));
           var deferred = staged.locally_deferred_phase_count ?? phases.routine_deferred ?? 0;
-          if (deferred) phaseNote += "\n" + t.stageLocallyDeferred.replace("{n}", deferred);
-          var healthLines = phaseHealthLines(staged, t);
-          if (healthLines.length) phaseNote += "\n" + healthLines.join("\n");
-          if (latest) phaseNote += "\n" + t.stageCoverage + ": " + (latest.coverage_complete === true ? t.coverageFull : latest.coverage_complete === false ? t.coveragePartial : t.unknown);
+          if (deferred) phaseNotes.push(t.stageLocallyDeferred.replace("{n}", deferred));
+          phaseNotes.push.apply(phaseNotes, phaseHealthLines(staged, t));
+          if (latest) phaseNotes.push(t.stageCoverage + ": " + (latest.coverage_complete === true ? t.coverageFull : latest.coverage_complete === false ? t.coveragePartial : t.unknown));
         }
-
         var captureNote = captureTransportLine(summary?.capture_transport, t);
-        if (captureNote) phaseNote += (phaseNote ? '\n' : '') + captureNote;
-
-        var panelStyle = {
-              display: "flex",
-              flexDirection: "column",
-              gap: "10px",
-              fontSize: "13px",
-              color: "var(--dsw-alias-label-primary, inherit)",
-        };
-        var panelHeader = h(
-            "div",
-            { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
-            h(
-              "div",
-              { style: { fontWeight: 600, fontSize: "13.5px", display: "flex", alignItems: "center", gap: "6px" } },
-              bookIcon(h, 15),
-              h("span", null, t.title)
-            ),
-            h(
-              "button",
-              {
-                type: "button",
-                onClick: reload,
-                style: {
-                  appearance: "none",
-                  border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.3))",
-                  background: "transparent",
-                  color: "var(--dsw-alias-label-secondary, inherit)",
-                  borderRadius: "6px",
-                  padding: "2px 8px",
-                  fontSize: "11.5px",
-                  cursor: "pointer",
-                },
-              },
-              t.refresh
-            )
-          );
+        var readFailed = statusCell.failed && statusCell.failedScope === scopeKey;
+        var panelHeader = h("div", {className: "al-panel-head"},
+          h("div", null, h("div", {className: "al-panel-title"}, bookIcon(h, 18), t.title), h("div", {className: "al-caption"}, t.subtitle)),
+          h("div", {className: "al-head-actions"},
+            h("button", {type: "button", onClick: reload, disabled: refreshing, className: "al-quiet", title: t.refreshHint}, t.refresh),
+            props.onClose ? h("button", {type: "button", onClick: props.onClose, disabled: busy, className: "al-quiet", "aria-label": t.close}, "×") : null));
         if (!installedProject(summary)) {
-          var emptyText = statusCell.failed && statusCell.failedScope === scopeKey
-            ? note : summary ? t.projectRequired : t.loading;
-          return h("div", {style: panelStyle}, panelHeader,
-            h("div", {role: "status", style: {fontSize: "12px", color: "var(--dsw-alias-label-secondary, inherit)"}}, emptyText));
+          return h("div", {className: "al-panel"}, h("style", null, PANEL_CSS), panelHeader,
+            h("div", {role: "status", className: "al-caption"}, readFailed ? note : summary ? t.projectRequired : t.loading));
         }
+        var executionReason = summary.diagnostic?.reason;
+        var notices = [];
+        if (review.reason) notices.push(reasonText(review.reason, t));
+        if (executionReason && executionReason !== review.reason && !["no_increment", "queue_not_checked"].includes(executionReason)) notices.push(reasonText(executionReason, t));
+        if (summary.admission?.blocking_scope) notices.push(summary.admission.blocking_scope);
+        if (captureNote) notices.push(captureNote);
+        return h("div", {className: "al-panel", "aria-busy": busy || refreshing},
+          h("style", null, PANEL_CSS), panelHeader,
+          h("div", {className: "al-project"}, h("strong", null, summary.project_name || summary.project_id),
+            h("div", {className: "al-caption al-project-path", title: summary.workspace || ""}, summary.workspace || t.unknown)),
+          readFailed ? h("div", {className: "al-notice", role: "status"}, t.staleStatus) : null,
+          h("section", {"aria-label": t.overview}, h("div", {className: "al-overview"},
+            statCell(t.knowledge, summary.active_knowledge), statCell(t.workMemory, summary.work_memories),
+            statCell(t.pendingCases, summary.pending_review_cases), statCell(t.awaitingApproval, summary.awaiting_approval_cases))),
+          h("div", {className: "al-actions"},
+            actionButton(t.openBrowser, "open_browser", function () { return t.openedBrowser; }, true),
+            actionButton(t.openReview, "open_review", function () { return t.openedReview; })),
+          h("section", {className: "al-review", "aria-label": t.reviewStatus},
+            h("div", {className: "al-section-head"}, t.reviewStatus,
+              h("span", {className: "al-badge", "data-tone": review.admitted === true ? "ready" : "neutral"}, review.label)),
+            review.rows.map(function (pair) { return row(pair[0], pair[1]); }),
+            review.configured === false ? h("div", {className: "al-caption"}, t.defaultPolicy) : null,
+            review.model ? h("div", {className: "al-caption", title: review.model}, review.model) : null,
+            notices.length ? h("div", {className: "al-notice"}, notices.join("\n")) : null),
+          h("section", {"aria-label": t.today}, h("div", {className: "al-section-head"}, t.today),
+            h("div", {className: "al-usage-line"},
+              h("span", null, t.attempts + ": ", h("strong", null, String(display(projectUsage?.counted_attempts)))),
+              h("span", null, t.completed + ": ", h("strong", null, String(display(projectUsage?.completed_reviews))))),
+            row(tokenMode ? t.remainingTokens : t.remaining, projectUsage ?
+              String(display(tokenMode ? projectUsage.remaining_reported_tokens : projectUsage.remaining_calls)) + " / " +
+              String(display(tokenMode ? projectUsage.max_reported_tokens_per_day : projectUsage.max_calls_per_day)) : t.unknown)),
+          h("details", null, h("summary", null, t.usageDetails), h("div", {className: "al-details-body"},
+            row(t.failedAttempts, projectUsage?.failed_attempts),
+            row(t.reportedTokens, projectUsage?.reported_tokens), row(t.reservedTokens, projectUsage?.token_reservations),
+            row(t.globalCalls, globalUsage.counted_attempts ?? globalUsage.used_calls), row(t.globalRemaining, globalUsage.remaining_calls),
+            row(t.awaitingEvidence, summary.awaiting_evidence_cases),
+            row(t.historyPending, summary.historical_pending_units),
+            h("div", {className: "al-caption"}, projectUsage ? t.scopeNote : t.projectUnavailable),
+            h("div", {className: "al-caption"}, t.queueNote),
+            projectUsage?.next_reset_at ? h("div", {className: "al-caption"}, t.reset + ": " + new Date(projectUsage.next_reset_at * 1000).toLocaleString(activeLocale || undefined)) : null,
+            tokenMode ? h("div", {className: "al-caption"}, t.tokenEstimate) : null,
+            phaseNotes.map(function (line, i) { return h("div", {className: "al-caption", key: i}, line); }))),
+          h("details", null, h("summary", null, t.reviewSettings), h("div", {className: "al-details-body"},
+            h("div", {className: "al-caption"}, staged ? t.tokenEstimate : t.freqTitle),
+            h("div", {className: "al-presets"}, presetChips.map(function (pair) {
+              return h("button", {key: pair[0], type: "button", "aria-pressed": activePreset === pair[0],
+                disabled: busy || !projectUsage || !summary.panel_snapshot || (pendingSettings && requestCell.current.preset !== pair[0]),
+                onClick: function () { trigger("set_admin_preset", t.opening, function () { return t.freqSaved + pair[1]; }, {preset: pair[0]}); }}, pair[1]);
+            })))),
+          h("details", null, h("summary", null, t.maintenance), h("div", {className: "al-details-body al-actions al-maintenance"},
+            props.onSendPrompt ? h("button", {type: "button", disabled: busy || pendingSettings, onClick: function () {
+              props.onSendPrompt("使用 $learning-debug 只读检查当前项目的 Agent Learning 连接、本轮会话绑定、知识目录和管理员状态，给我简短结果。");
+            }}, h("span", null, t.runDebug), h("span", {"aria-hidden": true}, "↵")) : null,
+            actionButton(t.archiveHistory, "archive_history", function (res) {
+              return ["continue_existing","no_changes"].includes(res.preparation?.action) ? t.reusedHistory : t.archivedPrefix + String(res.cases ?? 0);
+            }),
+            summary.browser_running ? actionButton(t.stopBrowser, "stop_browser", function (res) {
+              if (res.running === false && res.stopped === true) return t.stoppedBrowser;
+              if (res.running === false && res.stopped === false) return t.browserNotRunning;
+              return t.browserStopUnconfirmed;
+            }) : null)),
+          h("details", null, h("summary", null, t.technical), h("div", {className: "al-details-body al-caption"},
+            row("Project ID", summary.project_id), row("Host", summary.host_scope), row(t.version, summary.plugin_version),
+            summary.observed_at ? row(t.observedAt, new Date(summary.observed_at * 1000).toLocaleString(activeLocale || undefined)) : null)),
+          note ? h("div", {role: "status", className: "al-panel-note", "aria-live": "polite"}, note) : null,
+          h("div", {className: "al-panel-foot"}, t.safetyNote));
 
-        return h(
-          "div",
-          {style: panelStyle},
-          panelHeader,
-          summary && summary.project_name
-            ? h(
-                "div",
-                {
-                  style: {
-                    fontSize: "11.5px",
-                    color: "var(--dsw-alias-label-secondary, rgba(127,127,127,0.9))",
-                    padding: "5px 8px",
-                    borderRadius: "6px",
-                    background: "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.06))",
-                    wordBreak: "break-all",
-                  },
-                },
-                h("strong", null, summary.project_name),
-                " · ",
-                h("span", { style: { opacity: 0.8 } }, summary.workspace || "")
-              )
-            : null,
-          summary
-            ? h(
-                "div",
-                {
-                  style: {
-                    display: "grid",
-                    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                    gap: "6px",
-                  },
-                },
-                statCell(t.knowledge, summary.active_knowledge ?? 0),
-                statCell(t.workMemory, summary.work_memories ?? 0),
-                statCell(t.pendingCases, summary.pending_review_cases ?? "—"),
-                statCell(
-                  t.admin,
-                  summary.admin_admission_enabled ? t.adminOn : t.adminOff
-                ),
-                statCell(t.attempts, display(projectUsage?.counted_attempts)),
-                statCell(t.completed, display(projectUsage?.completed_reviews)),
-                statCell(t.failedAttempts, display(projectUsage?.failed_attempts)),
-                tokenMode ? statCell(t.reportedTokens, display(projectUsage?.reported_tokens)) : statCell(t.remaining, projectUsage ? display(projectUsage.remaining_calls) + "/" + display(projectUsage.max_calls_per_day) : t.unknown),
-                tokenMode ? statCell(t.reservedTokens, display(projectUsage?.token_reservations)) : null,
-                tokenMode ? statCell(t.remainingTokens, display(projectUsage?.remaining_reported_tokens) + "/" + display(projectUsage?.max_reported_tokens_per_day)) : null
-              )
-            : h(
-                "div",
-                { style: { fontSize: "12px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.8))" } },
-                t.loading
-              ),
-          summary ? h("div", { style: { fontSize: "11.5px", opacity: 0.85, whiteSpace: "pre-wrap" } },
-            (projectUsage ? t.scopeNote : t.projectUnavailable) + "\n" +
-            (phaseNote ? phaseNote + "\n" : "") + (tokenMode ? t.tokenEstimate + "\n" : "") +
-            t.globalCalls + ": " + display(globalUsage.counted_attempts ?? globalUsage.used_calls) + " · " +
-            t.globalRemaining + ": " + display(globalUsage.remaining_calls) +
-            (projectUsage?.next_reset_at ? "\n" + t.reset + ": " + new Date(projectUsage.next_reset_at * 1000).toLocaleString(activeLocale || undefined) : "") +
-            (summary.admission?.blocking_scope ? "\n" + summary.admission.blocking_scope : "") +
-            (summary.diagnostic?.reason ? "\n" + t.reason + ": " + reasonText(summary.diagnostic.reason, t) : "")) : null,
-          h(
-            "div",
-            { style: { display: "flex", flexDirection: "column", gap: "5px" } },
-            h(
-              "div",
-              { style: { fontSize: "11.5px", color: "var(--dsw-alias-label-tertiary, rgba(127,127,127,0.85))" } },
-              t.freqTitle
-            ),
-            h(
-              "div",
-              { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
-              presetChips.map(function (pair) {
-                var key = pair[0];
-                var label = pair[1];
-                var selected = activePreset === key;
-                return h(
-                  "button",
-                  {
-                    key: key,
-                    type: "button",
-                    disabled: busy || !projectUsage || !summary.panel_snapshot,
-                    onClick: function () {
-                      if (!projectUsage) return;
-                      trigger(
-                        "set_admin_preset",
-                        t.opening,
-                        function () {
-                          return t.freqSaved + label;
-                        },
-                        { preset: key }
-                      );
-                    },
-                    style: {
-                      appearance: "none",
-                      font: "inherit",
-                      fontSize: "11.5px",
-                      padding: "4px 8px",
-                      borderRadius: "6px",
-                      cursor: busy ? "default" : "pointer",
-                      border: selected
-                        ? "1px solid var(--dsw-alias-label-primary, #1f6feb)"
-                        : "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.3))",
-                      background: selected
-                        ? "var(--dsw-alias-bg-layer-2, rgba(31,111,235,0.18))"
-                        : "transparent",
-                      color: "var(--dsw-alias-label-primary, inherit)",
-                      fontWeight: selected ? 600 : 400,
-                    },
-                  },
-                  label
-                );
-              })
-            )
-          ),
-          h(
-            "div",
-            { style: { display: "flex", flexDirection: "column", gap: "6px" } },
-            h(
-              "button",
-              {
-                type: "button",
-                disabled: busy,
-                style: btnStyle(true),
-                onClick: function () {
-                  trigger("open_review", t.opening, function () {
-                    return t.openedReview;
-                  });
-                },
-              },
-              h("span", null, t.openReview),
-              h("span", { style: { fontSize: "11px", opacity: 0.85 } }, "↗")
-            ),
-            h(
-              "button",
-              {
-                type: "button",
-                disabled: busy,
-                style: btnStyle(false),
-                onClick: function () {
-                  trigger("open_browser", t.opening, function () {
-                    return t.openedBrowser;
-                  });
-                },
-              },
-              h("span", null, t.openBrowser),
-              h("span", { style: { fontSize: "11px", opacity: 0.75 } }, "↗")
-            ),
-            props && props.onSendPrompt
-              ? h(
-                  "button",
-                  {
-                    type: "button",
-                    disabled: busy,
-                    style: btnStyle(false),
-                    onClick: function () {
-                      props.onSendPrompt(
-                        "使用 $learning-debug 只读检查当前项目的 Agent Learning 连接、本轮会话绑定、知识目录和管理员状态，给我简短结果。"
-                      );
-                    },
-                  },
-                  h("span", null, t.runDebug),
-                  h("span", { style: { fontSize: "11px", opacity: 0.75 } }, "↵")
-                )
-              : null,
-            h(
-              "button",
-              {
-                type: "button",
-                disabled: busy,
-                style: btnStyle(false),
-                onClick: function () {
-                  trigger("archive_history", t.archiving, function (res) {
-                    return ["continue_existing","no_changes"].includes(res.preparation?.action) ? t.reusedHistory : t.archivedPrefix + String(res.cases ?? 0);
-                  });
-                },
-              },
-              h("span", null, t.archiveHistory),
-              h("span", { style: { fontSize: "11px", opacity: 0.75 } }, "⚡")
-            ),
-            summary && summary.browser_running
-              ? h(
-                  "button",
-                  {
-                    type: "button",
-                    disabled: busy,
-                    style: btnStyle(false),
-                    onClick: function () {
-                      trigger("stop_browser", t.opening, function (res) {
-                        if (res.running === false && res.stopped === true) return t.stoppedBrowser;
-                        if (res.running === false && res.stopped === false) return t.browserNotRunning;
-                        return t.browserStopUnconfirmed;
-                      });
-                    },
-                  },
-                  h("span", null, t.stopBrowser),
-                  h("span", { style: { fontSize: "11px", opacity: 0.75 } }, "■")
-                )
-              : null
-          ),
-          note
-            ? h(
-                "div",
-                {
-                  role: "status",
-                  style: {
-                    fontSize: "11.5px",
-                    color: "var(--dsw-alias-label-secondary, rgba(127,127,127,0.9))",
-                    paddingTop: "2px",
-                  },
-                },
-                note
-              )
-            : null
-        );
       };
     }
 
     function createComposerButton(react, localeRef) {
-      var h = react.createElement;
-      var Panel = buildControlPanel(react, localeRef);
-
+      var h = react.createElement, Panel = buildControlPanel(react, localeRef);
       return function ComposerLearningButton(props) {
-        var activeLocale = localeRef && localeRef.current ? localeRef.current.getSnapshot().active : "";
-        var t = getLabels(activeLocale);
-        var sessionId = props && props.sessionId ? String(props.sessionId) : "";
-        var sessionCwd =
-          props && typeof props.useSessions === "function" && sessionId
-            ? props.useSessions(function (s) {
-                return s && s.byId && s.byId[sessionId] && s.byId[sessionId].cwd
-                  ? String(s.byId[sessionId].cwd)
-                  : "";
-              })
-            : "";
-
-        var checkPair = react.useState(null);
-        var scopeKey = JSON.stringify([sessionCwd, sessionId]);
-        var checked = checkPair[0];
-        // Filtering during render also protects the interval before effects run.
-        var summary = checked && checked.scope === scopeKey ? checked.summary : null;
-        var setChecked = checkPair[1];
-        var openPair = react.useState(false);
-        var open = openPair[0];
-        var setOpen = openPair[1];
-        var wrapRef = react.useRef(null);
-
-        react.useEffect(
-          function () {
-            setChecked(null);
-            setOpen(false);
-            if (!sessionCwd && !sessionId) {
-              return;
-            }
-            var cancelled = false;
-            fetchStatus(sessionCwd, sessionId)
-              .then(function (data) {
-                if (!cancelled) {
-                  setChecked({scope: scopeKey, summary: installedProject(data) ? data : null});
-                }
-              })
-              .catch(function () {
-                if (!cancelled) {
-                  setChecked(null);
-                }
-              });
-            return function () {
-              cancelled = true;
-            };
-          },
-          [sessionCwd, sessionId]
-        );
-
-        react.useEffect(
-          function () {
-            if (!open) return;
-            function onDocClick(ev) {
-              if (wrapRef.current && !wrapRef.current.contains(ev.target)) {
-                setOpen(false);
-              }
-            }
-            document.addEventListener("mousedown", onDocClick);
-            return function () {
-              document.removeEventListener("mousedown", onDocClick);
-            };
-          },
-          [open]
-        );
-
-        // 仅在已安装绑定的项目中显示「知识库」按钮；其他未安装项目隐藏
-        if (!summary || !summary.installed) {
-          return null;
-        }
-
-        var handleSendPrompt = function (promptText) {
-          setOpen(false);
-          if (props && props.inputActions && typeof props.inputActions.setText === "function") {
-            props.inputActions.setText(promptText);
-          }
-        };
-
-        return h(
-          "div",
-          {
-            ref: wrapRef,
-            style: { position: "relative", display: "inline-flex", alignItems: "center" },
-          },
-          h(
-            "button",
-            {
-              type: "button",
-              title: t.title + (summary.project_name ? " (" + summary.project_name + ")" : ""),
-              "aria-expanded": open,
-              onClick: function () {
-                setOpen(!open);
-              },
-              style: {
-                appearance: "none",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "5px",
-                height: "28px",
-                padding: "0 10px",
-                borderRadius: "999px",
-                border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.3))",
-                background: open
-                  ? "var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.16))"
-                  : "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.06))",
-                color: "var(--dsw-alias-label-secondary, inherit)",
-                font: "inherit",
-                fontSize: "12.5px",
-                fontWeight: 500,
-                cursor: "pointer",
-                userSelect: "none",
-              },
-            },
-            bookIcon(h, 14),
-            h("span", null, t.button)
-          ),
-          open
-            ? h(
-                "div",
-                {
-                  style: {
-                    position: "absolute",
-                    bottom: "calc(100% + 8px)",
-                    left: 0,
-                    width: "335px",
-                    padding: "12px",
-                    borderRadius: "12px",
-                    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.35))",
-                    background: "var(--dsw-alias-bg-layer-1, #1e2024)",
-                    boxShadow: "0 8px 28px rgba(0,0,0,0.32)",
-                    zIndex: 1000,
-                  },
-                },
-                h(Panel, {
-                  cwd: sessionCwd,
-                  sessionId: sessionId,
-                  initialSummary: summary,
-                  initialScope: scopeKey,
-                  onSendPrompt: handleSendPrompt,
-                })
-              )
-            : null
-        );
+        var activeLocale = localeRef?.current ? localeRef.current.getSnapshot().active : "";
+        var t = getLabels(activeLocale), sessionId = props?.sessionId ? String(props.sessionId) : "";
+        var sessionCwd = typeof props?.useSessions === "function" && sessionId
+          ? props.useSessions(function (s) { return s?.byId?.[sessionId]?.cwd ? String(s.byId[sessionId].cwd) : ""; }) : "";
+        var checkPair = react.useState(null), scopeKey = JSON.stringify([sessionCwd, sessionId]);
+        var checked = checkPair[0], summary = checked?.scope === scopeKey ? checked.summary : null;
+        var setChecked = checkPair[1], openPair = react.useState(false), open = openPair[0], setOpen = openPair[1];
+        var dialogRef = react.useRef(null), buttonRef = react.useRef(null), lockRef = react.useRef(false);
+        // An uncertain setting request survives closing/reopening this project dialog.
+        // Never relabel its frozen snapshot as belonging to another session.
+        var pendingRef = react.useRef({scope: null, cell: null});
+        if (pendingRef.current.scope !== scopeKey) pendingRef.current = {scope: scopeKey, cell: {current: null, busy: false}};
+        function closePanel() { if (!lockRef.current) setOpen(false); }
+        react.useEffect(function () {
+          setChecked(null); setOpen(false); lockRef.current = false;
+          if (!sessionCwd && !sessionId) return;
+          var cancelled = false;
+          fetchStatus(sessionCwd, sessionId).then(function (data) {
+            if (!cancelled) setChecked({scope: scopeKey, summary: installedProject(data) ? data : null});
+          }).catch(function () { if (!cancelled) setChecked(null); });
+          return function () { cancelled = true; };
+        }, [sessionCwd, sessionId]);
+        react.useEffect(function () {
+          if (!open || !dialogRef.current) return;
+          var dialog = dialogRef.current;
+          // A native modal enters the browser top layer, outside composer clipping.
+          // The browser owns focus trapping, inert background and focus restoration.
+          if (typeof dialog.showModal === "function") dialog.showModal();
+          else dialog.setAttribute("open", "");
+          return function () {
+            if (dialog.open && typeof dialog.close === "function") dialog.close();
+            buttonRef.current?.focus?.({preventScroll: true});
+          };
+        }, [open, sessionCwd, sessionId]);
+        if (!summary?.installed) return null;
+        return h("div", {style: {display: "inline-flex", alignItems: "center"}},
+          h("style", null, PANEL_CSS),
+          h("button", {type: "button", ref: buttonRef, className: "al-trigger", "aria-haspopup": "dialog", "aria-expanded": open,
+            title: t.title + (summary.project_name ? " (" + summary.project_name + ")" : ""),
+            onClick: function () { if (open) closePanel(); else setOpen(true); }}, bookIcon(h, 14), h("span", null, t.button)),
+          open ? h("dialog", {ref: dialogRef, className: "al-dialog", "aria-label": t.title,
+            onCancel: function (event) { event.preventDefault(); closePanel(); },
+            onClick: function (event) { if (event.target === event.currentTarget) closePanel(); }},
+            h(Panel, {cwd: sessionCwd, sessionId: sessionId, initialSummary: summary, initialScope: scopeKey,
+              requestCell: pendingRef.current.cell, onClose: closePanel,
+              onLockChange: function (value) { if (pendingRef.current.scope === scopeKey) lockRef.current = value; },
+              onSendPrompt: function (prompt) {
+                closePanel();
+                if (typeof props?.inputActions?.setText === "function") props.inputActions.setText(prompt);
+              }})) : null);
       };
     }
 
@@ -849,8 +637,8 @@ window.__ModuleLoader__.load({
             style: {
               padding: "14px 16px",
               borderRadius: "12px",
-              border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.32))",
-              background: "var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.05))",
+              border: "1px solid var(--dsw-alias-border-l2)",
+              background: "var(--dsw-alias-bg-layer-1)",
             },
           },
           h(Panel, null)

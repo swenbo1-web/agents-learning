@@ -225,6 +225,28 @@ class DshPanelReadonlyTests(unittest.TestCase):
                 self.assertEqual(result["reason"], reason)
                 self.assertNotIn("PRIVATE", result["error"])
 
+    def test_administrator_projection_distinguishes_policy_pause_and_unready_route_without_writes(self):
+        state = control_summary(self.runtime, self.project)
+        state["policy"] = {**state["policy"], "enabled": True}
+        state["enabled"] = False
+        state["routing"] = {**state["routing"], "routing_ready": False,
+                            "reason": "dsh_profile_unavailable", "executor": None}
+        before = list(self.runtime.db.iterdump())
+        with patch("agent_learning.dsh_panel.control_summary", return_value=state), \
+             patch("subprocess.Popen", side_effect=AssertionError("must not launch")):
+            data = status_payload(self.runtime, self.project)
+        self.assertEqual(list(self.runtime.db.iterdump()), before)
+        administrator = data["administrator"]
+        self.assertIs(administrator["policy_enabled"], True)
+        self.assertIs(administrator["admission_enabled"], False)
+        self.assertIs(administrator["routing_ready"], False)
+        self.assertIsNone(administrator["model"])
+        self.assertEqual(administrator["routing_reason"], "dsh_profile_unavailable")
+        self.assertEqual(administrator["review_mode"], state["phase_review"]["policy"]["mode"])
+        self.assertEqual(administrator["phase"], state["diagnostic"]["phase"])
+        self.assertIsInstance(data["observed_at"], float)
+        self.assertEqual(data["panel_snapshot"]["expected"], snapshot(self.runtime, self.project)["expected"])
+
 
 if __name__ == "__main__":
     unittest.main()

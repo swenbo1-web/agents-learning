@@ -51,7 +51,15 @@ def status_payload(runtime, project):
                                   (project,)).fetchone()[0]
 
     onboarding = runtime.db.execute("SELECT state FROM project_onboarding WHERE project=?", (project,)).fetchone()
+    routing, phase = state["routing"], state["phase_review"]["policy"]
+    executor = routing.get("executor") or {}
+    administrator = {"policy_enabled": state["policy"]["enabled"], "admission_enabled": state["enabled"],
+                     "routing_ready": routing.get("routing_ready"), "routing_reason": routing.get("reason"),
+                     "model_mode": state["policy"]["model_mode"], "model": executor.get("model"),
+                     "review_mode": phase["mode"], "review_configured": phase.get("configured"),
+                     "phase": state["diagnostic"]["phase"]}
     return {"project_id": project, "home": str(runtime.home), "host_scope": runtime._session_scope(),
+            "observed_at": time.time(), "administrator": administrator,
             "counts": {"active": count("active"), "pending_problems": count("problems", " AND status='pending'"),
                        "candidates": count("candidates"),
                        "pending_review_cases": workload["stages"]["pending_review"],

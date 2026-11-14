@@ -65,7 +65,8 @@ function harness(language='en',initialProps={},kind='panel'){
  function button(fragment){return nodes(rootTree).find(n=>n.type==='button'&&text(n).includes(fragment));}
  function refresh(){const b=button(language.startsWith('en')?'Refresh':'刷新');assert(b);b.props.onClick();}
  function answer(index,body,ok=true){assert(calls[index]);calls[index].wait.resolve(response(body,ok));}
- return{calls,posts,timers,commit,flush,button,refresh,answer,text:()=>text(rootTree),tree:()=>rootTree,
+ function action(name){return nodes(rootTree).find(n=>n.type==='button'&&n.props['data-action']===name);}
+ return{calls,posts,timers,commit,flush,button,action,refresh,answer,text:()=>text(rootTree),tree:()=>rootTree,
   setProps:value=>{props=value;dirty=true;}};
 }
 const unbound=language=>language.startsWith('en')?'Open the knowledge panel from a conversation in an installed project':'请从已安装项目的对话打开知识库';
@@ -135,7 +136,7 @@ for(const language of ['en','zh-CN']){
     def test_bound_scope_to_unbound_hides_old_controls_and_ignores_late_reply(self):
         self.run_client(r"""
 const language='en',h=harness(language,{cwd:'scope-a',sessionId:'chat-a'});h.commit();
-h.answer(0,summary('PROJECT_A'));await h.flush();assert(h.button('Open Review'));
+h.answer(0,summary('PROJECT_A'));await h.flush();assert(h.action('open_review'));
 h.refresh();assert.equal(h.calls.length,2);
 h.setProps({cwd:'scope-b',sessionId:'chat-b'});h.commit();onlyRefresh(h,language);
 assert(!h.text().includes('PROJECT_A'));
@@ -149,10 +150,10 @@ assert(h.text().includes(unbound(language)));assert(!h.text().includes('LATE_A')
 const h=harness();h.commit();h.answer(0,{ok:true,installed:false});await h.flush();onlyRefresh(h,'en');
 h.setProps({cwd:'scope-a',sessionId:'chat-a'});h.commit();
 h.answer(1,summary('PROJECT_A'));await h.flush();assert(h.text().includes('PROJECT_A'));
-assert(h.text().includes('Published Knowledge'));assert(h.button('Open Review'));
+assert(h.text().includes('Published Knowledge'));assert(h.action('open_review'));
 h.refresh();h.answer(2,{ok:false,reason:'query_budget_exceeded'},false);await h.flush();
 assert(h.text().includes('PROJECT_A'));assert(h.text().includes('exceeded its read budget'));
-h.button('Open Visual Knowledge').props.onClick();assert.equal(h.posts.length,1);
+h.action('open_browser').props.onClick();assert.equal(h.posts.length,1);
 const payload=JSON.parse(h.posts[0].options.body);
 assert.equal(payload.action,'open_browser');assert.equal(payload.project_id,'PROJECT_A');
 assert.equal(payload.installation_id,'install-PROJECT_A');assert.equal(payload.cwd,'scope-a');
@@ -163,7 +164,7 @@ h.answer(3,summary('PROJECT_A'));await h.flush();assert.equal(h.timers.size,0);
     def test_action_guard_rejects_installed_false_even_with_a_retained_button(self):
         self.run_client(r"""
 const data=summary('PROJECT_A'),h=harness('en',{initialSummary:data,initialScope:JSON.stringify(['',''])});
-h.commit();const retained=h.button('Open Visual Knowledge');assert(retained);
+h.commit();const retained=h.action('open_browser');assert(retained);
 data.installed=false;retained.props.onClick();
 assert.equal(h.posts.length,0,'an uninstalled project ID must not authorize a panel action');
 h.answer(0,{ok:true,installed:false});await h.flush();onlyRefresh(h,'en');
@@ -172,13 +173,13 @@ h.answer(0,{ok:true,installed:false});await h.flush();onlyRefresh(h,'en');
     def test_previous_scope_error_and_retained_action_do_not_follow_scope_switch(self):
         self.run_client(r"""
 const h=harness('en',{cwd:'scope-a',sessionId:'chat-a'});h.commit();
-h.answer(0,summary('PROJECT_A'));await h.flush();const retained=h.button('Open Visual Knowledge');
+h.answer(0,summary('PROJECT_A'));await h.flush();const retained=h.action('open_browser');
 h.refresh();h.answer(1,{ok:false,reason:'query_budget_exceeded'},false);await h.flush();
 assert(h.text().includes('exceeded its read budget'));
 h.setProps({cwd:'scope-b',sessionId:'chat-b'});h.commit();
 assert(!h.text().includes('exceeded its read budget'));assert(h.text().includes('Loading status'));
 retained.props.onClick();assert.equal(h.posts.length,0,'old scope button must not start a write');
-h.answer(2,summary('PROJECT_B'));await h.flush();assert(h.button('Open Review'));
+h.answer(2,summary('PROJECT_B'));await h.flush();assert(h.action('open_review'));
 assert(!h.text().includes('exceeded its read budget'));assert(!h.text().includes('PROJECT_A'));
 """)
 
