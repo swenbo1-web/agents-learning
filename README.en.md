@@ -824,7 +824,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current source v1.4.66 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current source v1.4.67 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1165,7 +1165,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.66 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.67 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1834,7 +1834,13 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.66</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.67</summary>
+
+## Compact quick panel and explicit recommendations (1.4.67)
+
+- **Simple by default:** show the knowledge count, one new-review admission status, and Browse / Recommended settings. Work observations, approval, usage, routing, frequency, technical details and maintenance sit under one collapsed Advanced settings entry. Unconfirmed capture, failed reads and uncertain settings remain visible.
+- **Suggested, not applied:** preselect Light (at most 15 calls/day, 2 per batch) while separately labeling the current configuration. Viewing or choosing saves nothing; enabling and pausing both require explicit confirmation. Known unready routing blocks a new enable request. Stage review or token budgets retain their existing configuration rather than receive call-count presets.
+- **Recovery and compatibility:** reopening an uncertain request retains its original choice, request ID and frozen snapshot. Changing project/chat resets UI choices. No budget, model, review or publication contract changes; no lock-holding process is terminated and the standalone browser is unchanged. Schema/protocol remain 25; indexes remain 7/3/1. Refresh DSH after updating; offline behavior checks are not live visual acceptance.
 
 ## Layered knowledge surfaces and explainable status (1.4.66)
 

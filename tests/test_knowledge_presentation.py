@@ -231,8 +231,8 @@ assert.equal(h.calls.length,0,'rendering cannot enable review or import history'
         self.assertNotIn('position: "absolute"', source)
 
     def run_composer(self, code):
-        harness = COMPOSER_HARNESS.replace("window:{__ModuleLoader__:",
-            "window:{confirm:()=>true,crypto:{randomUUID:()=> 'fixture-request-id'},__ModuleLoader__:", 1)
+        harness = "let confirmation=true,confirmationCalls=0;\n" + COMPOSER_HARNESS.replace("window:{__ModuleLoader__:",
+            "window:{confirm:()=>{++confirmationCalls;return confirmation;},crypto:{randomUUID:()=> 'fixture-request-id'},__ModuleLoader__:", 1)
         harness = harness.replace("assert.equal(options,undefined,'only GET is allowed');", "", 1)
         harness = harness.replace("calls.push({url,wait})", "calls.push({url,wait,options})", 1)
         result = subprocess.run([NODE, "-e", harness + "\n(async()=>{\n" + code +
@@ -266,4 +266,146 @@ assert(nodes(h.tree()).find(n=>n.type==='button'&&n.props.className==='al-primar
 choose().props.onClick();h.commit();const retry=JSON.parse(h.calls[6].options.body);
 assert.equal(retry.request_id,first.request_id);assert.deepEqual(retry.panel_snapshot,first.panel_snapshot);
 h.answer(6,{ok:true});await h.flush();h.answer(7,summary('PROJECT_A',A));await h.flush();
+""")
+
+    def test_default_view_has_one_metric_two_actions_and_one_advanced_disclosure(self):
+        self.run_client(r"""
+const h=harness(),tree=h.render();
+const visible=n=>!n||typeof n!=='object'?[]:[n,...(n.type==='details'?[n.children.find(c=>c?.type==='summary')]:n.children||[]).flatMap(visible)];
+const shown=visible(tree),buttons=shown.filter(n=>n.type==='button');
+assert.equal(shown.filter(n=>n.props?.className==='al-stat').length,1);
+assert.deepEqual(buttons.map(n=>n.props['data-action']).filter(Boolean),['open_browser','show_recommendations']);
+const advanced=shown.filter(n=>n.type==='details');assert.equal(advanced.length,1);
+assert.equal(text(advanced[0].children[0]),'Advanced settings');assert(!advanced[0].props.open);
+for(const forbidden of ['Model routing','Reviews today','Maintenance and diagnostics','Review and settings'])
+ assert(!shown.some(n=>(n.children||[]).includes(forbidden)),forbidden+' belongs in Advanced');
+assert(!shown.some(n=>n.type==='select'));assert.equal(h.calls.length,0);
+""")
+
+    def test_recommendation_is_only_preselected_and_does_not_relabel_the_current_preset(self):
+        self.run_client(r"""
+const h=harness();h.states[0]={...summary('confirmed'),admin_admission_enabled:false,administrator:{routing_ready:true}};
+let tree=h.render();nodes(tree).find(n=>n.props?.['data-action']==='show_recommendations').props.onClick();tree=h.render();
+const section=nodes(tree).find(n=>n.props?.className==='al-recommendation');
+assert.equal(nodes(section).find(n=>n.type==='select').props.value,'light');
+assert(text(section).includes('Current preset: Off'));assert(text(section).includes('only a suggestion'));
+assert.equal(h.states[0].admin_admission_enabled,false);assert.equal(h.calls.length,0);
+const h2=harness();nodes(h2.render()).find(n=>n.props?.['data-action']==='show_recommendations').props.onClick();
+assert(text(nodes(h2.render()).find(n=>n.props?.className==='al-recommendation')).includes('Current preset: Unknown'));
+""")
+
+    def test_recommendation_enable_waits_for_confirmation_and_uses_frozen_snapshot(self):
+        self.run_composer(r"""
+const h=harness();await readyA(h);h.toggle();
+const data={...summary('PROJECT_A',A),admin_admission_enabled:false,administrator:{routing_ready:true}};
+h.answer(1,data);await h.flush();
+const action=name=>nodes(h.tree()).find(n=>n.props?.['data-action']===name);
+action('show_recommendations').props.onClick();h.commit();assert.equal(h.calls.length,2);
+confirmation=false;action('apply_recommendation').props.onClick();h.commit();assert.equal(h.calls.length,2);assert.equal(confirmationCalls,1);
+confirmation=true;action('apply_recommendation').props.onClick();h.commit();assert.equal(h.calls.length,3);
+const sent=JSON.parse(h.calls[2].options.body);assert.equal(sent.action,'set_admin_preset');assert.equal(sent.preset,'light');
+assert.equal(sent.confirm,true);assert.deepEqual(sent.panel_snapshot,data.panel_snapshot);
+assert.equal(data.admin_admission_enabled,false,'there must be no optimistic settings mutation');
+h.answer(2,{ok:true});await h.flush();h.answer(3,data);await h.flush();
+""")
+
+    def test_pause_recommendation_also_requires_confirmation(self):
+        self.run_composer(r"""
+const h=harness();await readyA(h);h.toggle();
+const data={...summary('PROJECT_A',A),admin_admission_enabled:true,administrator:{routing_ready:true}};
+h.answer(1,data);await h.flush();
+const action=name=>nodes(h.tree()).find(n=>n.props?.['data-action']===name);
+action('show_recommendations').props.onClick();h.commit();
+nodes(h.tree()).find(n=>n.type==='select').props.onChange({target:{value:'off'}});h.commit();
+confirmation=false;action('apply_recommendation').props.onClick();h.commit();assert.equal(h.calls.length,2);
+confirmation=true;action('apply_recommendation').props.onClick();h.commit();assert.equal(h.calls.length,3);
+assert.equal(JSON.parse(h.calls[2].options.body).preset,'off');assert.equal(confirmationCalls,2);
+h.answer(2,{ok:true});await h.flush();h.answer(3,data);await h.flush();
+""")
+
+    def test_stage_or_token_mode_recommendation_preserves_configuration_without_legacy_apply(self):
+        self.run_client(r"""
+for(const extra of [{administrator:{review_mode:'phase'}},{project_usage:{...summary('confirmed').project_usage,budget_mode:'tokens'}}]){
+ const h=harness();h.states[0]={...summary('confirmed'),...extra};
+ nodes(h.render()).find(n=>n.props?.['data-action']==='show_recommendations').props.onClick();
+ const section=nodes(h.render()).find(n=>n.props?.className==='al-recommendation');
+ assert(text(section).includes('Keep the current review mode, frequency and token budget'));
+ assert(!nodes(section).some(n=>n.type==='select'||n.props?.['data-action']==='apply_recommendation'));
+ assert(nodes(section).some(n=>n.props?.['data-action']==='open_review'));assert.equal(h.calls.length,0);
+}
+""")
+
+    def test_known_unready_routing_disables_new_recommendation_but_not_local_browsing(self):
+        self.run_client(r"""
+const h=harness();h.states[0]={...summary('confirmed'),admin_admission_enabled:false,administrator:{routing_ready:false}};
+nodes(h.render()).find(n=>n.props?.['data-action']==='show_recommendations').props.onClick();
+const tree=h.render();assert(nodes(tree).find(n=>n.props?.['data-action']==='apply_recommendation').props.disabled);
+assert(!nodes(tree).find(n=>n.props?.['data-action']==='open_browser').props.disabled);
+assert(text(tree).includes('Model routing is not ready'));assert.equal(h.calls.length,0);
+""")
+
+    def test_recommendation_state_resets_when_changing_project_and_chat(self):
+        self.run_composer(r"""
+const h=harness('panel',{cwd:A,sessionId:'chat-a'});h.commit();h.answer(0,summary('PROJECT_A',A));await h.flush();
+const action=name=>nodes(h.tree()).find(n=>n.props?.['data-action']===name);
+action('show_recommendations').props.onClick();h.commit();
+nodes(h.tree()).find(n=>n.type==='select').props.onChange({target:{value:'off'}});h.commit();
+h.setProps({cwd:B,sessionId:'chat-b'});h.commit();h.answer(1,summary('PROJECT_B',B));await h.flush();
+assert(!action('show_recommendations').props['aria-expanded']);
+action('show_recommendations').props.onClick();h.commit();
+assert.equal(nodes(h.tree()).find(n=>n.type==='select').props.value,'light');assert.equal(h.calls.length,2);
+""")
+
+    def test_recommendation_uncertain_retry_reuses_original_request_even_if_routing_changes(self):
+        self.run_composer(r"""
+const h=harness();await readyA(h);h.toggle();
+let data={...summary('PROJECT_A',A),admin_admission_enabled:false,administrator:{routing_ready:true}};
+h.answer(1,data);await h.flush();
+const action=name=>nodes(h.tree()).find(n=>n.props?.['data-action']===name);
+action('show_recommendations').props.onClick();h.commit();action('apply_recommendation').props.onClick();h.commit();
+const first=JSON.parse(h.calls[2].options.body);
+h.answer(2,{ok:false,error:'uncertain'},false);await h.flush();h.answer(3,{ok:true,found:false});await h.flush();
+h.answer(4,data);await h.flush();nodes(h.tree()).find(n=>n.type==='dialog').props.onCancel({preventDefault(){}});h.commit();
+h.toggle();data={...data,administrator:{routing_ready:false}};h.answer(5,data);await h.flush();
+action('show_recommendations').props.onClick();h.commit();assert(!action('apply_recommendation').props.disabled);
+action('apply_recommendation').props.onClick();h.commit();const retry=JSON.parse(h.calls[6].options.body);
+assert.equal(retry.request_id,first.request_id);assert.deepEqual(retry.panel_snapshot,first.panel_snapshot);
+h.answer(6,{ok:true});await h.flush();h.answer(7,data);await h.flush();
+""")
+
+    def test_capture_uncertainty_remains_visible_outside_advanced_settings(self):
+        self.run_client(r"""
+const h=harness();h.states[0]={...summary('confirmed'),capture_transport:{pending_events:2,retryable_events:1,unresolved_events:1,persistence:'bridge_memory_only'}};
+const tree=h.render(),visible=n=>!n||typeof n!=='object'?[]:[n,...(n.type==='details'?[]:n.children||[]).flatMap(visible)];
+assert(visible(tree).some(n=>(n.children||[]).some(c=>typeof c==='string'&&c.includes('Capture is unconfirmed'))));
+assert.equal(h.calls.length,0);
+""")
+
+    def test_pending_pause_reopens_with_the_original_selection_and_no_new_confirmation(self):
+        self.run_composer(r"""
+const h=harness();await readyA(h);h.toggle();
+const data={...summary('PROJECT_A',A),admin_admission_enabled:true,administrator:{routing_ready:true}};
+h.answer(1,data);await h.flush();
+const action=name=>nodes(h.tree()).find(n=>n.props?.['data-action']===name);
+action('show_recommendations').props.onClick();h.commit();
+nodes(h.tree()).find(n=>n.type==='select').props.onChange({target:{value:'off'}});h.commit();
+action('apply_recommendation').props.onClick();h.commit();const first=JSON.parse(h.calls[2].options.body);
+h.answer(2,{ok:false,error:'uncertain'},false);await h.flush();h.answer(3,{ok:true,found:false});await h.flush();
+h.answer(4,data);await h.flush();nodes(h.tree()).find(n=>n.type==='dialog').props.onCancel({preventDefault(){}});h.commit();
+h.toggle();h.answer(5,data);await h.flush();action('show_recommendations').props.onClick();h.commit();
+assert.equal(nodes(h.tree()).find(n=>n.type==='select').props.value,'off');assert(!action('apply_recommendation').props.disabled);
+action('apply_recommendation').props.onClick();h.commit();const retry=JSON.parse(h.calls[6].options.body);
+assert.equal(retry.preset,'off');assert.equal(retry.request_id,first.request_id);assert.equal(confirmationCalls,1);
+h.answer(6,{ok:true});await h.flush();h.answer(7,data);await h.flush();
+""")
+
+    def test_already_applied_requires_complete_matching_limits_not_only_the_daily_cap(self):
+        self.run_client(r"""
+for(const max_calls_per_batch of [2,5]){
+ const h=harness();h.states[0]={...summary('confirmed'),admin_admission_enabled:true,administrator:{routing_ready:true},
+  panel_snapshot:{...summary('confirmed').panel_snapshot,project_limits:{max_calls_per_day:15,max_calls_per_batch,max_batch_seconds:180,max_run_seconds:300}}};
+ nodes(h.render()).find(n=>n.props?.['data-action']==='show_recommendations').props.onClick();
+ const apply=nodes(h.render()).find(n=>n.props?.['data-action']==='apply_recommendation');
+ assert.equal(apply.props.disabled,max_calls_per_batch===2);assert.equal(h.calls.length,0);
+}
 """)

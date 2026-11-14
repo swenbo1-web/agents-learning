@@ -1,6 +1,6 @@
 // Browser half of the agent-learning DSH plugin:
 // - Composer toolbar button (`conversation.input.left`) shown ONLY for the bound/installed project
-// - Quick administrator frequency presets (Off / Light / Balanced / Active / Minimal + fine-tuning page)
+// - Compact overview, opt-in recommendations and collapsed advanced controls
 // - Plugins page configuration card (`plugins.bundle.config` / `settings.plugin.item`)
 window.__ModuleLoader__.load({
   id: "agent-learning",
@@ -294,10 +294,31 @@ window.__ModuleLoader__.load({
       dispatch_concurrency_limited: "Another review occupies the concurrency allowance.", dispatch_token_budget_exhausted: "The daily token budget is insufficient."
     });
 
+    Object.assign(TEXT.zh, {
+      recommendedSettings: "推荐设置", advancedSettings: "高级设置", currentSettings: "当前方案", freqCustom: "自定义", workspace: "工作区",
+      recommendedLight: "省流整理（推荐）", recommendedOff: "暂停 AI 整理，保留本地记忆",
+      recommendationHint: "省流方案：最多 15 次/天、每批 2 次。只是预选；确认后才会启用 AI 整理并使用模型额度。",
+      applyRecommendation: "确认并应用", recommendationApplied: "当前已是此方案",
+      preserveStage: "建议保留当前审核方式、频率与 token 预算，不套用按次数方案。需要调整时打开管理页。",
+      routeNotReady: "模型路由尚未就绪，请先在高级设置中核对。推荐方案不会修复模型配置。",
+      confirmPause: "暂停新的 AI 整理？本地记录、知识检索和已有知识保留。",
+      simpleSafety: "打开面板或查看推荐，不会更改设置或启动 AI 整理。"
+    });
+    Object.assign(TEXT.en, {
+      recommendedSettings: "Recommended settings", advancedSettings: "Advanced settings", currentSettings: "Current preset", freqCustom: "Custom", workspace: "Workspace",
+      recommendedLight: "Light review (recommended)", recommendedOff: "Pause AI review; keep local memory",
+      recommendationHint: "Light: at most 15 calls/day, 2 per batch. This is only a suggestion; confirmation enables AI review and uses model quota.",
+      applyRecommendation: "Confirm and apply", recommendationApplied: "Already using this preset",
+      preserveStage: "Keep the current review mode, frequency and token budget. Call-count presets are not applied; use management to adjust them.",
+      routeNotReady: "Model routing is not ready. Check Advanced settings first; applying a preset cannot fix model configuration.",
+      confirmPause: "Pause new AI reviews? Local recording, retrieval and existing knowledge are retained.",
+      simpleSafety: "Opening this panel or viewing recommendations changes no settings and starts no AI review."
+    });
+
     var PANEL_CSS = `
 .al-panel{display:flex;flex-direction:column;gap:16px;min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5;font-family:inherit}
 .al-panel *{box-sizing:border-box}.al-panel button{font:inherit;cursor:pointer;color:var(--dsw-alias-label-primary)}
-.al-panel button:disabled{opacity:.55;cursor:default}.al-panel button:focus-visible,.al-panel summary:focus-visible,.al-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}
+.al-panel button:disabled{opacity:.55;cursor:default}.al-panel button:focus-visible,.al-panel summary:focus-visible,.al-panel select:focus-visible,.al-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}
 .al-panel-head,.al-section-head,.al-status-row,.al-actions button{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .al-panel-title{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:650}.al-caption{font-size:11.5px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
 .al-head-actions{display:flex;gap:6px;flex-shrink:0}.al-panel .al-quiet{border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);border-radius:7px;padding:4px 8px;font-size:11.5px}
@@ -305,6 +326,9 @@ window.__ModuleLoader__.load({
 .al-project{border-left:3px solid var(--dsw-alias-brand-primary);padding-left:10px;min-width:0}.al-project strong{display:block;font-size:14px;overflow-wrap:anywhere}.al-project-path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .al-section-head{font-size:12px;font-weight:600;margin-bottom:8px}.al-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .al-stat{border:1px solid var(--dsw-alias-border-l1);border-radius:9px;padding:10px 8px;background:var(--dsw-alias-bg-layer-1);min-width:0}.al-stat span{display:block;font-size:10.5px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.al-stat strong{display:block;font-size:21px;line-height:1.4;font-weight:650;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.al-compact-overview{display:flex;align-items:center;justify-content:space-between;gap:16px}.al-compact-overview .al-stat{border:0;background:transparent;padding:0}.al-compact-status{display:flex;flex-direction:column;gap:5px;align-items:flex-end;text-align:right;min-width:0}
+.al-recommendation{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:12px;background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;gap:10px}.al-recommendation label{font-size:12px}.al-recommendation select{display:block;width:100%;margin-top:5px;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit}
+.al-advanced>.al-details-body{gap:16px}
 .al-review{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:12px;background:var(--dsw-alias-bg-layer-1)}
 .al-status-row{padding:4px 0;font-size:12px;align-items:baseline}.al-status-row>span:first-child{color:var(--dsw-alias-label-secondary);flex-shrink:0}.al-status-row>span:last-child{text-align:right;overflow-wrap:anywhere;min-width:0}
 .al-badge{display:inline-flex;align-items:center;border:1px solid var(--dsw-alias-border-l1);border-radius:20px;padding:2px 8px;font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);max-width:100%;overflow-wrap:anywhere}
@@ -332,7 +356,7 @@ window.__ModuleLoader__.load({
         [t.execution, t[a.phase] || (a.phase ? a.phase : t.unknown)]
       ];
       return { admitted: admitted, label: binary(admitted, t.admissionOn, t.admissionOff), rows: rows,
-        reason: a.routing_reason, model: a.model, configured: a.review_configured };
+        reason: a.routing_reason, model: a.model, configured: a.review_configured, mode: mode };
     }
 
     function buildControlPanel(react, localeRef) {
@@ -355,6 +379,11 @@ window.__ModuleLoader__.load({
         var noteScopePair = react.useState(null);
         var refreshPair = react.useState(false);
         var refreshing = refreshPair[0], setRefreshing = refreshPair[1];
+        var recommendationPair = react.useState({scope: scopeKey, open: false, preset: "light"});
+        var recommendation = recommendationPair[0].scope === scopeKey ? recommendationPair[0] : {scope: scopeKey, open: false, preset: "light"};
+        var setRecommendation = function (change) {
+          if (statusCell.scope === scopeKey) recommendationPair[1](Object.assign({}, recommendation, change));
+        };
         statusCell.scope = scopeKey;
         var summary = statusCell.summaryScope === scopeKey ? statePair[0] : null;
         var setSummary = statePair[1];
@@ -401,6 +430,12 @@ window.__ModuleLoader__.load({
           },
           [reload]
         );
+
+        react.useEffect(function () {
+          recommendationPair[1](function (old) {
+            return old.scope === scopeKey ? old : {scope: scopeKey, open: false, preset: "light"};
+          });
+        }, [scopeKey]);
 
         function trigger(action, startMsg, doneFn, extra) {
           if (statusCell.scope !== scopeKey || requestCell.busy || !installedProject(summary)) return;
@@ -472,7 +507,9 @@ window.__ModuleLoader__.load({
         var globalUsage = summary?.global_usage || {};
         var staged = stageReview(summary), tokenMode = !!staged || projectUsage?.budget_mode === "tokens";
         var activePreset = currentPresetOf(summary), review = reviewRows(summary, t);
-        var presetChips = staged ? [["off", t.freqOff]] : [
+        var phaseMode = !!staged || review.mode === "phase";
+        var preserveRecommendation = phaseMode || tokenMode;
+        var presetChips = phaseMode ? [["off", t.freqOff]] : [
           ["off", t.freqOff], ["minimal", t.freqMinimal], ["light", t.freqLight], ["balanced", t.freqBalanced], ["active", t.freqActive]
         ];
         var phaseNotes = [];
@@ -488,7 +525,7 @@ window.__ModuleLoader__.load({
         var captureNote = captureTransportLine(summary?.capture_transport, t);
         var readFailed = statusCell.failed && statusCell.failedScope === scopeKey;
         var panelHeader = h("div", {className: "al-panel-head"},
-          h("div", null, h("div", {className: "al-panel-title"}, bookIcon(h, 18), t.title), h("div", {className: "al-caption"}, t.subtitle)),
+          h("div", {className: "al-panel-title"}, bookIcon(h, 18), t.title),
           h("div", {className: "al-head-actions"},
             h("button", {type: "button", onClick: reload, disabled: refreshing, className: "al-quiet", title: t.refreshHint}, t.refresh),
             props.onClose ? h("button", {type: "button", onClick: props.onClose, disabled: busy, className: "al-quiet", "aria-label": t.close}, "×") : null));
@@ -502,17 +539,55 @@ window.__ModuleLoader__.load({
         if (executionReason && executionReason !== review.reason && !["no_increment", "queue_not_checked"].includes(executionReason)) notices.push(reasonText(executionReason, t));
         if (summary.admission?.blocking_scope) notices.push(summary.admission.blocking_scope);
         if (captureNote) notices.push(captureNote);
+        var presetName = function (preset) {
+          return ({off: t.freqOff, minimal: t.freqMinimal, light: t.freqLight, balanced: t.freqBalanced, active: t.freqActive})[preset] || t.freqCustom;
+        };
+        var currentRecommendationName = phaseMode ? t.phaseMode : review.admitted === false ? t.freqOff :
+          review.admitted !== true || projectUsage?.max_calls_per_day == null ? t.unknown : presetName(activePreset);
+        var selectedRecommendation = pendingSettings && ["light", "off"].includes(requestCell.current.preset)
+          ? requestCell.current.preset : recommendation.preset;
+        var recommendationUnchanged = !pendingSettings && (selectedRecommendation === "off" ? review.admitted === false :
+          review.admitted === true && [["max_calls_per_day", 15], ["max_calls_per_batch", 2], ["max_batch_seconds", 180], ["max_run_seconds", 300]]
+            .every(function (pair) { return summary.panel_snapshot?.project_limits?.[pair[0]] === pair[1]; }));
+        var recommendationBlocked = busy || !projectUsage || !summary.panel_snapshot ||
+          (pendingSettings && requestCell.current.preset !== selectedRecommendation) ||
+          (!pendingSettings && selectedRecommendation !== "off" && summary.administrator?.routing_ready === false);
         return h("div", {className: "al-panel", "aria-busy": busy || refreshing},
           h("style", null, PANEL_CSS), panelHeader,
-          h("div", {className: "al-project"}, h("strong", null, summary.project_name || summary.project_id),
-            h("div", {className: "al-caption al-project-path", title: summary.workspace || ""}, summary.workspace || t.unknown)),
+          h("div", {className: "al-project", title: summary.workspace || ""}, h("strong", null, summary.project_name || summary.project_id)),
           readFailed ? h("div", {className: "al-notice", role: "status"}, t.staleStatus) : null,
-          h("section", {"aria-label": t.overview}, h("div", {className: "al-overview"},
-            statCell(t.knowledge, summary.active_knowledge), statCell(t.workMemory, summary.work_memories),
-            statCell(t.pendingCases, summary.pending_review_cases), statCell(t.awaitingApproval, summary.awaiting_approval_cases))),
+          h("section", {"aria-label": t.overview, className: "al-compact-overview"},
+            statCell(t.knowledge, summary.active_knowledge),
+            h("div", {className: "al-compact-status"}, h("span", {className: "al-caption"}, t.reviewStatus),
+              h("span", {className: "al-badge", "data-tone": "neutral"}, review.label))),
           h("div", {className: "al-actions"},
             actionButton(t.openBrowser, "open_browser", function () { return t.openedBrowser; }, true),
-            actionButton(t.openReview, "open_review", function () { return t.openedReview; })),
+            h("button", {type: "button", "data-action": "show_recommendations", "aria-expanded": recommendation.open,
+              onClick: function () { setRecommendation({open: !recommendation.open}); }},
+              h("span", null, t.recommendedSettings), h("span", {"aria-hidden": true}, recommendation.open ? "−" : "+"))),
+          recommendation.open ? h("section", {className: "al-recommendation", "aria-label": t.recommendedSettings},
+            h("div", {className: "al-caption"}, t.currentSettings + ": " + currentRecommendationName),
+            preserveRecommendation ? h("div", {className: "al-caption"}, t.preserveStage) :
+              h("label", null, t.recommendedSettings,
+                h("select", {value: selectedRecommendation, disabled: busy || pendingSettings,
+                  onChange: function (event) { setRecommendation({preset: event.target.value}); }},
+                  h("option", {value: "light"}, t.recommendedLight), h("option", {value: "off"}, t.recommendedOff))),
+            !preserveRecommendation ? h("div", {className: "al-caption"}, t.recommendationHint) : null,
+            !preserveRecommendation && summary.administrator?.routing_ready === false ? h("div", {className: "al-notice"}, t.routeNotReady) : null,
+            preserveRecommendation ? h("div", {className: "al-actions al-maintenance"},
+              actionButton(t.openReview, "open_review", function () { return t.openedReview; })) :
+              h("div", {className: "al-actions al-maintenance"}, h("button", {type: "button", "data-action": "apply_recommendation",
+                disabled: recommendationBlocked || recommendationUnchanged,
+                onClick: function () {
+                  if (recommendationBlocked || recommendationUnchanged || statusCell.scope !== scopeKey) return;
+                  if (selectedRecommendation === "off" && !pendingSettings && !window.confirm(t.confirmPause)) return;
+                  trigger("set_admin_preset", t.opening, function () { return t.freqSaved + presetName(selectedRecommendation); }, {preset: selectedRecommendation});
+                }}, recommendationUnchanged ? t.recommendationApplied : t.applyRecommendation))) : null,
+          captureNote ? h("div", {className: "al-notice", role: "status"}, captureNote) : null,
+          h("details", {className: "al-advanced"}, h("summary", null, t.advancedSettings), h("div", {className: "al-details-body"},
+          h("div", {className: "al-overview"}, statCell(t.workMemory, summary.work_memories),
+            statCell(t.pendingCases, summary.pending_review_cases), statCell(t.awaitingApproval, summary.awaiting_approval_cases)),
+          h("div", {className: "al-actions al-maintenance"}, actionButton(t.openReview, "open_review", function () { return t.openedReview; })),
           h("section", {className: "al-review", "aria-label": t.reviewStatus},
             h("div", {className: "al-section-head"}, t.reviewStatus,
               h("span", {className: "al-badge", "data-tone": review.admitted === true ? "ready" : "neutral"}, review.label)),
@@ -558,10 +633,10 @@ window.__ModuleLoader__.load({
               return t.browserStopUnconfirmed;
             }) : null)),
           h("details", null, h("summary", null, t.technical), h("div", {className: "al-details-body al-caption"},
-            row("Project ID", summary.project_id), row("Host", summary.host_scope), row(t.version, summary.plugin_version),
-            summary.observed_at ? row(t.observedAt, new Date(summary.observed_at * 1000).toLocaleString(activeLocale || undefined)) : null)),
+            row("Project ID", summary.project_id), row("Host", summary.host_scope), row(t.workspace, summary.workspace), row(t.version, summary.plugin_version),
+            summary.observed_at ? row(t.observedAt, new Date(summary.observed_at * 1000).toLocaleString(activeLocale || undefined)) : null)))),
           note ? h("div", {role: "status", className: "al-panel-note", "aria-live": "polite"}, note) : null,
-          h("div", {className: "al-panel-foot"}, t.safetyNote));
+          h("div", {className: "al-panel-foot"}, t.simpleSafety));
 
       };
     }
