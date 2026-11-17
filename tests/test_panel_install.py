@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from agent_learning.cli import main, parser
 from agent_learning.install import _hook_commands, install
@@ -51,7 +51,8 @@ class PanelInstallTests(unittest.TestCase):
         self.assertNotIn("home", receipt)
         mcp = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]
         self.assertEqual(mcp["args"], [str(Path(result["runtime_directory"]) / "scripts/learning.py"),
-            "serve", "--role", "worker", "--panel-installation", str(self.target)])
+            "serve", "--role", "worker", "--plugin-installation", str(self.target),
+            "--panel-installation", str(self.target)])
         self.assertNotIn("--workspace", mcp["args"])
         self.assertNotIn("--home", mcp["args"])
         self.assertEqual(inspect_installation(self.target, _hook_commands)["receipt"], receipt)
@@ -177,11 +178,15 @@ class PanelCliTests(unittest.TestCase):
         self.assertIsNone(parser().parse_args(["serve"]).panel_installation)
 
     def test_serve_forwards_panel_installation_without_rebinding_normal_workspace(self):
-        with patch("agent_learning.cli.Runtime") as runtime, patch("agent_learning.cli.Server") as server:
+        with patch("agent_learning.cli.Runtime") as runtime, patch("agent_learning.cli.Server") as server, \
+                patch("agent_learning.project_admission.require_project_installation",
+                      return_value={"workspace": "actual host workspace"}) as admission:
             runtime.return_value.project.return_value = "current-project"
             self.assertEqual(main(["--workspace", "actual host workspace", "serve",
                                    "--panel-installation", "panel installation"]), 0)
-        runtime.return_value.project.assert_called_once_with("actual host workspace")
+        self.assertEqual(runtime.return_value.project.call_args_list,
+                         [call("actual host workspace"), call("actual host workspace")])
+        admission.assert_called_once_with("actual host workspace", "panel installation", host="codex", runtime_directory=None)
         self.assertEqual(server.call_args.kwargs["workspace"], "actual host workspace")
         self.assertEqual(server.call_args.kwargs["panel_installation"], "panel installation")
         server.return_value.serve.assert_called_once_with()

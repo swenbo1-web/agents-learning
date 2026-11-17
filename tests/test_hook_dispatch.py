@@ -55,6 +55,8 @@ class HookDispatchTests(unittest.TestCase):
         with patch.dict(os.environ, environment or self.environment, clear=True), \
                 patch.object(dispatch.sys, "stdin", types.SimpleNamespace(buffer=buffer or io.BytesIO(body))), \
                 patch.object(dispatch.sys, "stdout", output), \
+                patch("agent_learning.project_admission.require_project_installation",
+                      return_value={"workspace": str(self.workspace)}), \
                 patch.dict(sys.modules, {"agent_learning.release": release}), \
                 patch("agent_learning.runtime.Runtime", factory):
             code = dispatch.main(arguments if arguments is not None else ["--event", "PreToolUse"])
@@ -182,6 +184,11 @@ class HookDispatchTests(unittest.TestCase):
         runtime.handle_hook.assert_called_once_with(self.event)
 
     def run_entry(self, arguments):
+        from agent_learning.install import install
+        destination = self.workspace / ".agents/plugins/agent-learning"
+        if not destination.exists():
+            install(destination, runtime_store=Path(self.temporary.name) / "releases",
+                    panel_workspace=self.workspace)
         result = subprocess.run(
             [sys.executable, "-B", str(ROOT / "hooks/dispatch.py"), *arguments],
             input=json.dumps(self.event, ensure_ascii=False).encode("utf-8"),

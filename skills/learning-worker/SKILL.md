@@ -7,8 +7,9 @@ description: "在已接入 Agent Learning Runtime 的项目任务中使用审核
 
 继续完成用户当前授权的任务。知识服务提供经验和记录能力，不扩大任务范围。
 
+- 自动使用本技能须确认当前项目已接入，并取得本轮 Hook 的有效 `context_handle`。全局菜单、技能或工具可见不能证明项目已接入。缺少接入证据或本轮句柄时，继续用户当前任务；仅在用户明确要求诊断接入或查询项目记忆时使用对应入口，不为探测安装而调用 `session_context`、检索或登记任务。
 - 使用普通 Agent 的知识、工作历史、任务和反馈工具。`work_memory_search` 返回历史索引；`work_memory_read` 使用当前句柄按修订分页展开。发布和撤销由独立权限入口处理。
-- 首次写入使用当前 Hook 提供的 `context_handle`；可先用 `session_context(context_handle=...)` 读取会话和任务版本。压缩后恢复这份结构状态，不猜 `conversation_id` 或最新会话；没有句柄时只查询项目知识。连接绑定后不能换用另一个句柄。
+- 首次写入使用当前 Hook 提供的 `context_handle`；可先用 `session_context(context_handle=...)` 读取会话和任务版本。压缩后恢复这份结构状态，不猜 `conversation_id` 或最新会话。用户明确查询已接入项目且缺少句柄时，仅使用只读项目入口。连接绑定后不能换用另一个句柄。
 - `reconnect_required` 表示登录边界变化，需宿主重连并提供新句柄；项目知识仍共享，不能重置额度或重跑结果未知的操作。子 Agent 的句柄只能读取父任务边界并反馈自身证据，不能覆盖父任务。
 - 有相关注入知识时，先检查适用条件和证据等级；新问题、实际报错或任务目标变化时再补查。普通续聊不强制重复检索。
 - 注入和 `knowledge_search` 返回有限预览。需要执行细节时用条目 ID 调用 `knowledge_read`；正文 `truncated=true` 时按 `next_offset` 继续读取，同时传上一页 `revision` 为 `expected_revision`，修订变化则从首段重新判断。不把部分正文当成完整方案。首次查询可传当前 `context_handle` 登记实际展示；可按 `category`、`knowledge_kind` 和已知工具、版本、环境筛选，未知筛选字段省略。

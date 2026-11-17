@@ -79,6 +79,10 @@ class PanelMCPTests(unittest.TestCase):
         self.patch = patch.dict(sys.modules, {"agent_learning.panel_control": module})
         self.patch.start()
         self.addCleanup(self.patch.stop)
+        admission_patch = patch("agent_learning.project_admission.require_project_installation",
+                                return_value={"installation": "export-path", "workspace": "project-path", "receipt_digest": "one"})
+        self.admission = admission_patch.start()
+        self.addCleanup(admission_patch.stop)
         self.runtime, self.ident = FakeRuntime(), 0
 
     def request(self, server, method, params=None):
@@ -104,6 +108,7 @@ class PanelMCPTests(unittest.TestCase):
         server, initialized = self.ready(install=False, ui=False, discovery=True)
         self.assertIn("resources", initialized["capabilities"])
         tools = {t["name"]: t for t in self.request(server, "tools/list")["result"]["tools"]}
+        self.assertEqual(set(tools), {"learning_panel_open"})
         self.assertEqual(tools["learning_panel_open"]["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
         self.assertEqual(tools["learning_panel_open"]["_meta"]["ui"]["visibility"], ["app"])
         resources = self.request(server, "resources/list")["result"]["resources"]
@@ -119,10 +124,65 @@ class PanelMCPTests(unittest.TestCase):
         self.assertNotIn("structuredContent", result)
         self.assertFalse(result["_meta"]["agentLearningPanel"]["visible"])
         self.assertNotIn("summary", result["_meta"]["agentLearningPanel"])
-        denied = self.tool(server, "learning_panel_direct_action", {"capability": "foreign", "action": "debug"},
-                           meta={"thread_id": "uninstalled-chat"})["result"]
-        self.assertTrue(denied["isError"])
+        for name, arguments in (("learning_panel_direct_action", {"capability": "foreign", "action": "debug"}),
+                                ("session_context", {}), ("task_update", {"goal": "uninstalled task"})):
+            denied = self.tool(server, name, arguments, meta={"thread_id": "uninstalled-chat"})
+            self.assertEqual(denied["error"]["code"], -32602)
         self.assertIsNone(server.direct_panel)
+        self.assertIsNone(server.runtime)
+
+    def test_discovery_uses_no_runtime_or_project_identity(self):
+        server = Server(None, None, panel_discovery=True)
+        server.state = "ready"
+        self.assertEqual([tool["name"] for tool in self.request(server, "tools/list")["result"]["tools"]],
+                         ["learning_panel_open"])
+        self.assertFalse(self.tool(server, "learning_panel_open")["result"]["_meta"]["agentLearningPanel"]["visible"])
+        self.assertIsNone(server.project)
+
+    def test_removed_installation_hides_worker_tools_and_rejects_cached_calls(self):
+        server, _ = self.ready()
+        self.assertIn("learning_status", {tool["name"] for tool in self.request(server, "tools/list")["result"]["tools"]})
+        server.panel.active = False
+        self.admission.side_effect = ContractError("project_not_installed")
+        names = {tool["name"] for tool in self.request(server, "tools/list")["result"]["tools"]}
+        self.assertNotIn("learning_status", names)
+        self.assertNotIn("task_update", names)
+        denied = self.tool(server, "learning_status")["result"]
+        self.assertTrue(denied["isError"])
+        self.assertEqual(denied["content"][0]["text"], "project_not_installed_or_changed")
+
+    def test_panel_only_worker_calls_use_lightweight_admission(self):
+        server, _ = self.ready()
+        self.assertEqual(server.plugin_installation, "export-path")
+        with patch.object(server.panel, "eligible", side_effect=AssertionError("worker scanned full installation")), \
+                patch.object(server.direct_panel, "eligible", side_effect=AssertionError("worker inspected panel")), \
+                patch.object(self.runtime, "status", create=True, return_value={}) as status:
+            self.assertFalse(self.tool(server, "learning_status")["result"]["isError"])
+        status.assert_called_once_with("project")
+
+    def test_plugin_without_panel_rechecks_installation_for_lists_and_cached_calls(self):
+        binding = {"installation": "export-path", "workspace": "project-path", "receipt_digest": "one"}
+        with patch("agent_learning.project_admission.require_project_installation", return_value=binding) as admission:
+            server = Server(self.runtime, "project", workspace="project-path", plugin_installation="export-path")
+            server.state = "ready"
+            self.assertIsNone(server.panel)
+            names = {tool["name"] for tool in self.request(server, "tools/list")["result"]["tools"]}
+            self.assertIn("task_update", names)
+            self.assertNotIn("learning_panel", names)
+            admission.return_value = dict(binding, receipt_digest="two")
+            self.assertEqual(self.request(server, "tools/list")["result"]["tools"], [])
+            denied = self.tool(server, "learning_status")["result"]
+            self.assertTrue(denied["isError"])
+            admission.side_effect = ContractError("project_not_installed")
+            self.assertTrue(self.tool(server, "task_update", {"goal": "cached write"})["result"]["isError"])
+
+    def test_normal_server_requires_runtime_and_plugin_connections_reject_other_hosts(self):
+        with self.assertRaises(ContractError):
+            Server(None, None)
+        for host, role in (("codex", "admin"), ("antigravity", "worker"), ("dsh", "worker")):
+            self.runtime.host = host
+            with self.subTest(host=host, role=role), self.assertRaises(ContractError):
+                Server(self.runtime, "project", role=role, plugin_installation="export-path")
 
     def test_discovery_cannot_be_enabled_for_admin_or_other_hosts(self):
         with self.assertRaises(ContractError):

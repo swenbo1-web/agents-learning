@@ -402,21 +402,40 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
             self.assertFalse(store.exists())
 
-    def test_stable_mcp_and_hook_work_after_export_moves_and_is_deleted(self):
+    def test_exported_codex_mcp_rejects_uninstalled_workspace_before_opening_home(self):
+        with tempfile.TemporaryDirectory(prefix="alp-project-scope-") as temporary:
+            area = Path(temporary)
+            workspace, uninstalled = area / "installed", area / "uninstalled"
+            workspace.mkdir()
+            uninstalled.mkdir()
+            target = workspace / ".agents/plugins/agent-learning"
+            install(target, runtime_store=area / "releases")
+            mcp = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["agent_learning"]
+            home = area / "knowledge"
+            environment = dict(os.environ, ALP_HOME=str(home), ALP_CONFIG=str(home / "config.json"),
+                               PYTHONDONTWRITEBYTECODE="1")
+            for name in ("ALP_DISABLED", "ALP_HOOK_MODE", "ALP_CONTEXT_HANDLE"):
+                environment.pop(name, None)
+            response = subprocess.run([mcp["command"], *mcp["args"]], input=b"",
+                cwd=uninstalled, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
+            self.assertEqual(response.returncode, 1)
+            self.assertEqual(response.stdout, b"")
+            self.assertEqual(json.loads(response.stderr.decode("utf-8"))["reason"], "project_installation_invalid")
+            self.assertFalse(home.exists())
+
+    def test_fixed_cli_survives_export_removal_but_plugin_entries_require_installation(self):
         with tempfile.TemporaryDirectory(prefix="alp-stable-entries-") as temp:
             base = Path(temp)
-            target, store = base / "export", base / "releases"
+            workspace = base / "project"
+            workspace.mkdir()
+            target, store = workspace / ".agents/plugins/agent-learning", base / "releases"
             result = install(target, runtime_store=store)
             release = Path(result["runtime_directory"])
             mcp = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["agent_learning"]
             handler = json.loads((target / "hooks/hooks.json").read_text(encoding="utf-8"))["hooks"]["SessionStart"][0]["hooks"][0]
             self.assertEqual(Path(mcp["args"][0]).parents[1], release)
+            self.assertEqual(mcp["args"][-2:], ["--plugin-installation", str(target)])
             command = handler["commandWindows"] if os.name == "nt" else handler["command"]
-            moved = base / "moved export"
-            target.rename(moved)
-            shutil.rmtree(moved)
-            workspace = base / "project"
-            workspace.mkdir()
             environment = dict(os.environ, ALP_HOME=str(base / "data"), PYTHONDONTWRITEBYTECODE="1")
             for name in ("ALP_CONFIG", "ALP_DISABLED", "ALP_HOOK_MODE"):
                 environment.pop(name, None)
@@ -443,18 +462,39 @@ class PackageTests(unittest.TestCase):
             output = json.loads(response.stdout.decode("utf-8"))
             self.assertIn("hookSpecificOutput", output)
             self.assertNotIn("systemMessage", output)
+            moved = base / "moved export"
+            target.rename(moved)
+            shutil.rmtree(moved)
+            wire = ("\n".join(json.dumps(item) for item in messages) + "\n").encode("utf-8")
+            response = subprocess.run([mcp["command"], *mcp["args"]], input=wire,
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
+            self.assertEqual(response.returncode, 1)
+            self.assertEqual(response.stdout, b"")
+            self.assertEqual(json.loads(response.stderr.decode("utf-8"))["reason"], "project_installation_invalid")
+            response = subprocess.run(command, shell=True, input=json.dumps(event).encode("utf-8"),
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
+            self.assertEqual(response.returncode, 0)
+            self.assertEqual(json.loads(response.stdout.decode("utf-8")), {})
+            response = subprocess.run([sys.executable, "-B", str(release / "scripts/learning.py"),
+                "--workspace", str(workspace), "serve", "--role", "worker"], input=wire,
+                cwd=workspace, env=environment, capture_output=True, timeout=STARTUP_TIMEOUT)
+            self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+            replies = [json.loads(line) for line in response.stdout.decode("utf-8").splitlines()]
+            self.assertIn("knowledge_search", {tool["name"] for tool in replies[-1]["result"]["tools"]})
             self.assertEqual(validate_entry(release / "scripts/learning.py")["release_id"], result["release_id"])
 
     def test_changed_release_is_rejected_by_both_entries_and_missing_manifest_is_not_source(self):
         with tempfile.TemporaryDirectory(prefix="alp-release-integrity-") as temp:
             base = Path(temp)
-            result = install(base / "export", runtime_store=base / "releases", hook_mode="enforce")
+            workspace = base / "project"
+            workspace.mkdir()
+            target = workspace / ".agents/plugins/agent-learning"
+            result = install(target, runtime_store=base / "releases", hook_mode="enforce",
+                             panel_workspace=workspace)
             release = Path(result["runtime_directory"])
             (release / "README.md").write_text("changed", encoding="utf-8")
             with self.assertRaises(ReleaseError):
                 validate_entry(release / "scripts/learning.py")
-            workspace = base / "project"
-            workspace.mkdir()
             environment = dict(os.environ, ALP_HOME=str(base / "data"), PYTHONDONTWRITEBYTECODE="1")
             for name in ("ALP_CONFIG", "ALP_DISABLED", "ALP_HOOK_MODE"):
                 environment.pop(name, None)

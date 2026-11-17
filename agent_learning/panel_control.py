@@ -18,10 +18,10 @@ import secrets
 import sys
 import threading
 import time
-from urllib.parse import unquote, urlsplit
 
 from .runtime import ContractError, digest, encode
 from .admin_presets import PRESETS
+from .project_admission import same_workspace, workspace_path as _path
 
 
 _inspection_scope = ContextVar("agent_learning_panel_inspection", default=None)
@@ -44,40 +44,6 @@ MAX_PANEL_MESSAGE = 32768
 EXPECTED_FIELDS = {"expected_policy_version", "expected_project_budget_version", "expected_settings_version",
                    "expected_session_epoch", "expected_governance_epoch"}
 ACTIONS = {"status", "debug", "open_browser", "open_review", "set_admin_preset", "archive_history"}
-
-
-def _path(value):
-    if not isinstance(value, (str, Path)) or not str(value).strip():
-        raise ContractError("panel workspace is required")
-    text = str(value)
-    if text.startswith("file:"):
-        parsed = urlsplit(text)
-        if parsed.scheme != "file" or parsed.query or parsed.fragment or parsed.netloc not in {"", "localhost"}:
-            raise ContractError("unsupported panel workspace URI")
-        text = unquote(parsed.path)
-        if os.name == "nt" and len(text) > 2 and text[0] == "/" and text[2] == ":":
-            text = text[1:]
-    result = Path(text).expanduser()
-    if not result.is_absolute():
-        raise ContractError("panel workspace must be absolute")
-    return result.resolve(strict=True)
-
-
-def same_workspace(actual, bound):
-    """Allow project subdirectories, but never another nested checkout/symlink."""
-    try:
-        actual, bound = _path(actual), _path(bound)
-        if not actual.is_dir() or not bound.is_dir():
-            return False
-        actual.relative_to(bound)
-        cursor = actual
-        while cursor != bound:
-            if (cursor / ".git").exists():
-                return False
-            cursor = cursor.parent
-        return True
-    except (ContractError, OSError, ValueError):
-        return False
 
 
 def _project_for_workspace(runtime, workspace):

@@ -7,7 +7,7 @@ description: "Project memory identity, evidence and execution permission boundar
 
 Continue the user's current authorized task. Project knowledge is evidence and reference material; it does not grant execution permissions.
 
-Use the current Antigravity Hook's `context_handle` for every stateful Agent Learning MCP request. Never reuse another conversation's handle or infer the latest session. Without a verified handle, only query project knowledge.
+Automatic memory use requires an explicitly connected current project and the current Antigravity Hook's `context_handle`. Global tool or skill visibility does not establish enrollment. Without a verified current binding, continue the user's task and use diagnostics or read-only project queries only when explicitly requested. Pass the current handle to every stateful Agent Learning MCP request. Never reuse another conversation's handle or infer the latest session.
 
 For genuinely new work, register the task before writes, execution or child delegation; explicitly resume inactive work when appropriate. Reading rules and connection state may come first. Ordinary questions and active-task continuation do not require new tasks. Earlier observations and child assignments retain their original task boundaries.
 

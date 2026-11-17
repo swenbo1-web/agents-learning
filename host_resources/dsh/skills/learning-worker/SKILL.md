@@ -1,15 +1,17 @@
 ---
 name: learning-worker
-description: "Use Agent Learning project knowledge, work history, file associations and task state in DeepSeek Harness (DSH). Applies when the project memory tools are available."
+description: "Use Agent Learning knowledge, work history and task state in an explicitly connected DeepSeek Harness (DSH) project with a current Hook binding."
 ---
 
 # DSH worker knowledge protocol
 
 Complete the current authorized task. Querying or adopting knowledge never expands its execution scope.
 
+Automatic use requires a connected current project and this invocation's verified Hook handle. Global menus, skills and available tools do not establish project enrollment. Without that evidence, continue the user's task. Use a diagnostic or read-only memory entry only when the user explicitly requests it; do not probe enrollment by calling Runtime tools or registering a task.
+
 ## Identity and task state
 
-- Pass the current Hook's `context_handle` on every stateful call (`session_context`, `task_update`, `case_feedback`, `knowledge_use`, `work_memory_read`) and to `knowledge_search`, `knowledge_read` and `work_memory_search` to register actual exposure. Without a verified handle, use read-only project queries.
+- Pass the current Hook's `context_handle` on every stateful call (`session_context`, `task_update`, `case_feedback`, `knowledge_use`, `work_memory_read`) and to `knowledge_search`, `knowledge_read` and `work_memory_search` to register actual exposure. Explicit user queries for a connected project may use read-only project access without a current handle.
 - You may first read project rules and connection state. Register genuinely new work with `task_update(new_task=true)` **before the first write, execution or child delegation**. Explicitly resume an inactive task only when continuing that actual work after checking the current request. Ordinary continuation of an active task and ordinary questions do not require a new task. Registration never restores execution permissions.
 - For an existing task, read `session_context` and pass `expected_task_id` and `expected_write_version` to every `task_update`, including replacement with `new_task=true`. Pre-registration observations and already-started children keep their original identities; registering at delivery cannot backfill them into the new stage.
 - Child agents (`subagent` / `subagent_fork` / `workflow`) receive fixed assignments bound to the parent task snapshot. Read `session_context` to inspect the assigned scope, and never overwrite the parent task.

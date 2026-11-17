@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -88,8 +89,8 @@ def _mode(explicit: str | None) -> str | None:
 
 def main(arguments: list[str] | None = None) -> int:
     kind, explicit_mode, invalid_arguments = _arguments(sys.argv[1:] if arguments is None else arguments)
-    mode = _mode(explicit_mode)
     environment_mode = os.environ.get("ALP_HOOK_MODE")
+    mode = explicit_mode or (environment_mode if environment_mode in MODES else None)
     if explicit_mode is None and environment_mode is not None and environment_mode not in MODES:
         invalid_arguments = True
     if invalid_arguments:
@@ -127,6 +128,20 @@ def main(arguments: list[str] | None = None) -> int:
     plugin_root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(plugin_root))
     try:
+        from agent_learning.project_admission import require_project_installation
+
+        fixed = ((plugin_root / "release.json").exists()
+                 or re.fullmatch(r"\d+\.\d+\.\d+-[0-9a-f]{64}", plugin_root.name))
+        binding = require_project_installation(event["cwd"], host="codex",
+                                               runtime_directory=plugin_root if fixed else None)
+    except Exception as exc:
+        if str(exc) == "project_not_installed":
+            _emit({})
+        else:
+            _failure(kind, _mode(explicit_mode), "release_unverified")
+        return 0
+    mode = _mode(explicit_mode)
+    try:
         from agent_learning.release import validate_entry
 
         validate_entry(__file__)
@@ -140,6 +155,8 @@ def main(arguments: list[str] | None = None) -> int:
         # PLUGIN_DATA 不参与选择，避免不同安装副本分裂记录。
         runtime = Runtime()
         try:
+            # 首个事件也可能来自无 Git 工作区的子目录，先登记已核实的项目根。
+            runtime.project(binding["workspace"])
             # 固定入口／环境模式同时决定故障处理和正常守卫，避免两套策略互相矛盾。
             trusted_mode = explicit_mode or environment_mode
             mode = trusted_mode or ("enforce" if runtime.config["enforce_task_policy"] else "observe")

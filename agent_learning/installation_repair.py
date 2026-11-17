@@ -8,7 +8,7 @@ import tempfile
 
 from .installation_health import select_python
 from .install_update import (INSTALL_MANIFEST, antigravity_hooks, dsh_hooks, installation_lock,
-    inspect_installation, mcp_document, preserve_extra_files, safe_path, switch_installation,
+    codex_plugin_binding, inspect_installation, mcp_document, preserve_extra_files, safe_path, switch_installation,
     write_installation_manifest, _expected_hook_document, _json)
 from .release import filesystem_path
 from .runtime import ContractError
@@ -46,7 +46,8 @@ def repair_python(destination, python=None, *, expected_release_id=None, allow_v
             multi = host == "dsh" and len(receipt.get("workspaces") or []) > 1
             workspace = None if multi else receipt.get("workspace")
             mcp = mcp_document(runtime, selected, host, workspace, receipt.get("home"),
-                               panel_installation=target if "panel_workspace" in receipt else None)
+                               panel_installation=target if "panel_workspace" in receipt else None,
+                               plugin_installation=codex_plugin_binding(receipt, target))
             if host == "codex":
                 hooks = _expected_hook_document(runtime, selected, receipt["hook_mode"], _hook_commands)
             elif host == "antigravity":

@@ -123,6 +123,7 @@ def parser():
     serve.add_argument("--host", choices=["codex", "antigravity", "dsh"], default=argparse.SUPPRESS)
     serve.add_argument("--role", choices=["worker", "admin"], default="worker")
     serve.add_argument("--context-handle", help="受信显式绑定句柄；Codex可使用ALP_CONTEXT_HANDLE，Antigravity不继承环境句柄")
+    serve.add_argument("--plugin-installation", help="Codex项目插件安装目录；在初始化和工具调用前验证当前工作区接入")
     serve.add_argument("--panel-installation", help="Codex可视化面板对应的已验证项目安装目录")
     serve.add_argument("--panel-discovery", action="store_true", help="向Codex宿主目录声明只读UI入口；实际操作仍须当前项目的安装绑定")
     panel = sub.add_parser("panel-serve", help="供原生宿主界面调用的有限JSON控制桥，不执行任意命令")
@@ -447,7 +448,28 @@ def main(argv=None):
             print(encode({"status": "error", "reason": str(exc)}), file=sys.stderr)
             return 1
     runtime = None
+    project_installation = None
     try:
+        if args.command == "serve":
+            if args.panel_discovery:
+                if (args.host != "codex" or args.role != "worker" or args.panel_installation
+                        or args.plugin_installation or args.context_handle):
+                    raise ContractError("panel discovery requires an unbound Codex worker connection")
+                Server(None, None, panel_discovery=True).serve()
+                return 0
+            installation = args.plugin_installation or args.panel_installation
+            if installation:
+                if args.host != "codex" or args.role != "worker":
+                    raise ContractError("project panel connections require a Codex worker")
+                if (args.plugin_installation and args.panel_installation
+                        and Path(args.plugin_installation).resolve() != Path(args.panel_installation).resolve()):
+                    raise ContractError("project and panel installation must match")
+                from .project_admission import require_project_installation
+                from .release import RELEASE_DIRECTORY
+                source = Path(__file__).resolve().parent.parent
+                fixed_runtime = source if (source / "release.json").is_file() or RELEASE_DIRECTORY.fullmatch(source.name) else None
+                project_installation = require_project_installation(args.workspace or str(Path.cwd()), installation,
+                                                                     host=args.host, runtime_directory=fixed_runtime)
         if args.command == "panel-serve":
             from .panel_control import serve_panel
             if hasattr(sys.stdin, "reconfigure"):
@@ -581,13 +603,16 @@ def main(argv=None):
                       if args.command == "rebuild-index" else runtime.backup(args.destination))
             print(encode(result))
             return 0
+        if project_installation:
+            runtime.project(project_installation["workspace"])
         project = runtime.project(args.workspace)
         if args.command == "serve":
             handle = args.context_handle
             if handle is None and args.host == "codex":
                 handle = os.environ.get("ALP_CONTEXT_HANDLE")
             Server(runtime, project, args.role, context_handle=handle, workspace=args.workspace,
-                   panel_installation=args.panel_installation, panel_discovery=args.panel_discovery).serve()
+                   panel_installation=args.panel_installation, panel_discovery=args.panel_discovery,
+                   plugin_installation=args.plugin_installation).serve()
             return 0
         if args.command == "status": result = runtime.status(project)
         elif args.command == "history-prepare":

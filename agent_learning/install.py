@@ -441,7 +441,8 @@ def install(destination, runtime_store=None, hook_mode=None, *, upgrade=False, e
                 mcp = mcp_document(runtime_directory, selected_python, host,
                                    pinned_workspace,
                                    str(home) if home is not None else None,
-                                   panel_installation=target if panel_workspace is not None else None)
+                                   panel_installation=target if panel_workspace is not None else None,
+                                   plugin_installation=target if host == "codex" else None)
                 mcp_file = staging / (".mcp.json" if host == "codex" else "mcp_config.json")
                 mcp_file.write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 hook_file = staging / ("hooks/hooks.json" if host == "codex" else "hooks.json")

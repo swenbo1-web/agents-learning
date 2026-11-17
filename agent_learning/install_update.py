@@ -255,7 +255,18 @@ def dsh_hooks(runtime, python, mode, command_builder, workspace=None, home=None)
     return hooks
 
 
-def mcp_document(runtime, python, host="codex", workspace=None, home=None, *, panel_installation=None):
+def codex_plugin_binding(receipt, installation):
+    """Retain the MCP argument contract of the receipt's frozen release."""
+    if receipt.get("target_host", "codex") != "codex":
+        return None
+    version = receipt.get("version")
+    if not isinstance(version, str) or not _VERSION.fullmatch(version):
+        raise ContractError("existing installation version is invalid")
+    return installation if tuple(map(int, version.split("."))) >= (1, 4, 68) else None
+
+
+def mcp_document(runtime, python, host="codex", workspace=None, home=None, *, panel_installation=None,
+                 plugin_installation=None):
     arguments = [str(runtime / "scripts/learning.py"), "serve", "--role", "worker"]
     if host == "antigravity":
         arguments = ["-B", str(runtime / "scripts/learning.py"), "--workspace", workspace, "--home", home,
@@ -267,6 +278,10 @@ def mcp_document(runtime, python, host="codex", workspace=None, home=None, *, pa
         if home is not None:
             arguments.extend(["--home", home])
         arguments.extend(["serve", "--role", "worker", "--host", "dsh"])
+    if plugin_installation is not None:
+        if host != "codex":
+            raise ContractError("MCP plugin installation binding applies only to Codex")
+        arguments.extend(["--plugin-installation", str(plugin_installation)])
     if panel_installation is not None:
         if host != "codex":
             raise ContractError("MCP panel installation binding applies only to Codex")
@@ -357,7 +372,8 @@ def inspect_installation(destination, command_builder, expected_release_id=None,
     dsh_multi = host == "dsh" and isinstance(receipt.get("workspaces"), list) and len(receipt["workspaces"]) > 1
     pinned_workspace = None if dsh_multi else receipt.get("workspace")
     mcp = mcp_document(runtime, receipt["python"], host, pinned_workspace, receipt.get("home"),
-                       panel_installation=bound_target if "panel_workspace" in receipt else None)
+                       panel_installation=bound_target if "panel_workspace" in receipt else None,
+                       plugin_installation=codex_plugin_binding(receipt, bound_target))
     mcp_path = ".mcp.json" if host == "codex" else "mcp_config.json"
     hook_path = "hooks/hooks.json" if host == "codex" else "hooks.json"
     if host == "codex":

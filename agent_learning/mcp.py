@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 import sys
+from pathlib import Path
 from . import __version__
 from .runtime import CATEGORIES, KNOWLEDGE_KINDS, METADATA_KEYS, TASK_STATUSES, VALIDATION_LEVELS, ContractError, encode
 from .knowledge_output import read_page, search_preview
@@ -259,31 +260,45 @@ class Server:
     SUPPORTED_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
     def __init__(self, runtime, project, role="worker", context_handle=None, workspace=None,
-                 panel_installation=None, panel_discovery=False):
+                 panel_installation=None, panel_discovery=False, plugin_installation=None):
         if role not in {"worker", "admin"}:
             raise ContractError("invalid server role")
-        if type(panel_discovery) is not bool or panel_discovery and (runtime.host != "codex" or role != "worker"):
+        if type(panel_discovery) is not bool or panel_discovery and (
+                role != "worker" or runtime is not None and runtime.host != "codex"):
             raise ContractError("panel discovery requires a Codex worker connection")
-        self.runtime, self.project = runtime, project
+        if panel_discovery and (panel_installation is not None or plugin_installation is not None or context_handle is not None):
+            raise ContractError("panel discovery cannot bind a project installation or context")
+        if runtime is None and not panel_discovery:
+            raise ContractError("a project runtime is required")
+        if plugin_installation is not None and (runtime.host != "codex" or role != "worker"):
+            raise ContractError("plugin installation connections require a Codex worker")
+        if (plugin_installation is not None and panel_installation is not None
+                and Path(plugin_installation).resolve() != Path(panel_installation).resolve()):
+            raise ContractError("project and panel installation must match")
+        self.runtime, self.project = (None, None) if panel_discovery else (runtime, project)
         self.role = role
-        self.per_request_context = runtime.host in {"antigravity", "dsh"} and context_handle is None
+        self.per_request_context = not panel_discovery and runtime.host in {"antigravity", "dsh"} and context_handle is None
         self.context_handle = context_handle
         # 仅受信启动入口可以提供工作区；模型参数不能选择任意外部checkout。
         self.workspace = workspace
-        self.epoch = runtime.session_epoch()
-        self.governance_epoch = runtime.host_epoch()
+        self.plugin_installation = (plugin_installation or panel_installation
+                                    if not panel_discovery and runtime.host == "codex" and role == "worker"
+                                    else plugin_installation)
+        self.installation_identity = None
+        if self.plugin_installation is not None:
+            self.installation_identity = self._plugin_binding()
+        self.epoch = None if panel_discovery else runtime.session_epoch()
+        self.governance_epoch = None if panel_discovery else runtime.host_epoch()
         self.state, self.protocol_version = "new", None
         from .work_read_delivery import WorkReadDelivery
         self.work_read_delivery = WorkReadDelivery()
-        self.tools = {name: (description, contract) for name, description, contract in
-                      WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])}
+        entries = DIRECT_PANEL_TOOLS[:1] if panel_discovery else WORKER_TOOLS + (ADMIN_TOOLS if role == "admin" else [])
+        self.tools = {name: (description, contract) for name, description, contract in entries}
         self.panel, self.direct_panel, self.panel_ui_supported = None, None, False
         # Desktop discovers entrypoints through its host catalog, then routes
         # calls through the current thread's connection. Discovery grants no
         # project access and never chooses an installation for a caller.
         self.panel_discovery = panel_discovery
-        if panel_discovery:
-            self.tools.update({name: (description, contract) for name, description, contract in DIRECT_PANEL_TOOLS})
         if panel_installation is not None and role == "worker":
             from .panel_control import PanelControl
             self.panel = PanelControl(runtime, project, workspace, panel_installation, require_context=True)
@@ -301,6 +316,22 @@ class Server:
 
     def _direct_panel_eligible(self):
         return self.direct_panel is not None and self.direct_panel.eligible()
+
+    def _plugin_binding(self):
+        from .project_admission import require_project_installation
+        from .release import RELEASE_DIRECTORY
+        source = Path(__file__).resolve().parent.parent
+        fixed_runtime = source if (source / "release.json").is_file() or RELEASE_DIRECTORY.fullmatch(source.name) else None
+        return require_project_installation(self.workspace, self.plugin_installation,
+                                            host=self.runtime.host, runtime_directory=fixed_runtime)
+
+    def _plugin_eligible(self):
+        if self.plugin_installation is None:
+            return True
+        try:
+            return self._plugin_binding() == self.installation_identity
+        except (ContractError, OSError, ValueError, TypeError):
+            return False
 
     def _work_delivery_scope(self, access, handle):
         r, p = self.runtime, self.project
@@ -389,6 +420,8 @@ class Server:
             self.direct_panel.close()
 
     def _check_epoch(self):
+        if self.panel_discovery:
+            return
         if (self.runtime.session_epoch() != self.epoch
                 or self.role == "admin" and self.runtime.host_epoch() != self.governance_epoch):
             raise ProtocolError(-32001, "reconnect_required", {"reason": "host_epoch_changed"})
@@ -416,6 +449,8 @@ class Server:
             return self._direct_panel_call(name, args, request_meta)
         if name in {"learning_panel", "learning_panel_action"}:
             return self._panel_call(name, args)
+        if not self._plugin_eligible():
+            raise ContractError("project_not_installed_or_changed")
         p, r = self.project, self.runtime
         if name in {"candidate_reference_read", "candidate_reference_feedback"}:
             from .candidate_references import read as candidate_read, feedback as candidate_feedback
@@ -606,7 +641,10 @@ class Server:
                 raise ProtocolError(-32002, "initialization_required", {"state": self.state})
             elif method == "tools/list":
                 result = {"tools": []}
+                worker_eligible = self._plugin_eligible()
                 for name, (description, contract) in self.tools.items():
+                    if name not in PANEL_TOOL_NAMES and not worker_eligible:
+                        continue
                     if name in PANEL_TOOL_NAMES - DIRECT_PANEL_TOOL_NAMES and not self._panel_eligible():
                         continue
                     if name in DIRECT_PANEL_TOOL_NAMES and not (self.panel_discovery or self._direct_panel_eligible()):

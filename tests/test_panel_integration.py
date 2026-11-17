@@ -1,9 +1,13 @@
 """Actual fixed-runtime MCP panel chain, with isolated state and no models/UI launch."""
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import queue
+import re
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -109,17 +113,120 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertFalse(changed["structuredContent"]["summary"]["admin_admission_enabled"])
         self.assertEqual(self.runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
 
-    def test_same_installed_plugin_exposes_no_panel_in_another_project(self):
+    def test_same_installed_plugin_rejects_another_project_before_runtime(self):
         other = Path(self.area.name) / "uninstalled project"
         other.mkdir()
         (other / ".git").mkdir()
-        request, _ = self.client(other)
-        names = {tool["name"] for tool in request("tools/list")["tools"]}
-        self.assertNotIn("learning_panel", names)
-        self.assertNotIn("learning_panel_action", names)
-        self.assertNotIn("learning_panel_open", names)
-        self.assertNotIn("learning_panel_direct_action", names)
-        self.assertIn("knowledge_search", names)
+        unused_home = Path(self.area.name) / "uninstalled-home"
+        environment = dict(os.environ, ALP_HOME=str(unused_home), ALP_CONFIG=str(self.config),
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        environment.pop("ALP_CONTEXT_HANDLE", None)
+        result = subprocess.run([self.mcp["command"], *self.mcp["args"]], cwd=other, env=environment,
+                                input="", capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(json.loads(result.stderr)["reason"], "project_installation_invalid")
+        self.assertFalse(unused_home.exists())
+
+    def test_fixed_runtime_global_discovery_has_no_database_or_worker_tools(self):
+        unused_home = Path(self.area.name) / "discovery-home"
+        broken_config = Path(self.area.name) / "broken-config.json"
+        broken_config.write_text("invalid configuration", encoding="utf-8")
+        environment = dict(os.environ, ALP_HOME=str(unused_home), ALP_CONFIG=str(broken_config),
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        environment.pop("ALP_CONTEXT_HANDLE", None)
+        frames = [
+            {"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "isolated-discovery", "version": "1"}}},
+            {"method": "notifications/initialized"},
+            {"id": 2, "method": "tools/list"},
+            {"id": 3, "method": "tools/call", "params": {"name": "learning_panel_open", "arguments": {}}},
+            {"id": 4, "method": "tools/call", "params": {"name": "session_context", "arguments": {}}},
+            {"id": 5, "method": "tools/call", "params": {"name": "task_update", "arguments": {"goal": "cached task"}}},
+            {"id": 6, "method": "resources/list"},
+        ]
+        data = "".join(json.dumps({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+        args = self.mcp["args"]
+        script = next(value for value in args if value.endswith("learning.py"))
+        result = subprocess.run([self.mcp["command"], "-B", script, "serve", "--panel-discovery"],
+                                cwd=self.workspace, env=environment, input=data,
+                                capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = {reply["id"]: reply for line in result.stdout.splitlines() if (reply := json.loads(line))}
+        self.assertEqual([tool["name"] for tool in replies[2]["result"]["tools"]], ["learning_panel_open"])
+        self.assertEqual(replies[3]["result"]["content"], [])
+        self.assertFalse(replies[3]["result"]["_meta"]["agentLearningPanel"]["visible"])
+        self.assertEqual(replies[4]["error"]["code"], -32602)
+        self.assertEqual(replies[5]["error"]["code"], -32602)
+        self.assertEqual(len(replies[6]["result"]["resources"]), 1)
+        self.assertFalse(unused_home.exists())
+
+    def test_first_subdirectory_connection_uses_installed_root_without_git(self):
+        workspace = Path(self.area.name) / "non-git project"
+        subdirectory = workspace / "src" / "feature"
+        subdirectory.mkdir(parents=True)
+        target = Path(self.area.name) / "non-git export"
+        install(target, runtime_store=self.root / "releases", panel_workspace=workspace)
+        mcp = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["agent_learning"]
+        fresh_home = Path(self.area.name) / "fresh-subdirectory-home"
+        environment = dict(os.environ, ALP_HOME=str(fresh_home), ALP_CONFIG=str(self.config),
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        environment.pop("ALP_CONTEXT_HANDLE", None)
+        frames = [
+            {"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "isolated-subdirectory", "version": "1"}}},
+            {"method": "notifications/initialized"},
+            {"id": 2, "method": "tools/call", "params": {"name": "learning_status", "arguments": {"view": "summary"}}},
+        ]
+        data = "".join(json.dumps({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+        result = subprocess.run([mcp["command"], *mcp["args"]], cwd=subdirectory, env=environment,
+                                input=data, capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = {reply["id"]: reply for line in result.stdout.splitlines() if (reply := json.loads(line))}
+        self.assertFalse(replies[2]["result"]["isError"], replies[2])
+        with closing(sqlite3.connect((fresh_home / "runtime.sqlite3").as_uri() + "?mode=ro", uri=True)) as database:
+            database.execute("PRAGMA query_only=ON")
+            self.assertEqual(database.execute("SELECT COUNT(*) FROM projects").fetchone()[0], 1)
+            paths = database.execute("SELECT path,project FROM project_paths").fetchall()
+            self.assertEqual({row[0] for row in paths},
+                             {os.path.normcase(str(workspace.resolve())), os.path.normcase(str(subdirectory.resolve()))})
+            self.assertEqual(len({row[1] for row in paths}), 1)
+
+    def test_subdirectory_alias_keeps_hook_and_worker_project_identity(self):
+        workspace = Path(self.area.name) / "alias project"
+        subdirectory = workspace / "child"
+        subdirectory.mkdir(parents=True)
+        target = workspace / ".agents/plugins/agent-learning"
+        installed = install(target, runtime_store=self.root / "releases", panel_workspace=workspace)
+        self.config.write_text(json.dumps({"project_aliases": {str(subdirectory): "child-alias"}}), encoding="utf-8")
+        environment = dict(os.environ, ALP_HOME=str(self.home), ALP_CONFIG=str(self.config),
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        for name in ("ALP_DISABLED", "ALP_CONTEXT_HANDLE"):
+            environment.pop(name, None)
+        hook = subprocess.run([sys.executable, "-B", str(Path(installed["runtime_directory"]) / "hooks/dispatch.py")],
+            cwd=subdirectory, env=environment, input=json.dumps({"hook_event_name": "SessionStart",
+                "source": "startup", "session_id": "aliased-chat", "cwd": str(subdirectory)}),
+            capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        context = json.loads(hook.stdout)["hookSpecificOutput"]["additionalContext"]
+        handle = re.search(r"context_handle=([a-f0-9]{32})", context).group(1)
+        mcp = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["agent_learning"]
+        frames = [
+            {"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "isolated-alias", "version": "1"}}},
+            {"method": "notifications/initialized"},
+            {"id": 2, "method": "tools/call", "params": {"name": "session_context",
+                "arguments": {"context_handle": handle}}},
+        ]
+        data = "".join(json.dumps({"jsonrpc": "2.0", **frame}) + "\n" for frame in frames)
+        result = subprocess.run([mcp["command"], *mcp["args"]], cwd=subdirectory, env=environment,
+                                input=data, capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = {reply["id"]: reply for line in result.stdout.splitlines() if (reply := json.loads(line))}
+        self.assertFalse(replies[2]["result"]["isError"], replies[2])
+        binding = replies[2]["result"]["structuredContent"]
+        self.assertTrue(binding["context_bound"])
+        self.assertEqual(binding["project_id"], "child-alias")
 
     def test_fixed_runtime_without_ui_returns_only_verified_browser_launch_information(self):
         request, handle = self.client(self.workspace, ui=False)

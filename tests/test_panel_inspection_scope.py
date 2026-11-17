@@ -19,7 +19,8 @@ class PanelInspectionScopeTests(unittest.TestCase):
         self.addCleanup(runtime.close)
         project = runtime.project(workspace)
         receipt = {"panel_workspace": str(workspace), "home": str(runtime.home), "release_id": "one"}
-        with patch("agent_learning.install_update.inspect_installation", return_value={"receipt": receipt}) as inspect:
+        with patch("agent_learning.install_update.inspect_installation", return_value={"receipt": receipt}) as inspect, \
+                patch("agent_learning.project_admission.require_project_installation", return_value={"workspace": str(workspace)}):
             server = Server(runtime, project, workspace=workspace, panel_installation=root / "export")
             self.addCleanup(server.close)
             server.state = "ready"

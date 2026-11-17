@@ -6,7 +6,9 @@
         "${PLUGIN_ROOT}/scripts/learning.py",
         "serve",
         "--role",
-        "worker"
+        "worker",
+        "--plugin-installation",
+        "${PLUGIN_ROOT}"
       ]
     }
   }

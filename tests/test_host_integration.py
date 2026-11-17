@@ -31,6 +31,8 @@ class HostIntegrationTests(unittest.TestCase):
         base = Path(self.temporary.name)
         self.workspace = base / "project with spaces"
         self.workspace.mkdir()
+        install(self.workspace / ".agents/plugins/agent-learning", runtime_store=base / "releases",
+                panel_workspace=self.workspace)
         self.home = base / "runtime data"
         self.home.mkdir()
         (self.home / "config.json").write_text(
@@ -264,8 +266,7 @@ class HostIntegrationTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows Hook command contract")
     def test_exported_windows_command_accepts_json_stdin(self):
-        destination = self.workspace.parent / "installed plugin copy"
-        install(destination, runtime_store=self.workspace.parent / "runtime releases")
+        destination = self.workspace / ".agents/plugins/agent-learning"
         handlers = json.loads((destination / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         handler = handlers["hooks"]["UserPromptSubmit"][0]["hooks"][0]
         self.assertIn("commandWindows", handler)

@@ -1,15 +1,17 @@
 ---
 name: learning-worker
-description: "Use Agent Learning project knowledge, maintain task state and report observable evidence in Antigravity. Applies when the project memory tools are available."
+description: "Use Agent Learning knowledge, task state and observable evidence in an explicitly connected Antigravity project with a current Hook binding."
 ---
 
 # Antigravity worker knowledge protocol
 
 Complete the current authorized task. Querying or adopting knowledge never expands its scope.
 
+Automatic use requires a connected current project and this invocation's verified Hook handle. Global menus, skills and available tools do not establish project enrollment. Without that evidence, continue the user's task. Use a diagnostic or read-only memory entry only when the user explicitly requests it; do not probe enrollment by calling Runtime tools or registering a task.
+
 ## Identity and task state
 
-- The MCP process can serve multiple conversations. Pass the current Hook's `context_handle` on every stateful call, including `session_context`, `task_update`, `case_feedback` and `knowledge_use`. Also pass it to `knowledge_search` and `knowledge_read` to register actual knowledge exposure. A handle is not a model-chosen conversation ID. Without a verified current handle, use read-only project queries.
+- The MCP process can serve multiple conversations. Pass the current Hook's `context_handle` on every stateful call, including `session_context`, `task_update`, `case_feedback` and `knowledge_use`. Also pass it to `knowledge_search` and `knowledge_read` to register actual knowledge exposure. A handle is not a model-chosen conversation ID. Explicit user queries for a connected project may use read-only project access without a current handle.
 - You may first read project rules and connection state. Register genuinely new work with `task_update(new_task=true)` **before the first write, execution or child delegation**. Explicitly resume an inactive task only when continuing that actual work after checking the current request. Ordinary continuation of an active task and ordinary questions do not require a new task. Registration never restores execution permissions.
 - For an existing task, read `session_context` and pass `expected_task_id` and `expected_write_version` to every `task_update`, including replacement with `new_task=true`. Pre-registration observations and already-started children keep their original identities; registering at delivery cannot backfill them into the new stage.
 - Update the goal and scope when a new user requirement changes them, before executing it. PreInvocation does not establish a new-user-prompt boundary; historical approval cannot authorize a changed request.

@@ -12,7 +12,8 @@ from unittest.mock import patch
 from agent_learning import install as installer
 from agent_learning.install import install
 from agent_learning.install_update import (INSTALL_MANIFEST, inspect_installation, installation_lock,
-                                           _expected_hook_document, safe_path, snapshot, validate_previous_release)
+                                           _expected_hook_document, codex_plugin_binding, mcp_document,
+                                           safe_path, snapshot, validate_previous_release)
 from agent_learning.runtime import ContractError
 from agent_learning.installation_backups import backup_root
 
@@ -95,8 +96,8 @@ class InstallUpdateTests(unittest.TestCase):
         receipt.update({key: body[key] for key in ("version", "protocol_version", "content_digest", "release_id")})
         receipt["runtime_directory"] = str(release)
         write_json(self.target / "runtime-release.json", receipt)
-        write_json(self.target / ".mcp.json", {"mcpServers": {"agent_learning": {"command": sys.executable,
-                   "args": [str(release / "scripts/learning.py"), "serve", "--role", "worker"]}}})
+        write_json(self.target / ".mcp.json", mcp_document(release, sys.executable,
+            plugin_installation=codex_plugin_binding(receipt, self.target)))
         hooks = read_json(release / "hooks/hooks.json")
         for event, groups in hooks["hooks"].items():
             command, windows = installer._hook_commands(sys.executable, release / "hooks/dispatch.py", event, "enforce")
@@ -117,6 +118,51 @@ class InstallUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "already exists"):
             install(self.target, runtime_store=self.store)
         self.assertEqual(snapshot(self.target), observed)
+
+    def test_codex_mcp_always_binds_installation_with_optional_panel(self):
+        self.initial()
+        arguments = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertEqual(arguments[-2:], ["--plugin-installation", str(self.target)])
+        self.assertNotIn("--panel-installation", arguments)
+        workspace = self.root / "project"
+        workspace.mkdir()
+        install(self.target, upgrade=True, panel_workspace=workspace)
+        arguments = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertEqual(arguments[-4:], ["--plugin-installation", str(self.target),
+                                         "--panel-installation", str(self.target)])
+        inspect_installation(self.target, installer._hook_commands)
+
+    def test_pre_binding_codex_installation_upgrades_to_bound_mcp(self):
+        old, manifest = self.make_legacy(version="1.4.67", protocol="25")
+        before = snapshot(old)
+        arguments = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertNotIn("--plugin-installation", arguments)
+        inspect_installation(self.target, installer._hook_commands)
+        result = install(self.target, upgrade=True)
+        arguments = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertEqual(arguments[-2:], ["--plugin-installation", str(self.target)])
+        self.assertEqual(snapshot(old), before)
+        self.assertEqual(result["previous_release_id"], manifest["release_id"])
+        inspect_installation(self.target, installer._hook_commands)
+
+    def test_removing_new_mcp_installation_binding_is_rejected(self):
+        self.initial()
+        document = read_json(self.target / ".mcp.json")
+        document["mcpServers"]["agent_learning"]["args"] = document["mcpServers"]["agent_learning"]["args"][:-2]
+        write_json(self.target / ".mcp.json", document)
+        with self.assertRaisesRegex(ContractError, "MCP configuration"):
+            inspect_installation(self.target, installer._hook_commands)
+
+    def test_interpreter_repair_keeps_new_mcp_installation_binding(self):
+        from agent_learning.installation_repair import repair_python
+        initial = self.initial()
+        replacement = str(self.root / "replacement" / "python.exe")
+        with patch("agent_learning.installation_repair.select_python", return_value=(replacement, {})):
+            repaired = repair_python(self.target)
+        arguments = read_json(self.target / ".mcp.json")["mcpServers"]["agent_learning"]["args"]
+        self.assertEqual(arguments[-2:], ["--plugin-installation", str(self.target)])
+        self.assertEqual(repaired["release_id"], initial["release_id"])
+        inspect_installation(self.target, installer._hook_commands)
 
     def test_upgrade_keeps_custom_files_external_data_old_release_and_policy(self):
         first = self.initial()
