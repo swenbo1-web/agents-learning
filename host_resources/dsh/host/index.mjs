@@ -250,7 +250,7 @@ const STATUS_JSON_OUTPUT = {
 const WORKER_TOOL_SPECS = [
   {
     "name": "knowledge_search",
-    "description": "Search this project's published formal knowledge before expanding relevant entries with knowledge_read. Returns bounded items with knowledge_id/revision, previews, applicability, source health and truncation flags; a match is not proof of suitability. Updates retrieval/cache accounting and, when bound, records returned exposures; does not edit knowledge. Empty items are a valid result. Unknown filters should be omitted. A database_busy tool error delivers no knowledge; retry this read later after the write finishes, without rapid repeated retries.",
+    "description": "Find reusable facts, solutions or patterns in this project's published knowledge for a concrete problem. For prior work or file history, use work_memory_search. Returns bounded previews with knowledge_id, revision, applicability, source health and truncation flags. Expand relevant results with knowledge_read and check their conditions. Updates retrieval/cache accounting and records exposures when bound. Empty results are valid. Retry a database_busy error later after the write finishes.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -329,7 +329,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "knowledge_read",
-    "description": "Expand one active formal knowledge revision; returns section text, revision, health, truncated/next_offset and fields_truncated. Check conditions and limitations before use. Continue the same section with next_offset and expected_revision; read other truncated fields in their own sections. A revision conflict requires restarting at offset 0 against the current revision. When bound, records exposure and file-state observations; does not modify knowledge. A database_busy tool error delivers no knowledge; retry the same page later after the write finishes, without rapid repeated retries.",
+    "description": "Expand an active published knowledge revision using a knowledge_id from a search result or formal knowledge card. Check its applicability and limitations before use. Returns section text, revision, health, truncated, next_offset and fields_truncated. Continue the same section with next_offset and expected_revision. For another field or a changed revision, start at offset 0. Bound calls record exposure and file-state observations. Retry a database_busy error for the same page later after the write finishes.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -375,7 +375,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "work_memory_search",
-    "description": "Find observed work/file-history indexes, not formal solutions or execution authority. Returns items with memory_id/revision, source state, summaries and file links; use work_memory_read only for relevant missing detail. Does not read project file contents or rewrite original history. Bound calls write exposure receipts, so this is not a database-write-free operation. No matches or disabled history need not be retried.",
+    "description": "Find records of what was tried, changed or reported in past work, optionally linked to a file. For published guidance, use knowledge_search. Returns work-history summaries and file links with memory_id, revision and source state. Use work_memory_read for relevant missing details. Searches recorded indexes and writes exposure receipts when bound. Empty results or disabled history require no retry.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -409,7 +409,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "work_memory_read",
-    "description": "Expand relevant observed history in a verified context. Returns revision, section, pagination, source/file checks; previously complete reads may return already_read instead of the body. Keep section/revision and use next_offset on continuation. Revision changes require a fresh first page. Writes exposure/read tracking, not original history. file_check.complete=false means unknown file state; truncated original evidence cannot be reconstructed.",
+    "description": "Inspect the recorded summary or evidence of a work-history entry identified by memory_id. Requires a verified context. Returns revision, section, pagination and source/file checks. A completed read can return already_read. Continue with the same section and revision using next_offset. Start at offset 0 after a revision change. Records exposure and read progress. file_check.complete=false means unknown file state. Verify current files separately if needed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -538,7 +538,7 @@ const WORKER_TOOL_SPECS = [
   },
   {
     "name": "case_feedback",
-    "description": "Record a material issue, correction or resolution observation; routine tool events are captured by Hooks. Writes a reported Feedback event and problem/evidence records. With knowledge_id the default is an unresolved counterexample against that revision, which may suspend automatic reference; it is not a mere note or proof of falsity. Returns a problem (id/revision/status). Parent task identity/revision are required when a task exists; children use their fixed assignment. Retry lost replies only with the same idempotency_key and identical original arguments.",
+    "description": "Record a material project issue, correction, observed resolution or counterexample to a published knowledge revision. Hooks capture routine tool events. Writes a reported Feedback event and problem/evidence records. Supplying knowledge_id defaults to an unresolved counterexample that may suspend automatic reference. Returns the problem's id, revision and status. Supply the current parent task id/revision when applicable; children use their fixed assignment. For a lost reply, retry only with the original idempotency_key and identical arguments.",
     "parameters": {
       "type": "object",
       "properties": {
