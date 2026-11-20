@@ -15,16 +15,13 @@ Yesterday's two-hour debugging breakthrough becomes today's fresh investigation.
 | Capability (Design Comparison, Not a Competitor Ranking) | Agent Without Project Memory | Raw Transcript Replay Only | **agents-learning (Core Capability Combination)** |
 |---|---|---|---|
 | **Retrieval & Attention Protection** | Project background needs finding again | Conclusions must be selected from raw records | **`Conclusion + Necessary Conditions → Body → Evidence` progressive reads leave context for the current problem** |
-| **Everyday Simple-Task Speed & Cost** | Earlier debugging experience may need reconstructing | Long records can add input and reading cost | **Cold-start sample: 11m 02s observed, 1,086 injected characters, zero exact card repeats and equal quality to the historical no-plugin sample** |
 | **Automatic Tool-Error Follow-up** | Relies on current reasoning or manual lookup | Replay alone does not react to failures | **✅ Records a failure and performs bounded experience lookup at a subsequent supported event** |
-| **Compaction Recovery** | Relies on host summaries and current material | Replay alone does not recheck task/source eligibility | **✅ Recovery rechecks: this sample retained 46/47 early checks, with zero previously passing checks lost** |
+| **Compaction Recovery** | Relies on host summaries and current material | Replay alone does not recheck task/source eligibility | **✅ Rechecks the current task and knowledge sources after compaction to restore applicable context** |
 | **Wrong / Stale Memory Corrections** | Relies on current material and manual feedback | Replay alone does not track source changes or revocation | **✅ Counterexamples, revocation and source checks stop later excerpts for invalid knowledge; supported events notify affected conversations** |
 | **Evidence Grading & Stage Publishing** | Requires a separate knowledge process | Replay alone does not separate validation and publication rights | **✅ `reported` vs. `tool_success` grading, budgeted stage curation and publication within your selected scope** |
 | **Legacy Import & 3-Host Shared Brain** | Experience needs a separate sharing mechanism | Replay alone does not provide three-host project governance | **✅ Same-machine project memory across Codex, Antigravity and DSH, native panels/WebUI and frozen-batch history import** |
 
-> 🔥 **Real-Machine Benchmark (GPT-6.1-Sol / High, 2-Stage Coding + Explicit Compaction)**: A **cold-start simple task** with no preloaded knowledge scored **97.5/100**, with **11m 02.2s** observed completion time (historical samples: 15m 25.8s without the plugin and 19m 01.3s on v1.4.34), **1,086 characters** injected (**1** work-history card, **0** exact card repeats) and **0** early passing checks lost after compaction and later delivery. Historical timing differences are not attributed to plugin speedup. [Jump to the full benchmark 👇](#a-real-sample-equal-quality-selective-memory)
-
-**Cross-session work history · Conclusion-first progressive reads · Automatic error follow-up · Counterexample circuit-breakers · Stage review & tiered publication · Shared 3-host memory · Native visual consoles**
+> **A simple cold-start task scored 97.5/100**, matching the historical no-plugin and earlier-version samples. [See the compaction, token usage and timing results](#a-real-sample-equal-quality-selective-memory)
 
 [Install for Codex](#install-in-codex-desktop-and-cli) · [Install for Antigravity](#install-in-antigravity-native-plugin) · [Install for DSH](#install-in-dsh-deepseek-harness) · [Start using it](#use-it-in-your-project) · [Core capabilities](#core-capabilities) · [84-second demo](#84-second-demo) · [Architecture](#complete-architecture)
 
@@ -34,13 +31,7 @@ Python **3.10+** · Authoritative Local SQLite · Zero extra model API keys requ
 
 ## A real sample: equal quality, selective memory
 
-**Why did we benchmark a "cold-start simple scenario"? Because that is the ultimate stress test to crush your biggest worry.**
-
-The #1 reason developers hesitate to keep a memory plugin enabled 24/7 is simple: ***"Sure, memory helps on a massive legacy repo, but on my everyday quick tasks, won't a memory plugin just burn extra tokens, slow down execution, and distract the AI with irrelevant noise?"***
-
-**A cold-start simple task helps inspect baseline integration cost.** Without a pre-populated knowledge base, we can observe Hook, retrieval and context-delivery size/timing, and whether the task's own work history is read on demand. Here, "simple" is relative to a large, long-running project; it still includes stage dependencies and compaction.
-
-To put that exact fear to the test, we ran a live benchmark on a **zero-prior-knowledge, simple two-stage coding task with explicit compaction** (**identical task inputs and grading rubric, GPT-6.1-Sol / High**, administrator disabled, relying strictly on live work history generated during the task itself):
+This benchmark used a short coding task to observe everyday integration overhead. It had two dependent stages and one explicit compaction, with an empty knowledge store and the administrator disabled. All three samples used the same task inputs, grading rubric and **GPT-6.1-Sol / High**. Version 1.4.40 used work history captured during the run.
 
 | Condition | Quality score | Checks passed | Observed elapsed time | Host-reported cumulative tokens |
 |---|---:|---:|---:|---:|
@@ -48,7 +39,7 @@ To put that exact fear to the test, we ran a live benchmark on a **zero-prior-kn
 | agents-learning 1.4.34, October 27 historical sample | 97.5/100 | 73/74 | 19m 01.3s | 1,190,744 |
 | **agents-learning 1.4.40, October 28 new sample** | **97.5/100** | **73/74** | **11m 02.2s** | **1,169,926** |
 
-**Start with the measured results: this `1.4.40` run scored 97.5/100, matching both historical samples, with reported cumulative tokens close to the historical no-plugin sample (+0.82%) and 1.75% below the historical older-plugin sample. Observed completion time was 11m 02.2s.** A/B were not rerun, and CLI versions differed; timing differences cannot be attributed to the plugin alone, and the sample does not promise zero overhead for every task.
+Version 1.4.40 used **0.82%** more reported tokens than the historical no-plugin sample and **1.75%** fewer than the historical earlier-version sample. The historical samples used a different CLI version. The table records the elapsed time for each run.
 
 Memory input and local execution costs in this run also have inspectable observations:
 
@@ -61,15 +52,11 @@ Memory input and local execution costs in this run also have inspectable observa
 | **Cumulative local Hook/MCP timing** | ~**3.50 seconds** | **Local execution timing**: excludes model reading and attention effects; not end-to-end additional latency |
 | **Administrator generation-model calls** | **0 calls** | **No administrator model call in this run**: default capture/retrieval make no extra generation call; injected input still uses tokens |
 
-**Restrained memory for simple tasks; long-term reuse as the goal for complex projects.**
-
-- **On self-contained tasks**: this sample retained equal quality with a small amount of work history, while reported cumulative tokens stayed close to the historical no-plugin sample;
-- **On large, long-running projects**: we expect accumulated constraints, debugging experience and multi-host history to create greater opportunities for reuse and savings. Long-term net benefit and its magnitude still need continued controlled validation on real projects.
+Large, long-running projects accumulate more constraints, debugging experience and cross-host history, creating more opportunities for reuse. Measure long-term net benefit with [real-task paired evaluation](#real-task-paired-evaluation).
 
 <details>
 <summary>Expand: rigorous methodology, accounting rules & sample scope</summary>
 
-- This benchmark intentionally tests a simplified two-stage coding scenario (with real explicit compaction and an empty initial formal knowledge store) to verify baseline task fit, attention preservation, and overhead control on everyday work. Compounding gains on large, long-running repositories build on the same governed memory engine and can be quantified on your own codebase via [real-task paired evaluation](#real-task-paired-evaluation).
 - Runs took place locally on October 27–28, 2026 (one sample per condition). Only 1.4.40 was executed this round, using identical stage prompts, frozen task inputs, grading rubric, model, effort level, and account checks as the historical samples. The new CLI was `0.165.0-alpha.1.2` vs. historical `0.164.0-alpha.11.1`; because A/B were historical references rather than a same-environment single-variable multi-run trial, observed elapsed time reflects this run's performance and is not a blanket guarantee of a fixed speedup percentage across every task.
 - The 97.5/100 score follows a fixed rubric (all three runs shared the same single non-critical multi-file rollback exception-type assertion failure; offline diagnostics confirmed intact rollback state).
 - Tokens reflect host-reported cumulative input and output, including repeated input and cached input as a subset. Standalone compaction usage could not be allocated separately and remains unknown; orchestration/review usage is excluded. The 1,086 figure counts characters, not tokens; local Hook/MCP timing excludes model reading/attention effects and may overlap tool execution. Multi-host integration is validated separately via host health checks.
