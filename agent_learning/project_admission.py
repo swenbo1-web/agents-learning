@@ -46,7 +46,8 @@ def same_workspace(actual, bound):
         actual.relative_to(bound)
         cursor = actual
         while cursor != bound:
-            if (cursor / ".git").exists():
+            marker = cursor / ".git"
+            if marker.exists() or marker.is_symlink():
                 return False
             cursor = cursor.parent
         return True
@@ -112,13 +113,14 @@ def _candidates(workspace):
         local = root / ".agents/plugins/agent-learning"
         if local.is_dir():
             yield local, root
-        if (root / ".git").exists():
+        marker = root / ".git"
+        if marker.exists() or marker.is_symlink():
             break
         if root.name.lower() == "local" and root.parent.name.lower() == "build":
             break
 
 
-def _binding(workspace, installation, owner, host, runtime_directory, release):
+def _binding(workspace, installation, owner, host, runtime_directory, release, linked=None):
     installation = safe_path(installation)
     receipt, receipt_hash = _identity(installation, "runtime-release.json")
     if receipt.get("target_host", "codex") != host:
@@ -141,7 +143,8 @@ def _binding(workspace, installation, owner, host, runtime_directory, release):
         bound = next((workspace_path(item) for item in roots if item and same_workspace(workspace, item)), None)
     else:
         bound = workspace_path(receipt["workspace"])
-    if bound is None or not same_workspace(workspace, bound):
+    inherited = linked is not None and bound == linked.primary
+    if bound is None or not (inherited or same_workspace(workspace, bound)):
         raise ContractError("project_not_installed")
     from .install import _hook_commands
     from .install_update import (_expected_hook_document, antigravity_hooks,
@@ -175,8 +178,12 @@ def _binding(workspace, installation, owner, host, runtime_directory, release):
                 or manifest.get("target_host", "codex") != host
                 or any(manifest.get("files", {}).get(name) != value for name, value in expected_hashes.items())):
             raise ContractError("project_not_installed")
-    return {"installation": str(installation), "workspace": str(bound), "runtime_directory": str(runtime),
-            "release_id": receipt["release_id"], "receipt_digest": hashlib.sha256(encode(receipt).encode("utf-8")).hexdigest()}
+    result = {"installation": str(installation), "workspace": str(bound), "runtime_directory": str(runtime),
+              "release_id": receipt["release_id"], "receipt_digest": hashlib.sha256(encode(receipt).encode("utf-8")).hexdigest()}
+    if inherited:
+        result["checkout"] = str(linked.checkout)
+        result["worktree_registration"] = (str(linked.git_dir), linked.git_dir_identity)
+    return result
 
 
 def require_project_installation(workspace, installation=None, *, host="codex", runtime_directory=None, release=None):
@@ -185,15 +192,22 @@ def require_project_installation(workspace, installation=None, *, host="codex", 
         workspace = workspace_path(workspace)
         if host not in {"codex", "antigravity", "dsh"}:
             raise ContractError("project_not_installed")
+        linked = None
+        primary_candidates = ()
+        local_candidates = ()
+        if host == "codex":
+            from .git_worktrees import linked_worktree_identity
+            linked = linked_worktree_identity(workspace)
+            local_candidates = tuple(_candidates(workspace))
+            if linked is not None:
+                primary_candidates = tuple(_candidates(linked.primary))
         if installation is not None:
             target = safe_path(installation)
-            owner = None
-            if host == "codex":
-                owner = next((root for candidate, root in _candidates(workspace)
-                              if root is not None and safe_path(candidate) == target), None)
+            owner = next((root for candidate, root in (*local_candidates, *primary_candidates)
+                          if root is not None and safe_path(candidate) == target), None)
             candidates = [(target, owner)]
         elif host == "codex":
-            candidates = _candidates(workspace)
+            candidates = (*local_candidates, *primary_candidates)
         else:
             raise ContractError("project_not_installed")
         found = False
@@ -208,7 +222,10 @@ def require_project_installation(workspace, installation=None, *, host="codex", 
                     continue
             found = True
             try:
-                return _binding(workspace, target, owner, host, runtime_directory, release)
+                # A copied receipt cannot stand in for project opt-in.
+                inherited_link = linked if any(
+                    target == candidate for candidate, _ in primary_candidates) else None
+                return _binding(workspace, target, owner, host, runtime_directory, release, inherited_link)
             except (ContractError, OSError, ValueError, TypeError, KeyError):
                 if installation is not None:
                     raise ContractError("project_installation_invalid") from None
@@ -221,3 +238,15 @@ def require_project_installation(workspace, installation=None, *, host="codex", 
         raise ContractError("project_not_installed") from None
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         raise ContractError("project_not_installed") from None
+
+
+def codex_project_binding(workspace):
+    """Return the shared installation of a linked checkout, if it is admitted."""
+    from .git_worktrees import linked_worktree_identity
+    if linked_worktree_identity(workspace) is None:
+        return None
+    try:
+        binding = require_project_installation(workspace, host="codex")
+    except ContractError:
+        return None
+    return binding if "checkout" in binding else None

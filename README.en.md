@@ -303,6 +303,8 @@ Replace `$learningProject` with your existing project's absolute path. `codex-co
 
 **Native side panel:** after updating, connecting and reloading MCP, open the conversation side panel's new-tab menu → **More tools… → Agent Learning** on supported desktop hosts (some versions show the entry directly). The global connection advertises an entrypoint; actual calls use the current thread's verified project connection. It never guesses the latest conversation. When the five-minute connection expires, click Reconnect in the panel.
 
+**Git worktrees.** Codex Hooks recognize registered linked worktrees and use the verified primary checkout's installation and project knowledge. Files, tasks, and sessions remain scoped to the actual checkout and conversation. To use MCP and the side panel, run `codex-connect --installation "$learningPlugin"` from the linked worktree with the same primary export and reload the connection. A previously separate session switches at its next user prompt once its task is closed and operations have stopped. Its earlier task and evidence stay in the original records.
+
 **Read-only connection check:** if the entry is absent, check configuration first. Correct wiring does not establish that the desktop has rendered it.
 
 ```powershell

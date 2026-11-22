@@ -226,7 +226,8 @@ def _workspace_project(runtime, workspace, config=None):
     """Read-only equivalent of Runtime.project, without registering or merging."""
     from .runtime import digest
     from .work_files import checkout_root
-    resolved = Path(workspace).resolve()
+    binding = runtime._shared_worktree(workspace)
+    resolved = Path(binding["workspace"] if binding else workspace).resolve()
     path = _path_key(resolved)
     aliases = {}
     aliases_config = (runtime.config if config is None else config).get("project_aliases", {})

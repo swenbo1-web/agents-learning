@@ -534,6 +534,16 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             raise
 
     def project(self, cwd):
+        binding = self._shared_worktree(cwd)
+        return self._register_project_path(binding["workspace"] if binding else cwd)
+
+    def _shared_worktree(self, cwd):
+        if self.host != "codex":
+            return None
+        from .project_admission import codex_project_binding
+        return codex_project_binding(cwd)
+
+    def _register_project_path(self, cwd):
         resolved = Path(cwd).resolve()
         path = os.path.normcase(str(resolved))
         aliases = {}
@@ -563,6 +573,27 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         from .knowledge_health import maybe_advance
         maybe_advance(self, project)
         return project
+
+    def _rebind_completed_worktree_session(self, project, conversation, checkout):
+        """Move the live binding at a new user prompt while retaining old evidence."""
+        row = self.db.execute(
+            "SELECT s.project FROM session_projects s JOIN project_paths p ON p.project=s.project "
+            "WHERE s.conversation=? AND p.path=? AND s.project!=?",
+            (conversation, os.path.normcase(str(Path(checkout))), project)).fetchone()
+        if row is None:
+            return
+        previous = row["project"]
+        task = self.task(previous, conversation)
+        if task and task["status"] not in {"delivered", "cancelled"}:
+            raise ContractError("worktree_project_rebind_requires_closed_task")
+        if self.db.execute(
+                "SELECT 1 FROM operations WHERE project=? AND conversation=? AND state IN ('started','running') LIMIT 1",
+                (previous, conversation)).fetchone():
+            raise ContractError("worktree_project_rebind_requires_idle_operations")
+        self.db.execute("UPDATE session_projects SET project=? WHERE conversation=? AND project=?",
+                        (project, conversation, previous))
+        self.db.execute("DELETE FROM context_access WHERE project=? AND conversation=?", (previous, conversation))
+        self._event(project, conversation, "WorkspaceProjectRebind", {"previous_project": previous})
 
     def bind_session(self, project, conversation_id):
         if not isinstance(conversation_id, str) or not conversation_id.strip():
@@ -934,7 +965,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         return names
 
     def handle_hook(self, raw, *, context_delivery=True, expected_epoch=None, _phase_guard=None,
-                    _adapter_event_key=None, _adapter_conflict=False, _context_outcome=None):
+                    _adapter_event_key=None, _adapter_conflict=False, _context_outcome=None,
+                    _project_binding=None):
         # 原生身份摘要由适配器核对，不能从 Hook JSON 中注入冲突或更换去重身份。
         if _adapter_event_key is not None or _adapter_conflict:
             if (self.host != "antigravity" or not isinstance(_adapter_event_key, str)
@@ -947,7 +979,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             return {"systemMessage": "Agent Learning: 未覆盖的事件，未解释其状态。"}
         if not raw.get("session_id") or not raw.get("cwd"):
             raise ContractError("hook requires session_id and cwd")
-        project, conversation = self.project(raw["cwd"]), str(raw["session_id"])
+        binding_scope = _project_binding or self._shared_worktree(raw["cwd"])
+        inherited_worktree = binding_scope and binding_scope.get("checkout")
+        project_workspace = binding_scope["workspace"] if inherited_worktree else raw["cwd"]
+        project, conversation = self._register_project_path(project_workspace), str(raw["session_id"])
         tool_id, turn = raw.get("tool_use_id"), raw.get("turn_id")
         agent_id = raw.get("agent_id")
         if agent_id is not None and (not isinstance(agent_id, str) or not agent_id.strip()):
@@ -980,6 +1015,9 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             epoch = self.assert_session_epoch(expected_epoch)
             if _phase_guard:
                 _phase_guard()
+            if (inherited_worktree and not agent_id
+                    and kind == "UserPromptSubmit" and self.owns_conversation(conversation)):
+                self._rebind_completed_worktree_session(project, conversation, inherited_worktree)
             self.bind_session(project, conversation)
             if kind == "PostToolUse" and event_key:
                 identical_replay = False
@@ -1192,7 +1230,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if self.scheduler_wake(project):
                     token = self.claim_scheduler_worker()
                     if token:
-                        self._launch_scheduler(raw["cwd"], token)
+                        self._launch_scheduler(project_workspace, token)
             except (OSError, ValueError, TypeError, sqlite3.Error):
                 if token:
                     try:
@@ -1214,7 +1252,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 if dispatch_diagnostic(self, project).get("reason") == "ready":
                     token = claim_dispatch(self, project)
                     if token:
-                        self._launch_admin(raw["cwd"], token)
+                        self._launch_admin(project_workspace, token)
             except (OSError, ValueError, TypeError, sqlite3.Error):
                 if token:
                     try:
@@ -1259,7 +1297,7 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                 _settings(self.admin_effective_config(project))
                 token = claim_dispatch(self, project)
                 if token:
-                    self._launch_admin(raw["cwd"], token)
+                    self._launch_admin(project_workspace, token)
             except (OSError, ValueError, TypeError, sqlite3.Error):
                 if token:
                     try:

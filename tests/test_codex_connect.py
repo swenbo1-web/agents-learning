@@ -2,8 +2,10 @@
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -200,6 +202,62 @@ class CodexConnectTests(unittest.TestCase):
         other.mkdir()
         with self.assertRaisesRegex(ContractError, "exactly match"):
             connect(self.target, other, codex_home=self.codex_home)
+
+    def test_linked_worktree_uses_primary_installation_with_its_own_connector(self):
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("Git is required for the linked worktree fixture")
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                           GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+
+        def run_git(*args):
+            subprocess.run([git, *args], cwd=self.workspace, env=environment, check=True,
+                           capture_output=True, timeout=15)
+
+        worktree = self.root / "linked checkout"
+        run_git("init", "--quiet")
+        run_git("commit", "--quiet", "--allow-empty", "-m", "fixture")
+        run_git("worktree", "add", "--quiet", "--detach", str(worktree))
+        worktree_path = worktree / ".codex/config.toml"
+        options = {"home": self.home, "config": self.config, "codex_home": self.codex_home}
+        with self.assertRaisesRegex(ContractError, "connect the installed primary project"):
+            connect(self.target, worktree, **options)
+        self.assertFalse(worktree_path.exists())
+        self.assertFalse(self.global_path.exists())
+
+        self.connect()
+        original_project = self.project_path.read_bytes()
+        original_global = self.global_path.read_bytes()
+
+        with self.assertRaisesRegex(ContractError, "primary connector's ALP_HOME"):
+            connect(self.target, worktree, home=self.root / "wrong home", codex_home=self.codex_home)
+        with patch.dict(os.environ, {"ALP_HOME": str(self.root / "wrong home"),
+                                     "ALP_CONFIG": str(self.root / "wrong config.json")}):
+            checked = connect(self.target, worktree, check=True, codex_home=self.codex_home)
+            self.assertEqual(checked["changes_needed"], [str(worktree_path)])
+            self.assertFalse(worktree_path.exists())
+            connected = connect(self.target, worktree, codex_home=self.codex_home)
+        self.assertEqual(connected["workspace"], str(worktree))
+        self.assertEqual(connected["changed_configs"], [str(worktree_path)])
+        fields = self.fields(worktree_path)
+        self.assertEqual(json.loads(fields[(*SERVER, "cwd")][2]), str(worktree))
+        self.assertEqual(fields[(*SERVER, "args")][2], self.fields(self.project_path)[(*SERVER, "args")][2])
+        self.assertEqual(json.loads(fields[(*ENV, "ALP_HOME")][2]), str(self.home))
+        self.assertEqual(json.loads(fields[(*ENV, "ALP_CONFIG")][2]), str(self.config))
+        self.assertEqual(self.project_path.read_bytes(), original_project)
+        self.assertEqual(self.global_path.read_bytes(), original_global)
+        self.assertFalse(connect(self.target, worktree, **options)["restart_required"])
+        self.assertFalse(self.home.exists())
+
+        spoof = self.root / "spoofed checkout"
+        spoof.mkdir()
+        shutil.copyfile(worktree / ".git", spoof / ".git")
+        with self.assertRaisesRegex(ContractError, "exactly match"):
+            connect(self.target, spoof, **options)
+        self.assertFalse((spoof / ".codex/config.toml").exists())
+        self.assertEqual(self.global_path.read_bytes(), original_global)
 
     def test_cli_exposes_explicit_connection_and_read_only_check(self):
         args = parser().parse_args(["codex-connect", "--installation", "export", "--check"])

@@ -9,7 +9,9 @@ import stat
 import threading
 
 from .host_sessions import host_scope_key
+from .git_worktrees import linked_worktree_identity
 from .install_update import safe_path
+from .project_admission import require_project_installation
 from .runtime import ContractError, encode
 
 
@@ -90,6 +92,16 @@ def make_panel_guard(installation, binding, database, host_scope, session_epoch,
                 workspace = safe_path(expected_binding["workspace"])
                 if not workspace.is_dir():
                     raise ContractError("panel project is unavailable")
+                if expected_binding.get("checkout"):
+                    checkout = safe_path(expected_binding["checkout"])
+                    worktree = linked_worktree_identity(checkout)
+                    if (host != "codex" or worktree is None or worktree != expected_binding.get("worktree")
+                            or worktree.checkout != checkout or worktree.primary != workspace):
+                        raise ContractError("panel worktree changed")
+                    admission = require_project_installation(checkout, root, host="codex")
+                    if (not admission.get("checkout") or safe_path(admission["checkout"]) != checkout
+                            or safe_path(admission["workspace"]) != workspace):
+                        raise ContractError("panel worktree is no longer admitted")
                 if _database_identity(database) != (database, database_identity):
                     raise ContractError("panel database changed")
                 with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1,

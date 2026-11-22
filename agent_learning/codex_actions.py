@@ -12,6 +12,8 @@ import uuid
 
 from .install import _hook_commands
 from .install_update import installation_lock, inspect_installation, python_executable, safe_path
+from .git_worktrees import linked_worktree_identity
+from .project_admission import require_project_installation
 from .runtime import ContractError
 
 
@@ -47,7 +49,25 @@ def build_action_command(receipt, installation, *, home, config, host_instance="
     return shlex.join(["env", "ALP_HOME=" + home, "ALP_CONFIG=" + config, *arguments])
 
 
-def _binding(installation, workspace, *, require_panel=True):
+def _action_workspace(installation, workspace, bound, *, allow_linked=True):
+    """Select an exact checkout root for a Codex Action or local console."""
+    if workspace.is_dir():
+        if workspace == bound:
+            return workspace
+        if allow_linked:
+            worktree = linked_worktree_identity(workspace)
+            if worktree is not None and worktree.checkout == workspace and worktree.primary == bound:
+                try:
+                    admitted = require_project_installation(workspace, installation, host="codex")
+                except ContractError:
+                    raise ContractError("connect the installed primary project before using its linked worktree") from None
+                if (admitted.get("checkout") and safe_path(admitted["checkout"]) == workspace
+                        and safe_path(admitted["workspace"]) == bound):
+                    return workspace
+    raise ContractError("Codex action workspace must exactly match the installed project or a verified linked worktree")
+
+
+def _binding(installation, workspace, *, require_panel=True, allow_linked=False):
     inspected = inspect_installation(installation, _hook_commands, target_host="codex")
     receipt = inspected["receipt"]
     if not receipt.get("panel_workspace"):
@@ -56,10 +76,11 @@ def _binding(installation, workspace, *, require_panel=True):
         raise ContractError("installed runtime has no direct Codex console; upgrade the project plugin first")
     bound = safe_path(receipt["panel_workspace"])
     actual = safe_path(workspace) if workspace is not None else bound
-    if actual != bound or not actual.is_dir():
-        raise ContractError("Codex action workspace must exactly match the installed project")
+    actual = _action_workspace(inspected["target"], actual, bound, allow_linked=allow_linked)
+    if require_panel and actual != bound and "agent_learning/git_worktrees.py" not in inspected["release"]["files"]:
+        raise ContractError("upgrade the project plugin before using a linked worktree")
     receipt = dict(receipt, python=str(python_executable(receipt["python"])))
-    return receipt, inspected["target"], bound
+    return receipt, inspected["target"], actual
 
 
 def _paths(home, config):
@@ -127,7 +148,7 @@ def install_action(installation, workspace=None, remove=False, *, home=None, con
             raise ContractError("Codex action workspace must exist")
         receipt = None
     else:
-        receipt, installation, bound = _binding(installation, workspace, require_panel=not remove)
+        receipt, installation, bound = _binding(installation, workspace, require_panel=not remove, allow_linked=True)
     action = safe_path(bound / ".codex/environments" / ACTION_FILE)
     manifest = safe_path(action.parent / MANIFEST_FILE)
     with installation_lock(action):
@@ -148,7 +169,12 @@ def install_action(installation, workspace=None, remove=False, *, home=None, con
                 _write_atomic(action, previous[0])
                 raise
             return {"status": "removed", "action_file": str(action), "administrator_started": False}
-        home, config = _paths(home, config)
+        primary = safe_path(receipt["panel_workspace"])
+        if bound == primary:
+            home, config = _paths(home, config)
+        else:
+            from .codex_connect import _linked_paths
+            home, config = _linked_paths(primary, installation, home, config)
         command = build_action_command(receipt, installation, home=home, config=config, host_instance=host_instance)
         platform = sys.platform
         quote = lambda value: json.dumps(value, ensure_ascii=False)
@@ -165,6 +191,7 @@ def install_action(installation, workspace=None, remove=False, *, home=None, con
         if not unchanged:
             if _prior(action, manifest) != previous:
                 raise ContractError("managed Action changed while preparing; preserved")
+            _action_workspace(installation, bound, primary)
             try:
                 _write_atomic(action, raw)
                 _write_atomic(manifest, metadata)

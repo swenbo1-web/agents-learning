@@ -78,7 +78,7 @@ class PlanContinuation1465Tests(unittest.TestCase):
             self.assertEqual(after[field], before[field])
 
     def test_whole_subject_preserving_plan_actions_are_recognized(self):
-        for phrase in ("按计划推进", "按照计划继续推进", "请按原计划执行吧", "照原计划继续", "按既定方案实施",
+        for phrase in ("确认推进", "确定推进", "按计划推进", "按照计划继续推进", "请按原计划执行吧", "照原计划继续", "按既定方案实施",
                        "按上述方案继续推进并检查", "好的，按这个计划推进", "已重启，按计划继续推进",
                        "继续按计划执行", "按当前安排继续", "proceed as planned", "continue as planned",
                        "please proceed according to the plan", "proceed with the existing plan"):
@@ -86,7 +86,7 @@ class PlanContinuation1465Tests(unittest.TestCase):
                 self.assertTrue(is_continuation_query(phrase))
 
     def test_subject_negation_plan_numbers_versions_paths_and_new_plan_are_not_discarded(self):
-        for phrase in ("按计划推进数据库迁移", "按计划不要推进", "不要按计划推进", "按计划推进但不发布",
+        for phrase in ("确认推进数据库迁移", "按计划推进数据库迁移", "按计划不要推进", "不要按计划推进", "按计划推进但不发布",
                        "按计划2推进", "按第2个计划推进", "按方案A推进", "按计划 v2.1 推进", "按计划推进 src/main.py",
                        "按另一个计划推进", "按新计划执行", "按旧计划继续", "按计划", "按照计划讨论SQLite",
                        "proceed as planned with Redis", "do not proceed as planned", "proceed with plan B",

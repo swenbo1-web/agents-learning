@@ -30,11 +30,28 @@ class CodexNativePanelTests(unittest.TestCase):
             projects = {name: area / name for name in ("a", "b", "uninstalled")}
             for name, workspace in projects.items():
                 workspace.mkdir()
-                (workspace / ".git").mkdir()
+                if name == "a" and shutil.which("git"):
+                    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+                    git_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+                    def git(*args):
+                        result = subprocess.run(["git", "-C", str(workspace), *args], env=git_env,
+                                                capture_output=True, text=True, timeout=15)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+                    git("init")
+                    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "--allow-empty", "-m", "fixture")
+                    git("worktree", "add", "--detach", str(area / "linked"))
+                else:
+                    (workspace / ".git").mkdir()
                 if name != "uninstalled":
                     target = area / (name + "-export")
                     install(target, runtime_store=area / "releases", panel_workspace=workspace)
                     connect(target, workspace, home=home, config=config, codex_home=codex_home)
+            if (area / "linked").is_dir():
+                projects["linked"] = area / "linked"
+                connect(area / "a-export", projects["linked"], home=home, config=config, codex_home=codex_home)
             # Explicitly trust only these isolated fixture workspaces. No Hooks
             # or plugins are registered in this independent Codex home.
             with (codex_home / "config.toml").open("a", encoding="utf-8") as stream:
@@ -86,6 +103,7 @@ class CodexNativePanelTests(unittest.TestCase):
                     self.assertIsNone(server.get("toolsError"))
                     descriptor = next(t for t in server["tools"].values() if t["name"] == "learning_panel_open")
                     self.assertEqual(descriptor["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
+                    panel_uri = descriptor["_meta"]["ui"]["resourceUri"]
                     states = {}
                     for name, workspace in projects.items():
                         thread = request("thread/start", {"cwd": str(workspace), "approvalPolicy": "never",
@@ -100,6 +118,11 @@ class CodexNativePanelTests(unittest.TestCase):
                             continue
                         self.assertTrue(private["visible"])
                         self.assertEqual(Path(private["summary"]["workspace"]), workspace)
+                        if name == "linked":
+                            self.assertEqual(private["summary"]["project_id"], states["a"][1]["summary"]["project_id"])
+                            resource = request("mcpServer/resource/read", {"threadId": thread,
+                                "server": "agent_learning", "uri": panel_uri})
+                            self.assertEqual(resource["contents"][0]["uri"], panel_uri)
                         checked = tool(thread, "learning_panel_direct_action", {"action": "debug", "capability": private["capability"]})
                         self.assertTrue(checked["_meta"]["agentLearningPanel"]["visible"])
                         states[name] = (thread, private)

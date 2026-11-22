@@ -21,7 +21,8 @@ import time
 
 from .runtime import ContractError, digest, encode
 from .admin_presets import PRESETS
-from .project_admission import same_workspace, workspace_path as _path
+from .git_worktrees import linked_worktree_identity
+from .project_admission import require_project_installation, same_workspace, workspace_path as _path
 
 
 _inspection_scope = ContextVar("agent_learning_panel_inspection", default=None)
@@ -88,6 +89,10 @@ class PanelControl:
         self.binding = None
         self.installation_identity = None
 
+    @property
+    def checkout_workspace(self):
+        return self.binding.get("checkout", self.binding["workspace"])
+
     def _installation(self):
         if self.installation is None:
             raise ContractError("project_panel_not_installed")
@@ -110,6 +115,13 @@ class PanelControl:
             candidates = [receipt["workspace"]] if receipt.get("workspace") else []
         bound = next((item for item in sorted(candidates, key=len, reverse=True)
                       if same_workspace(self.workspace, item)), None)
+        worktree = None
+        if not bound and candidates and self.runtime.host == "codex":
+            admitted = require_project_installation(self.workspace, self.installation, host="codex")
+            worktree = linked_worktree_identity(_path(self.workspace))
+            if (worktree is not None and worktree.checkout == _path(admitted["checkout"])
+                    and worktree.primary == _path(candidates[0]) == _path(admitted["workspace"])):
+                bound = admitted["workspace"]
         if not bound:
             raise ContractError("project_panel_not_installed")
         if receipt.get("home") and _path(receipt["home"]) != self.runtime.home.resolve():
@@ -118,6 +130,7 @@ class PanelControl:
             raise ContractError("panel_project_mismatch")
         return {"workspace": str(_path(bound)), "release_id": receipt["release_id"],
                 "installation": str(Path(self.installation).resolve()),
+                **({"checkout": str(worktree.checkout), "worktree": worktree} if worktree else {}),
                 "receipt_digest": hashlib.sha256(encode(receipt).encode("utf-8")).hexdigest()}
 
     def eligible(self):
@@ -178,7 +191,7 @@ class PanelControl:
         capture = ({"host_capture": capture_status(self.runtime, self.project)}
                    if self.runtime.host == "antigravity" else {})
         availability = routing.get("availability") or {}
-        return {"project_id": self.project, "project_name": Path(root).name, "workspace": root,
+        return {"project_id": self.project, "project_name": Path(root).name, "workspace": self.checkout_workspace,
                 **capture,
                 "administrator_readiness": {
                     "provider": executor.get("provider") if executor.get("provider") in {"codex", "antigravity", "dsh"} else None,
@@ -276,7 +289,7 @@ class PanelControl:
                     "protocol_matches": str(receipt["protocol_version"]) == PROTOCOL_VERSION,
                     "running_runtime_matches_installation": Path(receipt["runtime_directory"]).resolve() == Path(__file__).resolve().parents[1],
                     "latest_release_checked": False},
-                "project": {"id": self.project, "workspace": self.binding["workspace"], "home": str(self.runtime.home),
+                "project": {"id": self.project, "workspace": self.checkout_workspace, "home": str(self.runtime.home),
                     "host_scope": self.runtime._session_scope(),
                     "storage_schema": number(self.runtime.db.execute("PRAGMA user_version").fetchone()[0]),
                     "index_version": number(self.runtime.db.execute("SELECT version FROM knowledge_index_state WHERE id=1").fetchone()[0])},
@@ -296,7 +309,7 @@ class PanelControl:
     def bootstrap(self, context_handle=None, workspace=None, conversation_id=None, ui_session_id=None):
         if not self.eligible():
             return {"visible": False, "reason": self.reason}
-        if workspace is not None and not same_workspace(workspace, self.binding["workspace"]):
+        if workspace is not None and not same_workspace(workspace, self.checkout_workspace):
             return {"visible": False, "reason": "project_panel_not_installed"}
         if self.project_ui:
             if (workspace is None or not self._ui_session(ui_session_id)
@@ -332,7 +345,7 @@ class PanelControl:
             self.leases.pop(capability, None)
             self.requests = OrderedDict((key, value) for key, value in self.requests.items() if key[0] != capability)
             raise ContractError("panel_access_expired")
-        if workspace is not None and not same_workspace(workspace, self.binding["workspace"]):
+        if workspace is not None and not same_workspace(workspace, self.checkout_workspace):
             raise ContractError("panel_project_mismatch")
         if self.project_ui:
             if (workspace is None or not self._ui_session(ui_session_id) or ui_session_id != lease["ui_session_id"]
@@ -428,7 +441,7 @@ class PanelControl:
             apply_control(self.runtime, self.project, body)
             result["preset"] = preset
         else:
-            status = self.runtime.history_archive(self.project, self.binding["workspace"], expected_epoch=self.governance_epoch)
+            status = self.runtime.history_archive(self.project, self.checkout_workspace, expected_epoch=self.governance_epoch)
             job_id = status["prepared_job_id"]
             job = status.get("job") or {}
             counts = job.get("counts", {})

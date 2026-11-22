@@ -5,12 +5,16 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
+from agent_learning.codex_actions import install_action
+from agent_learning.codex_connect import connect
 from agent_learning.codex_panel import make_panel_server, open_panel
 from agent_learning.install import install
 from agent_learning.panel_control import PanelControl
@@ -168,6 +172,54 @@ class CodexPanelTests(unittest.TestCase):
                 with self.subTest(home=home), self.assertRaises(ContractError):
                     make_panel_server(self.target, workspace=self.workspace, home=home)
                 self.assertFalse((home / "runtime.sqlite3").exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for linked checkout fixtures")
+    def test_linked_action_uses_shared_project_and_stays_bound_to_its_checkout(self):
+        area = Path(self.data.name).resolve()
+        primary, checkout = area / "primary", area / "linked checkout"
+        primary.mkdir()
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                           GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+        for arguments in (("init", "--quiet"), ("commit", "--quiet", "--allow-empty", "-m", "fixture"),
+                          ("worktree", "add", "--quiet", "--detach", str(checkout))):
+            subprocess.run(["git", *arguments], cwd=primary, env=environment, check=True,
+                           capture_output=True, timeout=15)
+        target = primary / ".agents/plugins/agent-learning"
+        install(target, runtime_store=self.root / "releases", panel_workspace=primary)
+        config = area / "primary config.json"
+        config.write_text('{"injection_max_chars": 1337}', encoding="utf-8")
+        connect(target, primary, home=self.home, config=config, codex_home=area / "codex")
+        action = install_action(target, checkout)
+        self.assertEqual(Path(action["workspace"]), checkout)
+        self.assertEqual(Path(action["action_file"]).parent, checkout / ".codex/environments")
+        self.assertEqual(Path(action["home"]), self.home)
+        self.assertEqual(Path(action["config"]), config)
+        self.assertFalse((primary / ".codex/environments").exists())
+
+        with patch("pathlib.Path.cwd", return_value=checkout), patch.dict(os.environ, {"ALP_CONFIG": str(config)}):
+            server = make_panel_server(target, workspace=checkout)
+        self.addCleanup(server.server_close)
+        panel = server.controller
+        self.assertEqual(server.runtime.home, self.home)
+        self.assertEqual(server.runtime.config["injection_max_chars"], 1337)
+        project = self.runtime.project(primary)
+        opened = server.dispatch("bootstrap", {"ui_session_id": "linked-window"})
+        self.assertTrue(opened["visible"], opened)
+        self.assertEqual(opened["summary"]["project_id"], project)
+        self.assertEqual(opened["summary"]["workspace"], str(checkout))
+        self.assertEqual(panel.binding["workspace"], str(primary))
+        with self.assertRaisesRegex(ContractError, "panel_project_mismatch"):
+            panel.action(opened["capability"], "status", workspace=primary, ui_session_id="linked-window")
+        with patch.object(server.runtime, "history_archive", return_value={"prepared_job_id": "fixture"}) as archive:
+            server.dispatch("action", {"ui_session_id": "linked-window", "capability": opened["capability"],
+                "action": "archive_history", "request_id": "explicit", "confirm": True})
+        archive.assert_called_once_with(project, str(checkout), expected_epoch=panel.governance_epoch)
+        self.assertTrue(server.access_guard())
+        (checkout / ".git").unlink()
+        self.assertFalse(server.access_guard())
+        self.assertFalse(panel.eligible())
 
     def test_old_fixed_action_cannot_follow_a_new_installation_runtime(self):
         old = Path(self.data.name) / "old-runtime"

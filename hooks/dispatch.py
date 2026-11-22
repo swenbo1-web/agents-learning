@@ -22,6 +22,7 @@ FAILURES = {
     "event_mismatch": "the event did not match the installed hook entry; this event was not recorded.",
     "release_unverified": "the installed runtime release could not be verified.",
     "runtime_unavailable": "runtime processing failed; event persistence and policy could not be confirmed.",
+    "worktree_binding_pending": "the earlier worktree session could not switch to the shared project at this boundary.",
     "response_invalid": "runtime returned an invalid response; its result could not be confirmed.",
 }
 
@@ -153,23 +154,38 @@ def main(arguments: list[str] | None = None) -> int:
 
         # 持久目录由 Runtime 的 ALP_HOME/平台默认值统一决定。
         # PLUGIN_DATA 不参与选择，避免不同安装副本分裂记录。
+        if "checkout" in binding:
+            from agent_learning.codex_connect import _linked_paths
+            home, config = _linked_paths(Path(binding["workspace"]), Path(binding["installation"]), None, None)
+            # The short-lived Hook process and its workers share the primary
+            # installation's storage and policy paths.
+            os.environ.update(ALP_HOME=str(home), ALP_CONFIG=str(config))
         runtime = Runtime()
         try:
-            # 首个事件也可能来自无 Git 工作区的子目录，先登记已核实的项目根。
-            runtime.project(binding["workspace"])
+            if "checkout" not in binding:
+                # 已验证的非 Git 子目录沿用安装根，但保留显式路径别名。
+                runtime.project(binding["workspace"])
             # 固定入口／环境模式同时决定故障处理和正常守卫，避免两套策略互相矛盾。
             trusted_mode = explicit_mode or environment_mode
             mode = trusted_mode or ("enforce" if runtime.config["enforce_task_policy"] else "observe")
             runtime.config["enforce_task_policy"] = mode == "enforce"
-            output = runtime.handle_hook(event)
+            if "checkout" in binding:
+                output = runtime.handle_hook(event, _project_binding=binding)
+            else:
+                output = runtime.handle_hook(event)
         finally:
             runtime.close()
         if not isinstance(output, dict):
             _failure(kind, mode, "response_invalid")
             return 0
         _emit(output)
-    except Exception:
-        _failure(kind, mode, "runtime_unavailable")
+    except Exception as exc:
+        pending = "checkout" in binding and str(exc) in {
+            "conversation is already bound to a different workspace",
+            "worktree_project_rebind_requires_closed_task",
+            "worktree_project_rebind_requires_idle_operations",
+        }
+        _failure(kind, mode, "worktree_binding_pending" if pending else "runtime_unavailable")
     return 0
 
 

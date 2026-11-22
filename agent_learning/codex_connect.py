@@ -241,18 +241,55 @@ def _patch(text, desired, receipt, *, repair_python=False):
     return text
 
 
+def _linked_paths(primary, installation, home, config):
+    """Use the same knowledge directory and configuration as the primary connector."""
+    from .project_admission import _configured_installation
+
+    path = safe_path(primary / ".codex/config.toml")
+    if _configured_installation(primary) != installation:
+        return _paths(home, config)
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_CONFIG + 1)
+        if len(raw) > MAX_CONFIG:
+            raise ValueError("Codex configuration is not a bounded file")
+        _, entries = _document(raw.decode("utf-8-sig"))
+        paths = []
+        for key, override in (("ALP_HOME", home), ("ALP_CONFIG", config)):
+            field = entries.get((*ENV, key))
+            if field is None:
+                paths.append(override)
+                continue
+            value = Path(_string(field[2]))
+            if not value.is_absolute():
+                raise ValueError("primary connector paths must be absolute")
+            value = safe_path(value)
+            if override is not None and safe_path(override) != value:
+                raise ContractError("linked worktree must use the primary connector's " + key)
+            paths.append(value)
+    except ContractError:
+        raise
+    except (OSError, ValueError, RecursionError):
+        raise ContractError("primary Codex connector configuration could not be verified") from None
+    return _paths(*paths)
+
+
 def connect(installation, workspace=None, *, home=None, config=None, codex_home=None, check=False, repair_python=False):
     """Wire one bound project and the shared descriptor, preserving other keys."""
     if type(check) is not bool or type(repair_python) is not bool:
         raise ContractError("Codex connection check must be boolean")
-    receipt, installation, workspace = _binding(installation, workspace)
-    if not (Path(receipt["runtime_directory"]) / "agent_learning/codex_connect.py").is_file():
+    receipt, installation, workspace = _binding(installation, workspace, allow_linked=True)
+    runtime_package = Path(receipt["runtime_directory"]) / "agent_learning"
+    primary = safe_path(receipt["panel_workspace"])
+    linked = workspace != primary
+    if not (runtime_package / "codex_connect.py").is_file():
         raise ContractError("upgrade the project plugin before connecting native UI discovery")
     from .installation_health import python_health
     interpreter = python_health(receipt["python"], probe=True)
     if not interpreter["usable"]:
         raise ContractError("installed Python failed preflight; run installation-check and repair-python --confirm")
-    home, config = _paths(home, config)
+    requested_paths = home, config
+    home, config = _linked_paths(primary, installation, *requested_paths) if linked else _paths(*requested_paths)
     codex_home = safe_path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     global_path = safe_path(codex_home / "config.toml")
     project_path = safe_path(workspace / ".codex/config.toml")
@@ -286,6 +323,16 @@ def connect(installation, workspace=None, *, home=None, config=None, codex_home=
                   "restart_required": bool(changed), "administrator_started": False, "interpreter": interpreter}
         if check or not changed:
             return result
+        if linked:
+            # The checkout or its primary project can change while acquiring the locks.
+            from .project_admission import require_project_installation
+            try:
+                verified = require_project_installation(workspace, installation, host="codex")
+            except ContractError:
+                verified = {}
+            if (verified.get("checkout") != str(workspace) or verified.get("workspace") != str(primary)
+                    or _linked_paths(primary, installation, *requested_paths) != (home, config)):
+                raise ContractError("linked Git worktree changed during connection; configuration preserved")
         backup = safe_path(codex_home / "agent-learning-backups" / uuid.uuid4().hex)
         backup.mkdir(parents=True, exist_ok=False)
         written = []

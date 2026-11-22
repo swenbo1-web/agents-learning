@@ -46,7 +46,7 @@ _EN_FOLLOWUP = re.compile(
 # to be action-only. Subjects, versions and negations are never discarded.
 _ZH_PROGRESS = re.compile(
     r"(?:请|麻烦)?(?:按你说的|按此|按上述方案|按原计划)?"
-    r"(?:继续|接着)(?:推进|进行|执行|完成)?(?:一下|下去)?(?:吧)?\Z")
+    r"(?:(?:继续|接着)(?:推进|进行|执行|完成)?|(?:确认|确定)推进)(?:一下|下去)?(?:吧)?\Z")
 # Generic plan references preserve the existing subject only when the entire
 # prompt remains action-only. A named/numbered/new plan, object or negation is
 # deliberately outside this grammar; no plan text or identifier is stripped.

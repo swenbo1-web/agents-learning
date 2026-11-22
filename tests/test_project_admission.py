@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,8 @@ from unittest.mock import patch
 
 from agent_learning.install import install
 from agent_learning.project_admission import require_project_installation, same_workspace
-from agent_learning.runtime import ContractError
+from agent_learning.runtime import ContractError, Runtime
+from agent_learning.work_files import checkout_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +203,100 @@ class ProjectAdmissionTests(unittest.TestCase):
             paths = database.execute("SELECT path,project FROM project_paths").fetchall()
         self.assertIn(os.path.normcase(str(self.workspace)), {row[0] for row in paths})
         self.assertEqual(len({row[1] for row in paths}), 1)
+
+    @unittest.skipUnless(shutil.which("git"), "Git worktrees require Git")
+    def test_linked_worktree_shares_project_without_crossing_checkout_boundary(self):
+        git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        git_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+        def git(*args):
+            result = subprocess.run(["git", "-C", str(self.workspace), *args], env=git_env,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        git("init")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-m", "fixture")
+        linked = self.root / "linked project"
+        git("worktree", "add", "--detach", str(linked))
+        legacy_home = self.root / "worktree home"
+        room = Runtime(legacy_home, config={})
+        try:
+            main = room.project(self.workspace)
+            legacy = room.project(linked)
+            self.assertNotEqual(main, legacy)
+            room.task_update(legacy, "previous-chat", "Finished legacy task", status="delivered")
+            room.task_update(legacy, "active-chat", "Active legacy task")
+            old_handle = room.register_context(legacy, "previous-chat")["context_handle"]
+        finally:
+            room.close()
+        receipt = self.install()
+        self.configure_external(self.target)
+        with (self.workspace / ".codex/config.toml").open("a", encoding="utf-8") as config:
+            config.write("\n[mcp_servers.agent_learning.env]\nALP_HOME = " + json.dumps(str(legacy_home))
+                         + "\nALP_CONFIG = " + json.dumps(str(legacy_home / "config.json")) + "\n")
+        binding = require_project_installation(linked)
+        self.assertEqual(binding["workspace"], str(self.workspace))
+        self.assertEqual(binding["checkout"], str(linked))
+        self.assertEqual(require_project_installation(linked, self.target), binding)
+        fake = self.root / "spoofed checkout"
+        fake.mkdir()
+        shutil.copyfile(linked / ".git", fake / ".git")
+        with self.assertRaisesRegex(ContractError, "project_not_installed"):
+            require_project_installation(fake)
+
+        env = {**os.environ, "ALP_HOME": str(legacy_home), "ALP_CONFIG": str(legacy_home / "config.json"),
+               "ALP_HOOK_MODE": "observe", "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("ALP_DISABLED", None)
+        env.pop("ALP_CONTEXT_HANDLE", None)
+        inherited_env = {**env, "ALP_HOME": str(self.root / "wrong home"),
+                         "ALP_CONFIG": str(self.root / "wrong config.json")}
+        release = Path(receipt["runtime_directory"])
+        for session in ("new-chat", "previous-chat", "active-chat"):
+            event = {"hook_event_name": "UserPromptSubmit", "session_id": session, "cwd": str(linked),
+                     "prompt": "Inspect this checkout.", "turn_id": session + "-turn"}
+            result = subprocess.run([sys.executable, "-B", str(release / "hooks/dispatch.py"),
+                         "--event", "UserPromptSubmit", "--hook-mode", "observe"],
+                         input=json.dumps(event).encode(), capture_output=True, cwd=linked,
+                         env=inherited_env, timeout=15)
+            self.assertEqual(result.returncode, 0)
+            if session != "active-chat":
+                self.assertIn("context_handle", json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
+            else:
+                self.assertIn("worktree_binding_pending", json.loads(result.stdout)["systemMessage"])
+        self.assertFalse((self.root / "wrong home").exists())
+        with closing(sqlite3.connect((legacy_home / "runtime.sqlite3").as_uri() + "?mode=ro", uri=True)) as db:
+            projects = dict(db.execute("SELECT conversation,project FROM session_projects"))
+            self.assertEqual(projects, {"new-chat": main, "previous-chat": main, "active-chat": legacy})
+            self.assertIsNone(db.execute("SELECT 1 FROM context_access WHERE handle=?", (old_handle,)).fetchone())
+            self.assertEqual(db.execute("SELECT status FROM tasks WHERE project=? AND conversation=?",
+                                        (legacy, "previous-chat")).fetchone(), ("delivered",))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM events WHERE project=? AND conversation=? "
+                                        "AND type='WorkspaceProjectRebind'", (main, "previous-chat")).fetchone(), (1,))
+            row = db.execute("SELECT handle FROM context_access WHERE project=? AND conversation=?",
+                             (main, "previous-chat")).fetchone()
+            self.assertIsNotNone(row)
+            new_handle = row[0]
+            self.assertEqual(db.execute(
+                "SELECT w.checkout_key FROM work_event_checkouts w JOIN events e ON e.id=w.event_id "
+                "WHERE e.project=? AND e.conversation=? AND e.type='UserPromptSubmit'", (main, "new-chat")
+            ).fetchone(), (checkout_key(linked),))
+        messages = [
+            {"jsonrpc": "2.0", "method": "initialize", "id": 1,
+             "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "worktree-test", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+             "params": {"name": "session_context", "arguments": {"context_handle": new_handle}}},
+        ]
+        response = subprocess.run([sys.executable, "-B", str(release / "scripts/learning.py"),
+                   "serve", "--role", "worker", "--panel-installation", str(self.target)], cwd=linked, env=env,
+                   input="\n".join(map(json.dumps, messages)) + "\n", capture_output=True, text=True, timeout=15)
+        self.assertEqual(response.returncode, 0, response.stderr)
+        context = json.loads(response.stdout.splitlines()[-1])["result"]["structuredContent"]
+        self.assertEqual(context["project_id"], main)
+        self.assertEqual(context["conversation_id"], "previous-chat")
+        self.assertTrue(context["context_bound"])
 
 
 if __name__ == "__main__":

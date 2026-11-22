@@ -20,6 +20,7 @@ import webbrowser
 
 from .install import _hook_commands, _resource_root
 from .install_update import inspect_installation, safe_path
+from .codex_actions import _action_workspace
 from .panel_browser import make_panel_guard
 from .panel_control import ACTIONS, EXPECTED_FIELDS, PanelControl
 from .runtime import ContractError, Runtime
@@ -235,11 +236,18 @@ def make_panel_server(installation, workspace=None, home=None, host_instance="de
         raise ContractError("this Codex installation has no project UI binding")
     bound = safe_path(bound)
     actual = safe_path(Path.cwd())
-    if actual != bound or workspace is not None and safe_path(workspace) != bound:
-        raise ContractError("launch the Codex panel from its exact installed project workspace")
+    if workspace is not None and safe_path(workspace) != actual:
+        raise ContractError("launch the Codex panel from the selected checkout root")
+    actual = _action_workspace(installed["target"], actual, bound)
     default_home = (Path(os.environ["LOCALAPPDATA"]) / "AgentLearning" if os.environ.get("LOCALAPPDATA")
                     else Path.home() / ".local/share/agent-learning")
     selected_home = safe_path(home or receipt.get("home") or os.environ.get("ALP_HOME") or default_home)
+    if actual != bound:
+        from .codex_connect import _linked_paths
+        selected_home, primary_config = _linked_paths(bound, installed["target"], home or receipt.get("home"), None)
+        effective_config = safe_path(os.environ.get("ALP_CONFIG") or selected_home / "config.json")
+        if effective_config != primary_config:
+            raise ContractError("launch the linked worktree's Agent Learning Action or set ALP_CONFIG to its primary connector's config")
     if receipt.get("home") and selected_home != safe_path(receipt["home"]):
         raise ContractError("panel knowledge directory does not match its installation")
     source = _resource_root()
@@ -264,7 +272,7 @@ def make_panel_server(installation, workspace=None, home=None, host_instance="de
         runtime.db.execute("PRAGMA foreign_keys=ON")
         runtime.db.execute("PRAGMA synchronous=FULL")
         project = runtime.project(bound)
-        controller = PanelControl(runtime, project, bound, installed["target"], project_ui=True)
+        controller = PanelControl(runtime, project, actual, installed["target"], project_ui=True)
         if not controller.eligible():
             raise ContractError("project UI installation could not be verified")
         guard = make_panel_guard(installed["target"], dict(controller.binding), runtime.home / "runtime.sqlite3",

@@ -393,7 +393,7 @@ class Server:
             binding = self.panel.binding
             return {"visible": False, "reason": "panel_ui_unavailable", "fallback_skill": "learning-browser",
                     "fallback": {"kind": "local_browser", "mode": "read_only", "skill": "learning-browser",
-                        "installation": binding["installation"], "workspace": binding["workspace"],
+                        "installation": binding["installation"], "workspace": binding.get("checkout", binding["workspace"]),
                         "home": str(self.runtime.home), "host": self.runtime.host,
                         "host_instance": self.runtime.host_instance, "diagnostic_skill": "learning-debug",
                         "instructions": "使用 learning-browser 核对该安装的固定运行入口并启动 browser --open；"

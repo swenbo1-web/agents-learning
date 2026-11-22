@@ -524,7 +524,13 @@ def main(argv=None):
                             if os.environ.get("LOCALAPPDATA") else Path.home() / ".local/share/agent-learning")
             home = Path(args.home or os.environ.get("ALP_HOME") or default_home).resolve()
             database = home / "runtime.sqlite3"
-            project = resolve_browser_project(database, args.workspace, args.project_id)
+            workspace = args.workspace
+            if args.host == "codex" and workspace and not args.project_id:
+                from .project_admission import codex_project_binding
+                binding = codex_project_binding(workspace)
+                if binding:
+                    workspace = binding["workspace"]
+            project = resolve_browser_project(database, workspace, args.project_id)
             browser_server = make_browser_server(database, project, port=args.port,
                 review=args.review, admin_control=args.admin_control, language=args.language, runtime_host=args.host,
                 runtime_instance=args.host_instance)
@@ -603,9 +609,13 @@ def main(argv=None):
                       if args.command == "rebuild-index" else runtime.backup(args.destination))
             print(encode(result))
             return 0
+        project_workspace = args.workspace
         if project_installation:
-            runtime.project(project_installation["workspace"])
-        project = runtime.project(args.workspace)
+            if "checkout" in project_installation:
+                project_workspace = project_installation["workspace"]
+            else:
+                runtime.project(project_installation["workspace"])
+        project = runtime.project(project_workspace)
         if args.command == "serve":
             handle = args.context_handle
             if handle is None and args.host == "codex":
