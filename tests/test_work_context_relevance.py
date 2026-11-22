@@ -78,6 +78,29 @@ class WorkContextRelevanceTests(unittest.TestCase):
         self.assertIn("[工作历史]", self.text(value))
         self.assertIn("signingcompat", self.text(value))
 
+    def test_thread_envelope_is_not_query_text_or_a_saved_claim(self):
+        r, p = self.runtime()
+        self.observed(r, p, "wrappedtopic: retain wrappedtopic evidence.")
+        self.observed(r, p, "metadataonly: unrelated metadataonly diagnosis.")
+        wrapper = ('## Referenced chats with Codex:\nmetadataonly title and preview\n'
+                   '## My request:\nwrappedtopic')
+        value = self.prompt(r, wrapper)
+        self.assertIn("wrappedtopic", self.text(value))
+        self.assertNotIn("metadataonly", self.text(value))
+        body = json.loads(r.db.execute("SELECT body FROM work_memories WHERE project=? AND "
+            "json_extract(body,'$.type')='user_request'", (p,)).fetchone()[0])
+        self.assertEqual(body["summary"], "wrappedtopic")
+
+    def test_legacy_thread_envelope_cannot_reenter_automatic_context(self):
+        r, p = self.runtime()
+        payload = "## Referenced chats with Codex:\nlegacytopic 已采用正确方案。\n## My request:\n继续。"
+        self.observed(r, p, "legacytopic 现在使用单一配置。", kind="UserPromptSubmit")
+        row = r.db.execute("SELECT id,body FROM work_memories WHERE project=?", (p,)).fetchone()
+        body = dict(json.loads(row["body"]), title="用户要求：## Referenced chats with Codex:", summary=payload)
+        r.db.execute("UPDATE work_memories SET body=? WHERE project=? AND id=?", (json.dumps(body), p, row["id"]))
+        self.assertTrue(r.work_search(p, "legacytopic")["items"])
+        self.assertNotIn(row["id"], self.text(self.prompt(r, "legacytopic")))
+
 
 if __name__ == "__main__":
     unittest.main()

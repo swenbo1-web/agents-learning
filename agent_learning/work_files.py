@@ -253,24 +253,25 @@ def knowledge_file_observation(runtime, project, item, workspace):
     if not workspace:
         return None
     refs = list(dict.fromkeys(ev["event_id"] for ev in item.get("evidence", [])
-                             if isinstance(ev, dict) and ev.get("event_id")))[:20]
+                             if isinstance(ev, dict) and ev.get("event_id")))
     if not refs:
         return None
+    refs_complete = len(refs) <= 20
+    refs = refs[:20]
     marks = ",".join("?" for _ in refs)
     from .workspace_links import file_workspace_roots
     roots = file_workspace_roots(runtime, project, workspace)
     rows = runtime.db.execute(
         f"SELECT checkout_key,relative_path,version FROM work_file_links WHERE project=? "
-        f"AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 16",
+        f"AND event_id IN ({marks}) ORDER BY event_id,relative_path LIMIT 17",
         (project, *refs)).fetchall()
-    snapshots, files, changed, unverified, blocked = [], [], False, False, False
-    for row in rows:
+    complete = refs_complete and len(rows) <= 16
+    snapshots, files, changed, unverified, blocked = [], [], False, not complete, False
+    for row in rows[:16]:
         try:
             recorded = json.loads(row["version"])
         except (ValueError, TypeError):
-            continue
-        if not isinstance(recorded, dict) or recorded.get("status") != "stat_observed":
-            continue
+            recorded = None
         current = current_file_version(row["relative_path"], workspace, file_checkout=row["checkout_key"], roots=roots)
         snapshots.append([row["checkout_key"], row["relative_path"], recorded, current])
         comparison = compare_file_versions(recorded, current)
@@ -280,9 +281,10 @@ def knowledge_file_observation(runtime, project, item, workspace):
         files.append({"checkout": row["checkout_key"], "path": row["relative_path"],
                       "verified": comparison["verified"],
                       "scope": current.get("status") not in {"outside_workspace", "outside_scope", "unknown"}})
-    return ({"checkout": checkout_key(workspace), "version": digest(snapshots), "changed": changed,
+    return ({"checkout": checkout_key(workspace), "version": digest(snapshots if complete else [snapshots, complete]),
+             "changed": changed,
              "unverified": unverified, "blocked": blocked, "files": files}
-            if snapshots else None)
+            if snapshots or not complete else None)
 
 
 def knowledge_file_state(runtime, project, item, workspace):

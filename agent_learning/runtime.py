@@ -586,14 +586,70 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         task = self.task(previous, conversation)
         if task and task["status"] not in {"delivered", "cancelled"}:
             raise ContractError("worktree_project_rebind_requires_closed_task")
-        if self.db.execute(
-                "SELECT 1 FROM operations WHERE project=? AND conversation=? AND state IN ('started','running') LIMIT 1",
-                (previous, conversation)).fetchone():
-            raise ContractError("worktree_project_rebind_requires_idle_operations")
+        if self._has_inflight_worktree_operations(previous, conversation):
+            if task:
+                self._reconcile_closed_worktree_operations(previous, conversation, task)
+            if not task or self._has_inflight_worktree_operations(previous, conversation):
+                raise ContractError("worktree_project_rebind_requires_idle_operations")
         self.db.execute("UPDATE session_projects SET project=? WHERE conversation=? AND project=?",
                         (project, conversation, previous))
         self.db.execute("DELETE FROM context_access WHERE project=? AND conversation=?", (previous, conversation))
         self._event(project, conversation, "WorkspaceProjectRebind", {"previous_project": previous})
+
+    def _has_inflight_worktree_operations(self, project, conversation):
+        return self.db.execute(
+            "SELECT 1 FROM operations WHERE project=? AND conversation=? AND state IN ('started','running') LIMIT 1",
+            (project, conversation)).fetchone() is not None
+
+    def _reconcile_closed_worktree_operations(self, project, conversation, task):
+        # Do not guess a child result from time elapsed or a parent Stop alone.
+        # Recover a missing callback only if the child progressed in the same
+        # turn, its original task is fenced, and a later, distinct task stopped.
+        stop = self.db.execute(
+            "SELECT id,created FROM events WHERE project=? AND conversation=? AND agent IS NULL AND type='Stop' "
+            "AND task_id=? AND task_revision=? AND execution_epoch=? AND task_status=? "
+            "ORDER BY created DESC LIMIT 1",
+            (project, conversation, task["id"], task["revision"], task["execution_epoch"], task["status"])).fetchone()
+        if stop is None:
+            return
+        candidates = self.db.execute(
+            "SELECT o.id,o.last_event,o.agent,o.task_id,o.task_revision,o.execution_epoch,o.assignment_id,"
+            "o.host_epoch,e.created,json_extract(e.payload,'$.turn_id') AS turn_id "
+            "FROM operations o JOIN events e ON e.id=o.last_event AND e.project=o.project AND e.operation=o.id "
+            "WHERE o.project=? AND o.conversation=? AND o.agent IS NOT NULL AND o.task_id<>? "
+            "AND e.conversation=o.conversation AND e.agent=o.agent AND e.assignment_id=o.assignment_id "
+            "AND e.task_id=o.task_id AND e.task_revision=o.task_revision AND e.execution_epoch=o.execution_epoch "
+            "AND o.execution_epoch<? AND e.type='PreToolUse' AND e.created<? "
+            "AND o.state='started' AND o.observation='unknown' AND o.conflict=0 "
+            "AND o.decision IN ('allowed','observed')",
+            (project, conversation, task["id"], task["execution_epoch"], stop["created"])).fetchall()
+        for operation in candidates:
+            if not operation["turn_id"]:
+                continue
+            closed = self.db.execute(
+                "SELECT status,execution_epoch FROM task_states WHERE project=? AND conversation=? AND id=? "
+                "ORDER BY write_version DESC LIMIT 1", (project, conversation, operation["task_id"])).fetchone()
+            if (closed is None or closed["status"] not in {"delivered", "cancelled"}
+                    or closed["execution_epoch"] <= operation["execution_epoch"]):
+                continue
+            progress = self.db.execute(
+                "SELECT id FROM events WHERE project=? AND conversation=? AND created>? AND created<? "
+                "AND type='PostToolUse' AND agent=? AND assignment_id=? AND operation<>? "
+                "AND outcome NOT IN ('conflict','denied','running','started') "
+                "AND json_extract(payload,'$.turn_id')=? AND json_extract(payload,'$.host_epoch')=? "
+                "ORDER BY created,id LIMIT 1",
+                (project, conversation, operation["created"], stop["created"], operation["agent"],
+                 operation["assignment_id"], operation["id"], operation["turn_id"], operation["host_epoch"])).fetchone()
+            if progress is None:
+                continue
+            self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND id=?",
+                            (project, operation["id"]))
+            self._event(project, conversation, "WorktreeOperationReconciled", {
+                "reason": "missing_callback_under_closed_assignment", "pre_event": operation["last_event"],
+                "child_progress_event": progress["id"], "root_stop_event": stop["id"],
+            }, task_id=operation["task_id"], task_revision=operation["task_revision"], agent_id=operation["agent"],
+                operation_id=operation["id"], execution_epoch=operation["execution_epoch"],
+                assignment_id=operation["assignment_id"])
 
     def bind_session(self, project, conversation_id):
         if not isinstance(conversation_id, str) or not conversation_id.strip():

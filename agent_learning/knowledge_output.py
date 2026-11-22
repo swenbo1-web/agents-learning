@@ -2,6 +2,17 @@
 from __future__ import annotations
 
 import json
+import re
+
+
+_HISTORICAL_SCOPE = re.compile(
+    r"(?:固定|历史|阶段|旧版|文档|提交)快照|(?:本轮|本次|本阶段|该阶段)的?"
+    r"(?:优化排期|实验|测试|评估|部署|发布|验证|基准|单视图)|"
+    r"仅适用于.{0,50}(?:待确认|待评审|未安装|未部署)(?:的)?(?:方案|阶段|状态|候选)|"
+    r"\b(?:historical|fixed|dated|stage|commit) snapshot\b|"
+    r"\b(?:this|that) (?:run|benchmark run|deployment stage) only\b", re.I)
+_PHASE_SCOPE = re.compile(r"本轮|本次|本阶段|本批|该次试验|当前可见的待确认|"
+                          r"\b(?:this|that) (?:experiment|stage|trial|batch)\b", re.I)
 
 
 def _encode(value):
@@ -22,13 +33,32 @@ def _text(value):
     return value if isinstance(value, str) else ""
 
 
+def reference_status(item):
+    """Use observed risks and explicit scope, never age alone, for safe previews."""
+    from .source_caveats import context_caveat
+    if (item.get("source_health", "valid") != "valid" or ("sources" in item and not item["sources"])
+            or item.get("pending_counterexample_count")
+            or context_caveat(item) or item.get("problem_changed")):
+        return "source_recheck"
+    if item.get("source_files_changed") or item.get("source_files_unverified"):
+        return "file_recheck"
+    applicability = _text(item.get("applicability"))
+    if item.get("validation_level", "reported") == "reported" and (
+            _PHASE_SCOPE.search(applicability) or _HISTORICAL_SCOPE.search(applicability)
+            or _HISTORICAL_SCOPE.search(_text(item.get("limitations")))):
+        return "historical_scope"
+    return None
+
+
 def _state(item):
     from .source_caveats import context_caveat
     caveat = context_caveat(item)
+    status = reference_status(item)
     # 展示的来源版本与展示状态必须一起传给登记入口，不能另读一次猜基线。
     return {**({"source_files_changed": True} if item.get("source_files_changed") else {}),
             **({"source_files_unverified": True} if item.get("source_files_unverified") else {}),
             **({"source_caveat": caveat} if caveat else {}),
+            **({"reference_status": status} if status else {}),
             "source_health": item.get("source_health", "missing"),
             "maturity": item.get("maturity", "candidate"),
             "current_tool_success": bool(item.get("current_tool_success", False)),
@@ -97,6 +127,9 @@ def _card(item):
     result["read_required"] = any(result[key] != item.get(key, "") for key in ("applicability", "limitations"))
     if not result["content_summary"] and item.get("content"):
         result["read_required"] = True
+    if result.get("reference_status"):
+        result.update(title="历史资料，需复核", content_summary="", applicability="", limitations="",
+                      read_required=True, truncated=True)
     if match.get("method") in {"lexical", "semantic", "hybrid"}:
         result["match"]["method"] = match["method"]
     for key in ("semantic_score", "semantic_rank"):

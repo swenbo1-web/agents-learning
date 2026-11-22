@@ -231,6 +231,17 @@ class WorkMemoryContextTests(unittest.TestCase):
         text = self.context()
         self.assertIn(memory["memory_id"], text)
         self.assertIn('"file_version_changed":true', text)
+        card = next(json.loads(line.removeprefix("[工作历史] ")) for line in text.splitlines()
+                    if line.startswith("[工作历史] ") and memory["memory_id"] in line)
+        self.assertFalse(card.get("summary"))
+        self.assertEqual(card["reference_status"], "file_recheck")
+
+    def test_omitted_associated_files_cannot_appear_rechecked(self):
+        from agent_learning.work_memory import _work_file_risk
+
+        visible = [{"version_changed": False} for _ in range(3)]
+        self.assertTrue(_work_file_risk({"files": visible, "files_count": 4}))
+        self.assertFalse(_work_file_risk({"files": visible, "files_count": 3}))
 
     def test_file_restored_to_captured_stat_still_notifies_change_since_exposure(self):
         memory = self.observed()

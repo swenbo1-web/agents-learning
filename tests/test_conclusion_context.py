@@ -166,6 +166,24 @@ class ConclusionRuntimeTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups)
         self.f.r.config["work_memory"]["automatic_context"] = False
 
+    def test_dated_plan_stays_an_index_but_its_evidence_is_readable(self):
+        f = self.f
+        report = "dedupfocus 部署候选已经封存，下一阶段应沿草案派单。"
+        record, _ = f.published(content=report, title="dedupfocus 草案已成为现状",
+                               applicability="仅适用于当前可见的待确认方案。")
+        text = f.context("dedupfocus 部署候选")
+        card = f.formal_cards(text)[0]
+        self.assertEqual(card["reference_status"], "historical_scope")
+        self.assertEqual(card["content_summary"], "")
+        self.assertTrue(card["read_required"])
+        self.assertNotIn("草案", text)
+        item = f.r.read(f.p, record["knowledge_id"])
+        from agent_learning.knowledge_output import read_page, search_preview
+        self.assertEqual(search_preview({"items": [item]})["items"][0]["content_summary"], "")
+        page = read_page(item)
+        self.assertEqual(page["reference_status"], "historical_scope")
+        self.assertEqual(page["content"], report)
+
     def test_context_keeps_conditions_evidence_level_dedup_and_revoke(self):
         f = self.f
         body = "背景：dedupfocus " + "raw history " * 100 + "\n结论：dedupfocus 使用事务。\n限制：失败不得发布。"

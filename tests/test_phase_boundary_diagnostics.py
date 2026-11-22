@@ -215,13 +215,11 @@ class PhaseBoundaryDiagnosticsTests(unittest.TestCase):
                     or (table == "phase_seal_requests" and column == "capture")):
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
-        r.db.set_authorizer(authorize)
         r.db.execute("PRAGMA query_only=ON")
-        try:
-            self.assertEqual(self.only(r, p)["reason"], "local_seal_retry")
-        finally:
-            r.db.set_authorizer(None)
-            r.db.execute("PRAGMA query_only=OFF")
+        r.db.set_authorizer(authorize)
+        # The fixture closes this connection. Python 3.10 does not support
+        # passing None to disable the authorizer, so keep the fence in place.
+        self.assertEqual(self.only(r, p)["reason"], "local_seal_retry")
 
     def test_unavailable_diagnostics_do_not_break_optional_projection(self):
         r, p = self.runtime()

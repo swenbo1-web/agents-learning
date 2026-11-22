@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_learning.mcp import Server
 from agent_learning.runtime import Runtime
@@ -54,6 +55,9 @@ class KnowledgeFileStateTests(unittest.TestCase):
                 cards = [json.loads(line) for line in text.splitlines() if line.startswith('{"')]
                 self.assertEqual(len(cards), 1, text)
                 self.assertTrue(cards[0]["source_files_changed"])
+                self.assertEqual(cards[0]["reference_status"], "file_recheck")
+                self.assertFalse(cards[0].get("content_summary"))
+                self.assertNotIn("service startup config", cards[0].get("title", ""))
                 self.assertEqual(cards[0]["knowledge_id"], self.knowledge_id)
                 self.assertLessEqual(len(text), budget)
                 if budget <= 550:
@@ -108,9 +112,13 @@ class KnowledgeFileStateTests(unittest.TestCase):
         self.addCleanup(server.close)
         page = server.call("knowledge_read", {"knowledge_id": self.knowledge_id, "max_chars": 1200})
         self.assertTrue(page["source_files_changed"])
+        self.assertEqual(page["reference_status"], "file_recheck")
+        self.assertIn("body ", page["content"])
         self.assertLessEqual(len(json.dumps(page, ensure_ascii=False, sort_keys=True, separators=(",", ":"))), 1200)
         found = server.call("knowledge_search", {"query": "service startup config"})
         self.assertTrue(found["items"][0]["source_files_changed"])
+        self.assertEqual(found["items"][0]["content_summary"], "")
+        self.assertEqual(found["items"][0]["reference_status"], "file_recheck")
 
     def test_other_checkout_does_not_compare_current_file_with_foreign_baseline(self):
         other = Path(self.temp.name) / "other-checkout"
@@ -120,3 +128,38 @@ class KnowledgeFileStateTests(unittest.TestCase):
         self.addCleanup(server.close)
         page = server.call("knowledge_read", {"knowledge_id": self.knowledge_id})
         self.assertNotIn("source_files_changed", page)
+        self.assertTrue(page["source_files_unverified"])
+        self.assertEqual(page["reference_status"], "file_recheck")
+
+    def test_unscanned_file_associations_cannot_look_verified(self):
+        from agent_learning.runtime import encode
+        from agent_learning.work_files import knowledge_file_observation, normalize_file_target
+
+        item = self.runtime.read(self.project, self.knowledge_id)
+        event = item["evidence"][0]["event_id"]
+        for index in range(17):
+            path = self.workspace / f"association{index:02}.py"
+            path.write_text("seen\n", encoding="utf-8")
+            target = normalize_file_target(str(path), self.workspace)
+            self.runtime.db.execute("INSERT INTO work_file_links VALUES(?,?,?,?,?,?,?)", (
+                self.project, event, target["checkout_key"], target["relative_path"], target["path_key"],
+                "read_target", encode(target["version"])))
+        observation = knowledge_file_observation(self.runtime, self.project, item, self.workspace)
+        self.assertFalse(observation["changed"])
+        self.assertTrue(observation["unverified"])
+        self.assertEqual(len(observation["files"]), 16)
+
+    def test_old_exposure_of_a_stale_body_gets_one_new_review_index(self):
+        conversation = "previous-release"
+        handle = self.context_after_task_notice(conversation)
+
+        def context():
+            return self.runtime._context(self.project, conversation, "service startup config",
+                context_handle=handle, workspace=str(self.workspace))
+
+        with patch("agent_learning.knowledge_output.reference_status", return_value=None):
+            self.assertIn("body body", context())
+        repaired = context()
+        self.assertIn('"reference_status":"file_recheck"', repaired)
+        self.assertNotIn("body body", repaired)
+        self.assertNotIn(self.knowledge_id, context())

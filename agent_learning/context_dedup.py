@@ -229,6 +229,8 @@ class ContextDedup:
             base = {"source_files_changed": bool(card.get("source_files_changed"))}
             if card.get("source_files_unverified"):
                 base["source_files_unverified"] = True
+            if card.get("reference_status"):
+                base["reference_status"] = card["reference_status"]
             ranges = [] if card.get("read_required") else _formal_ranges(item, card)
             if ranges is not None:
                 entry["material_key"] = "formal:" + digest([

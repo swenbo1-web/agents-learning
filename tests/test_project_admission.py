@@ -204,6 +204,27 @@ class ProjectAdmissionTests(unittest.TestCase):
         self.assertIn(os.path.normcase(str(self.workspace)), {row[0] for row in paths})
         self.assertEqual(len({row[1] for row in paths}), 1)
 
+    def _record_previous_worktree_task(self, room, project, workspace, session, *, running=False, progressed=True):
+        def hook(event, **fields):
+            room.handle_hook({"hook_event_name": event, "session_id": session, "cwd": str(workspace), **fields},
+                             context_delivery=False)
+
+        room.task_update(project, session, "Old task")
+        child = {"agent_id": "child", "turn_id": "child-turn"}
+        old_tool = {**child, "tool_use_id": "old-tool", "tool_name": "Bash"}
+        hook("SubagentStart", **child)
+        hook("PreToolUse", **old_tool)
+        if running:
+            hook("PostToolUse", **old_tool, tool_response={"session_id": 42, "exit_code": None})
+        room.task_update(project, session, "Old task", status="delivered")
+        if progressed:
+            subsequent = {**child, "tool_use_id": "next-tool", "tool_name": "Bash"}
+            hook("PreToolUse", **subsequent)
+            # A callback is evidence of progress even when its outcome is unknown.
+            hook("PostToolUse", **subsequent)
+        room.task_update(project, session, "New task", status="delivered", new_task=True)
+        hook("Stop", turn_id="new-turn", last_assistant_message="Finished later task.")
+
     @unittest.skipUnless(shutil.which("git"), "Git worktrees require Git")
     def test_linked_worktree_shares_project_without_crossing_checkout_boundary(self):
         git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -225,7 +246,9 @@ class ProjectAdmissionTests(unittest.TestCase):
             main = room.project(self.workspace)
             legacy = room.project(linked)
             self.assertNotEqual(main, legacy)
-            room.task_update(legacy, "previous-chat", "Finished legacy task", status="delivered")
+            self._record_previous_worktree_task(room, legacy, linked, "previous-chat")
+            self._record_previous_worktree_task(room, legacy, linked, "running-chat", running=True)
+            self._record_previous_worktree_task(room, legacy, linked, "no-progress-chat", progressed=False)
             room.task_update(legacy, "active-chat", "Active legacy task")
             old_handle = room.register_context(legacy, "previous-chat")["context_handle"]
         finally:
@@ -252,7 +275,7 @@ class ProjectAdmissionTests(unittest.TestCase):
         inherited_env = {**env, "ALP_HOME": str(self.root / "wrong home"),
                          "ALP_CONFIG": str(self.root / "wrong config.json")}
         release = Path(receipt["runtime_directory"])
-        for session in ("new-chat", "previous-chat", "active-chat"):
+        for session in ("new-chat", "previous-chat", "previous-chat", "active-chat", "running-chat", "no-progress-chat"):
             event = {"hook_event_name": "UserPromptSubmit", "session_id": session, "cwd": str(linked),
                      "prompt": "Inspect this checkout.", "turn_id": session + "-turn"}
             result = subprocess.run([sys.executable, "-B", str(release / "hooks/dispatch.py"),
@@ -260,19 +283,31 @@ class ProjectAdmissionTests(unittest.TestCase):
                          input=json.dumps(event).encode(), capture_output=True, cwd=linked,
                          env=inherited_env, timeout=15)
             self.assertEqual(result.returncode, 0)
-            if session != "active-chat":
+            if session in ("new-chat", "previous-chat"):
                 self.assertIn("context_handle", json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
             else:
                 self.assertIn("worktree_binding_pending", json.loads(result.stdout)["systemMessage"])
         self.assertFalse((self.root / "wrong home").exists())
         with closing(sqlite3.connect((legacy_home / "runtime.sqlite3").as_uri() + "?mode=ro", uri=True)) as db:
             projects = dict(db.execute("SELECT conversation,project FROM session_projects"))
-            self.assertEqual(projects, {"new-chat": main, "previous-chat": main, "active-chat": legacy})
+            self.assertEqual(projects, {"new-chat": main, "previous-chat": main, "active-chat": legacy,
+                                        "running-chat": legacy, "no-progress-chat": legacy})
             self.assertIsNone(db.execute("SELECT 1 FROM context_access WHERE handle=?", (old_handle,)).fetchone())
             self.assertEqual(db.execute("SELECT status FROM tasks WHERE project=? AND conversation=?",
                                         (legacy, "previous-chat")).fetchone(), ("delivered",))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM events WHERE project=? AND conversation=? "
                                         "AND type='WorkspaceProjectRebind'", (main, "previous-chat")).fetchone(), (1,))
+            self.assertEqual(db.execute(
+                "SELECT o.state,o.observation,e.type FROM operations o JOIN events e ON e.id=o.last_event "
+                "WHERE o.project=? AND o.conversation=? AND e.type='PreToolUse'",
+                (legacy, "previous-chat")).fetchall(), [("unknown", "unknown", "PreToolUse")])
+            self.assertEqual(db.execute("SELECT conversation,outcome FROM events WHERE project=? "
+                                        "AND type='WorktreeOperationReconciled'", (legacy,)).fetchall(),
+                             [("previous-chat", "unknown")])
+            self.assertEqual(db.execute("SELECT state FROM operations WHERE project=? AND conversation=? AND state='running'",
+                                        (legacy, "running-chat")).fetchall(), [("running",)])
+            self.assertEqual(db.execute("SELECT state FROM operations WHERE project=? AND conversation=? AND state='started'",
+                                        (legacy, "no-progress-chat")).fetchall(), [("started",)])
             row = db.execute("SELECT handle FROM context_access WHERE project=? AND conversation=?",
                              (main, "previous-chat")).fetchone()
             self.assertIsNotNone(row)
@@ -297,6 +332,24 @@ class ProjectAdmissionTests(unittest.TestCase):
         self.assertEqual(context["project_id"], main)
         self.assertEqual(context["conversation_id"], "previous-chat")
         self.assertTrue(context["context_bound"])
+
+        with closing(Runtime(legacy_home, config={})) as room:
+            room.handle_hook({"hook_event_name": "UserPromptSubmit", "session_id": "primary-chat",
+                              "cwd": str(self.workspace), "prompt": "Primary-only marker."}, context_delivery=False)
+            room.db.execute("DELETE FROM work_memory_fts WHERE project=?", (main,))
+            with self.assertRaisesRegex(ContractError, "belongs to another project"):
+                room.work_rebuild(main, fake)
+        rebuilt = subprocess.run([sys.executable, "-B", str(release / "scripts/learning.py"),
+                    "--workspace", str(linked), "work-rebuild"], cwd=linked, env=env,
+                    capture_output=True, text=True, timeout=15)
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+        self.assertGreater(json.loads(rebuilt.stdout)["reindexed"], 0)
+        with closing(sqlite3.connect((legacy_home / "runtime.sqlite3").as_uri() + "?mode=ro", uri=True)) as db:
+            owners = db.execute("SELECT DISTINCT w.conversation FROM work_memory_fts f JOIN work_memories w "
+                                "ON f.project=w.project AND f.id=w.id WHERE f.project=?", (main,)).fetchall()
+            self.assertEqual({owner for owner, in owners}, {"new-chat", "previous-chat"})
+            self.assertEqual(db.execute("SELECT project FROM project_paths WHERE path=?",
+                                        (os.path.normcase(str(linked)),)).fetchone(), (legacy,))
 
 
 if __name__ == "__main__":

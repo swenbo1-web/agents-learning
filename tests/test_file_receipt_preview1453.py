@@ -200,7 +200,9 @@ class FileReceiptPreviewTests(unittest.TestCase):
                 item.pop("_file_receipt_preview", None)
             return items
 
-        tables = ("work_exposures", "work_notice_delivery", "context_delivery_cache")
+        # The first rendering updates the independent file-observation baseline.
+        # Both branches of this budget comparison must start from the same one.
+        tables = ("work_exposures", "work_file_check_schedule", "work_notice_delivery", "context_delivery_cache")
         saved = {name: [dict(row) for row in self.r.db.execute("SELECT * FROM " + name + " WHERE project=?",
                   (self.p,))] for name in tables}
         with patch.object(self.r, "work_validate_items", side_effect=old_view):

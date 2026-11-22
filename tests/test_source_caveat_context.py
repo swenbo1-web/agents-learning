@@ -78,3 +78,18 @@ class SourceCaveatContextTests(unittest.TestCase):
         self.assertEqual(item["source_caveat"]["state"], "mixed_support")
         result = search_preview({"items": [item]}, max_chars=1400)
         self.assertEqual(result["items"][0]["source_caveat"]["state"], "mixed_support")
+
+    def test_legacy_evidence_without_publication_lineage_is_only_a_recheck_index(self):
+        from agent_learning.knowledge_output import read_page
+
+        record = self.source(("succeeded",), "missing-lineage")
+        with self.r.transaction():
+            self.r.db.execute("DELETE FROM knowledge_sources WHERE project=? AND knowledge_id=?",
+                              (self.p, record["knowledge_id"]))
+        item = self.r.read(self.p, record["knowledge_id"])
+        self.assertEqual(item["source_health"], "valid")
+        card = self.cards(self.context())[0]
+        self.assertEqual(card["reference_status"], "source_recheck")
+        self.assertFalse(card.get("content_summary"))
+        self.assertFalse(search_preview({"items": [item]})["items"][0]["content_summary"])
+        self.assertIn("verify allocator recovery", read_page(item)["content"])

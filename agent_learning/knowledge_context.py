@@ -241,7 +241,8 @@ class KnowledgeContextMixin:
         if _outcome is not None and not isinstance(_outcome, dict):
             raise ContractError("context outcome must be a dictionary")
         from .knowledge_index import normalized_query_plan, _MAX_QUERY_CHARS
-        from .knowledge_output import _summary, _shrink_summary
+        from .knowledge_output import _summary, _shrink_summary, reference_status
+        from .work_memory import _prompt_text
         # 检索在写事务外进行；最终提交重新核身份、任务及上下文版本。
         with self.transaction():
             epoch = self.assert_session_epoch(expected_epoch)
@@ -260,8 +261,10 @@ class KnowledgeContextMixin:
                 "AND host_epoch=? ORDER BY created LIMIT 1",
                 (project, conversation, agent_id or "", *self._task_key(task)[:2],
                  *((self._task_key(task)[2],) if agent_id else ()), epoch)).fetchone()
-        query = clean(query).strip()
-        if not _query_available and query:
+        original_query = clean(query).strip()
+        query = _prompt_text(original_query).strip()
+        wrapper_only = bool(original_query and not query)
+        if not _query_available and original_query:
             raise ContractError("unavailable context query must be empty")
         # Missing or partial native input cannot assert that the user meant
         # "continue". Keep real faults, task boundaries and notices independent.
@@ -271,18 +274,19 @@ class KnowledgeContextMixin:
             fault = None
         # Older contexts may already contain an acknowledgement as last_query.
         # Recover the current task focus instead of recalling that generic word.
-        effective = (initial["last_query"] if not _continuation_query(initial["last_query"]) else "") if continuation else query
+        last_query = _prompt_text(initial["last_query"])
+        effective = (last_query if not _continuation_query(last_query) else "") if continuation else query
         if compact and effective:
             # 恢复当前讨论焦点；旧故障继续排队到工具前置，不能抢占当前
             # 查询后再通过历史展示 ID 补回一批未经相关度核对的旧卡。
             fault = None
-        if (not effective and task and not _continuation_query(task["goal"])
+        if (not wrapper_only and not effective and task and not _continuation_query(task["goal"])
                 and (_query_available or task.get("status") == "active")):
             effective = task["goal"]
         # An explicit action without a business focus cannot select unrelated
         # recent history through the blank-query fallback. Empty startup events
         # retain their existing recovery path; source/file notices stay separate.
-        focus_missing = bool(query) and continuation and not effective
+        focus_missing = wrapper_only or (bool(query) and continuation and not effective)
         # 续聊、恢复或工具前置承接报错；父任务执行轮次变化不丢同合同的经验。
         retrieval = fault["query"] if fault else effective
         effective_plan = normalized_query_plan(effective)
@@ -501,14 +505,11 @@ class KnowledgeContextMixin:
                 from .work_files import knowledge_file_observation, file_observation_state
                 observation = knowledge_file_observation(self, project, item, workspace)
                 file_state = file_observation_state(observation)
-                if identity in prior and file_state:
-                    # The independent notice keeps the old card provisional;
-                    # do not replay its stale body as fresh task advice.
-                    continue
                 eligible += 1
                 available = remaining() - (len(header) + 1 if not delivered else 0)
                 from .source_caveats import context_caveat
                 caveat = context_caveat(item)
+                recheck = reference_status({**item, **file_state})
                 card = {"knowledge_id": item["knowledge_id"], "revision": item["revision"],
                         "title": clip(item["title"], 100), "content_summary": _summary(item, 500),
                         "applicability": item["applicability"], "limitations": item["limitations"],
@@ -519,7 +520,7 @@ class KnowledgeContextMixin:
                         "current_tool_success": item["current_tool_success"], "problem_changed": item.get("problem_changed", False),
                         "summary_only": True}
                 if caveat:
-                    card.update(source_caveat=caveat, content_summary="", read_required=True)
+                    card["source_caveat"] = caveat
                 card.update(file_state)
                 if item.get("pending_counterexample_count", 0):
                     card["pending_counterexample_count"] = item["pending_counterexample_count"]
@@ -531,6 +532,12 @@ class KnowledgeContextMixin:
                     if item["match"].get("method") in {"semantic", "hybrid"}:
                         card["retrieval_method"] = item["match"]["method"]
                         card["semantic_score"] = item["match"].get("semantic_score")
+                if recheck:
+                    # A title or an applicability note can carry the stale claim too.
+                    card.update(title="历史资料，需复核", content_summary="", read_required=True,
+                                reference_status=recheck)
+                    for field in ("applicability", "limitations", "metadata"):
+                        card.pop(field, None)
                 for field in ("content_summary", "title"):
                     while len(encode(card)) > available and len(card[field]) > 24:
                         limit = max(24, len(card[field]) // 2)
@@ -547,6 +554,8 @@ class KnowledgeContextMixin:
                             "knowledge_tier": item.get("knowledge_tier", "source_reference"),
                             "maturity": item.get("maturity", "candidate")}
                     card.update(file_state)
+                    if recheck:
+                        card.update(title="历史资料，需复核", reference_status=recheck)
                     if caveat:
                         card["source_caveat"] = caveat
                     if item.get("pending_counterexample_count", 0):
@@ -664,6 +673,7 @@ class KnowledgeContextMixin:
                     work_budget = min(remaining(), max(0, optional_budget - candidate_used))
                     work_used = 0
                     conclusion_used = False
+                    from .work_memory import _work_file_risk
                     from .work_notice_delivery import (FileNoticeGate, coalesce, file_notice,
                                                        protocol_only_file_summary, visible_exposures,
                                                        file_state_key, visible_file_keys)
@@ -677,6 +687,7 @@ class KnowledgeContextMixin:
                                 and (not changed_work or work_item.get("candidate_reference_risk"))):
                             continue
                         handoff = work_item.get("reference_role") == "task_handoff"
+                        file_recheck = _work_file_risk(work_item)
                         card = {"memory_id": work_item["memory_id"], "revision": work_item["revision"],
                                 "title": clip(work_item.get("title", ""), 50),
                                 "summary": clip(work_item.get("summary", ""), 160 if handoff else 80),
@@ -684,7 +695,7 @@ class KnowledgeContextMixin:
                                 "validation_level": work_item.get("validation_level", "reported"),
                                 "read_required": True}
                         expanded = (work_item.get("_conclusion_preview")
-                                    if not conclusion_used and not handoff and not changed_work else None)
+                                    if not conclusion_used and not handoff and not changed_work and not file_recheck else None)
                         if expanded:
                             card["summary"] = expanded
                         if handoff:
@@ -748,6 +759,9 @@ class KnowledgeContextMixin:
                                 card["related_memories"] = [{"memory_id": member["memory_id"],
                                                              "revision": member["revision"]}
                                                             for member in members[1:]]
+                        elif file_recheck and not protocol_only_file_summary(work_item) and not work_item.get("_file_receipt_preview"):
+                            card.pop("summary", None)
+                            card.update(title="历史文件资料，需复核", reference_status="file_recheck")
                         files = work_item.get("files", [])
                         if work_item.get("file_state_changed") and work_item.get("_changed_file_paths"):
                             # A source update describes this delivery transition,

@@ -40,6 +40,36 @@ def _body_projection(row):
     return clean(json.loads(row["body"]))
 
 
+_THREAD_HEADERS = ("## Referenced chats with Codex:", "## Referenced ChatGPT conversation:")
+_REQUEST_MARKER = re.compile(r"^## (?:My request|我的请求):?[ \t]*\r?$", re.M)
+
+
+def _is_thread_wrapper(text):
+    return text.lstrip().split("\n", 1)[0].rstrip() in _THREAD_HEADERS
+
+
+def _prompt_text(text):
+    """Use the explicit request, keeping the original event as the source."""
+    if not _is_thread_wrapper(text):
+        return text
+    match = _REQUEST_MARKER.search(text)
+    return text[match.end():].lstrip() if match else ""
+
+
+def _work_file_risk(item):
+    files = item.get("files", ())
+    return bool(item.get("source_files_unverified")
+                or item.get("files_count", len(files)) > len(files)
+                or any(file.get("version_changed") is True or file.get("version_unverified") is True
+                       for file in files))
+
+
+def _work_prompt_metadata(item):
+    return item.get("type") in {"user_request", "user_correction"} and (
+        _is_thread_wrapper(item.get("summary", ""))
+        or item.get("title", "").partition("：")[2].startswith(_THREAD_HEADERS))
+
+
 def _read_file_version(relative_path, workspace, *, file_checkout=None, roots=None):
     """Bounded metadata observation; known absence differs from unreadable state."""
     try:
@@ -682,6 +712,9 @@ class WorkMemoryMixin:
             text = payload.get("prompt", "")
             if not isinstance(text, str) or not text.strip():
                 return None
+            text = _prompt_text(text)
+            if not text.strip():
+                return None
             kind = "user_correction" if _correction(text) else "user_request"
             title = ("用户更正：" if kind == "user_correction" else "用户要求：") + text.strip().splitlines()[0][:85]
         if not isinstance(text, str) or not text.strip():
@@ -691,6 +724,8 @@ class WorkMemoryMixin:
         coverage = payload.get("capture_coverage", raw.get("capture_coverage", {}))
         if public and event["type"] != "PublicMessageSegment":
             original = raw.get("last_assistant_message" if event["type"] == "Stop" else "prompt", text)
+            if event["type"] == "UserPromptSubmit" and isinstance(original, str):
+                original = _prompt_text(original)
             if isinstance(original, str) and len(original) > 1400:
                 self._work_capture_public_segments(project, event, workspace, clean(original), kind, title,
                                                    completion, coverage, raw)
@@ -1085,6 +1120,8 @@ class WorkMemoryMixin:
             body = _body_projection(row)
             if automatic and _metadata_only_write(body):
                 continue
+            if automatic and _work_prompt_metadata(body):
+                continue  # Legacy envelope-only projections remain accessible through explicit history reads.
             if (automatic and body.get("type") == "user_request" and history_topic is None
                     and not _request_has_context(body.get("summary", ""))):
                 continue
@@ -1143,6 +1180,10 @@ class WorkMemoryMixin:
                     roots=file_workspace_roots(self, project, workspace)) if file_path and workspace else None
                 card = self._work_item(project, row, workspace=workspace,
                                        file_paths=[_file_focus_key(target)] if target else None)
+                if _work_file_risk(card):
+                    card.update(title="历史文件资料，需复核", summary="", reference_status="file_recheck")
+                elif _work_prompt_metadata(card):
+                    card.update(title="历史对话引用", summary="", reference_status="prompt_metadata")
                 # 默认检索只给索引；精确 stat、长摘要与完整来源在 read 中展开。
                 card["files"] = [{**{key: item[key] for key in ("relative_path", "checkout_key", "relation", "version_changed", "version_unverified") if key in item},
                                   **({"current_version_status": item.get("current_version", {}).get("status", "unknown")}
@@ -1185,6 +1226,10 @@ class WorkMemoryMixin:
             if expected_revision is not None and expected_revision != row["revision"]:
                 raise ContractError("work revision changed; search again")
             result = self._work_item(project, row, workspace=workspace)
+            if _work_file_risk(result):
+                result["reference_status"] = "file_recheck"
+            elif _work_prompt_metadata(result):
+                result["reference_status"] = "prompt_metadata"
             result["file_check"] = _read_file_check(self, project, memory_id, workspace)
             if result["files_count"] > len(result["files"]):
                 result["files_omitted"] = result["files_count"] - len(result["files"])
@@ -1770,9 +1815,12 @@ class WorkMemoryMixin:
                     raise ValueError()
             except (TypeError, ValueError):
                 raise ContractError("invalid work rebuild cursor")
+        binding = self._shared_worktree(workspace)
+        workspace_key = checkout_key(workspace)
+        registered_key = checkout_key(binding["workspace"]) if binding else workspace_key
         with _write_snapshot(self):
             paths = self.db.execute("SELECT path FROM project_paths WHERE project=?", (project,)).fetchall()
-            if checkout_key(workspace) not in {checkout_key(row[0]) for row in paths}:
+            if registered_key not in {checkout_key(row[0]) for row in paths}:
                 raise ContractError("work rebuild workspace belongs to another project")
             rows = (self.db.execute("SELECT * FROM events WHERE project=? AND (created>? OR created=? AND id>?) ORDER BY created,id LIMIT ?",
                                    (project, after[0], after[0], after[1], limit + 1)).fetchall()
@@ -1784,8 +1832,9 @@ class WorkMemoryMixin:
                 recorded_checkout = self.db.execute("SELECT checkout_key FROM work_event_checkouts WHERE project=? AND event_id=?",
                                                      (project, row["id"])).fetchone()
                 # 缺少旧checkout身份不猜；只重建本checkout可确认的已有事件。
-                if (recorded_checkout and recorded_checkout[0] == checkout_key(workspace)
-                        or recorded_workspace and checkout_key(recorded_workspace) == checkout_key(workspace)):
+                recorded_key = recorded_checkout[0] if recorded_checkout else (
+                    checkout_key(recorded_workspace) if recorded_workspace else None)
+                if recorded_key == workspace_key:
                     from .work_recovery import restore
                     result = restore(self, project, row["id"], workspace, reindex=True)
                     if result["status"] == "completed":
@@ -1804,14 +1853,14 @@ class WorkMemoryMixin:
                 summaries = self.db.execute(
                     "SELECT * FROM work_memories WHERE project=? AND event_id IS NULL AND workspace_key=? "
                     "AND (created>? OR created=? AND id>?) ORDER BY created,id LIMIT ?",
-                    (project, checkout_key(workspace), summary_after[0], summary_after[0],
+                    (project, workspace_key, summary_after[0], summary_after[0],
                      summary_after[1], remaining + 1)).fetchall()
                 for summary in summaries[:remaining]:
                     files = [dict(row) for row in self.db.execute(
                         "SELECT DISTINCT l.relative_path FROM work_memory_sources s JOIN work_file_links l "
                         "ON l.project=s.project AND l.event_id=s.event_id WHERE s.project=? AND s.memory_id=? "
                         "AND l.checkout_key=? ORDER BY l.relative_path LIMIT 640",
-                        (project, summary["id"], checkout_key(workspace)))]
+                        (project, summary["id"], workspace_key))]
                     self._work_index(project, summary["id"], json.loads(summary["body"]), files)
                     reindexed += 1
                     summary_scanned += 1

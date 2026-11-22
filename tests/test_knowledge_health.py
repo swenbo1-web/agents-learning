@@ -25,13 +25,11 @@ class KnowledgeHealthTests(unittest.TestCase):
         self.r = Runtime(self.home)
         self.addCleanup(self.r.close)
         # A registered, existing project models an upgrade with retained data.
-        # Avoid treating an empty newly-created project's completed check as
-        # an obligation to rescan when ordinary new knowledge is later added.
         self.p = "knowledge-health-existing-project"
         self.r.db.execute("INSERT INTO projects(id) VALUES(?)", (self.p,))
         self.sequence = 0
 
-    def publish(self, *, project=None, title=None, content=None):
+    def publish(self, *, project=None, title=None, content=None, replaces=None):
         project = project or self.p
         self.sequence += 1
         title = title or "Retained project fact " + str(self.sequence)
@@ -45,7 +43,9 @@ class KnowledgeHealthTests(unittest.TestCase):
             category="project", knowledge_kind="fact", applicability="This project and source observation",
             limitations="Source statement; factual verification remains separate",
             evidence_refs=refs, validation_level="reported", metadata={})
-        return self.r.publish(project, candidate["candidate_id"])
+        return self.r.publish(project, candidate["candidate_id"], **(
+            {"knowledge_id": replaces["knowledge_id"], "expected_revision": replaces["revision"]}
+            if replaces else {}))
 
     def finish(self, *, runtime=None, project=None, max_items=2):
         runtime, project = runtime or self.r, project or self.p
@@ -142,9 +142,20 @@ class KnowledgeHealthTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 1)
 
     def test_concurrent_hosts_do_not_count_a_knowledge_record_twice(self):
-        for _ in range(7):
+        for _ in range(2):
             self.publish()
+        self.assertEqual(self.finish()["scanned"], 2)
+        expected = {self.publish()["knowledge_id"] for _ in range(5)}
         barrier = threading.Barrier(3)
+        lock = threading.Lock()
+        checked = []
+        original_inspect = health._issues
+
+        def inspect(runtime, project, row):
+            result = original_inspect(runtime, project, row)
+            with lock:
+                checked.append(row["id"])
+            return result
 
         def run(host):
             runtime = Runtime(self.home, host=host)
@@ -155,12 +166,30 @@ class KnowledgeHealthTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(run, ("codex", "antigravity", "dsh")))
-        result = self.finish(max_items=1)
+        with patch.object(health, "_issues", side_effect=inspect):
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                list(pool.map(run, ("codex", "antigravity", "dsh")))
+            result = self.finish(max_items=1)
         self.assertEqual(result["scanned"], 7)
-        identities = [(row["knowledge_id"], row["revision"]) for row in result["items"]]
-        self.assertEqual(len(identities), len(set(identities)))
+        self.assertEqual(set(checked), expected)
+        self.assertEqual(len(checked), len(expected))
+
+    def test_records_added_behind_bootstrap_cursor_are_not_skipped(self):
+        def add(identity):
+            self.r.db.execute("INSERT INTO knowledge VALUES(?,?,1,'{}',1)", (self.p, identity))
+            self.r.db.execute("INSERT INTO active VALUES(?,?,1)", (self.p, identity))
+
+        add("b-initial")
+        add("d-initial")
+        health.advance(self.r, self.p, max_items=1, max_seconds=.25)
+        add("a-added-behind")
+        add("e-added-beyond-ceiling")
+        with patch.object(health, "_issues", wraps=health._issues) as inspect:
+            result = self.finish(max_items=1)
+        self.assertEqual([call.args[2]["id"] for call in inspect.call_args_list],
+                         ["d-initial", "a-added-behind", "e-added-beyond-ceiling"])
+        self.assertEqual(result["scanned"], 4)
+        self.assertTrue(result["snapshot_current"])
 
     def test_projects_and_homes_have_independent_checkpoints(self):
         self.publish()
@@ -235,15 +264,52 @@ class KnowledgeHealthTests(unittest.TestCase):
         self.assertEqual(self.r.db.execute("SELECT id FROM active WHERE project=?", (self.p,)).fetchone()[0],
                          keep["knowledge_id"])
 
-    def test_later_publication_marks_snapshot_old_without_restarting_same_rule(self):
+    def test_later_publication_checks_only_the_new_record(self):
         self.publish()
         first = self.finish()
         self.assertTrue(first["snapshot_current"])
-        self.publish()
+        added = self.publish()
         updated = health.report(self.r.db, self.p)
         self.assertFalse(updated["snapshot_current"])
-        health.advance(self.r, self.p)
-        self.assertEqual(health.report(self.r.db, self.p)["scanned"], 1)
+        with patch.object(health, "_issues", wraps=health._issues) as inspect:
+            final = self.finish(max_items=1)
+        self.assertEqual([call.args[2]["id"] for call in inspect.call_args_list], [added["knowledge_id"]])
+        self.assertEqual(final["scanned"], 2)
+        self.assertEqual(final["started"], first["started"])
+        self.assertTrue(final["snapshot_current"])
+
+    def test_correction_replaces_an_old_finding_without_rechecking_another_record(self):
+        earlier = self.publish()
+        self.publish()
+        body = self.body(earlier)
+        body["category"] = "unknown"
+        self.replace_body(earlier, body)
+        self.assertEqual(self.finish()["issue_counts"], {"category_unknown": 1})
+
+        newer = self.publish(content="Corrected, observable project fact.", replaces=earlier)
+        with patch.object(health, "_issues", wraps=health._issues) as inspect:
+            final = self.finish(max_items=1)
+        self.assertEqual([(call.args[2]["id"], call.args[2]["revision"]) for call in inspect.call_args_list],
+                         [(newer["knowledge_id"], newer["revision"])])
+        self.assertEqual(final["scanned"], 2)
+        self.assertEqual(final["affected"], 0)
+        self.assertEqual(final["issue_counts"], {})
+        self.assertTrue(final["snapshot_current"])
+
+    def test_cited_evidence_change_invalidates_snapshot_without_a_publication(self):
+        record, events = self.source(("failed", "succeeded"))
+        self.publish()
+        first = self.finish()
+        self.assertEqual(first["affected"], 0)
+        self.r.db.execute("UPDATE events SET outcome='failed' WHERE id=?", (events[-1]["id"],))
+        changed = health.report(self.r.db, self.p)
+        self.assertEqual(changed["current_generation"], first["current_generation"])
+        self.assertFalse(changed["snapshot_current"])
+        with patch.object(health, "_issues", wraps=health._issues) as inspect:
+            final = self.finish(max_items=1)
+        self.assertEqual([call.args[2]["id"] for call in inspect.call_args_list], [record["knowledge_id"]])
+        self.assertEqual(final["issue_counts"], {"unresolved_source_failure": 1})
+        self.assertTrue(final["snapshot_current"])
 
     def test_reference_grade_and_unknown_classification_are_not_rewritten_as_verified(self):
         record = self.publish(content="The source claims an unverified project convention.")
@@ -286,6 +352,11 @@ class KnowledgeHealthTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 2)
         self.assertEqual(result["affected"], 2)
         self.assertEqual(self.authority(), before)
+        self.r.revoke(self.p, duplicate_id, 1)
+        after = self.finish(max_items=1)
+        self.assertEqual(after["scanned"], 1)
+        self.assertEqual(after["affected"], 0)
+        self.assertEqual(after["issue_counts"], {})
 
     def test_busy_database_defers_the_optional_check_without_changing_the_checkpoint(self):
         self.publish()
@@ -445,6 +516,12 @@ class KnowledgeHealthTests(unittest.TestCase):
         report = health.report(self.r.db, self.p)
         self.assertFalse(report["snapshot_current"])
         self.assertFalse(report["items"][0]["current"])
+        with patch.object(health, "_issues", side_effect=AssertionError("must not inspect revoked knowledge")):
+            final = self.finish()
+        self.assertEqual(final["scanned"], 0)
+        self.assertEqual(final["items"], [])
+        self.assertEqual(final["issue_counts"], {})
+        self.assertTrue(final["snapshot_current"])
 
     def test_bad_legacy_body_does_not_abort_other_records(self):
         broken, normal = self.publish(), self.publish()

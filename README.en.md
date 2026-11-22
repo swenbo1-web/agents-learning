@@ -629,6 +629,8 @@ The main task, knowledge retrieval and experience organization proceed independe
 
 **State reconciliation:** Original model attempts and usage form the accounting record; local acceptance receipts separately show whether knowledge was accepted. Repeated events and source restatements add no independent validation. Disabling work history disables only its optional index, not candidate provenance or publication checks. Both manual and automatic publication check revocation and counterexamples; restoration uses its explicit governance entry. Bounded stage scans rotate so older evidence-incomplete stages cannot permanently hide later stages with new evidence.
 
+**Rechecking older references.** Automatic context and knowledge search previews show a neutral lookup when a recorded file changes or cannot be checked, source evidence needs review, or the reference explicitly applies to a particular experiment or stage. Reading by ID preserves the original evidence and scope. New working summaries omit the host's thread-reference metadata. The three hosts share one paged health baseline per project, followed by incremental checks on publication, revision, revocation and saved evidence changes. Structural consistency, file metadata, tool success and acceptance each establish different facts.
+
 ### Roles and responsibilities
 
 | Participant | Responsibilities | Permissions and handoff |
