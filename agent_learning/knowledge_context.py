@@ -89,7 +89,7 @@ class KnowledgeContextMixin:
             self._record_exposure(project, access["conversation_id"], access["agent_id"], items,
                                   file_observations=file_observations)
 
-    def _notifications(self, project, conversation, agent_id, max_chars, workspace=None):
+    def _notifications(self, project, conversation, agent_id, max_chars, workspace=None, *, file_receipts=None):
         """调用方持有事务；完整进入响应后才推进通知状态。"""
         from .runtime import ContractError, encode
         key = (project, conversation, agent_id or "")
@@ -164,15 +164,19 @@ class KnowledgeContextMixin:
                  encode([(i, s) for i, s in states.items() if i not in removed]), *context_key))
         from .context_files import notifications as file_notifications
         file_budget = max(0, remaining - int(bool(notes)))
+        receipts = set()
         self.db.execute("SAVEPOINT optional_formal_files")
         try:
-            file_notes = file_notifications(self, project, conversation, agent_id, workspace, file_budget)
+            file_notes = file_notifications(self, project, conversation, agent_id, workspace, file_budget,
+                                            receipts=receipts)
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
             self.db.execute("ROLLBACK TO optional_formal_files")
             self.db.execute("RELEASE optional_formal_files")
         else:
             self.db.execute("RELEASE optional_formal_files")
             notes.extend(file_notes)
+            if file_receipts is not None:
+                file_receipts.update(receipts)
         return notes
 
     def _retrieval_task(self, project, conversation, agent_id, context_handle=None):
@@ -353,7 +357,8 @@ class KnowledgeContextMixin:
         from .context_dedup import scope_key
         from .work_notice_delivery import FileNoticeGate
         work_notices = FileNoticeGate(self, project, conversation, agent_id,
-            scope_key(self, conversation, agent_id, workspace, task_state, work_context_epoch, environment), delivery)
+            scope_key(self, conversation, agent_id, workspace, task_state, work_context_epoch, environment),
+            delivery, workspace=workspace)
         if (work_settings.get("enabled", True) and work_settings.get("automatic_context", True)
                 and work_settings.get("max_context_chars", 600)):
             # 文件触发独立于故障队列；工作历史只给索引，不能转成解法或执行许可。
@@ -412,7 +417,9 @@ class KnowledgeContextMixin:
                 lines.append(f"[Agent Learning] context_handle={context_handle}; host_epoch={epoch}")
             def remaining():
                 return budget - len("\n".join(lines)) - int(bool(lines))
-            lines.extend(self._notifications(project, conversation, agent_id, remaining(), workspace=workspace))
+            file_receipts = set()
+            lines.extend(self._notifications(project, conversation, agent_id, remaining(), workspace=workspace,
+                                             file_receipts=file_receipts))
             if context_handle:
                 from .candidate_references import notifications, ack_notifications
                 self.db.execute("SAVEPOINT candidate_notifications")
@@ -565,9 +572,18 @@ class KnowledgeContextMixin:
                     for optional in ("title", "maturity"):
                         if len(encode(card)) > available:
                             card.pop(optional, None)
-                if len(encode(card)) > available:
+                same_file_notice = bool(recheck == "file_recheck" and observation and
+                    (item["knowledge_id"], item["revision"], observation["checkout"], observation["version"]) in file_receipts)
+                if not same_file_notice and len(encode(card)) > available:
                     continue
                 delivery_entry = dedup.prepare("formal", item, card)
+                if same_file_notice:
+                    # The rendered notice already gives the exact revision and file risk.
+                    # Cache only this index-level coverage, not the underlying text.
+                    dedup.record(delivery_entry)
+                    prior.add(identity)
+                    eligible -= 1
+                    continue
                 if dedup.repeated(delivery_entry):
                     # An equivalent card is already present. Do not fabricate
                     # an exposure/adoption for the hidden alias or leave a fault
@@ -596,7 +612,8 @@ class KnowledgeContextMixin:
             if work_items:
                 self.db.execute("SAVEPOINT optional_work_validation")
                 try:
-                    notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery)
+                    notices = FileNoticeGate(self, project, conversation, agent_id, dedup.scope, delivery,
+                                             workspace=workspace)
                     # Refresh once in the final transaction. The same objects
                     # drive priority and rendering; recall snapshots cannot
                     # reserve budget or acknowledge a source warning.
@@ -734,26 +751,26 @@ class KnowledgeContextMixin:
                             card.pop("summary", None)
                             card["title"] = "关联来源或文件状态变化"
                             card["reference_role"] = "source_update"
-                            card["recheck"] = "来源或文件状态已变化；使用关联记录前重新核对，不沿用旧结论。"
+                            card["recheck"] = "来源或文件已变，使用前重新核对。"
                             if work_item.get("file_state_unverified") and not work_item.get("source_changed"):
                                 card["title"] = "关联文件当前无法核实"
-                                card["recheck"] = "已展示关联文件的范围或可用性已变化，当前无法核实；请核对授权范围与来源，不沿用旧结论。"
+                                card["recheck"] = "文件无法核实，先重新核对可用性和范围。"
                             elif (work_item.get("file_state_changed") and not work_item.get("source_changed")
                                   and not work_item.get("file_state_metadata_changed")):
                                 card["title"] = "关联文件观察状态变化"
-                                card["recheck"] = "关联文件的可核实状态已变化；请重新核对当前文件与来源。"
+                                card["recheck"] = "重新核对当前文件与来源。"
                             if (file_notice(work_item) and all(member.get("_file_receipt_only")
                                     for member in work_item.get("_notice_members", [work_item]))):
                                 card["read_required"] = False
                                 card["title"] = "关联文件版本变化"
-                                card["recheck"] = "文件已变化；先核对当前文件，勿直接沿用旧记录。"
+                                card["recheck"] = "使用前核对当前文件。"
                             if work_item.get("published_knowledge_risk"):
                                 card["published_knowledge_risk"] = work_item["published_knowledge_risk"][:1]
                                 if any(risk.get("reason", "").startswith("publication_")
                                        for risk in work_item["published_knowledge_risk"]):
-                                    card["recheck"] = "同源发布状态暂无法完整核对；先查阅来源，不沿用旧结论。"
+                                    card["recheck"] = "先核对同源知识的发布状态。"
                                 else:
-                                    card["recheck"] = "同源结论已被争议、撤销或替换；停止沿用旧结论，先核对治理状态。"
+                                    card["recheck"] = "同源结论有争议或已失效，先核对治理状态。"
                             members = work_item.get("_notice_members", [])
                             if len(members) > 1:
                                 card["related_memories"] = [{"memory_id": member["memory_id"],
@@ -860,7 +877,7 @@ class KnowledgeContextMixin:
                     if work_delivered:
                         self.work_record_exposure(
                             project, conversation, visible_exposures(work_delivered), agent_id=agent_id, delivery=delivery,
-                            task_state=task_state, compact=compact, context_epoch=work_context_epoch,
+                            task_state=task_state, compact=compact, context_epoch=work_context_epoch, workspace=workspace,
                             method="hook", context_handle=context_handle, expected_epoch=epoch)
                         self._metric(project, "work_indices_delivered", len(work_delivered))
                 except ContractError:

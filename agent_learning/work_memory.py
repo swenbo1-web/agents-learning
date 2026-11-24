@@ -1297,7 +1297,7 @@ class WorkMemoryMixin:
         return _json({"projection_only": True, "events": evidence})
 
     def work_record_exposure(self, project, conversation, items, agent_id=None, *, delivery="persistent",
-                             task_state=None, compact=False, context_epoch=None, method="hook", **kwargs):
+                             task_state=None, compact=False, context_epoch=None, method="hook", workspace=None, **kwargs):
         from .runtime import ContractError
         if delivery not in {"persistent", "ephemeral"} or method not in {"hook", "mcp"}:
             raise ContractError("invalid work delivery or method")
@@ -1306,6 +1306,7 @@ class WorkMemoryMixin:
         if kwargs.get("context_handle"):
             self.access_context(project, kwargs["context_handle"])
         context_epoch = int(context_epoch or 0)
+        observer = checkout_key(workspace) if workspace else None
         now, count = time.time(), 0
         for item in items[:20]:
             if not isinstance(item, dict) or not all(key in item for key in ("memory_id", "revision", "source_version")):
@@ -1325,9 +1326,9 @@ class WorkMemoryMixin:
                 primary = schedule["primary_checkout"] if schedule else None
                 if not isinstance(primary, str) or not re.fullmatch(r"[0-9a-f]{64}", primary):
                     primary = None
-                from .work_notice_delivery import canonical_file_states
+                from .work_notice_delivery import canonical_file_states, file_delivery_state
                 saved = canonical_file_states(schedule["file_states"] if schedule else None,
-                                              baseline=known, primary=primary)
+                                              baseline=known, primary=primary, retain_views=True)
                 covered = {key[65:] if primary and key.startswith(primary + ":") else key for key in saved}
                 # A malformed or partial auxiliary receipt cannot delete an
                 # already displayed core baseline. Unknown identity stays
@@ -1348,10 +1349,10 @@ class WorkMemoryMixin:
                         if key == file["relative_path"]:
                             primary = file["checkout_key"]
                             saved.pop("legacy:" + key, None)
-                        saved.pop(canonical, None)
-                        saved[canonical] = {"fingerprint": observed_files[key],
-                            "status": file.get("current_version", {}).get("status", file.get("current_version_status",
-                                "stat_observed" if not file.get("version_unverified") and type(file.get("version_changed")) is bool else "unknown"))}
+                        old = saved.pop(canonical, {})
+                        status = file.get("current_version", {}).get("status", file.get("current_version_status",
+                            "stat_observed" if not file.get("version_unverified") and type(file.get("version_changed")) is bool else "unknown"))
+                        saved[canonical] = file_delivery_state(observed_files[key], status, old, observer)
                     saved = dict(list(saved.items())[-WORK_EXPOSURE_FILE_CHECK_LIMIT:])
                     # Keep the legacy presentation keys while persisting the
                     # independent checkout identity in the additive receipt.
@@ -1465,7 +1466,7 @@ class WorkMemoryMixin:
                 fallback = json.loads(row["shown_file_state"]) if row["shown_file_state"] else {}
                 stored = schedule.get(row["id"], {})
                 states = canonical_file_states(stored.get("file_states"), baseline=fallback,
-                                               primary=stored.get("primary_checkout"))
+                                               primary=stored.get("primary_checkout"), observer=primary)
                 if not states:
                     states = {key: {"fingerprint": value, "status": "unknown"} for key, value in fallback.items()
                               if re.match(r"^[0-9a-f]{64}:.+", key)}
@@ -1559,6 +1560,7 @@ class WorkMemoryMixin:
             name, args = _tool(raw or {})
             roots = file_workspace_roots(self, project, workspace) if workspace else []
             root_paths = {root["checkout_key"]: root["path"] for root in roots}
+            observer = next((root["checkout_key"] for root in roots if root.get("primary")), None)
             root_keys = list(root_paths)
             root_marks = ",".join("?" for _ in root_keys)
             links = (file_links_from_payload(name, args, workspace, observe_version=False, roots=roots)
@@ -1679,7 +1681,8 @@ class WorkMemoryMixin:
                 previous_files = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
                 current_files = item["file_state"] or {}
                 from .work_notice_delivery import mark_file_transition, displayed_file_baseline
-                previous_files = displayed_file_baseline(self, project, conversation, agent_id, item, previous_files)
+                previous_files = displayed_file_baseline(self, project, conversation, agent_id, item, previous_files,
+                                                         observer)
                 mark_file_transition(item, previous_files)
                 file_changed = bool(item.get("file_state_changed"))
                 file_unseen = bool(current_files) and any(path not in previous_files for path in current_files)

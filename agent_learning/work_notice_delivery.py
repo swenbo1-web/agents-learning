@@ -9,6 +9,7 @@ import sqlite3
 import time
 
 DEFER_SECONDS = 30
+MAX_FILE_VIEWS = 4
 SOURCE_RISK_KINDS = frozenset({"capture_mismatch", "source_missing", "operation_conflict", "operation_denied",
                                "source_failed", "candidate_reference_risk", "published_knowledge_risk"})
 
@@ -36,7 +37,21 @@ def _coherent_file_status(fingerprint, status, *, legacy=False):
     return None if legacy and status is None else "unknown"
 
 
-def canonical_file_states(value, *, baseline=None, primary=None):
+def _file_views(state):
+    views = state.get("views")
+    if not isinstance(views, list) or len(views) > MAX_FILE_VIEWS:
+        return {}
+    valid = {}
+    for entry in views:
+        if not isinstance(entry, list) or len(entry) != 3:
+            continue
+        view, fingerprint, status = entry
+        if isinstance(view, str) and re.fullmatch(r"[0-9a-f]{64}", view) and isinstance(fingerprint, str):
+            valid[view] = {"fingerprint": fingerprint, "status": _coherent_file_status(fingerprint, status)}
+    return valid
+
+
+def canonical_file_states(value, *, baseline=None, primary=None, observer=None, retain_views=False):
     try:
         states = json.loads(value) if isinstance(value, str) else value
     except (ValueError, TypeError):
@@ -46,23 +61,41 @@ def canonical_file_states(value, *, baseline=None, primary=None):
     if baseline is not None and not isinstance(baseline, dict):
         return {}
     primary = primary if isinstance(primary, str) and re.fullmatch(r"[0-9a-f]{64}", primary) else None
-    return {key: {"fingerprint": state["fingerprint"],
-                  "status": _coherent_file_status(state["fingerprint"], state.get("status"))}
-            for key, state in states.items()
-            if isinstance(key, str) and re.match(r"^[0-9a-f]{64}:.+", key)
+    result = {}
+    for key, state in states.items():
+        if (isinstance(key, str) and re.match(r"^[0-9a-f]{64}:.+", key)
             and isinstance(state, dict) and isinstance(state.get("fingerprint"), str)
             and (baseline is None or state["fingerprint"] == baseline.get(
-                key[65:] if primary and key.startswith(primary + ":") else key))}
+                key[65:] if primary and key.startswith(primary + ":") else key))):
+            views = _file_views(state) if observer or retain_views else {}
+            result[key] = dict(views.get(observer) or {"fingerprint": state["fingerprint"],
+                "status": _coherent_file_status(state["fingerprint"], state.get("status"))})
+            if retain_views and views:
+                result[key]["views"] = [[view, state["fingerprint"], state["status"]] for view, state in views.items()]
+    return result
 
 
-def displayed_file_baseline(runtime, project, conversation, agent, item, fallback):
+def file_delivery_state(fingerprint, status, prior, observer):
+    """Keep only recently displayed observations of this canonical file."""
+    state = {"fingerprint": fingerprint, "status": status}
+    views = _file_views(prior)
+    if observer:
+        views.pop(observer, None)
+        views[observer] = state
+    if views:
+        state["views"] = [[view, fact["fingerprint"], fact["status"]]
+                          for view, fact in list(views.items())[-MAX_FILE_VIEWS:]]
+    return state
+
+
+def displayed_file_baseline(runtime, project, conversation, agent, item, fallback, observer=None):
     """Read checkout identities actually retained at delivery, never infer a root."""
     try:
         row = runtime.db.execute("SELECT file_states,primary_checkout FROM work_file_check_schedule WHERE project=? "
             "AND conversation=? AND agent=? AND memory_id=?", (project, conversation, agent or "", item["memory_id"])).fetchone()
     except sqlite3.Error:
         row = None
-    states = canonical_file_states(row[0], baseline=fallback, primary=row[1]) if row else {}
+    states = canonical_file_states(row[0], baseline=fallback, primary=row[1], observer=observer) if row else {}
     if not states:
         # Explicit qualified legacy keys retain their own identity. Relative
         # keys without a recorded original primary cannot be reinterpreted.
@@ -239,9 +272,11 @@ def visible_exposures(items):
 
 
 class FileNoticeGate:
-    def __init__(self, runtime, project, conversation, agent, scope, delivery):
+    def __init__(self, runtime, project, conversation, agent, scope, delivery, *, workspace=None):
+        from .work_files import checkout_key
         self.r, self.project, self.conversation, self.agent = runtime, project, conversation, agent or ""
         self.scope, self.delivery = scope, delivery
+        self.observer_checkout = checkout_key(workspace) if workspace else None
         self._index_scope_computed, self._index_scope_value = False, None
 
     def _index_scope(self):
@@ -315,7 +350,7 @@ class FileNoticeGate:
                                              and previous["source_version"] != item["source_version"])
         fallback = json.loads(previous["file_state"]) if previous and previous["file_state"] else {}
         mark_file_transition(item, displayed_file_baseline(self.r, self.project, self.conversation,
-                                                         self.agent, item, fallback))
+                                                         self.agent, item, fallback, self.observer_checkout))
         return item
 
     def _keys(self, item):

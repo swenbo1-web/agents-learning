@@ -496,7 +496,7 @@ class Server:
                         raise ContractError("work context changed; retry reading in the current context")
                     r.work_record_exposure(p, access["conversation_id"], [result], agent_id=access["agent_id"],
                         task_state=task_state, context_epoch=context_epoch, method="mcp",
-                        context_handle=handle, expected_epoch=self.epoch)
+                        context_handle=handle, expected_epoch=self.epoch, workspace=self.workspace)
                 self._bind(handle)
                 return (result if result.get("already_read") else self.work_read_delivery.project(
                     result, delivery_scope, reread=args.get("reread", False)))
@@ -505,7 +505,7 @@ class Server:
                     _, task_state, context_epoch = self._work_delivery_scope(access, handle)
                     r.work_record_exposure(p, access["conversation_id"], items, agent_id=access["agent_id"],
                                            task_state=task_state, context_epoch=context_epoch, method="mcp",
-                                           context_handle=handle, expected_epoch=self.epoch)
+                                           context_handle=handle, expected_epoch=self.epoch, workspace=self.workspace)
                 self._bind(handle)
             else:
                 # 未绑定查询只返回项目公开索引，不能为猜测的会话登记展示。

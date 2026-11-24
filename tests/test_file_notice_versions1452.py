@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from agent_learning.mcp import Server
 from agent_learning.runtime import encode
 from agent_learning.work_files import normalize_file_target
 from agent_learning.work_notice_delivery import FileNoticeGate
@@ -127,6 +128,44 @@ class FileNoticeVersionTests(unittest.TestCase):
         self.assertIn(identity, self.context(32))
         self.path.write_text("ledger = 200\n", encoding="utf-8")
         self.assertIn(identity, self.context(63))
+
+    def test_switching_checkouts_does_not_replay_scope_loss_and_restoration(self):
+        identity, _ = self.source(truncated=True)
+        source_checkout = self.f.workspace
+        other_checkout = self.f.root / "other-checkout"
+        other_checkout.mkdir()
+
+        def cards(checkout, seconds):
+            self.f.workspace = checkout
+            return self.f.work_cards(self.context(seconds))
+
+        # The first explicit read captures the still-unchanged source
+        # file in the source checkout.
+        server = Server(self.r, self.p, context_handle=self.f.handle, workspace=source_checkout)
+        self.addCleanup(server.close)
+        shown = server.call("work_memory_search", {"file_path": str(self.path)})
+        self.assertEqual(shown["items"][0]["memory_id"], identity)
+        self.assertTrue(cards(other_checkout, 45)[0]["source_files_unverified"])
+        self.assertEqual(cards(source_checkout, 90), [])
+        self.assertEqual(cards(other_checkout, 135), [])
+
+        self.path.write_text("ledger = 30000\n", encoding="utf-8")
+        changed = cards(source_checkout, 180)[0]
+        self.assertEqual(changed["memory_id"], identity)
+        self.assertTrue(changed["file_version_changed"])
+        self.assertEqual(cards(other_checkout, 225), [])
+
+        # A real access change inside one checkout still produces both
+        # the loss and recovery notices, without altering the other view.
+        self.path.unlink()
+        self.assertTrue(cards(source_checkout, 270)[0]["source_files_unverified"])
+        self.assertEqual(cards(other_checkout, 315), [])
+        self.path.write_text("ledger = 400000\n", encoding="utf-8")
+        recovered = cards(source_checkout, 360)[0]
+        self.assertEqual(recovered["memory_id"], identity)
+        self.assertFalse(recovered.get("source_files_unverified", False))
+        self.assertFalse(recovered.get("file_version_changed", False))
+        self.assertEqual(cards(other_checkout, 405), [])
 
     def test_coalesced_default_budget_prefers_a_file_path_over_unshown_member_ids(self):
         self.r.config["work_memory"]["max_items"] = 4

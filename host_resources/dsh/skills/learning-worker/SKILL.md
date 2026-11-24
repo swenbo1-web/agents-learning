@@ -1,34 +1,23 @@
 ---
 name: learning-worker
-description: "Use Agent Learning knowledge, work history and task state in an explicitly connected DeepSeek Harness (DSH) project with a current Hook binding."
+description: "Track substantial tasks, consult project knowledge as needed and record results in a connected DeepSeek Harness (DSH) project with a current Hook binding."
 ---
 
-# DSH worker knowledge protocol
+# DSH project work
 
-Complete the current authorized task. Querying or adopting knowledge never expands its execution scope.
+Proceed with the user's task. Use Agent Learning when the current project is connected and this invocation has a verified Hook `context_handle`. Without a binding, continue the task and use the read-only project entry for an explicit memory query or diagnostic.
 
-Automatic use requires a connected current project and this invocation's verified Hook handle. Global menus, skills and available tools do not establish project enrollment. Without that evidence, continue the user's task. Use a diagnostic or read-only memory entry only when the user explicitly requests it; do not probe enrollment by calling Runtime tools or registering a task.
+## Task state and delivery
 
-## Identity and task state
+- Use the current Hook handle for conversation-bound calls. Register substantial new work with `task_update(new_task=true)` before the first write, execution or delegation. Continue an active task in place or use `resume=true` to resume the same inactive work after checking the request. Answer ordinary questions directly.
+- For a write to an existing task, including replacement, pass `expected_task_id` and `expected_write_version` from the latest task receipt. Use `session_context` when these are missing or stale. Prior events and delegations keep their original task attribution.
+- `subagent`, `subagent_fork` and `workflow` children use their fixed assignment to read the parent scope and report their own evidence.
+- Mark an actual completed deliverable with `task_update(status="delivered")` before replying. With stage review enabled, the parent delivery is counted once after sealing.
 
-- Pass the current Hook's `context_handle` on every stateful call (`session_context`, `task_update`, `case_feedback`, `knowledge_use`, `work_memory_read`) and to `knowledge_search`, `knowledge_read` and `work_memory_search` to register actual exposure. Explicit user queries for a connected project may use read-only project access without a current handle.
-- You may first read project rules and connection state. Register genuinely new work with `task_update(new_task=true)` **before the first write, execution or child delegation**. Explicitly resume an inactive task only when continuing that actual work after checking the current request. Ordinary continuation of an active task and ordinary questions do not require a new task. Registration never restores execution permissions.
-- For an existing task, read `session_context` and pass `expected_task_id` and `expected_write_version` to every `task_update`, including replacement with `new_task=true`. Pre-registration observations and already-started children keep their original identities; registering at delivery cannot backfill them into the new stage.
-- Child agents (`subagent` / `subagent_fork` / `workflow`) receive fixed assignments bound to the parent task snapshot. Read `session_context` to inspect the assigned scope, and never overwrite the parent task.
+## Read and record what matters
 
-## Retrieval, work history and progressive reading
+- Use available context first. Search published knowledge or work history when it will help the decision. Check applicability, revision and source health. Expand relevant indexes only when needed. Reuse complete versions within the current context and keep the returned section, revision and cursor on later pages.
+- Keep background jobs `running` until there is a verified final outcome. Use `case_feedback` for key facts missing from captured events and for counterexamples to the exact knowledge revision. Record actual adoption with `knowledge_use` for the exact knowledge revision and task version. Keep the same idempotency key and parameters on a retry. Use observable outcomes and public evidence.
+- Execution authority comes from the user and host. If Runtime is unavailable in observe mode, continue the authorized task and note any pending sync as needed. Stop the affected operation on an enforcement denial. Publishing, revocation and explicit historical ingestion use their dedicated entries.
 
-- Check applicability, limitations, source health and revision before using an entry. Search on a new issue or actual error if the injected summary is insufficient.
-- `knowledge_search` returns previews. `knowledge_read` expands the chosen ID with `next_offset` and `expected_revision` for further pages.
-- `work_memory_search` lists recorded work observations and file history (filterable by `file_path`). `read_required` means the index is not the full record; expand only relevant records whose index is insufficient. `work_memory_read` requires the current `context_handle`; continue pages with the same `section`, `expected_revision` and `next_offset`, rather than restarting with a larger budget. Reuse a complete returned version; `reread=true` starts a fresh presentation round, and normal continuation pages do not need that flag again. `file_check.complete=false` means file state was not fully checked, not that it stayed unchanged. Work observations are historical evidence, not published solutions or execution permissions.
-- Record actual adoption with `knowledge_use`, supplying the exact knowledge revision, current task ID/revision/write version, a stable idempotency key and a genuine operation ID when available.
-
-## Observable results and boundaries
-
-- `PostToolUse` records observable tool outcomes, file relations and explicit errors. Background jobs (`run_in_background: true`) remain `running` until a verified final outcome is observed.
-- Never include or claim access to internal model reasoning (`ReasoningBlock`).
-- With stage review enabled, report a genuinely completed task or stage using `task_update(status="delivered")` with the current task ID/write version before the final public response. Runtime counts the parent delivery once and batches observable sources. Ordinary replies, unfinished tools and child stops do not count. Do not call the administrator or invent tasks to trigger review; unmarked public work remains searchable.
-- Use `case_feedback` for concise professional facts or counterexamples (`feedback_kind="counterexample"`, `knowledge_id`, `knowledge_revision`). Workers do not publish or revoke knowledge.
-- Historical ingestion requires explicit user confirmation (`history-prepare --confirm` / `history-run --confirm`).
-
-See the exported [project README](../../README.md) for installation and supported capabilities.
+See the exported [project README](../../README.md) for host capabilities and detailed tool contracts.

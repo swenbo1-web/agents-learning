@@ -139,6 +139,7 @@ class FileScopeUncertaintyTests(unittest.TestCase):
         self.assertNotIn("关联文件已变化", text)
         self.assertNotIn("当前无法核实", again)
         self.assertEqual(f.formal_cards(text), [])
+        self.assertEqual(f.formal_cards(again), [])
 
     def test_scope_loss_notice_waits_for_complete_budget_and_legacy_snapshot_is_conservative(self):
         f = self.f

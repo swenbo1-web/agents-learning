@@ -16,7 +16,7 @@ def delivered_state(state, observation):
     return state
 
 
-def notifications(runtime, project, conversation, agent_id, workspace, max_chars):
+def notifications(runtime, project, conversation, agent_id, workspace, max_chars, *, receipts=None):
     """A file snapshot is acknowledged only after its complete notice fits."""
     if not workspace:
         return []
@@ -88,6 +88,8 @@ def notifications(runtime, project, conversation, agent_id, workspace, max_chars
                 notes.append(note)
                 remaining -= cost
                 delivered_state(state, observation)
+                if receipts is not None:
+                    receipts.add((row["knowledge_id"], row["revision"], observation["checkout"], observation["version"]))
             else:
                 # Rotate without acknowledging the unreturned new version.
                 state["_files"] = dict(previous, checked=time.time())

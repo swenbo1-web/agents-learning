@@ -8,11 +8,32 @@ from unittest.mock import patch
 from agent_learning.runtime import digest
 from agent_learning.mcp import Server
 from agent_learning.work_files import checkout_key
-from agent_learning.work_notice_delivery import canonical_file_states, mark_file_transition, visible_file_keys
+from agent_learning.work_notice_delivery import (
+    canonical_file_states, file_delivery_state, mark_file_transition, visible_file_keys,
+)
 from tests import test_work_exposure_full_check as fixtures
 
 
 class FileTransitionContractTests(unittest.TestCase):
+    def test_checkout_views_stay_bounded_and_cannot_override_a_mismatched_core_receipt(self):
+        checkout = "a" * 64
+        state = {}
+        fingerprints = []
+        for version in range(6):
+            fingerprint = digest({"status": "stat_observed", "size": version, "mtime_ns": 1})
+            fingerprints.append(fingerprint)
+            state = file_delivery_state(fingerprint, "stat_observed", state, str(version) * 64)
+        key = checkout + ":same.py"
+        scoped = {key: state}
+        baseline = {"same.py": fingerprints[-1]}
+        self.assertEqual([view for view, *_ in state["views"]], [c * 64 for c in "2345"])
+        self.assertEqual(canonical_file_states(scoped, baseline=baseline, primary=checkout)[key]["fingerprint"],
+                         fingerprints[-1])
+        self.assertEqual(canonical_file_states(scoped, baseline=baseline, primary=checkout, observer="3" * 64)
+                         [key]["fingerprint"], fingerprints[3])
+        self.assertEqual(canonical_file_states(scoped, baseline={"same.py": fingerprints[0]},
+                                               primary=checkout, observer="3" * 64), {})
+
     def test_invalid_primary_does_not_reinterpret_relative_baselines(self):
         checkout = 'a' * 64
         fingerprint = digest({'status': 'stat_observed', 'size': 3, 'mtime_ns': 1})
