@@ -815,7 +815,7 @@ Default installations can share the same default directory. For a custom directo
 
 Review cases manually through a separate administrator interface, or configure a CLI knowledge reviewer for the corresponding host; DSH supports v1.4.40 or later. An admin skill is guidance; the default native MCP role remains worker. See [administrator setup](#optional-administrator-executor). Automatic review, scheduling, publication and remote services remain disabled by default. Local SQLite sharing is on one device; sharing across devices needs separate synchronization.
 
-Current source v1.4.70 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
+Current source v1.4.71 uses schema **25**, internal publication protocol **25**, and formal/work/semantic indexes **7/3/1**. Routine deferral, terminal capture and phase backlogs are checked separately. Manual historical queries, guides, risk notices and strict task handoffs remain available. Partial public responses are not complete phase delivery. Update and reload shared-database hosts together; installation enables no administrator, history or publication policy. Real-task acceptance is separate.
 
 Upgrade Antigravity or DSH with its matching `--host` and `--upgrade`. Omitted workspace/home bindings are preserved; explicit changes update both MCP and Hooks. Update a custom Codex MCP entry's runtime paths as described below. Old exports and runtime copies are retained, and external knowledge/configuration is untouched. Reload or reinstall host caches and review changed entries. Hosts can share one fixed runtime release but update their own export directories.
 
@@ -1158,7 +1158,7 @@ Immutable sanitized source versions, locations and receipts live in the independ
 
 ## Current version and compatibility
 
-**Current source version 1.4.70 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
+**Current source version 1.4.71 uses schema/internal publication protocol 25 and formal/work/optional semantic indexes 7/3/1.** It distinguishes protocol completion from business success, capture acknowledgement from task delivery, and eligible work from protected phase backlogs. Old call locks, unknown usage and publication policy remain; old model requests are not retried and completed receipts are not backfilled. Update and reload shared-database hosts together; a source update does not mean existing installations or downloadable releases were updated.
 
 The following entries describe changes and release status at the time of each historical version:
 
@@ -1827,7 +1827,11 @@ Live desktop Hook trust, automatic account event wiring, parent/child MCP connec
 ## Release notes
 
 <details>
-<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.70</summary>
+<summary>Expand feature changes and compatibility notes for 1.3.0–1.4.71</summary>
+
+## Stage receipts and worktree notices (1.4.71)
+
+Codex and DSH bind stage review to the native parent turn and delivered task version. The matching Stop is saved before evidence processing so a local failure can recover the original receipt. File-risk notices for published knowledge are deduplicated per worktree, and notices deferred by the budget remain pending. Worker skills across all three hosts favor existing context, with reads and feedback as needed.
 
 ## Knowledge rechecks and worktree recovery (1.4.70)
 
