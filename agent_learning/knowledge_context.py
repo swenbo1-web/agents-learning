@@ -43,16 +43,14 @@ class KnowledgeContextMixin:
         for item in items:
             identity = f"{item['knowledge_id']}@{item['revision']}"
             state = self._source_state(item)
-            if file_observations is not None:
-                delivered_state(state, file_observations.get(identity))
             previous = self.db.execute("SELECT state FROM context_exposures WHERE project=? AND conversation=? "
                 "AND agent=? AND knowledge_id=? AND revision=?", (project, conversation, agent_id or "",
                 item["knowledge_id"], item["revision"])).fetchone()
             previous_files = json.loads(previous["state"]).get("_files", {}) if previous else {}
-            if previous_files.get("pending_unverified") is True:
-                # A fresh body/page can update its actual observation, but it
-                # cannot acknowledge an unsent owner-specific risk notice.
-                state.setdefault("_files", dict(previous_files))["pending_unverified"] = True
+            if previous_files:
+                state["_files"] = previous_files
+            if file_observations is not None:
+                delivered_state(state, file_observations.get(identity))
             # 使用返回快照里的来源版本，不把读完后发生的变化误记为已经展示。
             self.db.execute("INSERT INTO context_exposures VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(project,conversation,agent,knowledge_id,revision) DO UPDATE SET "

@@ -42,7 +42,7 @@ class SchedulerWakeup1452Tests(unittest.TestCase):
     def interrupt_after_capture(self, r, send):
         with patch.object(r, "scheduler_wake", side_effect=KeyboardInterrupt("before wake transaction")):
             with self.assertRaises(KeyboardInterrupt):
-                send("stop", turn=2, text="Delivered a reusable project constraint")
+                send("stop", turn=1, text="Delivered a reusable project constraint")
 
     def intent(self, r, p):
         return r.db.execute("SELECT * FROM scheduler_wake_requests WHERE project=? AND host_scope=?",
@@ -80,7 +80,7 @@ class SchedulerWakeup1452Tests(unittest.TestCase):
     def test_launch_failure_retains_hint_with_bounded_retry(self):
         r, p, send, c, spawn = self.start()
         spawn.side_effect = OSError("offline launcher unavailable")
-        send("stop", turn=2, text="Delivered a sourced project convention")
+        send("stop", turn=1, text="Delivered a sourced project convention")
         self.assertEqual(self.intent(r, p)["attempts"], 1)
         self.assertIsNone(r.db.execute("SELECT 1 FROM scheduler_worker").fetchone())
         for turn in range(3, 10):
@@ -129,7 +129,7 @@ class SchedulerWakeup1452Tests(unittest.TestCase):
                 # Adapter handling catches local wake failures, while keeping
                 # its original public Stop/trajectory receipt complete.
                 with patch.object(r, "scheduler_wake", side_effect=OSError("local wake interrupted")):
-                    send("stop", turn=2, text="Delivered a sourced project convention")
+                    send("stop", turn=1, text="Delivered a sourced project convention")
                 self.assertIsNotNone(self.intent(r, p))
                 with patch.object(r, "_scheduler_refresh", side_effect=AssertionError("sync scan")):
                     send("prompt", turn=3)
@@ -184,7 +184,7 @@ class SchedulerWakeup1452Tests(unittest.TestCase):
         r, p, send, c, spawn = self.start()
         with patch("agent_learning.scheduler_wakeup.request", side_effect=sqlite3.OperationalError("derived hint unavailable")), \
              patch.object(r, "scheduler_wake", side_effect=OSError("no local worker")):
-            send("stop", turn=2, text="A complete public delivery remains available")
+            send("stop", turn=1, text="A complete public delivery remains available")
         event = r.db.execute("SELECT payload FROM events WHERE project=? AND conversation=? AND type='Stop'",
                              (p, c)).fetchone()
         self.assertIn("A complete public delivery remains available", event[0])
@@ -211,7 +211,7 @@ class SchedulerWakeup1452Tests(unittest.TestCase):
         r, p, send, c, spawn = self.start("antigravity")
         r.admin_configure(p, True, provider="host", model_mode="first")
         with patch.object(r, "scheduler_wake", side_effect=OSError("wake interrupted after capture")):
-            send("stop", turn=2, text="Delivered a reusable sourced project convention")
+            send("stop", turn=1, text="Delivered a reusable sourced project convention")
         self.assertIsNotNone(self.intent(r, p))
         other = Runtime(r.home, host="codex", config=r.config)
         self.addCleanup(other.close)

@@ -30,6 +30,7 @@ def _version(value):
 
 def _matches_stop(event, phase):
     return bool(event and event["project"] == phase["project"]
+        and (phase["pinned_phase"] is None or phase["pinned_stop"] == event["id"])
         and event["conversation"] == phase["conversation"] and event["type"] == "Stop"
         and event["agent"] is None and event["task_status"] == "delivered"
         and event["task_id"] == phase["task_id"] and event["task_revision"] == phase["task_revision"]
@@ -74,9 +75,15 @@ def delivery_boundary_diagnostics(runtime, project):
 def _diagnose(runtime, project, result):
     host = runtime._session_scope()
     session, governance = runtime.session_epoch(), runtime.host_epoch()
+    has_pins = runtime.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                  "AND name='phase_delivery_turns'").fetchone()
+    phase_field, stop_field = ("b.phase_id", "b.stop_event") if has_pins else ("NULL", "NULL")
+    pin_join = "LEFT JOIN phase_delivery_turns b ON b.phase_id=p.id " if has_pins else ""
     rows = runtime.db.execute("SELECT p.*,t.id AS current_id,t.revision AS current_revision,"
-        "t.write_version AS current_write_version,t.status AS current_status "
+        "t.write_version AS current_write_version,t.status AS current_status,"
+        f"{phase_field} AS pinned_phase,{stop_field} AS pinned_stop "
         "FROM review_phases p LEFT JOIN tasks t ON t.project=p.project AND t.conversation=p.conversation "
+        + pin_join +
         "WHERE p.project=? AND p.host_scope=? AND p.state='awaiting_stop' "
         "ORDER BY p.created DESC,p.rowid DESC LIMIT ?", (project, host, SAMPLE_LIMIT + 1)).fetchall()
     result["truncated"] = len(rows) > SAMPLE_LIMIT

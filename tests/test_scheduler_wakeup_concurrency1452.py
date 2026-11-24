@@ -31,17 +31,17 @@ class WakeupConcurrencyTests(unittest.TestCase):
                 ready.set()
                 if not begin_write.wait(5):
                     raise AssertionError("refresh did not release the late writer")
-                current = other.task(project, conversation)
+                other_send, _ = self.host_events(other)
                 writing.set()
-                task = other.task_update(project, conversation, "A distinct late delivered stage",
-                    new_task=True, expected_task_id=current["id"],
-                    expected_write_version=current["write_version"])
-                other.task_update(project, conversation, task["goal"], status="delivered",
-                    expected_task_id=task["id"], expected_write_version=task["write_version"])
                 with patch.object(other, "_launch_scheduler"):
-                    other.handle_hook({"hook_event_name": "Stop", "session_id": conversation,
-                        "cwd": str(self.workspace), "turn_id": "late-stage-stop",
-                        "last_assistant_message": "Delivered a new independently sourced constraint"})
+                    other_send("prompt", turn=2, text="Record an independent project constraint")
+                    current = other.task(project, conversation)
+                    task = other.task_update(project, conversation, "A distinct late delivered stage",
+                        new_task=True, expected_task_id=current["id"],
+                        expected_write_version=current["write_version"])
+                    other.task_update(project, conversation, task["goal"], status="delivered",
+                        expected_task_id=task["id"], expected_write_version=task["write_version"])
+                    other_send("stop", turn=2, text="Delivered a new independently sourced constraint")
             except BaseException as exc:
                 failures.append(exc)
                 ready.set()

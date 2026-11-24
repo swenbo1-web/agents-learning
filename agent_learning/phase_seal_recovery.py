@@ -38,6 +38,7 @@ def _checked_identity(runtime, phase_id):
 
 def request(runtime, project, event_id, workspace, conversation, raw=None):
     from .phase_review import scope
+    from .phase_turns import matches_receipt
     from .runtime import clean, encode
     if scope(runtime, project) is None:
         return None
@@ -50,7 +51,7 @@ def request(runtime, project, event_id, workspace, conversation, raw=None):
         "AND session_epoch=? AND governance_epoch=? AND start_time<=?", (project, runtime._session_scope(),
         conversation, event["task_id"], event["task_revision"], event["task_write_version"],
         runtime.session_epoch(), runtime.host_epoch(), event["created"])).fetchone()
-    if not phase:
+    if not phase or not matches_receipt(runtime, phase["id"], event_id):
         return None
     payload = json.loads(event["payload"])
     capture = {key: payload[key] for key in ("last_assistant_message", "completion", "capture_coverage",
@@ -112,6 +113,7 @@ def recover(runtime, project, *, limit=8, force=False):
         "AND first.conversation=p.conversation AND first.task_id=p.task_id AND first.task_revision=p.task_revision "
         "AND first.task_write_version=p.delivery_version AND first.task_status='delivered' "
         "AND first.type='Stop' AND first.agent IS NULL AND first.created>=p.start_time "
+        "AND NOT EXISTS(SELECT 1 FROM phase_delivery_turns t WHERE t.phase_id=p.id AND t.stop_event IS NOT first.id) "
         "ORDER BY first.created,first.rowid LIMIT 1) "
         "ORDER BY COALESCE(scan.position,0),p.created,e.created,e.rowid LIMIT ?", (project, runtime._session_scope(),
         runtime.session_epoch(), runtime.host_epoch(), limit)).fetchall()

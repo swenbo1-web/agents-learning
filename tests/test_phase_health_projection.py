@@ -112,7 +112,7 @@ class PhaseHealthProjectionTests(unittest.TestCase):
         r, p, send, c = self.setup_host()
         r.task_update(p, c, "Continue a real unfinished task", new_task=True)
         send("prompt", turn=1)
-        send("stop", turn=2, text="Work is still ongoing")
+        send("stop", turn=1, text="Work is still ongoing")
         value = delivery_registration(r, p)
         self.assertEqual(value["reason"], "task_not_delivered")
         self.assertEqual(r.task(p, c)["status"], "active")
@@ -124,6 +124,7 @@ class PhaseHealthProjectionTests(unittest.TestCase):
                 r, p, send, c = self.setup_host(host)
                 self.stage(r, p, send, c, 1)
                 self.assertEqual(delivery_registration(r, p)["reason"], "phase_registered")
+                send("prompt", turn=99, text="Explain the same completed delivery")
                 send("stop", turn=99, text="A follow-up about the same completed delivery")
                 self.assertEqual(delivery_registration(r, p)["reason"], "delivery_already_registered")
                 self.assertEqual(r.db.execute("SELECT COUNT(*) FROM review_phases").fetchone()[0], 1)
@@ -131,6 +132,7 @@ class PhaseHealthProjectionTests(unittest.TestCase):
     def test_partial_new_reply_cannot_borrow_old_complete_registration(self):
         r, p, send, c = self.setup_host("antigravity")
         self.stage(r, p, send, c, 1)
+        send("prompt", turn=99, text="Explain the same completed delivery")
         send("stop", turn=99, text="Partial later output", partial=True)
         value = delivery_registration(r, p)
         self.assertEqual((value["state"], value["reason"]), ("unobserved", "public_reply_unverified"))
@@ -142,6 +144,21 @@ class PhaseHealthProjectionTests(unittest.TestCase):
         value = delivery_registration(r, p)
         self.assertEqual((value["state"], value["reason"]), ("pending", "awaiting_capture_seal"))
 
+    def test_read_only_phase_diagnostics_support_older_database_without_native_pins(self):
+        from agent_learning.phase_boundary_diagnostics import delivery_boundary_diagnostics
+
+        r, p, send, c = self.setup_host()
+        self.stage(r, p, send, c, 1)
+        r.db.execute("UPDATE review_phases SET state='awaiting_stop',event_id=NULL")
+        r.db.execute("DROP TABLE phase_delivery_turns")
+        r.db.execute("PRAGMA query_only=ON")
+        try:
+            result = delivery_boundary_diagnostics(r, p)
+        finally:
+            r.db.execute("PRAGMA query_only=OFF")
+        self.assertEqual(result["counts"], {"awaiting_local_seal": 1})
+        self.assertTrue(result["items"][0]["stop_observed"])
+
     def test_resume_between_deliveries_cannot_borrow_an_old_registered_stage(self):
         r, p, send, c = self.setup_host("antigravity")
         self.stage(r, p, send, c, 1)
@@ -149,6 +166,7 @@ class PhaseHealthProjectionTests(unittest.TestCase):
         task = r.task(p, c)
         r.task_update(p, c, task["goal"], resume=True, status="active",
                       expected_task_id=task["id"], expected_write_version=task["write_version"])
+        send("prompt", turn=99, text="Complete the resumed stage")
         self.deliver(r, p, c)
         send("stop", turn=99, text="A new delivery after a genuine resume")
         r.db.execute("DELETE FROM review_phases WHERE id!=?", (first,))

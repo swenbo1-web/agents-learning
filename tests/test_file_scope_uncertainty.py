@@ -209,6 +209,86 @@ class FileScopeUncertaintyTests(unittest.TestCase):
         f.r.config["injection_max_chars"] = 6000
         self.assertIn("关联文件已变化", f.context("continue"))
 
+    def test_formal_file_warning_uses_each_checkout_last_observation(self):
+        f = self.f
+        original = f.workspace
+        foreign = f.root / "foreign"
+        foreign.mkdir()
+        formal, _ = f.published(f.source(file=True))
+        f.r.config["work_memory"]["automatic_context"] = False
+        f.context()
+        (original / "ledger.py").write_text("a genuine change in the first checkout\n", encoding="utf-8")
+        self.assertIn("关联文件已变化", f.context("continue"))
+
+        f.workspace = foreign
+        self.assertIn("关联文件当前无法核实", f.context("continue"))
+        f.workspace = original
+        self.assertNotIn(formal["knowledge_id"], f.context("continue"))
+        f.workspace = foreign
+        self.assertNotIn(formal["knowledge_id"], f.context("continue"))
+
+        third_checkout = f.root / "third-checkout"
+        third_checkout.mkdir()
+        f.workspace = third_checkout
+        self.assertIn("关联文件当前无法核实", f.context("unrelated astronomy"))
+        self.assertNotIn(formal["knowledge_id"], f.context("unrelated astronomy"))
+
+        f.workspace = original
+        (original / "ledger.py").write_text("a second genuine change in the first checkout\n", encoding="utf-8")
+        self.assertIn("关联文件已变化", f.context("continue"))
+
+    def test_notice_in_other_checkout_keeps_original_pending_risk(self):
+        f = self.f
+        original = f.workspace
+        foreign = f.root / "foreign"
+        foreign.mkdir()
+        linked, path = self.linked()
+        formal, _ = f.published(self.source(path, f.CONTENT))
+        f.r.config["work_memory"]["automatic_context"] = False
+        f.context()
+        f.r.config["linked_workspaces"] = {}
+        f.r.config["injection_max_chars"] = 128
+        self.assertNotIn("当前无法核实", f.context("continue"))
+
+        f.workspace = foreign
+        f.r.config["injection_max_chars"] = 6000
+        self.assertIn("关联文件当前无法核实", f.context("continue"))
+        f.workspace = original
+        f.r.config["linked_workspaces"] = {f.p: [str(linked)]}
+        Server(f.r, f.p, context_handle=f.handle, workspace=original).call("knowledge_read", {
+            "knowledge_id": formal["knowledge_id"]})
+        self.assertIn("当前已恢复可核验", f.context("continue"))
+        self.assertNotIn("当前已恢复可核验", f.context("continue"))
+
+    def test_bounded_checkout_views_keep_a_notice_for_evicted_pending_risks(self):
+        from agent_learning.context_files import MAX_FILE_VIEWS
+
+        f = self.f
+        original = f.workspace
+        linked, path = self.linked()
+        formal, _ = f.published(self.source(path, f.CONTENT))
+        f.r.config["work_memory"]["automatic_context"] = False
+        f.context()
+        f.r.config["linked_workspaces"] = {}
+        f.r.config["injection_max_chars"] = 128
+        f.context("continue")
+        for index in range(MAX_FILE_VIEWS):
+            f.workspace = f.root / f"other-{index}"
+            f.workspace.mkdir()
+            self.assertNotIn("当前无法核实", f.context("continue"))
+        saved = json.loads(f.r.db.execute("SELECT state FROM context_exposures WHERE knowledge_id=?",
+                                         (formal["knowledge_id"],)).fetchone()[0])["_files"]
+        self.assertEqual(len(saved["views"]), MAX_FILE_VIEWS - 1)
+        self.assertIs(saved["pending_view_overflow"], True)
+
+        f.workspace = original
+        f.r.config["linked_workspaces"] = {f.p: [str(linked)]}
+        f.r.config["injection_max_chars"] = 6000
+        Server(f.r, f.p, context_handle=f.handle, workspace=original).call("knowledge_read", {
+            "knowledge_id": formal["knowledge_id"]})
+        self.assertIn("其他检出也有过文件核验变化", f.context("continue"))
+        self.assertNotIn("其他检出也有过文件核验变化", f.context("continue"))
+
     def test_authorized_file_unavailability_remains_a_risk_without_claiming_drift(self):
         f = self.f
         path = f.workspace / "ledger.py"

@@ -67,8 +67,10 @@ def install(runtime):
         runtime.db.execute("ALTER TABLE phase_scan_progress ADD COLUMN last_checked REAL NOT NULL DEFAULT 0")
     from .phase_source_changes import install as install_source_changes
     from .phase_seal_recovery import install as install_seal_recovery
+    from .phase_turns import install as install_turns
     install_source_changes(runtime)
     install_seal_recovery(runtime)
+    install_turns(runtime)
 
 
 def policy(runtime, project):
@@ -176,9 +178,15 @@ def retry(runtime, project, problem_id):
 def arm(runtime, project, conversation, previous, task, *, result_only=False):
     """Only an actual active -> delivered transition creates a phase, never a fence."""
     from .runtime import digest
-    if (result_only and previous and previous["status"] == task["status"] == "delivered"
-            and (previous["id"], previous["revision"]) == (task["id"], task["revision"])
-            and scope(runtime, project) is not None):
+    deliver = (previous and previous["status"] == "active" and task["status"] == "delivered"
+               and previous["id"] == task["id"])
+    correct = (result_only and previous and previous["status"] == task["status"] == "delivered"
+               and (previous["id"], previous["revision"]) == (task["id"], task["revision"]))
+    if not (deliver or correct) or scope(runtime, project) is None:
+        return
+    from .phase_turns import live_turn, pin
+    turn = live_turn(runtime, project, conversation)
+    if correct:
         # Before its first Stop, a result correction still belongs to this
         # logical delivery. Keep its identity/window and follow the new write.
         # An observed Stop, recovery request or frozen packet pins the original
@@ -186,6 +194,7 @@ def arm(runtime, project, conversation, previous, task, *, result_only=False):
         runtime.db.execute("UPDATE review_phases AS p SET delivery_version=? WHERE project=? AND host_scope=? "
             "AND conversation=? AND task_id=? AND task_revision=? AND delivery_version=? "
             "AND session_epoch=? AND governance_epoch=? AND state='awaiting_stop' AND event_id IS NULL "
+            "AND NOT EXISTS(SELECT 1 FROM phase_delivery_turns t WHERE t.phase_id=p.id AND t.prompt_event IS NOT ?) "
             "AND NOT EXISTS(SELECT 1 FROM phase_seal_requests q WHERE q.phase_id=p.id) "
             "AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project=p.project AND e.conversation=p.conversation "
             "AND e.task_id=p.task_id AND e.task_revision=p.task_revision AND e.task_write_version=p.delivery_version "
@@ -193,28 +202,29 @@ def arm(runtime, project, conversation, previous, task, *, result_only=False):
             "AND NOT EXISTS(SELECT 1 FROM phase_review_batches b,json_each(b.phase_ids) member "
             "WHERE b.project=p.project AND b.host_scope=p.host_scope AND member.value=p.id)",
             (task["write_version"], project, runtime._session_scope(), conversation, task["id"], task["revision"],
-             previous["write_version"], runtime.session_epoch(), runtime.host_epoch()))
-    if (scope(runtime, project) is None or not previous or previous["status"] != "active"
-            or task["status"] != "delivered" or previous["id"] != task["id"]):
+             previous["write_version"], runtime.session_epoch(), runtime.host_epoch(), turn["prompt_event"] if turn else None))
         return
     from .phase_window import start_time
     start = start_time(runtime, project, conversation, task)
+    phase_id = digest([project, runtime._session_scope(), task["id"], task["write_version"]])[:32]
     runtime.db.execute("INSERT OR IGNORE INTO review_phases VALUES(?,?,?,?,?,?,?,?,?,?,'awaiting_stop',NULL,?,0)",
-        (digest([project, runtime._session_scope(), task["id"], task["write_version"]])[:32], project,
+        (phase_id, project,
          runtime._session_scope(), conversation, task["id"], task["revision"], task["write_version"],
          start, runtime.session_epoch(), runtime.host_epoch(), time.time()))
+    pin(runtime, phase_id, turn)
 
 
 def seal(runtime, project, conversation, event_id, *, defer_prepare=False):
     if scope(runtime, project) is None:
         return
-    task = runtime.task(project, conversation)
-    if not task or task["status"] != "delivered":
+    stop = runtime.db.execute("SELECT task_id,task_revision,task_write_version FROM events WHERE project=? AND id=? "
+        "AND conversation=? AND type='Stop' AND agent IS NULL AND task_status='delivered'",
+        (project, event_id, conversation)).fetchone()
+    if not stop:
         return
     row = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND host_scope=? AND conversation=? "
-        "AND task_id=? AND task_revision=? AND state='awaiting_stop' AND session_epoch=? AND governance_epoch=? "
-        "ORDER BY delivery_version DESC LIMIT 1", (project, runtime._session_scope(), conversation, task["id"],
-        task["revision"], runtime.session_epoch(), runtime.host_epoch())).fetchone()
+        "AND task_id=? AND task_revision=? AND delivery_version=? AND state='awaiting_stop' AND session_epoch=? AND governance_epoch=?",
+        (project, runtime._session_scope(), conversation, *tuple(stop), runtime.session_epoch(), runtime.host_epoch())).fetchone()
     if not row:
         return
     from .phase_seal_recovery import pinned_event, complete
@@ -236,7 +246,9 @@ def seal_phase(runtime, project, phase, event_id):
     """Seal one fixed original task/Stop, without recursively preparing work."""
     row = runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND id=?",
                              (project, phase["id"])).fetchone()
+    from .phase_turns import matches_receipt
     if (not row or row["state"] != "awaiting_stop" or row["host_scope"] != runtime._session_scope()
+            or not matches_receipt(runtime, row["id"], event_id)
             or row["session_epoch"] != runtime.session_epoch() or row["governance_epoch"] != runtime.host_epoch()):
         return False
     task = runtime.task_snapshot(project, row["task_id"], row["task_revision"], row["delivery_version"])

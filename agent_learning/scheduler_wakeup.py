@@ -34,12 +34,13 @@ def request(runtime, project, event_id, workspace, conversation):
     # Fast handoff is for a genuinely armed delivery, not an ordinary reply or
     # a legacy queue probe whose executor may be unavailable. Capture/seal may
     # still fail after this point; the exact original boundary remains pinned.
-    phase = runtime.db.execute("SELECT 1 FROM review_phases WHERE project=? AND host_scope=? AND conversation=? "
+    phase = runtime.db.execute("SELECT id FROM review_phases WHERE project=? AND host_scope=? AND conversation=? "
         "AND task_id=? AND task_revision=? AND delivery_version=? AND state='awaiting_stop' "
         "AND session_epoch=? AND governance_epoch=? AND start_time<=?", (project, runtime._session_scope(),
         conversation, event["task_id"], event["task_revision"], event["task_write_version"],
         runtime.session_epoch(), runtime.host_epoch(), event["created"])).fetchone()
-    if phase is None:
+    from .phase_turns import matches_receipt
+    if phase is None or not matches_receipt(runtime, phase["id"], event_id):
         return
     runtime.db.execute("INSERT INTO scheduler_wake_requests VALUES(?,?,?,?,?,?,?,0,0) "
         "ON CONFLICT(project,host_scope) DO UPDATE SET session_epoch=excluded.session_epoch,"

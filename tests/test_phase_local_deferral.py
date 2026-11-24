@@ -42,7 +42,7 @@ class PhaseLocalDeferralTests(unittest.TestCase):
         send("prompt", turn=1, text=prompt if prompt is not None else goal)
         return task
 
-    def finish(self, runtime, project, send, conversation, *, reply="Agent Learning 连接正常。", turn=2):
+    def finish(self, runtime, project, send, conversation, *, reply="Agent Learning 连接正常。", turn=1):
         self.deliver(runtime, project, conversation)
         send("stop", turn=turn, text=reply)
         return runtime.db.execute("SELECT * FROM review_phases WHERE project=? AND conversation=? "
@@ -74,8 +74,9 @@ class PhaseLocalDeferralTests(unittest.TestCase):
                 self.assertEqual(runtime.db.execute("SELECT COUNT(*) FROM admin_calls").fetchone()[0], 0)
                 self.assertEqual(runtime.db.execute("SELECT COUNT(*) FROM review_receipts").fetchone()[0], 0,
                                  "local deferral must not impersonate a reviewed skip")
+                send("stop", turn=1, text="Agent Learning 连接正常。")
+                send("prompt", turn=2, text="检查 Agent Learning 连接")
                 send("stop", turn=2, text="Agent Learning 连接正常。")
-                send("stop", turn=3, text="Agent Learning 连接正常。")
                 self.assertEqual(runtime.db.execute("SELECT COUNT(*) FROM review_phases").fetchone()[0], 1)
                 self.assertEqual(status(runtime, project)["locally_deferred_phase_count"], 1)
 
@@ -335,7 +336,7 @@ class PhaseLocalDeferralTests(unittest.TestCase):
     def test_full_normal_batch_takes_priority_and_retains_routine_for_later(self):
         runtime, project, send, conversation = self.setup_host(suffix="-priority")
         self.begin(runtime, project, send, conversation)
-        routine = self.finish(runtime, project, send, conversation, turn=30)
+        routine = self.finish(runtime, project, send, conversation)
         self.assertEqual(routine["state"], "routine_deferred")
         runtime.config["admin"]["max_input_chars"] = 64000
         normal_send, normal_conversation = self.host_events(runtime, native="normal-with-many-cases")
@@ -369,10 +370,10 @@ class PhaseLocalDeferralTests(unittest.TestCase):
         runtime, project, send, conversation = self.setup_host(suffix="-partial-routine")
         runtime.config["admin"]["max_input_chars"] = 64000
         self.begin(runtime, project, send, conversation)
-        for turn in (2, 3, 4):
+        for turn in (1, 2, 3):
             send("stop", turn=turn, text="Agent Learning 连接正常。")
-            send("prompt", turn=turn + 10, text="检查 Agent Learning 连接")
-        routine = self.finish(runtime, project, send, conversation, turn=30)
+            send("prompt", turn=turn + 1, text="检查 Agent Learning 连接")
+        routine = self.finish(runtime, project, send, conversation, turn=4)
         self.assertEqual(routine["state"], "routine_deferred")
         source_cases = runtime.db.execute("SELECT COUNT(*) FROM problems WHERE task_id=? "
             "AND summary LIKE '阶段公开记录：%'", (routine["task_id"],)).fetchone()[0]

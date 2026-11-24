@@ -310,12 +310,14 @@ def _targets_compatible(first, second):
 
 
 class CaseCaptureMixin:
-    def _operation_attempts(self, project, operation):
+    def _operation_attempts(self, project, operation, *, before=None):
         if not operation:
             return []
+        boundary = " AND rowid<?" if before is not None else ""
+        args = (project, operation, before) if before is not None else (project, operation)
         return [dict(row) for row in self.db.execute(
-            "SELECT * FROM events WHERE project=? AND operation=? AND type='PreToolUse' ORDER BY created,id",
-            (project, operation)).fetchall()]
+            "SELECT * FROM events WHERE project=? AND operation=? AND type='PreToolUse'" + boundary + " ORDER BY created,id",
+            args).fetchall()]
 
     def _capture_tool_case(self, project, conversation, agent_id, event, outcome, raw,
                            task_binding, source, epoch, operation):
@@ -462,16 +464,17 @@ class CaseCaptureMixin:
             "AND write_version<? AND status='active' ORDER BY write_version DESC LIMIT 1",
             (project, task["id"], task["revision"], write_version)).fetchone()
         observed_epoch = active[0] if active else task["execution_epoch"]
+        stop_rowid = self.db.execute("SELECT rowid FROM events WHERE id=?", (event["id"],)).fetchone()[0]
         observations = self.db.execute(
             "SELECT * FROM events WHERE project=? AND conversation=? AND task_id=? AND task_revision=? "
             "AND agent IS NULL AND execution_epoch=? AND type='PostToolUse' "
-            "AND outcome IN ('succeeded','failed','conflict') ORDER BY created DESC,id DESC LIMIT 3",
-            (project, conversation, task["id"], task["revision"], observed_epoch)).fetchall()
+            "AND rowid<? AND outcome IN ('succeeded','failed','conflict') ORDER BY created DESC,id DESC LIMIT 3",
+            (project, conversation, task["id"], task["revision"], observed_epoch, stop_rowid)).fetchall()
         for observed in observations:
             refs.append(observed["id"])
             roles[observed["id"]] = ("failure" if observed["outcome"] == "failed" else
                                      "conflict" if observed["outcome"] == "conflict" else "observation")
-            for attempt in self._operation_attempts(project, observed["operation"]):
+            for attempt in self._operation_attempts(project, observed["operation"], before=stop_rowid):
                 if attempt["id"] not in roles:
                     refs.append(attempt["id"])
                     roles[attempt["id"]] = "attempt"

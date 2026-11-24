@@ -43,6 +43,8 @@ class PhaseToolEvidenceTests(unittest.TestCase):
         self.begin()
 
     def hook(self, kind, **values):
+        if kind == "UserPromptSubmit":
+            self.parent_turn = values["turn_id"]
         return self.r.handle_hook({"cwd": str(self.workspace), "session_id": self.native,
                                    "hook_event_name": kind, **values})
 
@@ -67,11 +69,11 @@ class PhaseToolEvidenceTests(unittest.TestCase):
         self.assertIsNotNone(row, "the fixture must capture a real native PostToolUse event")
         return dict(row)
 
-    def finish(self, reply="TERM_DIAG_ALPHA identifies the terminal observation", *, turn="delivery"):
+    def finish(self, reply="TERM_DIAG_ALPHA identifies the terminal observation"):
         task = self.r.task(self.p, self.c)
         self.r.task_update(self.p, self.c, task["goal"], status="delivered",
             expected_task_id=task["id"], expected_write_version=task["write_version"])
-        self.hook("Stop", turn_id=turn, last_assistant_message=reply)
+        self.hook("Stop", turn_id=self.parent_turn, last_assistant_message=reply)
         return self.r.db.execute("SELECT * FROM review_phases WHERE project=? AND conversation=? "
             "ORDER BY created DESC LIMIT 1", (self.p, self.c)).fetchone()
 
@@ -226,12 +228,13 @@ class PhaseToolEvidenceTests(unittest.TestCase):
             self.begin("Inspect TERM_DIAG_ALPHA in two ordered suffixes")
             original = self.tool("original-suffix", "TERM_DIAG_ALPHA original observation")
             with patch("agent_learning.phase_review.seal_phase", side_effect=sqlite3.OperationalError("delayed seal")):
-                phase = self.finish("TERM_DIAG_ALPHA ORIGINAL_STAGE_DELIVERY", turn="original-stop")
+                phase = self.finish("TERM_DIAG_ALPHA ORIGINAL_STAGE_DELIVERY")
                 task = self.r.task(self.p, self.c)
                 self.r.task_update(self.p, self.c, task["goal"], resume=True, status="active",
                     expected_task_id=task["id"], expected_write_version=task["write_version"])
+                self.hook("UserPromptSubmit", turn_id="future-turn", prompt="Continue the terminal diagnostic")
                 future = self.tool("future-suffix", "TERM_DIAG_ALPHA FUTURE_STAGE_OBSERVATION")
-                self.finish("TERM_DIAG_ALPHA FUTURE_STAGE_DELIVERY", turn="future-stop")
+                self.finish("TERM_DIAG_ALPHA FUTURE_STAGE_DELIVERY")
             with self.r.transaction():
                 recover(self.r, self.p, force=True)
         packet = self.packet(phase)
@@ -294,6 +297,28 @@ class PhaseToolEvidenceTests(unittest.TestCase):
             "the actual delivery projection must also reference the observation in this fixture")
         self.assertEqual([event["id"] for event in self.selected_tools(self.packet(phase))], [observed["id"]])
 
+    def test_delivery_projection_excludes_observations_committed_after_stop(self):
+        observed = self.tool("before-stop", "TERM_DIAG_ALPHA was observed")
+        capture = self.r._capture_delivery
+        late_events = []
+
+        def after_stop(project, conversation, task, stop, raw):
+            for kind in ("PreToolUse", "PostToolUse"):
+                late, _ = self.r._event(project, conversation, kind, {"tool_name": "exec_command"},
+                    task_id=task["id"], task_revision=task["revision"],
+                    task_write_version=observed["task_write_version"], execution_epoch=observed["execution_epoch"],
+                    operation_id=observed["operation"], outcome="succeeded")
+                late_events.append(late["id"])
+            capture(project, conversation, task, stop, raw)
+
+        with patch.object(self.r, "_capture_delivery", side_effect=after_stop):
+            self.finish()
+        evidence = {row[0] for row in self.r.db.execute("SELECT pe.event FROM deliveries d "
+            "JOIN problem_events pe ON pe.problem=d.problem_id WHERE d.project=?", (self.p,))}
+        self.assertIn(observed["id"], evidence)
+        self.assertEqual(len(late_events), 2)
+        self.assertTrue(evidence.isdisjoint(late_events))
+
     def test_optional_tools_cannot_block_a_public_case_at_the_low_token_limit(self):
         self.begin("Inspect TERM")
         configure(self.r, self.p, {"max_input_tokens": 18000}, policy(self.r, self.p)["version"])
@@ -349,8 +374,7 @@ class PhaseToolEvidenceTests(unittest.TestCase):
                     self.begin("Inspect the source identity for terminal diagnostic " + str(index))
                 if not index:
                     self.tool("twenty-phase", "TERM_DIAG_ALPHA " + "观测记录" * 300)
-                phase = self.finish("TERM_DIAG_ALPHA identifies the original terminal observation " + str(index),
-                                    turn="twenty-delivery-" + str(index))
+                phase = self.finish("TERM_DIAG_ALPHA identifies the original terminal observation " + str(index))
                 first = first or phase
         self.assertEqual(self.r.db.execute("SELECT COUNT(*) FROM phase_seal_requests").fetchone()[0], 20)
 
@@ -466,7 +490,8 @@ class PhaseToolEvidenceTests(unittest.TestCase):
                                               (conversation,)).fetchone()
                 self.assertIsNotNone(observed)
                 hosts.PhaseHostIntegrationTests.deliver(self, runtime, project, conversation)
-                send("stop", turn=3, text="TERM_NATIVE_DIAG describes the native terminal observation")
+                send("stop", turn=3 if host == "antigravity" else 1,
+                     text="TERM_NATIVE_DIAG describes the native terminal observation")
                 case = runtime.db.execute("SELECT id FROM problems WHERE project=? AND task_id=? "
                     "AND summary LIKE '阶段公开记录：%'", (project, task["id"])).fetchone()
                 self.assertIsNotNone(case)

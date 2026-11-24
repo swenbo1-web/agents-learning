@@ -33,7 +33,7 @@ class PhaseSealRecoveryTests(unittest.TestCase):
         send, c = self.host_events(r, native="seal-native" + suffix)
         send("start", turn=0)
         r.task_update(p, c, "Preserve original project constraint", new_task=True)
-        send("prompt", turn=1, text=text)
+        send("prompt", turn=2, text=text)
         self.deliver(r, p, c)
         return r, p, send, c
 
@@ -71,7 +71,7 @@ class PhaseSealRecoveryTests(unittest.TestCase):
                 original_time = r.db.execute("SELECT created FROM events WHERE id=?", (request["event_id"],)).fetchone()[0]
                 r.task_update(p, c, "A different later task", new_task=True)
                 send("prompt", turn=3, text="LATER_REQUEST_MUST_NOT_JOIN")
-                send("stop", turn=4, text="LATER_REPLY_MUST_NOT_JOIN")
+                send("stop", turn=3, text="LATER_REPLY_MUST_NOT_JOIN")
                 with patch("subprocess.Popen", side_effect=AssertionError("Local compensation cannot start a model")):
                     with r.transaction():
                         prepare(r, p, force=True)
@@ -160,6 +160,8 @@ class PhaseSealRecoveryTests(unittest.TestCase):
         r, p, send, c = self.start(suffix="-later")
         phase, request = self.failed_stop(r, send)
         send("stop", turn=9, text="LATER_EXPLANATION_IS_OUTSIDE_ORIGINAL_STAGE")
+        with r.transaction():
+            prepare(r, p, force=True)
         current = r.db.execute("SELECT event_id FROM review_phases WHERE id=?", (phase["id"],)).fetchone()
         self.assertEqual(current[0], request["event_id"])
         packet = r.db.execute("SELECT packet FROM phase_review_batches ORDER BY created DESC LIMIT 1").fetchone()

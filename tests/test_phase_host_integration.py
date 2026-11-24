@@ -86,7 +86,7 @@ class PhaseHostIntegrationTests(unittest.TestCase):
 
     def stage(self, r, p, send, c, number):
         r.task_update(p, c, "Project convention stage " + str(number), new_task=True)
-        send("prompt", turn=number * 10, text="Document reusable convention " + str(number))
+        send("prompt", turn=number * 10 + 1, text="Document reusable convention " + str(number))
         self.deliver(r, p, c)
         return send("stop", turn=number * 10 + 1, text="Delivered convention " + str(number))
 
@@ -113,9 +113,10 @@ class PhaseHostIntegrationTests(unittest.TestCase):
         send, c = self.host_events(r)
         send("start", turn=0)
         r.task_update(p, c, "Keep the current sourced project convention", new_task=True)
-        send("prompt", turn=1)
+        send("prompt", turn=2)
         send("stop", turn=2, text="An ordinary progress reply, work is ongoing")
         self.assertEqual(status(r, p)["phases"], {}, "a normal reply is not a delivered stage")
+        send("prompt", turn=4, text="Finish the current convention")
         self.deliver(r, p, c)
         self.assertEqual(status(r, p)["phases"], {"awaiting_stop": 1})
         if host == "antigravity":
@@ -164,7 +165,7 @@ class PhaseHostIntegrationTests(unittest.TestCase):
                 send, c = self.host_events(r)
                 send("start", turn=0)
                 r.task_update(p, c, "Retain all public release conventions", new_task=True)
-                send("prompt", turn=1, text="Record the sourced convention and its final constraint")
+                send("prompt", turn=2, text="Record the sourced convention and its final constraint")
                 self.deliver(r, p, c)
                 marker = "TAIL_CONSTRAINT_" + host
                 reply = "A sourced project convention. " + "Details belong to this project. " * 75 + marker

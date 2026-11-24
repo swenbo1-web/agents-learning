@@ -1067,6 +1067,10 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         if _adapter_event_key is not None:
             event_key = ["antigravity-v2", conversation, kind, _adapter_event_key]
         access = None
+        root_stop = kind == "Stop" and not agent_id
+        current_stop, current_prompt, stop_phase = True, True, None
+        prompt_origin = None
+        staged_stop = None
         with self.transaction():
             epoch = self.assert_session_epoch(expected_epoch)
             if _phase_guard:
@@ -1121,6 +1125,12 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             payload["host_epoch"] = epoch
             # 状态判断与记录共享快照，避免并发晚到事件降级终止状态。
             task = self.task(project, conversation)
+            if root_stop:
+                from .phase_turns import stop_boundary
+                current_stop, stop_phase = stop_boundary(self, project, conversation, task, turn)
+            if not agent_id and kind == "UserPromptSubmit":
+                from .phase_turns import prompt_boundary
+                current_prompt, prompt_origin = prompt_boundary(self, project, conversation, turn)
             binding = self.db.execute("SELECT * FROM operations WHERE project=? AND id=?", (project, operation)).fetchone() if operation else None
             obsolete_operation = binding and binding["host_epoch"] != epoch
             tool_name = raw.get("tool_name")
@@ -1134,6 +1144,8 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                        "write_version": binding["task_write_version"], "execution_epoch": binding["execution_epoch"],
                        "assignment_id": binding["assignment_id"]} if binding else assigned if agent_id else
                       task if kind != "PostToolUse" else None)
+            if not current_stop or not current_prompt:
+                source = None  # Retain the raw callback without lending it the latest task.
             task_id, task_revision = (source["id"], source["revision"]) if source else (None, None)
             task_write_version = source.get("write_version") if source else None
             execution_epoch = source.get("execution_epoch") if source else None
@@ -1198,7 +1210,17 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                                        agent_id=agent_id, operation_id=operation, outcome=outcome,
                                        task_write_version=task_write_version, execution_epoch=execution_epoch, assignment_id=assignment_id,
                                        capture_digest=capture_digest, _capture_original=capture_original)
-            if fresh and not agent_id and kind in {"SessionStart", "UserPromptSubmit", "Stop"}:
+            if fresh and current_prompt and not agent_id and kind == "UserPromptSubmit":
+                from .phase_turns import observe_prompt
+                observe_prompt(self, project, conversation, event["id"], turn)
+            if fresh and not agent_id and (kind == "Interrupt" or kind == "SessionStart"
+                    and raw.get("source") in {None, "startup", "resume", "clear"}):
+                from .phase_turns import reset
+                reset(self, project, conversation)
+            if fresh and stop_phase:
+                from .phase_turns import observe_stop
+                observe_stop(self, project, conversation, event["id"], turn, stop_phase)
+            if fresh and current_stop and current_prompt and not agent_id and kind in {"SessionStart", "UserPromptSubmit", "Stop"}:
                 try:
                     self.admin_observe_model(project, conversation, raw.get("model"), expected_epoch=epoch)
                 except ContractError:
@@ -1243,31 +1265,50 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             if fresh and kind == "SessionStart" and not agent_id and raw.get("source") in {None, "startup", "resume", "clear"}:
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
                                 "AND agent IS NULL AND state='started'", (project, conversation))
-            if fresh and kind == "Stop" and not agent_id:
+            if fresh and root_stop and current_stop:
                 # 同步工具调用若到回合结束仍停留在 started（从未收到 PostToolUse 转为后台 running 或终态），
                 # 收敛本 root 的缺失回执；子 Agent 与已确认后台 running 操作保持各自生命周期。
                 self.db.execute("UPDATE operations SET state='unknown' WHERE project=? AND conversation=? "
                                 "AND agent IS NULL AND state='started'", (project, conversation))
-            if fresh and not agent_id and kind in {"UserPromptSubmit", "SessionStart"}:
+            if fresh and current_prompt and not agent_id and kind in {"UserPromptSubmit", "SessionStart"}:
                 from .phase_window import observe
                 observe(self, project, conversation, task, event)
-            if fresh and kind == "UserPromptSubmit" and not agent_id and str(raw.get("prompt", "")).strip().lower().strip("。.!！ ") not in {
+            if fresh and current_prompt and kind == "UserPromptSubmit" and not agent_id and str(raw.get("prompt", "")).strip().lower().strip("。.!！ ") not in {
                     "继续", "继续吧", "接着", "continue", "go on"}:
                 self._execution_fence(project, conversation, "new_user_prompt")
             if kind == "SessionStart" and raw.get("source") == "clear" and not agent_id:
                 self._execution_fence(project, conversation, "context_cleared", pause=True)
-            if kind == "Stop" and not agent_id and fresh:
+            if fresh and stop_phase:
+                # Commit the native event and recovery request before derived evidence.
+                self._register_stop_requests(project, event["id"], raw["cwd"], conversation, raw)
+                staged_stop = self.host_epoch()
+            elif fresh and root_stop and current_stop:
                 self._capture_delivery(project, conversation, task, event, raw)
-            if fresh:
+            if fresh and current_stop and current_prompt and staged_stop is None:
                 self._work_capture_safely(project, event["id"], raw["cwd"], raw=raw,
                                           summarize=kind == "Stop" and not agent_id,
                                           conversation=conversation,
                                           native_context_hint=_adapter_event_key is not None
                                           or (self.host == "dsh" and kind == "PostToolUse" and not binding))
-            else:
+            elif not fresh and current_stop:
                 self._work_repair_safely(project)
+        if not current_stop or (not current_prompt and not prompt_origin):
+            return {}
+        if staged_stop is not None:
+            try:
+                with self.transaction():
+                    self.assert_session_epoch(epoch)
+                    if _phase_guard:
+                        _phase_guard()
+                    if self.host_epoch() == staged_stop:
+                        self._capture_delivery(project, conversation, task, event, raw)
+                        self._work_capture_safely(project, event["id"], raw["cwd"], raw=raw, summarize=True,
+                                                  conversation=conversation, stop_requests_recorded=True)
+            except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+                # The committed Stop remains recoverable by the exact phase receipt.
+                pass
         schedule_warning = None
-        update_notice_event = (fresh and not agent_id and self.config["software_updates"]["enabled"]
+        update_notice_event = (fresh and current_prompt and not agent_id and self.config["software_updates"]["enabled"]
                               and (kind == "UserPromptSubmit" or kind == "SessionStart"
                                    and raw.get("source") in {None, "startup", "resume"}))
         if update_notice_event and kind == "SessionStart":
@@ -1334,11 +1375,16 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             if kind == "SubagentStart" and not agent_id:
                 return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext":
                         "Agent Learning: 子 Agent 身份未知，未分配写入句柄；继承当前任务边界，可按项目检索知识，不猜测会话归属。"}}
+            # Recover context after an identical prompt response is lost. A
+            # replay with a different projection cannot query as a new prompt.
+            source_event = event["id"] if kind == "UserPromptSubmit" else None
             query = raw.get("prompt", "")
+            if prompt_origin and prompt_origin != source_event:
+                query, source_event = "", None
             text = self._context(project, conversation, query, compact=kind == "SessionStart" and raw.get("source") in {"compact", "clear"},
                                  agent_id=agent_id, context_handle=access["context_handle"], expected_epoch=access["host_epoch"],
                                  _outcome=_context_outcome, workspace=raw["cwd"], raw=raw,
-                                 _source_event_id=event["id"] if kind == "UserPromptSubmit" else None)
+                                 _source_event_id=source_event)
             if text:
                 result = {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": text[:self.config["injection_max_chars"]]}}
                 if schedule_warning:
@@ -1440,11 +1486,29 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
                     pass
             return output
 
+    def _register_stop_requests(self, project, event_id, workspace, conversation, raw):
+        from .scheduler_wakeup import request as request_wake
+        from .phase_seal_recovery import request as request_seal
+
+        for name, callback, args in (
+                ("scheduler_wake_registration", request_wake, ()),
+                ("phase_seal_registration", request_seal, (raw,))):
+            self.db.execute("SAVEPOINT " + name)
+            try:
+                callback(self, project, event_id, workspace, conversation, *args)
+            except (OSError, ValueError, TypeError, sqlite3.Error, ContractError):
+                self.db.execute("ROLLBACK TO " + name)
+                self._metric(project, name + "_failed")
+            finally:
+                self.db.execute("RELEASE " + name)
+
     def _work_capture_safely(self, project, event_id, workspace, *, raw=None, summarize=False, conversation=None,
-                              native_context_hint=False):
+                              native_context_hint=False, stop_requests_recorded=False):
         """派生功能故障不回滚已记录的任务、事件或执行决定；可选摘要排队与普通工作记录采集彼此隔离。"""
         if not self.db.in_transaction:
             raise ContractError("work capture requires an existing event transaction")
+        if summarize and conversation and not stop_requests_recorded:
+            self._register_stop_requests(project, event_id, workspace, conversation, raw)
         self.db.execute("SAVEPOINT work_file_diagnostics")
         try:
             from .work_file_diagnostics import observe_event
@@ -1457,18 +1521,6 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
             self._metric(project, "work_file_diagnostics_failed")
         finally:
             self.db.execute("RELEASE work_file_diagnostics")
-        if summarize and conversation:
-            # Keep the wake hint in the same transaction as the original Stop,
-            # even if optional capture/prepare or the later launcher fails.
-            self.db.execute("SAVEPOINT scheduler_wake_registration")
-            try:
-                from .scheduler_wakeup import request as request_scheduler_wake
-                request_scheduler_wake(self, project, event_id, workspace, conversation)
-            except (OSError, ValueError, TypeError, sqlite3.Error):
-                self.db.execute("ROLLBACK TO scheduler_wake_registration")
-                self._metric(project, "scheduler_wake_registration_failed")
-            finally:
-                self.db.execute("RELEASE scheduler_wake_registration")
         self._work_repair_safely(project, exclude_event=event_id)
         from .work_recovery import register, complete, failed
         self.db.execute("SAVEPOINT work_capture_identity")
@@ -1481,17 +1533,6 @@ class Runtime(HostSessionMixin, TaskControlMixin, ExecutionMixin, AssignmentMixi
         finally:
             self.db.execute("RELEASE work_capture_identity")
         captured = False
-        if summarize and conversation:
-            self.db.execute("SAVEPOINT phase_seal_registration")
-            try:
-                from .phase_seal_recovery import request
-                request(self, project, event_id, workspace, conversation, raw)
-            except (OSError, ValueError, TypeError, sqlite3.Error):
-                self.db.execute("ROLLBACK TO phase_seal_registration")
-                self.db.execute("RELEASE phase_seal_registration")
-                self._metric(project, "phase_seal_registration_failed")
-            else:
-                self.db.execute("RELEASE phase_seal_registration")
         self.db.execute("SAVEPOINT work_capture_extension")
         try:
             if registered is None:
